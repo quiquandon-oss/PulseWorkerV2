@@ -1,6 +1,12 @@
 name = "pulseworker-v2"
 main = "worker.js"
 compatibility_date = "2024-11-01"
+# Explicit account_id so wrangler skips its /memberships auto-detection call
+# at deploy time (that call was failing with a 9106 "missing auth headers"
+# error for this token/account regardless of permissions granted — this
+# sidesteps it rather than depending on why). Account IDs aren't sensitive,
+# safe to commit in plain text.
+account_id = "f58e761fbc8e62dc404d8684290af264"
 
 [ai]
 binding = "AI"

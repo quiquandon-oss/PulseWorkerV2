@@ -21,5 +21,8 @@ binding = "DB"
 database_name = "sentiment-history"
 database_id = "f91ca980-b886-423a-bd6f-f3baea46d181"
 
-# No cron triggers yet — added once there's an actual model to run on a
-# schedule. Everything here is called on-demand by the frontend for now.
+# Runs the model every 6h regardless of whether anyone opens the page —
+# keeps predictions logging and old ones resolving on a real schedule
+# instead of only when a page visit happens to trigger /predict.
+[triggers]
+crons = ["0 */6 * * *"]

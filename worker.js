@@ -157,6 +157,29 @@ async function getCalibration(env) {
 // deterministically and/or calls Gemini for narration. It never asks an LLM
 // to invent a price or a probability — those come from the model itself.
 
+// Shared by the /predict HTTP route and the cron handler below, so both
+// paths run identical logic rather than the schedule quietly drifting from
+// what a manual visit does.
+async function predictAndLog(env) {
+  const resolvedCount = await backfillPredictions(env);
+  const result = await runPrediction(env);
+  result.backfilled_this_call = resolvedCount;
+  return result;
+}
+
+// ---- Chart data: BTC price series + the full predictions log in one call,
+// so the frontend can filter to 1D/1W/1M/ALL client-side without refetching
+// on every range-tab click. ----
+async function getChartData(env) {
+  const { results: prices } = await env.DB.prepare(
+    'SELECT ts, btc_price FROM history WHERE btc_price IS NOT NULL ORDER BY ts ASC'
+  ).all();
+  const { results: predictions } = await env.DB.prepare(
+    'SELECT id, ts, target_ts, btc_price_at_prediction, p_up, median_analog_return, realized_up, realized_return FROM predictions ORDER BY ts ASC'
+  ).all();
+  return { ok: true, prices, predictions };
+}
+
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
@@ -193,14 +216,27 @@ export default {
     }
 
     // ---- GET /predict — BTC 24h k-NN historical analog prediction. Also
-    // backfills any past predictions whose horizon has now passed, since
-    // there's no cron yet (see README) — this is the simplest version of
-    // the calibration loop, not a permanent design. ----
+    // backfills any past predictions whose horizon has now passed. Runs
+    // automatically every 6h via cron (see scheduled() below) in addition
+    // to firing on page visits. ----
     if (url.pathname === '/predict' && request.method === 'GET') {
       try {
-        const resolvedCount = await backfillPredictions(env);
-        const result = await runPrediction(env);
-        result.backfilled_this_call = resolvedCount;
+        const result = await predictAndLog(env);
+        return new Response(JSON.stringify(result), {
+          headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+      } catch (err) {
+        return new Response(JSON.stringify({ ok: false, error: String(err) }), {
+          status: 500,
+          headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+      }
+    }
+
+    // ---- GET /chart-data — price series + predictions log for the price-vs-prediction chart ----
+    if (url.pathname === '/chart-data' && request.method === 'GET') {
+      try {
+        const result = await getChartData(env);
         return new Response(JSON.stringify(result), {
           headers: { ...corsHeaders, 'Content-Type': 'application/json' },
         });
@@ -232,5 +268,12 @@ export default {
       status: 404,
       headers: { ...corsHeaders, 'Content-Type': 'application/json' },
     });
+  },
+
+  // Fires every 6h (see wrangler.toml [triggers]) so predictions get logged
+  // and old ones get resolved regardless of whether anyone opens the page.
+  // Same predictAndLog() the /predict route uses — one code path either way.
+  async scheduled(event, env, ctx) {
+    ctx.waitUntil(predictAndLog(env));
   },
 };

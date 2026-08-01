@@ -1,0 +1,19 @@
+name = "pulseworker-v2"
+main = "worker.js"
+compatibility_date = "2024-11-01"
+
+[ai]
+binding = "AI"
+
+# Deliberately the SAME database as the original PulseWorker (sentiment-ff75) —
+# gives this Worker read access to the existing history/technical_eval tables
+# (25+ days of real sentiment/technical/regime data) from day one, and a place
+# to write new V2-only tables (predictions, calibration log) without touching
+# anything the original app depends on. See CryptoPulseV2 README for context.
+[[d1_databases]]
+binding = "DB"
+database_name = "sentiment-history"
+database_id = "f91ca980-b886-423a-bd6f-f3baea46d181"
+
+# No cron triggers yet — added once there's an actual model to run on a
+# schedule. Everything here is called on-demand by the frontend for now.

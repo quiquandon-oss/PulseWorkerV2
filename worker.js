@@ -428,6 +428,23 @@ export default {
       }
     }
 
+    // ---- GET /run-analysis — manually trigger the daily Gemini analysis
+    // outside its 07:00 UTC schedule. Same pattern as V1's Outlook tab
+    // having both a cron and a manual button. ----
+    if (url.pathname === '/run-analysis' && request.method === 'GET') {
+      try {
+        const result = await runGeminiDailyAnalysis(env);
+        return new Response(JSON.stringify(result), {
+          headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+      } catch (err) {
+        return new Response(JSON.stringify({ ok: false, error: String(err) }), {
+          status: 500,
+          headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+      }
+    }
+
     return new Response(JSON.stringify({ ok: false, error: 'not_found' }), {
       status: 404,
       headers: { ...corsHeaders, 'Content-Type': 'application/json' },

@@ -76,14 +76,17 @@ async function runPrediction(env) {
   const returns = resolved.map(r => r.return_pct).sort((a, b) => a - b);
   const nUp = returns.filter(r => r > 0).length;
   const pUp = nUp / returns.length;
-  const median = returns[Math.floor(returns.length / 2)];
+  const pct = (p) => returns[Math.min(returns.length - 1, Math.floor(returns.length * p))];
+  const median = pct(0.5);
+  const p25 = pct(0.25);
+  const p75 = pct(0.75);
 
   const nowTs = Date.now();
   const features = Object.fromEntries(FEATURE_KEYS.map(k => [k, today[k]]));
 
   const insert = await env.DB.prepare(
-    'INSERT INTO predictions (ts, target_ts, btc_price_at_prediction, p_up, n_analogs, median_analog_return, features_json) VALUES (?,?,?,?,?,?,?)'
-  ).bind(nowTs, nowTs + LAG_MS, today.btc_price, pUp, resolved.length, median, JSON.stringify(features)).run();
+    'INSERT INTO predictions (ts, target_ts, btc_price_at_prediction, p_up, n_analogs, median_analog_return, return_p25, return_p75, features_json) VALUES (?,?,?,?,?,?,?,?,?)'
+  ).bind(nowTs, nowTs + LAG_MS, today.btc_price, pUp, resolved.length, median, p25, p75, JSON.stringify(features)).run();
 
   return {
     ok: true,
@@ -94,10 +97,11 @@ async function runPrediction(env) {
     p_up: Number(pUp.toFixed(3)),
     n_analogs: resolved.length,
     median_analog_return_pct: Number(median.toFixed(2)),
+    return_range_pct: [Number(p25.toFixed(2)), Number(p75.toFixed(2))],
     btc_price_now: today.btc_price,
     features,
     top_analogs: resolved.slice(0, 5).map(r => ({ date: new Date(r.analog_ts).toISOString().slice(0, 10), return_pct: Number(r.return_pct.toFixed(2)) })),
-    note: `Based on the ${resolved.length} most similar days in ${candidates.length} days of history. Small sample — read as a rough lean, not a forecast.`,
+    note: `Based on the ${resolved.length} most similar days in ${candidates.length} days of history. Small sample — read as a rough lean and a plausible range, not a forecast.`,
   };
 }
 
@@ -135,14 +139,30 @@ async function getCalibration(env) {
   const accuracy = results.filter(r => (r.p_up >= 0.5) === (r.realized_up === 1)).length / n;
   const brier = results.reduce((s, r) => s + (r.p_up - r.realized_up) ** 2, 0) / n;
 
+  // Naive baselines the model has to actually beat to mean anything — per
+  // the general finding that BTC is hard to beat a random-walk baseline on,
+  // the honest question isn't "is our accuracy good" in isolation, it's
+  // "does it beat just guessing a constant every time."
+  const upRate = results.filter(r => r.realized_up === 1).length / n;
+  const brierAlways5050 = 0.25; // mathematically constant for any 50/50 guess, not computed
+  const brierAlwaysBaseRate = results.reduce((s, r) => s + (upRate - r.realized_up) ** 2, 0) / n;
+  const bestNaiveBrier = Math.min(brierAlways5050, brierAlwaysBaseRate);
+  const beatsNaiveBaseline = brier < bestNaiveBrier;
+
   return {
     ok: true,
     n_resolved: n,
     accuracy: Number(accuracy.toFixed(3)),
     brier_score: Number(brier.toFixed(3)),
+    historical_up_rate: Number(upRate.toFixed(3)),
+    brier_baseline_5050: brierAlways5050,
+    brier_baseline_up_rate: Number(brierAlwaysBaseRate.toFixed(3)),
+    beats_naive_baseline: beatsNaiveBaseline,
     note: n < 20
-      ? 'Fewer than 20 resolved predictions — these numbers will be noisy for a while yet.'
-      : 'Brier score: 0 is perfect, 0.25 is what guessing 50/50 every time gives you.',
+      ? `Only ${n} resolved predictions — this comparison is noise at this size, not a real verdict yet. Revisit past ~20-30.`
+      : beatsNaiveBaseline
+        ? `Beats the best naive baseline (${bestNaiveBrier.toFixed(3)}) — there's a real, if modest, edge here.`
+        : `Does NOT beat the best naive baseline (${bestNaiveBrier.toFixed(3)}) — right now a constant guess would have done as well or better. Worth taking seriously, not explaining away.`,
   };
 }
 

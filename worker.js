@@ -537,6 +537,302 @@ async function backfillGeminiBiasShort(env) {
   return resolvedCount;
 }
 
+// ==================================================================
+// LINK module — second coin, added deliberately as a harder test of
+// whether a coin-specific model is worth building at all (LINK has its
+// own narrative — oracle infra, CCIP/SWIFT — rather than being pure
+// BTC-beta), not because it's the safest/easiest choice.
+//
+// Data source: Hyperliquid ONLY (permissionless, already proven for BTC
+// funding, and metaAndAssetCtxs covers LINK in the same call). Deliberately
+// NOT using CoinGecko for this coin — avoids a new API-key dependency for
+// what would only be a one-time historical backfill. That means LINK's
+// technical_score self-bootstraps from its OWN accumulating price log,
+// starting at neutral (50) and becoming informative over the following
+// weeks — same organic cold-start the BTC model itself went through, no
+// artificial acceleration.
+//
+// Feature vector: LINK's own technical_score + funding rate, PLUS BTC's
+// regime_mag and the shared sentiment composite BORROWED via nearest-time
+// join to the existing `history` table — those two aren't really
+// coin-specific to begin with (crypto-wide macro context and Fear&Greed
+// aren't LINK-specific either way), so recomputing them per-coin would
+// just be duplicated work for no real gain.
+// ==================================================================
+
+const LINK_FUNDING_FLOOR_HOURLY = 0.0000125; // same constant already proven correct for BTC in V1
+
+async function fetchLinkSnapshot() {
+  const res = await fetch('https://api.hyperliquid.xyz/info', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ type: 'metaAndAssetCtxs' }),
+  });
+  if (!res.ok) throw new Error('Hyperliquid info ' + res.status);
+  const [meta, ctxs] = await res.json();
+  const idx = (meta.universe || []).findIndex(u => u.name === 'LINK');
+  if (idx < 0) throw new Error('LINK not found in Hyperliquid universe');
+  const ctx = ctxs[idx];
+  const price = parseFloat(ctx.markPx);
+  const fundingAdj = parseFloat(ctx.funding) - LINK_FUNDING_FLOOR_HOURLY;
+  if (!Number.isFinite(price)) throw new Error('LINK markPx not parseable');
+  return { price, fundingAdj: Number.isFinite(fundingAdj) ? fundingAdj : null };
+}
+
+// Self-bootstrapping technical score (0-100): a simple RSI-style momentum
+// read over whatever's accumulated in link_data so far. Explicitly NOT a
+// replica of V1's full MACD/Bollinger/OBV/Kumo-twist system — that's a much
+// larger build for a second coin; this is an honest, simpler stand-in with
+// the same 0-100 direction (higher = more upward momentum).
+function computeLinkTechnicalScore(recentRows) {
+  if (recentRows.length < 6) return 50; // not enough history yet — neutral, not a guess dressed up as a read
+  const changes = [];
+  for (let i = 1; i < recentRows.length; i++) {
+    changes.push(recentRows[i].link_price - recentRows[i - 1].link_price);
+  }
+  const gains = changes.filter(c => c > 0);
+  const losses = changes.filter(c => c < 0).map(c => -c);
+  const avgGain = gains.length ? gains.reduce((a, b) => a + b, 0) / changes.length : 0;
+  const avgLoss = losses.length ? losses.reduce((a, b) => a + b, 0) / changes.length : 0;
+  if (avgGain + avgLoss === 0) return 50;
+  const rs = avgLoss === 0 ? 100 : avgGain / avgLoss;
+  const rsi = avgLoss === 0 ? 100 : 100 - (100 / (1 + rs));
+  return Math.round(rsi);
+}
+
+async function logLinkData(env) {
+  const snap = await fetchLinkSnapshot();
+  const { results: recent } = await env.DB.prepare(
+    'SELECT link_price FROM link_data ORDER BY ts DESC LIMIT 30'
+  ).all();
+  const technicalScore = computeLinkTechnicalScore(recent.reverse());
+  await env.DB.prepare(
+    'INSERT INTO link_data (ts, link_price, technical_score, funding_adj) VALUES (?,?,?,?)'
+  ).bind(Date.now(), snap.price, technicalScore, snap.fundingAdj).run();
+  return { price: snap.price, technical_score: technicalScore, funding_adj: snap.fundingAdj };
+}
+
+const LINK_FEATURE_KEYS = ['technical_score', 'funding_adj', 'btc_regime_mag', 'sentiment_score'];
+const LINK_MIN_COMPLETE_ROWS = 30;
+const LINK_MIN_RESOLVED_ANALOGS = 5;
+
+async function runLinkPrediction(env) {
+  const { results: linkRows } = await env.DB.prepare(
+    'SELECT ts, link_price, technical_score, funding_adj FROM link_data ORDER BY ts ASC'
+  ).all();
+  if (linkRows.length < LINK_MIN_COMPLETE_ROWS) {
+    return { ok: true, status: 'insufficient_data', n_available: linkRows.length, min_required: LINK_MIN_COMPLETE_ROWS };
+  }
+
+  // Borrow BTC's regime_mag and the shared sentiment composite via
+  // nearest-time join — these aren't coin-specific, no reason to duplicate
+  // the underlying computation for a second coin.
+  const { results: btcHistory } = await env.DB.prepare(
+    'SELECT ts, score, regime_mag FROM history WHERE regime_mag IS NOT NULL ORDER BY ts ASC'
+  ).all();
+
+  const complete = [];
+  for (const r of linkRows) {
+    if (r.technical_score == null || r.funding_adj == null) continue;
+    const nearestBtc = nearestRow(btcHistory, r.ts);
+    if (!nearestBtc) continue;
+    complete.push({
+      ts: r.ts, link_price: r.link_price,
+      technical_score: r.technical_score, funding_adj: r.funding_adj,
+      btc_regime_mag: nearestBtc.regime_mag, sentiment_score: nearestBtc.score,
+    });
+  }
+  if (complete.length < LINK_MIN_COMPLETE_ROWS) {
+    return { ok: true, status: 'insufficient_data', n_available: complete.length, min_required: LINK_MIN_COMPLETE_ROWS };
+  }
+
+  const stats = {};
+  for (const k of LINK_FEATURE_KEYS) stats[k] = meanStd(complete.map(r => r[k]));
+
+  const today = complete[complete.length - 1];
+  const candidates = complete.slice(0, -1);
+
+  const distances = candidates.map(r => {
+    let d = 0;
+    for (const k of LINK_FEATURE_KEYS) {
+      const z1 = (today[k] - stats[k].mean) / stats[k].std;
+      const z2 = (r[k] - stats[k].mean) / stats[k].std;
+      d += (z1 - z2) ** 2;
+    }
+    return { row: r, dist: Math.sqrt(d) };
+  }).sort((a, b) => a.dist - b.dist);
+
+  const K = Math.min(15, Math.max(5, Math.floor(candidates.length / 3)));
+  const neighbors = distances.slice(0, K);
+
+  const resolved = neighbors
+    .map(n => {
+      const fwd = nearestRow(linkRows, n.row.ts + LAG_MS);
+      if (!fwd) return null;
+      return { analog_ts: n.row.ts, dist: n.dist, return_pct: (fwd.link_price - n.row.link_price) / n.row.link_price * 100 };
+    })
+    .filter(Boolean);
+
+  if (resolved.length < LINK_MIN_RESOLVED_ANALOGS) {
+    return { ok: true, status: 'insufficient_resolved_analogs', n_neighbors: neighbors.length, n_resolved: resolved.length, min_required: LINK_MIN_RESOLVED_ANALOGS };
+  }
+
+  const returns = resolved.map(r => r.return_pct).sort((a, b) => a - b);
+  const nUp = returns.filter(r => r > 0).length;
+  const pUp = nUp / returns.length;
+  const pct = (p) => returns[Math.min(returns.length - 1, Math.floor(returns.length * p))];
+  const median = pct(0.5), p25 = pct(0.25), p75 = pct(0.75);
+
+  const nowTs = Date.now();
+  const features = Object.fromEntries(LINK_FEATURE_KEYS.map(k => [k, today[k]]));
+
+  const insert = await env.DB.prepare(
+    'INSERT INTO link_predictions (ts, target_ts, link_price_at_prediction, p_up, n_analogs, median_analog_return, return_p25, return_p75, features_json) VALUES (?,?,?,?,?,?,?,?,?)'
+  ).bind(nowTs, nowTs + LAG_MS, today.link_price, pUp, resolved.length, median, p25, p75, JSON.stringify(features)).run();
+
+  return {
+    ok: true, status: 'ok', prediction_id: insert.meta.last_row_id, ts: nowTs, horizon_hours: 24,
+    p_up: Number(pUp.toFixed(3)), n_analogs: resolved.length,
+    median_analog_return_pct: Number(median.toFixed(2)),
+    return_range_pct: [Number(p25.toFixed(2)), Number(p75.toFixed(2))],
+    link_price_now: today.link_price, features,
+    top_analogs: resolved.slice(0, 5).map(r => ({ date: new Date(r.analog_ts).toISOString().slice(0, 10), return_pct: Number(r.return_pct.toFixed(2)) })),
+    note: `Based on the ${resolved.length} most similar days in ${candidates.length} days of LINK history. Technical score is a simplified RSI-style read, not V1's full indicator system — and this whole model is much younger than BTC's. Read with extra caution relative to the BTC prediction.`,
+  };
+}
+
+async function backfillLinkPredictions(env) {
+  const { results: linkRows } = await env.DB.prepare(
+    'SELECT ts, link_price FROM link_data ORDER BY ts ASC'
+  ).all();
+  const { results: unresolved } = await env.DB.prepare(
+    'SELECT id, target_ts, link_price_at_prediction FROM link_predictions WHERE realized_up IS NULL AND target_ts <= ?'
+  ).bind(Date.now()).all();
+
+  let resolvedCount = 0;
+  for (const p of unresolved) {
+    const match = nearestRow(linkRows, p.target_ts);
+    if (!match) continue;
+    const ret = (match.link_price - p.link_price_at_prediction) / p.link_price_at_prediction * 100;
+    await env.DB.prepare(
+      'UPDATE link_predictions SET realized_link_price=?, realized_return=?, realized_up=?, resolved_ts=? WHERE id=?'
+    ).bind(match.link_price, ret, ret > 0 ? 1 : 0, Date.now(), p.id).run();
+    resolvedCount++;
+  }
+  return resolvedCount;
+}
+
+async function linkPredictAndLog(env) {
+  await logLinkData(env);
+  const resolvedCount = await backfillLinkPredictions(env);
+  const result = await runLinkPrediction(env);
+  result.backfilled_this_call = resolvedCount;
+  return result;
+}
+
+async function getLinkCalibration(env) {
+  const { results } = await env.DB.prepare(
+    'SELECT p_up, realized_up FROM link_predictions WHERE realized_up IS NOT NULL'
+  ).all();
+  const n = results.length;
+  if (n === 0) return { ok: true, n_resolved: 0, note: 'No resolved LINK predictions yet — the first ones need 24h to mature, and this model is newer than BTC\'s.' };
+  const accuracy = results.filter(r => (r.p_up >= 0.5) === (r.realized_up === 1)).length / n;
+  const brier = results.reduce((s, r) => s + (r.p_up - r.realized_up) ** 2, 0) / n;
+  const upRate = results.filter(r => r.realized_up === 1).length / n;
+  const brierAlwaysBaseRate = results.reduce((s, r) => s + (upRate - r.realized_up) ** 2, 0) / n;
+  const bestNaiveBrier = Math.min(0.25, brierAlwaysBaseRate);
+  const beatsNaiveBaseline = brier < bestNaiveBrier;
+  return {
+    ok: true, n_resolved: n, accuracy: Number(accuracy.toFixed(3)), brier_score: Number(brier.toFixed(3)),
+    historical_up_rate: Number(upRate.toFixed(3)), brier_baseline_5050: 0.25,
+    brier_baseline_up_rate: Number(brierAlwaysBaseRate.toFixed(3)), beats_naive_baseline: beatsNaiveBaseline,
+    note: n < 20
+      ? `Only ${n} resolved LINK predictions — noise at this size, not a verdict yet.`
+      : beatsNaiveBaseline
+        ? `Beats the best naive baseline (${bestNaiveBrier.toFixed(3)}).`
+        : `Does NOT beat the best naive baseline (${bestNaiveBrier.toFixed(3)}) yet.`,
+  };
+}
+
+async function getLinkChartData(env) {
+  const { results: prices } = await env.DB.prepare(
+    'SELECT ts, link_price FROM link_data ORDER BY ts ASC'
+  ).all();
+  const { results: predictions } = await env.DB.prepare(
+    'SELECT id, ts, target_ts, link_price_at_prediction, p_up, median_analog_return, realized_up, realized_return FROM link_predictions ORDER BY ts ASC'
+  ).all();
+  return { ok: true, prices, predictions };
+}
+
+// LINK-specific daily Gemini read — deliberately narrower than the BTC
+// comprehensive analysis: LINK's own narrative (oracle infra, CCIP/SWIFT,
+// enterprise adoption) plus its technical picture, not a repeat of the same
+// macro/geopolitics sections already covered for BTC.
+async function runLinkGeminiAnalysis(env) {
+  if (!env.GEMINI_API_KEY) throw new Error('GEMINI_API_KEY not configured on this Worker');
+  const latest = await env.DB.prepare(
+    'SELECT ts, link_price, technical_score FROM link_data ORDER BY ts DESC LIMIT 1'
+  ).first();
+  const linkPrice = latest?.link_price ?? null;
+
+  const prompt = `You are a crypto analyst writing a short daily briefing specifically on Chainlink (LINK) — not a general crypto market update, focus on what's specific to LINK.
+
+GROUND TRUTH: Current LINK price: ${linkPrice != null ? '$' + linkPrice.toFixed(2) : 'unknown'}. Current simplified technical score (0-100, RSI-style, not a full indicator suite): ${latest?.technical_score ?? 'N/A'}.
+
+RULES: never state a guaranteed outcome as fact. Plain text, no markdown symbols. If your knowledge of very recent LINK-specific news may be incomplete, say so.
+
+Cover, each as its own labeled section on its own line, 2-3 sentences each:
+ORACLE ADOPTION: enterprise/institutional integrations, CCIP, bank/SWIFT-related activity, any recent partnership news.
+TECHNICAL PICTURE: chart structure, momentum, key levels for LINK specifically.
+RISK FACTORS: anything LINK-specific that could weigh on it (competition from other oracle networks, token unlock schedules if known, etc).
+SYNTHESIS: 1-2 sentences tying it together.
+
+After all sections, on its own final line, output exactly this (valid JSON, nothing after it):
+LINK_JSON: {"bias_short":"bullish|neutral|bearish","bias_medium":"bullish|neutral|bearish","support_pct_below":<number>,"resistance_pct_above":<number>}`;
+
+  const geminiRes = await fetch(
+    'https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent',
+    { method: 'POST', headers: { 'Content-Type': 'application/json', 'x-goog-api-key': env.GEMINI_API_KEY },
+      body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }] }) }
+  );
+  if (!geminiRes.ok) throw new Error(`Gemini API ${geminiRes.status}: ${(await geminiRes.text()).slice(0, 300)}`);
+  const geminiJson = await geminiRes.json();
+  const text = geminiJson?.candidates?.[0]?.content?.parts?.[0]?.text;
+  if (!text) throw new Error('Empty or unexpected Gemini response shape');
+
+  let narrative = text.trim();
+  let parsed = {};
+  const jsonMatch = narrative.match(/LINK_JSON:\s*(\{[\s\S]*\})\s*$/);
+  if (jsonMatch) {
+    try { parsed = JSON.parse(jsonMatch[1]); } catch (e) {}
+    narrative = narrative.slice(0, jsonMatch.index).trim();
+  }
+  for (const label of ['ORACLE ADOPTION', 'TECHNICAL PICTURE', 'RISK FACTORS', 'SYNTHESIS']) {
+    narrative = narrative.replace(new RegExp(`\\s*(${label}:)`, 'gi'), `\n\n$1`);
+  }
+  narrative = narrative.replace(/^\n+/, '').trim();
+
+  const record = {
+    ts: Date.now(), link_price_at_analysis: linkPrice,
+    bias_short: normalizeBias(parsed.bias_short), bias_medium: normalizeBias(parsed.bias_medium),
+    support_pct_below: Number.isFinite(parsed.support_pct_below) ? parsed.support_pct_below : null,
+    resistance_pct_above: Number.isFinite(parsed.resistance_pct_above) ? parsed.resistance_pct_above : null,
+    narrative, raw_json: JSON.stringify(parsed),
+  };
+  await env.DB.prepare(
+    `INSERT INTO link_gemini_analysis (ts, link_price_at_analysis, bias_short, bias_medium, support_pct_below, resistance_pct_above, narrative, raw_json) VALUES (?,?,?,?,?,?,?,?)`
+  ).bind(record.ts, record.link_price_at_analysis, record.bias_short, record.bias_medium, record.support_pct_below, record.resistance_pct_above, record.narrative, record.raw_json).run();
+
+  return { ok: true, ...record };
+}
+
+async function getLinkGeminiHistory(env, limit) {
+  const { results } = await env.DB.prepare(
+    'SELECT id, ts, link_price_at_analysis, bias_short, bias_medium, support_pct_below, resistance_pct_above, narrative FROM link_gemini_analysis ORDER BY ts DESC LIMIT ?'
+  ).bind(limit).all();
+  return { ok: true, analyses: results };
+}
+
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
@@ -654,6 +950,49 @@ export default {
       }
     }
 
+    // ==================== LINK routes ====================
+    if (url.pathname === '/link-predict' && request.method === 'GET') {
+      try {
+        const result = await linkPredictAndLog(env);
+        return new Response(JSON.stringify(result), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+      } catch (err) {
+        return new Response(JSON.stringify({ ok: false, error: String(err) }), { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+      }
+    }
+    if (url.pathname === '/link-calibration' && request.method === 'GET') {
+      try {
+        const result = await getLinkCalibration(env);
+        return new Response(JSON.stringify(result), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+      } catch (err) {
+        return new Response(JSON.stringify({ ok: false, error: String(err) }), { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+      }
+    }
+    if (url.pathname === '/link-chart-data' && request.method === 'GET') {
+      try {
+        const result = await getLinkChartData(env);
+        return new Response(JSON.stringify(result), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+      } catch (err) {
+        return new Response(JSON.stringify({ ok: false, error: String(err) }), { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+      }
+    }
+    if (url.pathname === '/link-gemini-analysis' && request.method === 'GET') {
+      try {
+        const limit = Math.min(50, parseInt(url.searchParams.get('limit') || '10', 10));
+        const result = await getLinkGeminiHistory(env, limit);
+        return new Response(JSON.stringify(result), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+      } catch (err) {
+        return new Response(JSON.stringify({ ok: false, error: String(err) }), { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+      }
+    }
+    if (url.pathname === '/run-link-analysis' && request.method === 'GET') {
+      try {
+        const result = await runLinkGeminiAnalysis(env);
+        return new Response(JSON.stringify(result), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+      } catch (err) {
+        return new Response(JSON.stringify({ ok: false, error: String(err) }), { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+      }
+    }
+
     return new Response(JSON.stringify({ ok: false, error: 'not_found' }), {
       status: 404,
       headers: { ...corsHeaders, 'Content-Type': 'application/json' },
@@ -670,8 +1009,10 @@ export default {
   async scheduled(event, env, ctx) {
     if (event.cron === '0 7 * * *') {
       ctx.waitUntil(runGeminiDailyAnalysis(env).catch(err => console.error('Daily Gemini analysis failed:', err)));
+      ctx.waitUntil(runLinkGeminiAnalysis(env).catch(err => console.error('Daily LINK Gemini analysis failed:', err)));
     } else {
       ctx.waitUntil(predictAndLog(env));
+      ctx.waitUntil(linkPredictAndLog(env).catch(err => console.error('LINK predict-and-log failed:', err)));
     }
   },
 };

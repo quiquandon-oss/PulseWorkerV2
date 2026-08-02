@@ -680,22 +680,38 @@ async function runLinkPrediction(env) {
 
   // Borrow BTC's regime_mag and the shared sentiment composite via
   // nearest-time join — these aren't coin-specific, no reason to duplicate
-  // the underlying computation for a second coin.
+  // the underlying computation for a second coin. IMPORTANT: this context
+  // only exists for the last ~7 days (V1 only started logging regime_mag
+  // on 2026-07-25), while LINK's own backfilled price history goes back 90
+  // days — so most rows won't have a real match. Rather than drop them
+  // (which left only ~13 usable rows, well under the 30 minimum), missing
+  // context gets mean-imputed from whatever real matches DO exist. After
+  // z-scoring, an imputed mean value contributes exactly zero pull on that
+  // feature's dimension — neutral, not a biased guess — while still
+  // letting the full technical_score history do its job for the analog
+  // match. Flagged per-row so this is auditable, not silently smoothed over.
   const { results: btcHistory } = await env.DB.prepare(
     'SELECT ts, score, regime_mag FROM history WHERE regime_mag IS NOT NULL ORDER BY ts ASC'
   ).all();
-
-  const complete = [];
+  const rawRows = [];
+  const realRegimeVals = [], realSentimentVals = [];
   for (const r of linkRows) {
     if (r.technical_score == null) continue;
     const nearestBtc = nearestRow(btcHistory, r.ts);
-    if (!nearestBtc) continue;
-    complete.push({
-      ts: r.ts, link_price: r.link_price,
-      technical_score: r.technical_score, funding_adj: r.funding_adj,
-      btc_regime_mag: nearestBtc.regime_mag, sentiment_score: nearestBtc.score,
+    rawRows.push({
+      ts: r.ts, link_price: r.link_price, technical_score: r.technical_score,
+      btc_regime_mag: nearestBtc?.regime_mag ?? null, sentiment_score: nearestBtc?.score ?? null,
     });
+    if (nearestBtc) { realRegimeVals.push(nearestBtc.regime_mag); realSentimentVals.push(nearestBtc.score); }
   }
+  const meanRegime = realRegimeVals.length ? realRegimeVals.reduce((a, b) => a + b, 0) / realRegimeVals.length : 0;
+  const meanSentiment = realSentimentVals.length ? realSentimentVals.reduce((a, b) => a + b, 0) / realSentimentVals.length : 50;
+  const complete = rawRows.map(r => ({
+    ts: r.ts, link_price: r.link_price, technical_score: r.technical_score,
+    btc_regime_mag: r.btc_regime_mag ?? meanRegime,
+    sentiment_score: r.sentiment_score ?? meanSentiment,
+    context_imputed: r.btc_regime_mag == null || r.sentiment_score == null,
+  }));
   if (complete.length < LINK_MIN_COMPLETE_ROWS) {
     return { ok: true, status: 'insufficient_data', n_available: complete.length, min_required: LINK_MIN_COMPLETE_ROWS };
   }
@@ -744,6 +760,8 @@ async function runLinkPrediction(env) {
     'INSERT INTO link_predictions (ts, target_ts, link_price_at_prediction, p_up, n_analogs, median_analog_return, return_p25, return_p75, features_json) VALUES (?,?,?,?,?,?,?,?,?)'
   ).bind(nowTs, nowTs + LAG_MS, today.link_price, pUp, resolved.length, median, p25, p75, JSON.stringify(features)).run();
 
+  const nImputedInNeighbors = neighbors.filter(n => n.row.context_imputed).length;
+
   return {
     ok: true, status: 'ok', prediction_id: insert.meta.last_row_id, ts: nowTs, horizon_hours: 24,
     p_up: Number(pUp.toFixed(3)), n_analogs: resolved.length,
@@ -751,7 +769,7 @@ async function runLinkPrediction(env) {
     return_range_pct: [Number(p25.toFixed(2)), Number(p75.toFixed(2))],
     link_price_now: today.link_price, features,
     top_analogs: resolved.slice(0, 5).map(r => ({ date: new Date(r.analog_ts).toISOString().slice(0, 10), return_pct: Number(r.return_pct.toFixed(2)) })),
-    note: `Based on the ${resolved.length} most similar days in ${candidates.length} days of LINK history. Technical score is a simplified RSI-style read, not V1's full indicator system — and this whole model is much younger than BTC's. Read with extra caution relative to the BTC prediction.`,
+    note: `Based on the ${resolved.length} most similar days in ${candidates.length} days of LINK history (${nImputedInNeighbors} of the ${neighbors.length} matched days used an averaged macro/sentiment reading, real BTC data only goes back 7 days). Technical score is a simplified RSI-style read, not V1's full indicator system — and this whole model is much younger than BTC's. Read with extra caution relative to the BTC prediction.`,
   };
 }
 

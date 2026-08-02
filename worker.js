@@ -21,6 +21,50 @@ function meanStd(vals) {
   return { mean, std: Math.sqrt(variance) || 1 };
 }
 
+// Trailing realized volatility (stddev of period-over-period % moves) over
+// the last `lookback` rows ending at (and including) `endIdx` in a
+// chronologically-sorted array. Used both for today's own volatility and,
+// retrospectively, to build a reference distribution of "what volatility
+// has looked like historically" so today's reading can be percentile-ranked
+// against it rather than compared to an arbitrary hardcoded threshold.
+function trailingVolatility(sortedRows, endIdx, lookback = 14) {
+  const start = Math.max(0, endIdx - lookback + 1);
+  const window = sortedRows.slice(start, endIdx + 1);
+  if (window.length < 4) return null;
+  const rets = [];
+  for (let i = 1; i < window.length; i++) {
+    rets.push((window[i].btc_price - window[i - 1].btc_price) / window[i - 1].btc_price * 100);
+  }
+  return meanStd(rets).std;
+}
+
+// Percentile rank of `value` within `referenceValues` (0 = lowest ever seen,
+// 1 = highest). Used for both the volatility-based K adjustment and the
+// regime-anomaly distance check — same self-calibrating idea either way:
+// judge today against this dataset's own history, not a fixed number picked
+// in advance with no basis.
+function percentileRank(value, referenceValues) {
+  const valid = referenceValues.filter(v => v != null);
+  if (valid.length < 10) return null; // too few points for a percentile to mean anything
+  const below = valid.filter(v => v <= value).length;
+  return below / valid.length;
+}
+
+// Weighted median: same idea as an unweighted median, but each observation
+// counts in proportion to its weight (here, inverse distance) rather than
+// counting once each. Standard weighted-quantile construction: sort by
+// value, walk the accumulated weight until it crosses the target fraction.
+function weightedQuantile(pairs, p) {
+  const sorted = [...pairs].sort((a, b) => a.value - b.value);
+  const total = sorted.reduce((s, x) => s + x.weight, 0);
+  let acc = 0;
+  for (const x of sorted) {
+    acc += x.weight;
+    if (acc / total >= p) return x.value;
+  }
+  return sorted[sorted.length - 1].value;
+}
+
 // Nearest row to targetTs within TOL_MS, used both for "what happened 24h
 // after this analog" and later for backfilling a prediction's real outcome.
 function nearestRow(history, targetTs) {
@@ -81,12 +125,82 @@ async function runPrediction(env) {
   const p25 = pct(0.25);
   const p75 = pct(0.75);
 
+  // ---- Experimental: adaptive K + distance-weighted aggregation ----
+  // Built and logged ALONGSIDE the fixed-K/unweighted numbers above, not
+  // instead of them — the headline p_up/median above stays exactly what
+  // it's been, already being calibrated. This experiment runs in parallel,
+  // gets its own columns, and only gets compared against the original once
+  // there's enough resolved data for that comparison to mean anything (see
+  // /calibration). Built now, trusted later — not the other way round.
+  //
+  // Adaptive K: today's trailing volatility is percentile-ranked against
+  // the same measure computed retrospectively at every historical point
+  // (not a hardcoded threshold) — high-volatility days use a smaller,
+  // more selective K; calm days use a wider pool.
+  const historicalVol = candidates.map((_, i) => trailingVolatility(candidates, i));
+  const todayVol = trailingVolatility(complete, complete.length - 1);
+  const volPercentile = todayVol != null ? percentileRank(todayVol, historicalVol) : null;
+  let kAdaptive = K;
+  if (volPercentile != null) {
+    if (volPercentile >= 0.66) kAdaptive = Math.max(5, Math.floor(K * 0.6));   // volatile: fewer, closer analogs
+    else if (volPercentile <= 0.33) kAdaptive = Math.min(candidates.length, Math.floor(K * 1.4)); // calm: wider pool is safer
+  }
+  const neighborsAdaptive = distances.slice(0, kAdaptive);
+  const resolvedAdaptive = neighborsAdaptive
+    .map(n => {
+      const fwd = nearestRow(history, n.row.ts + LAG_MS);
+      if (!fwd) return null;
+      return { dist: n.dist, return_pct: (fwd.btc_price - n.row.btc_price) / n.row.btc_price * 100 };
+    })
+    .filter(Boolean);
+
+  let pUpExperimental = null, medianReturnExperimental = null;
+  if (resolvedAdaptive.length >= MIN_RESOLVED_ANALOGS) {
+    const EPS = 0.05; // avoids divide-by-zero for a near-exact historical match
+    const weighted = resolvedAdaptive.map(r => ({ value: r.return_pct, weight: 1 / (r.dist + EPS) }));
+    const totalWeight = weighted.reduce((s, w) => s + w.weight, 0);
+    const upWeight = weighted.filter(w => w.value > 0).reduce((s, w) => s + w.weight, 0);
+    pUpExperimental = upWeight / totalWeight;
+    medianReturnExperimental = weightedQuantile(weighted, 0.5);
+  }
+
+  // Regime-anomaly tripwire: is even the single closest analog unusually
+  // far away compared to every closest-match distance seen historically?
+  // If so, today's setup doesn't resemble anything in history well, and
+  // the prediction above is honestly built on weaker matches than usual —
+  // flagged rather than silently reported with the same confidence as any
+  // other day.
+  const closestDist = distances[0].dist;
+  const historicalClosestDists = candidates.map((_, i) => {
+    if (i === 0) return null;
+    let best = Infinity;
+    for (let j = 0; j < i; j++) {
+      let d = 0;
+      for (const k of FEATURE_KEYS) {
+        const z1 = (candidates[i][k] - stats[k].mean) / stats[k].std;
+        const z2 = (candidates[j][k] - stats[k].mean) / stats[k].std;
+        d += (z1 - z2) ** 2;
+      }
+      d = Math.sqrt(d);
+      if (d < best) best = d;
+    }
+    return Number.isFinite(best) ? best : null;
+  });
+  const closestDistPercentile = percentileRank(closestDist, historicalClosestDists);
+  const isRegimeAnomaly = closestDistPercentile != null && closestDistPercentile >= 0.9;
+
   const nowTs = Date.now();
   const features = Object.fromEntries(FEATURE_KEYS.map(k => [k, today[k]]));
 
   const insert = await env.DB.prepare(
-    'INSERT INTO predictions (ts, target_ts, btc_price_at_prediction, p_up, n_analogs, median_analog_return, return_p25, return_p75, features_json) VALUES (?,?,?,?,?,?,?,?,?)'
-  ).bind(nowTs, nowTs + LAG_MS, today.btc_price, pUp, resolved.length, median, p25, p75, JSON.stringify(features)).run();
+    `INSERT INTO predictions
+     (ts, target_ts, btc_price_at_prediction, p_up, n_analogs, median_analog_return, return_p25, return_p75, features_json,
+      k_used, volatility_percentile, closest_analog_dist, is_regime_anomaly, p_up_experimental, median_return_experimental)
+     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
+  ).bind(
+    nowTs, nowTs + LAG_MS, today.btc_price, pUp, resolved.length, median, p25, p75, JSON.stringify(features),
+    kAdaptive, volPercentile, closestDist, isRegimeAnomaly ? 1 : 0, pUpExperimental, medianReturnExperimental
+  ).run();
 
   return {
     ok: true,
@@ -101,7 +215,17 @@ async function runPrediction(env) {
     btc_price_now: today.btc_price,
     features,
     top_analogs: resolved.slice(0, 5).map(r => ({ date: new Date(r.analog_ts).toISOString().slice(0, 10), return_pct: Number(r.return_pct.toFixed(2)) })),
-    note: `Based on the ${resolved.length} most similar days in ${candidates.length} days of history. Small sample — read as a rough lean and a plausible range, not a forecast.`,
+    regime_anomaly: isRegimeAnomaly,
+    experimental: {
+      k_used: kAdaptive,
+      volatility_percentile: volPercentile != null ? Number(volPercentile.toFixed(2)) : null,
+      p_up: pUpExperimental != null ? Number(pUpExperimental.toFixed(3)) : null,
+      median_return_pct: medianReturnExperimental != null ? Number(medianReturnExperimental.toFixed(2)) : null,
+      note: 'Adaptive-K + distance-weighted variant, logged in parallel — not yet trusted over the headline number above. See /calibration once enough of these resolve.',
+    },
+    note: isRegimeAnomaly
+      ? `Today's setup doesn't closely resemble anything in ${candidates.length} days of history — the analogs behind this number are weaker matches than usual. Read with extra caution.`
+      : `Based on the ${resolved.length} most similar days in ${candidates.length} days of history. Small sample — read as a rough lean and a plausible range, not a forecast.`,
   };
 }
 
@@ -131,7 +255,7 @@ async function backfillPredictions(env) {
 
 async function getCalibration(env) {
   const { results } = await env.DB.prepare(
-    'SELECT p_up, realized_up FROM predictions WHERE realized_up IS NOT NULL'
+    'SELECT p_up, realized_up, p_up_experimental FROM predictions WHERE realized_up IS NOT NULL'
   ).all();
   const n = results.length;
   if (n === 0) return { ok: true, n_resolved: 0, note: 'No resolved predictions yet — the first ones need 24h to mature.' };
@@ -139,15 +263,36 @@ async function getCalibration(env) {
   const accuracy = results.filter(r => (r.p_up >= 0.5) === (r.realized_up === 1)).length / n;
   const brier = results.reduce((s, r) => s + (r.p_up - r.realized_up) ** 2, 0) / n;
 
-  // Naive baselines the model has to actually beat to mean anything — per
-  // the general finding that BTC is hard to beat a random-walk baseline on,
-  // the honest question isn't "is our accuracy good" in isolation, it's
-  // "does it beat just guessing a constant every time."
   const upRate = results.filter(r => r.realized_up === 1).length / n;
-  const brierAlways5050 = 0.25; // mathematically constant for any 50/50 guess, not computed
+  const brierAlways5050 = 0.25;
   const brierAlwaysBaseRate = results.reduce((s, r) => s + (upRate - r.realized_up) ** 2, 0) / n;
   const bestNaiveBrier = Math.min(brierAlways5050, brierAlwaysBaseRate);
   const beatsNaiveBaseline = brier < bestNaiveBrier;
+
+  // The tracker for the adaptive-K/weighted-distance experiment: only
+  // meaningful once enough resolved predictions actually have an
+  // experimental value logged (early predictions, before this was built,
+  // won't). Reports "not enough data yet" honestly rather than a number
+  // built on a handful of rows.
+  const withExperimental = results.filter(r => r.p_up_experimental != null);
+  let experimentalComparison = { available: false, note: 'Not enough resolved predictions with the experimental variant logged yet.' };
+  if (withExperimental.length >= 20) {
+    const nExp = withExperimental.length;
+    const accuracyExp = withExperimental.filter(r => (r.p_up_experimental >= 0.5) === (r.realized_up === 1)).length / nExp;
+    const brierExp = withExperimental.reduce((s, r) => s + (r.p_up_experimental - r.realized_up) ** 2, 0) / nExp;
+    const brierOrigSameSet = withExperimental.reduce((s, r) => s + (r.p_up - r.realized_up) ** 2, 0) / nExp;
+    experimentalComparison = {
+      available: true,
+      n_resolved: nExp,
+      accuracy_experimental: Number(accuracyExp.toFixed(3)),
+      brier_experimental: Number(brierExp.toFixed(3)),
+      brier_original_same_set: Number(brierOrigSameSet.toFixed(3)),
+      experimental_wins: brierExp < brierOrigSameSet,
+      note: brierExp < brierOrigSameSet
+        ? 'The adaptive-K/weighted variant is currently outperforming the original on the same set of days — worth considering promoting it, but check this again once n is larger.'
+        : 'The original fixed-K/unweighted approach is still doing as well or better — no reason to switch yet.',
+    };
+  }
 
   return {
     ok: true,
@@ -158,6 +303,7 @@ async function getCalibration(env) {
     brier_baseline_5050: brierAlways5050,
     brier_baseline_up_rate: Number(brierAlwaysBaseRate.toFixed(3)),
     beats_naive_baseline: beatsNaiveBaseline,
+    experimental_vs_original: experimentalComparison,
     note: n < 20
       ? `Only ${n} resolved predictions — this comparison is noise at this size, not a real verdict yet. Revisit past ~20-30.`
       : beatsNaiveBaseline
@@ -283,7 +429,7 @@ ADOPTION: institutional, regulatory, retail adoption trends.
 SYNTHESIS: 2-3 sentences tying it together.
 
 After all sections, on its own final line with nothing else on that line, output exactly this (valid JSON, one line, nothing after it):
-ANALYSIS_JSON: {"bias_short":"bullish|neutral|bearish","bias_medium":"bullish|neutral|bearish","bias_long":"bullish|neutral|bearish","support_pct_below":<number, % below current price>,"resistance_pct_above":<number, % above current price>,"macro_risk":"low|medium|high","geopolitical_risk":"low|medium|high"}`;
+ANALYSIS_JSON: {"bias_short":"bullish|neutral|bearish","bias_medium":"bullish|neutral|bearish","bias_long":"bullish|neutral|bearish","support_pct_below":<number, % below current price>,"resistance_pct_above":<number, % above current price>,"macro_risk":"low|medium|high","geopolitical_risk":"low|medium|high","macro_score":<number from -1.0 (very restrictive/bearish macro backdrop) to 1.0 (very supportive/bullish)>,"liquidity_bias":<number from -1.0 (tightening, liquidity draining from risk assets) to 1.0 (loosening, liquidity flowing into risk assets)>,"cross_asset_stress":<number from 0.0 (calm, gold/bonds/oil moving normally) to 1.0 (high dislocation/stress across those markets)>}`;
 
   const geminiRes = await fetch(
     `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent`,
@@ -326,17 +472,24 @@ ANALYSIS_JSON: {"bias_short":"bullish|neutral|bearish","bias_medium":"bullish|ne
     resistance_pct_above: Number.isFinite(parsed.resistance_pct_above) ? parsed.resistance_pct_above : null,
     macro_risk: normalizeRisk(parsed.macro_risk),
     geopolitical_risk: normalizeRisk(parsed.geopolitical_risk),
+    // Continuous, storage-only for now (see README) — clamped to their
+    // documented ranges rather than trusting Gemini to always stay in
+    // bounds, same defensiveness as normalizeBias/normalizeRisk above.
+    macro_score: Number.isFinite(parsed.macro_score) ? Math.max(-1, Math.min(1, parsed.macro_score)) : null,
+    liquidity_bias: Number.isFinite(parsed.liquidity_bias) ? Math.max(-1, Math.min(1, parsed.liquidity_bias)) : null,
+    cross_asset_stress: Number.isFinite(parsed.cross_asset_stress) ? Math.max(0, Math.min(1, parsed.cross_asset_stress)) : null,
     narrative,
     raw_json: JSON.stringify(parsed),
   };
 
   await env.DB.prepare(
     `INSERT INTO gemini_daily_analysis
-     (ts, btc_price_at_analysis, bias_short, bias_medium, bias_long, support_pct_below, resistance_pct_above, macro_risk, geopolitical_risk, narrative, raw_json)
-     VALUES (?,?,?,?,?,?,?,?,?,?,?)`
+     (ts, btc_price_at_analysis, bias_short, bias_medium, bias_long, support_pct_below, resistance_pct_above, macro_risk, geopolitical_risk, macro_score, liquidity_bias, cross_asset_stress, narrative, raw_json)
+     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
   ).bind(
     record.ts, record.btc_price_at_analysis, record.bias_short, record.bias_medium, record.bias_long,
     record.support_pct_below, record.resistance_pct_above, record.macro_risk, record.geopolitical_risk,
+    record.macro_score, record.liquidity_bias, record.cross_asset_stress,
     record.narrative, record.raw_json
   ).run();
 

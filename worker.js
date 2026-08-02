@@ -600,6 +600,54 @@ function computeLinkTechnicalScore(recentRows) {
   return Math.round(rsi);
 }
 
+// One-time (safe to re-run) historical backfill using Hyperliquid's
+// candleSnapshot endpoint — the exact same pattern V1 already proved works
+// for gold/USD history. Gives the chart and the model real history
+// immediately instead of only accumulating from live snapshots going
+// forward, which would otherwise take weeks. No funding rate available
+// from candles (price only) — that's exactly why funding_adj was dropped
+// from the required feature set above rather than kept and left null
+// forever. Technical score is computed retroactively using only each
+// day's own trailing window of PRIOR candles — no lookahead bias, same as
+// any real technical indicator.
+async function backfillLinkHistory(env, days = 90) {
+  const endTime = Date.now();
+  const startTime = endTime - days * 24 * 60 * 60 * 1000;
+  const res = await fetch('https://api.hyperliquid.xyz/info', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ type: 'candleSnapshot', req: { coin: 'LINK', interval: '1d', startTime, endTime } }),
+  });
+  if (!res.ok) throw new Error('LINK candleSnapshot ' + res.status);
+  const candles = await res.json();
+  if (!Array.isArray(candles) || !candles.length) throw new Error('No candle data returned');
+
+  const sorted = candles
+    .map(c => ({ ts: c.t, price: parseFloat(c.c) }))
+    .filter(c => Number.isFinite(c.price))
+    .sort((a, b) => a.ts - b.ts);
+
+  const { results: existing } = await env.DB.prepare('SELECT ts FROM link_data ORDER BY ts ASC').all();
+  const existingTs = existing.map(r => r.ts);
+
+  let inserted = 0;
+  const window = [];
+  for (const c of sorted) {
+    window.push({ link_price: c.price });
+    if (window.length > 30) window.shift();
+    // Skip if a real (live) data point already exists within 12h of this
+    // candle — never overwrite a live snapshot with a coarser daily one.
+    const nearDup = existingTs.some(ts => Math.abs(ts - c.ts) < 12 * 60 * 60 * 1000);
+    if (nearDup) continue;
+    const techScore = computeLinkTechnicalScore(window.slice());
+    await env.DB.prepare(
+      'INSERT INTO link_data (ts, link_price, technical_score, funding_adj) VALUES (?,?,?,?)'
+    ).bind(c.ts, c.price, techScore, null).run();
+    inserted++;
+  }
+  return { ok: true, candles_received: sorted.length, rows_inserted: inserted };
+}
+
 async function logLinkData(env) {
   const snap = await fetchLinkSnapshot();
   const { results: recent } = await env.DB.prepare(
@@ -612,7 +660,13 @@ async function logLinkData(env) {
   return { price: snap.price, technical_score: technicalScore, funding_adj: snap.fundingAdj };
 }
 
-const LINK_FEATURE_KEYS = ['technical_score', 'funding_adj', 'btc_regime_mag', 'sentiment_score'];
+// technical_score + borrowed BTC regime/sentiment only — funding_adj is
+// still logged on every LIVE cron snapshot (bonus context, potentially
+// useful later) but deliberately not required here: real historical
+// candles (used for backfill below) only carry price, no funding rate, and
+// requiring it would disqualify every backfilled row from ever being a
+// usable analog.
+const LINK_FEATURE_KEYS = ['technical_score', 'btc_regime_mag', 'sentiment_score'];
 const LINK_MIN_COMPLETE_ROWS = 30;
 const LINK_MIN_RESOLVED_ANALOGS = 5;
 
@@ -633,7 +687,7 @@ async function runLinkPrediction(env) {
 
   const complete = [];
   for (const r of linkRows) {
-    if (r.technical_score == null || r.funding_adj == null) continue;
+    if (r.technical_score == null) continue;
     const nearestBtc = nearestRow(btcHistory, r.ts);
     if (!nearestBtc) continue;
     complete.push({
@@ -951,6 +1005,15 @@ export default {
     }
 
     // ==================== LINK routes ====================
+    if (url.pathname === '/link-backfill' && request.method === 'GET') {
+      try {
+        const days = Math.min(365, parseInt(url.searchParams.get('days') || '90', 10));
+        const result = await backfillLinkHistory(env, days);
+        return new Response(JSON.stringify(result), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+      } catch (err) {
+        return new Response(JSON.stringify({ ok: false, error: String(err) }), { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+      }
+    }
     if (url.pathname === '/link-predict' && request.method === 'GET') {
       try {
         const result = await linkPredictAndLog(env);

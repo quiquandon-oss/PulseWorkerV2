@@ -182,8 +182,10 @@ async function getCalibration(env) {
 // what a manual visit does.
 async function predictAndLog(env) {
   const resolvedCount = await backfillPredictions(env);
+  const geminiResolvedCount = await backfillGeminiBiasShort(env);
   const result = await runPrediction(env);
   result.backfilled_this_call = resolvedCount;
+  result.gemini_bias_backfilled_this_call = geminiResolvedCount;
   return result;
 }
 
@@ -343,9 +345,43 @@ ANALYSIS_JSON: {"bias_short":"bullish|neutral|bearish","bias_medium":"bullish|ne
 
 async function getGeminiAnalysisHistory(env, limit) {
   const { results } = await env.DB.prepare(
-    'SELECT id, ts, btc_price_at_analysis, bias_short, bias_medium, bias_long, support_pct_below, resistance_pct_above, macro_risk, geopolitical_risk, narrative FROM gemini_daily_analysis ORDER BY ts DESC LIMIT ?'
+    'SELECT id, ts, btc_price_at_analysis, bias_short, bias_medium, bias_long, support_pct_below, resistance_pct_above, macro_risk, geopolitical_risk, narrative, realized_return, bias_short_correct FROM gemini_daily_analysis ORDER BY ts DESC LIMIT ?'
   ).bind(limit).all();
   return { ok: true, analyses: results };
+}
+
+// Resolves bias_short (the only one of the three horizons that fits a 24h
+// check) against what BTC actually did — same nearest-timestamp-match
+// technique as backfillPredictions, just applied to this table. bias_medium
+// needs 4-6+ weeks to mean anything and bias_long can't be resolved on any
+// reasonable timescale at all, so neither is touched here — this is
+// deliberately scoped to the one horizon that's actually checkable now.
+// "Neutral" is scored correct if the realized move stayed small (<1%, i.e.
+// genuinely no big move either way), not graded on direction at all.
+async function backfillGeminiBiasShort(env) {
+  const { results: history } = await env.DB.prepare(
+    'SELECT ts, btc_price FROM history WHERE btc_price IS NOT NULL ORDER BY ts ASC'
+  ).all();
+  const { results: unresolved } = await env.DB.prepare(
+    'SELECT id, ts, btc_price_at_analysis, bias_short FROM gemini_daily_analysis WHERE bias_short_correct IS NULL AND ts <= ?'
+  ).bind(Date.now() - LAG_MS).all();
+
+  let resolvedCount = 0;
+  for (const a of unresolved) {
+    if (!a.btc_price_at_analysis || !a.bias_short) continue;
+    const match = nearestRow(history, a.ts + LAG_MS);
+    if (!match) continue;
+    const ret = (match.btc_price - a.btc_price_at_analysis) / a.btc_price_at_analysis * 100;
+    const correct =
+      a.bias_short === 'bullish' ? ret > 0 :
+      a.bias_short === 'bearish' ? ret < 0 :
+      Math.abs(ret) < 1.0; // neutral
+    await env.DB.prepare(
+      'UPDATE gemini_daily_analysis SET realized_btc_price=?, realized_return=?, bias_short_correct=?, resolved_ts=? WHERE id=?'
+    ).bind(match.btc_price, ret, correct ? 1 : 0, Date.now(), a.id).run();
+    resolvedCount++;
+  }
+  return resolvedCount;
 }
 
 export default {

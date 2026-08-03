@@ -76,12 +76,57 @@ function nearestRow(history, targetTs) {
   return best;
 }
 
+const HISTORY_FRESHNESS_MS = 48 * 60 * 60 * 1000; // beyond this, a "history" match is too stale to trust as real, falls back to imputed
+
 async function runPrediction(env) {
+  const { results: btcRows } = await env.DB.prepare(
+    'SELECT ts, btc_price, technical_score FROM btc_data ORDER BY ts ASC'
+  ).all();
+  if (btcRows.length < MIN_COMPLETE_ROWS) {
+    return { ok: true, status: 'insufficient_data', n_available: btcRows.length, min_required: MIN_COMPLETE_ROWS };
+  }
+
+  // Optional enrichment from V1's history table — sentiment/regime/bottom
+  // score aren't things this Worker can cheaply replicate (V1's composite
+  // is a ~19-source weighted engine, not worth duplicating for a bonus
+  // feature). But V1's history only updates when someone opens V1 in a
+  // browser, so a stale match here must NOT silently be used as if it were
+  // current — freshness-checked per row, falls back to the dataset's own
+  // mean when missing or too old, same technique already proven for LINK's
+  // borrowed BTC context.
   const { results: history } = await env.DB.prepare(
-    'SELECT ts, score, btc_price, technical_score, regime_mag, bottom_score FROM history WHERE btc_price IS NOT NULL ORDER BY ts ASC'
+    'SELECT ts, score, regime_mag, bottom_score FROM history ORDER BY ts ASC'
   ).all();
 
-  const complete = history.filter(r => FEATURE_KEYS.every(k => r[k] !== null && r[k] !== undefined));
+  const rawRows = [];
+  const realScoreVals = [], realRegimeVals = [], realBottomVals = [];
+  for (const r of btcRows) {
+    if (r.technical_score == null) continue;
+    const nearestHist = nearestRow(history, r.ts);
+    const fresh = nearestHist && Math.abs(nearestHist.ts - r.ts) <= HISTORY_FRESHNESS_MS;
+    rawRows.push({
+      ts: r.ts, btc_price: r.btc_price, technical_score: r.technical_score,
+      score: fresh ? nearestHist.score : null,
+      regime_mag: fresh ? nearestHist.regime_mag : null,
+      bottom_score: fresh ? nearestHist.bottom_score : null,
+    });
+    if (fresh) {
+      if (nearestHist.score != null) realScoreVals.push(nearestHist.score);
+      if (nearestHist.regime_mag != null) realRegimeVals.push(nearestHist.regime_mag);
+      if (nearestHist.bottom_score != null) realBottomVals.push(nearestHist.bottom_score);
+    }
+  }
+  const meanOf = (arr, fallback) => arr.length ? arr.reduce((a, b) => a + b, 0) / arr.length : fallback;
+  const meanScore = meanOf(realScoreVals, 50);
+  const meanRegime = meanOf(realRegimeVals, 0);
+  const meanBottom = meanOf(realBottomVals, 25);
+  const complete = rawRows.map(r => ({
+    ts: r.ts, btc_price: r.btc_price, technical_score: r.technical_score,
+    score: r.score ?? meanScore,
+    regime_mag: r.regime_mag ?? meanRegime,
+    bottom_score: r.bottom_score ?? meanBottom,
+    context_imputed: r.score == null || r.regime_mag == null || r.bottom_score == null,
+  }));
   if (complete.length < MIN_COMPLETE_ROWS) {
     return { ok: true, status: 'insufficient_data', n_available: complete.length, min_required: MIN_COMPLETE_ROWS };
   }
@@ -107,7 +152,7 @@ async function runPrediction(env) {
 
   const resolved = neighbors
     .map(n => {
-      const fwd = nearestRow(history, n.row.ts + LAG_MS);
+      const fwd = nearestRow(btcRows, n.row.ts + LAG_MS);
       if (!fwd) return null;
       return { analog_ts: n.row.ts, dist: n.dist, return_pct: (fwd.btc_price - n.row.btc_price) / n.row.btc_price * 100 };
     })
@@ -148,7 +193,7 @@ async function runPrediction(env) {
   const neighborsAdaptive = distances.slice(0, kAdaptive);
   const resolvedAdaptive = neighborsAdaptive
     .map(n => {
-      const fwd = nearestRow(history, n.row.ts + LAG_MS);
+      const fwd = nearestRow(btcRows, n.row.ts + LAG_MS);
       if (!fwd) return null;
       return { dist: n.dist, return_pct: (fwd.btc_price - n.row.btc_price) / n.row.btc_price * 100 };
     })
@@ -233,8 +278,8 @@ async function runPrediction(env) {
 // passed but hasn't been resolved yet. This is the calibration loop — the
 // part that actually lets the model be checked against reality over time.
 async function backfillPredictions(env) {
-  const { results: history } = await env.DB.prepare(
-    'SELECT ts, btc_price FROM history WHERE btc_price IS NOT NULL ORDER BY ts ASC'
+  const { results: btcRows } = await env.DB.prepare(
+    'SELECT ts, btc_price FROM btc_data ORDER BY ts ASC'
   ).all();
   const { results: unresolved } = await env.DB.prepare(
     'SELECT id, target_ts, btc_price_at_prediction FROM predictions WHERE realized_up IS NULL AND target_ts <= ?'
@@ -242,7 +287,7 @@ async function backfillPredictions(env) {
 
   let resolvedCount = 0;
   for (const p of unresolved) {
-    const match = nearestRow(history, p.target_ts);
+    const match = nearestRow(btcRows, p.target_ts);
     if (!match) continue;
     const ret = (match.btc_price - p.btc_price_at_prediction) / p.btc_price_at_prediction * 100;
     await env.DB.prepare(
@@ -327,6 +372,7 @@ async function getCalibration(env) {
 // paths run identical logic rather than the schedule quietly drifting from
 // what a manual visit does.
 async function predictAndLog(env) {
+  await logBtcData(env);
   const resolvedCount = await backfillPredictions(env);
   const geminiResolvedCount = await backfillGeminiBiasShort(env);
   const result = await runPrediction(env);
@@ -340,7 +386,7 @@ async function predictAndLog(env) {
 // on every range-tab click. ----
 async function getChartData(env) {
   const { results: prices } = await env.DB.prepare(
-    'SELECT ts, btc_price FROM history WHERE btc_price IS NOT NULL ORDER BY ts ASC'
+    'SELECT ts, btc_price FROM btc_data ORDER BY ts ASC'
   ).all();
   const { results: predictions } = await env.DB.prepare(
     'SELECT id, ts, target_ts, btc_price_at_prediction, p_up, median_analog_return, realized_up, realized_return FROM predictions ORDER BY ts ASC'
@@ -395,11 +441,19 @@ async function runGeminiDailyAnalysis(env) {
 
   // Ground-truth context, same pattern as V1: give Gemini real numbers to
   // reconcile with rather than let its technical read float free of what
-  // the deterministic engine already computes.
-  const latest = await env.DB.prepare(
-    'SELECT ts, btc_price, score, technical_score, regime_mag, bottom_score FROM history WHERE btc_price IS NOT NULL ORDER BY ts DESC LIMIT 1'
+  // the deterministic engine already computes. Price/technical come from
+  // the self-sufficient btc_data source (doesn't depend on V1 being
+  // opened); sentiment/regime are optional bonus context from V1's
+  // history when available — already handled gracefully as "N/A" below
+  // when it isn't.
+  const latestBtc = await env.DB.prepare(
+    'SELECT ts, btc_price, technical_score FROM btc_data ORDER BY ts DESC LIMIT 1'
   ).first();
-  const btcPrice = latest?.btc_price ?? null;
+  const latestHistory = await env.DB.prepare(
+    'SELECT ts, score, regime_mag FROM history ORDER BY ts DESC LIMIT 1'
+  ).first();
+  const btcPrice = latestBtc?.btc_price ?? null;
+  const latest = { btc_price: btcPrice, technical_score: latestBtc?.technical_score, score: latestHistory?.score, regime_mag: latestHistory?.regime_mag };
 
   const prompt = `You are a professional Bitcoin market analyst writing a comprehensive daily briefing. Use your own broad knowledge of current events, markets, and Bitcoin's chart alongside the ground-truth context below.
 
@@ -512,8 +566,8 @@ async function getGeminiAnalysisHistory(env, limit) {
 // "Neutral" is scored correct if the realized move stayed small (<1%, i.e.
 // genuinely no big move either way), not graded on direction at all.
 async function backfillGeminiBiasShort(env) {
-  const { results: history } = await env.DB.prepare(
-    'SELECT ts, btc_price FROM history WHERE btc_price IS NOT NULL ORDER BY ts ASC'
+  const { results: btcRows } = await env.DB.prepare(
+    'SELECT ts, btc_price FROM btc_data ORDER BY ts ASC'
   ).all();
   const { results: unresolved } = await env.DB.prepare(
     'SELECT id, ts, btc_price_at_analysis, bias_short FROM gemini_daily_analysis WHERE bias_short_correct IS NULL AND ts <= ?'
@@ -522,7 +576,7 @@ async function backfillGeminiBiasShort(env) {
   let resolvedCount = 0;
   for (const a of unresolved) {
     if (!a.btc_price_at_analysis || !a.bias_short) continue;
-    const match = nearestRow(history, a.ts + LAG_MS);
+    const match = nearestRow(btcRows, a.ts + LAG_MS);
     if (!match) continue;
     const ret = (match.btc_price - a.btc_price_at_analysis) / a.btc_price_at_analysis * 100;
     const correct =
@@ -562,7 +616,7 @@ async function backfillGeminiBiasShort(env) {
 
 const LINK_FUNDING_FLOOR_HOURLY = 0.0000125; // same constant already proven correct for BTC in V1
 
-async function fetchLinkSnapshot() {
+async function fetchHyperliquidPrice(coinName) {
   const res = await fetch('https://api.hyperliquid.xyz/info', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -570,13 +624,21 @@ async function fetchLinkSnapshot() {
   });
   if (!res.ok) throw new Error('Hyperliquid info ' + res.status);
   const [meta, ctxs] = await res.json();
-  const idx = (meta.universe || []).findIndex(u => u.name === 'LINK');
-  if (idx < 0) throw new Error('LINK not found in Hyperliquid universe');
+  const idx = (meta.universe || []).findIndex(u => u.name === coinName);
+  if (idx < 0) throw new Error(coinName + ' not found in Hyperliquid universe');
   const ctx = ctxs[idx];
   const price = parseFloat(ctx.markPx);
-  const fundingAdj = parseFloat(ctx.funding) - LINK_FUNDING_FLOOR_HOURLY;
-  if (!Number.isFinite(price)) throw new Error('LINK markPx not parseable');
+  if (!Number.isFinite(price)) throw new Error(coinName + ' markPx not parseable');
+  return { price, funding: parseFloat(ctx.funding) };
+}
+async function fetchLinkSnapshot() {
+  const { price, funding } = await fetchHyperliquidPrice('LINK');
+  const fundingAdj = funding - LINK_FUNDING_FLOOR_HOURLY;
   return { price, fundingAdj: Number.isFinite(fundingAdj) ? fundingAdj : null };
+}
+async function fetchBtcSnapshot() {
+  const { price } = await fetchHyperliquidPrice('BTC');
+  return { price };
 }
 
 // Self-bootstrapping technical score (0-100): a simple RSI-style momentum
@@ -584,12 +646,14 @@ async function fetchLinkSnapshot() {
 // replica of V1's full MACD/Bollinger/OBV/Kumo-twist system — that's a much
 // larger build for a second coin; this is an honest, simpler stand-in with
 // the same 0-100 direction (higher = more upward momentum).
-function computeLinkTechnicalScore(recentRows) {
-  if (recentRows.length < 6) return 50; // not enough history yet — neutral, not a guess dressed up as a read
+// Generic self-bootstrapping technical score (0-100, RSI-style), reused by
+// both LINK and BTC's self-sufficient pipelines — see the LINK module notes
+// above for why this is an honest simpler stand-in, not a replica of V1's
+// full indicator system. Takes a plain array of prices, chronological order.
+function computeSimpleTechnicalScore(prices) {
+  if (prices.length < 6) return 50;
   const changes = [];
-  for (let i = 1; i < recentRows.length; i++) {
-    changes.push(recentRows[i].link_price - recentRows[i - 1].link_price);
-  }
+  for (let i = 1; i < prices.length; i++) changes.push(prices[i] - prices[i - 1]);
   const gains = changes.filter(c => c > 0);
   const losses = changes.filter(c => c < 0).map(c => -c);
   const avgGain = gains.length ? gains.reduce((a, b) => a + b, 0) / changes.length : 0;
@@ -609,16 +673,17 @@ function computeLinkTechnicalScore(recentRows) {
 // from the required feature set above rather than kept and left null
 // forever. Technical score is computed retroactively using only each
 // day's own trailing window of PRIOR candles — no lookahead bias, same as
-// any real technical indicator.
-async function backfillLinkHistory(env, days = 90) {
+// any real technical indicator. Generic over coin/table so BTC reuses this
+// unchanged.
+async function backfillCoinHistory(env, { coin, table, priceCol, days = 90 }) {
   const endTime = Date.now();
   const startTime = endTime - days * 24 * 60 * 60 * 1000;
   const res = await fetch('https://api.hyperliquid.xyz/info', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ type: 'candleSnapshot', req: { coin: 'LINK', interval: '1d', startTime, endTime } }),
+    body: JSON.stringify({ type: 'candleSnapshot', req: { coin, interval: '1d', startTime, endTime } }),
   });
-  if (!res.ok) throw new Error('LINK candleSnapshot ' + res.status);
+  if (!res.ok) throw new Error(coin + ' candleSnapshot ' + res.status);
   const candles = await res.json();
   if (!Array.isArray(candles) || !candles.length) throw new Error('No candle data returned');
 
@@ -627,25 +692,32 @@ async function backfillLinkHistory(env, days = 90) {
     .filter(c => Number.isFinite(c.price))
     .sort((a, b) => a.ts - b.ts);
 
-  const { results: existing } = await env.DB.prepare('SELECT ts FROM link_data ORDER BY ts ASC').all();
+  const { results: existing } = await env.DB.prepare(`SELECT ts FROM ${table} ORDER BY ts ASC`).all();
   const existingTs = existing.map(r => r.ts);
 
   let inserted = 0;
   const window = [];
   for (const c of sorted) {
-    window.push({ link_price: c.price });
+    window.push(c.price);
     if (window.length > 30) window.shift();
-    // Skip if a real (live) data point already exists within 12h of this
-    // candle — never overwrite a live snapshot with a coarser daily one.
     const nearDup = existingTs.some(ts => Math.abs(ts - c.ts) < 12 * 60 * 60 * 1000);
     if (nearDup) continue;
-    const techScore = computeLinkTechnicalScore(window.slice());
+    const techScore = computeSimpleTechnicalScore(window.slice());
     await env.DB.prepare(
-      'INSERT INTO link_data (ts, link_price, technical_score, funding_adj) VALUES (?,?,?,?)'
-    ).bind(c.ts, c.price, techScore, null).run();
+      `INSERT INTO ${table} (ts, ${priceCol}, technical_score) VALUES (?,?,?)`
+    ).bind(c.ts, c.price, techScore).run();
     inserted++;
   }
   return { ok: true, candles_received: sorted.length, rows_inserted: inserted };
+}
+async function backfillLinkHistory(env, days = 90) {
+  // LINK's table also has a funding_adj column (unused by backfill, always
+  // null here) — reuse the generic backfill, which only ever inserts the
+  // 3 shared columns, so this is fully compatible with link_data's schema.
+  return backfillCoinHistory(env, { coin: 'LINK', table: 'link_data', priceCol: 'link_price', days });
+}
+async function backfillBtcHistory(env, days = 90) {
+  return backfillCoinHistory(env, { coin: 'BTC', table: 'btc_data', priceCol: 'btc_price', days });
 }
 
 async function logLinkData(env) {
@@ -653,11 +725,30 @@ async function logLinkData(env) {
   const { results: recent } = await env.DB.prepare(
     'SELECT link_price FROM link_data ORDER BY ts DESC LIMIT 30'
   ).all();
-  const technicalScore = computeLinkTechnicalScore(recent.reverse());
+  const technicalScore = computeSimpleTechnicalScore(recent.reverse().map(r => r.link_price));
   await env.DB.prepare(
     'INSERT INTO link_data (ts, link_price, technical_score, funding_adj) VALUES (?,?,?,?)'
   ).bind(Date.now(), snap.price, technicalScore, snap.fundingAdj).run();
   return { price: snap.price, technical_score: technicalScore, funding_adj: snap.fundingAdj };
+}
+
+// BTC's own self-sufficient price+technical logging — same pattern as LINK,
+// built so the BTC model no longer depends on V1's history table getting
+// fresh rows. V1's history table is only ever updated when someone opens
+// V1 in a browser (confirmed directly: INSERT INTO history only happens in
+// the client-triggered POST /history route, no server cron touches it) —
+// so without this, both making a fresh BTC prediction AND resolving old
+// ones against reality would silently stall whenever V1 goes unvisited.
+async function logBtcData(env) {
+  const snap = await fetchBtcSnapshot();
+  const { results: recent } = await env.DB.prepare(
+    'SELECT btc_price FROM btc_data ORDER BY ts DESC LIMIT 30'
+  ).all();
+  const technicalScore = computeSimpleTechnicalScore(recent.reverse().map(r => r.btc_price));
+  await env.DB.prepare(
+    'INSERT INTO btc_data (ts, btc_price, technical_score) VALUES (?,?,?)'
+  ).bind(Date.now(), snap.price, technicalScore).run();
+  return { price: snap.price, technical_score: technicalScore };
 }
 
 // technical_score + borrowed BTC regime/sentiment only — funding_adj is
@@ -1023,6 +1114,15 @@ export default {
     }
 
     // ==================== LINK routes ====================
+    if (url.pathname === '/btc-backfill' && request.method === 'GET') {
+      try {
+        const days = Math.min(365, parseInt(url.searchParams.get('days') || '90', 10));
+        const result = await backfillBtcHistory(env, days);
+        return new Response(JSON.stringify(result), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+      } catch (err) {
+        return new Response(JSON.stringify({ ok: false, error: String(err) }), { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+      }
+    }
     if (url.pathname === '/link-backfill' && request.method === 'GET') {
       try {
         const days = Math.min(365, parseInt(url.searchParams.get('days') || '90', 10));

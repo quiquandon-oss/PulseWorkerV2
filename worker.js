@@ -65,20 +65,25 @@ function weightedQuantile(pairs, p) {
   return sorted[sorted.length - 1].value;
 }
 
-// Nearest row to targetTs within TOL_MS, used both for "what happened 24h
-// after this analog" and later for backfilling a prediction's real outcome.
-function nearestRow(history, targetTs) {
+// Nearest row to targetTs within tolMs (defaults to the 24h-derived TOL_MS
+// for every call site that isn't horizon-specific — enrichment joins, etc.).
+// Horizon-specific forward-return lookups pass their own tolerance now that
+// 12h predictions need a tighter matching window than 24h ones.
+function nearestRow(history, targetTs, tolMs = TOL_MS) {
   let best = null, bestDiff = Infinity;
   for (const r of history) {
     const diff = Math.abs(r.ts - targetTs);
-    if (diff <= TOL_MS && diff < bestDiff) { bestDiff = diff; best = r; }
+    if (diff <= tolMs && diff < bestDiff) { bestDiff = diff; best = r; }
   }
   return best;
 }
 
 const HISTORY_FRESHNESS_MS = 48 * 60 * 60 * 1000; // beyond this, a "history" match is too stale to trust as real, falls back to imputed
 
-async function runPrediction(env) {
+async function runPrediction(env, horizonHours = 24) {
+  const lagMs = horizonHours * 60 * 60 * 1000;
+  const tolMs = lagMs * 0.2;
+
   const { results: btcRows } = await env.DB.prepare(
     'SELECT ts, btc_price, technical_score FROM btc_data ORDER BY ts ASC'
   ).all();
@@ -152,7 +157,7 @@ async function runPrediction(env) {
 
   const resolved = neighbors
     .map(n => {
-      const fwd = nearestRow(btcRows, n.row.ts + LAG_MS);
+      const fwd = nearestRow(btcRows, n.row.ts + lagMs, tolMs);
       if (!fwd) return null;
       return { analog_ts: n.row.ts, dist: n.dist, return_pct: (fwd.btc_price - n.row.btc_price) / n.row.btc_price * 100 };
     })
@@ -193,7 +198,7 @@ async function runPrediction(env) {
   const neighborsAdaptive = distances.slice(0, kAdaptive);
   const resolvedAdaptive = neighborsAdaptive
     .map(n => {
-      const fwd = nearestRow(btcRows, n.row.ts + LAG_MS);
+      const fwd = nearestRow(btcRows, n.row.ts + lagMs, tolMs);
       if (!fwd) return null;
       return { dist: n.dist, return_pct: (fwd.btc_price - n.row.btc_price) / n.row.btc_price * 100 };
     })
@@ -240,11 +245,11 @@ async function runPrediction(env) {
   const insert = await env.DB.prepare(
     `INSERT INTO predictions
      (ts, target_ts, btc_price_at_prediction, p_up, n_analogs, median_analog_return, return_p25, return_p75, features_json,
-      k_used, volatility_percentile, closest_analog_dist, is_regime_anomaly, p_up_experimental, median_return_experimental)
-     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
+      k_used, volatility_percentile, closest_analog_dist, is_regime_anomaly, p_up_experimental, median_return_experimental, horizon_hours)
+     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
   ).bind(
-    nowTs, nowTs + LAG_MS, today.btc_price, pUp, resolved.length, median, p25, p75, JSON.stringify(features),
-    kAdaptive, volPercentile, closestDist, isRegimeAnomaly ? 1 : 0, pUpExperimental, medianReturnExperimental
+    nowTs, nowTs + lagMs, today.btc_price, pUp, resolved.length, median, p25, p75, JSON.stringify(features),
+    kAdaptive, volPercentile, closestDist, isRegimeAnomaly ? 1 : 0, pUpExperimental, medianReturnExperimental, horizonHours
   ).run();
 
   return {
@@ -252,7 +257,7 @@ async function runPrediction(env) {
     status: 'ok',
     prediction_id: insert.meta.last_row_id,
     ts: nowTs,
-    horizon_hours: 24,
+    horizon_hours: horizonHours,
     p_up: Number(pUp.toFixed(3)),
     n_analogs: resolved.length,
     median_analog_return_pct: Number(median.toFixed(2)),
@@ -298,12 +303,12 @@ async function backfillPredictions(env) {
   return resolvedCount;
 }
 
-async function getCalibration(env) {
+async function getCalibration(env, horizonHours = 24) {
   const { results } = await env.DB.prepare(
-    'SELECT p_up, realized_up, p_up_experimental FROM predictions WHERE realized_up IS NOT NULL'
-  ).all();
+    'SELECT p_up, realized_up, p_up_experimental FROM predictions WHERE realized_up IS NOT NULL AND horizon_hours = ?'
+  ).bind(horizonHours).all();
   const n = results.length;
-  if (n === 0) return { ok: true, n_resolved: 0, note: 'No resolved predictions yet — the first ones need 24h to mature.' };
+  if (n === 0) return { ok: true, n_resolved: 0, note: `No resolved ${horizonHours}h predictions yet.` };
 
   const accuracy = results.filter(r => (r.p_up >= 0.5) === (r.realized_up === 1)).length / n;
   const brier = results.reduce((s, r) => s + (r.p_up - r.realized_up) ** 2, 0) / n;
@@ -371,11 +376,11 @@ async function getCalibration(env) {
 // Shared by the /predict HTTP route and the cron handler below, so both
 // paths run identical logic rather than the schedule quietly drifting from
 // what a manual visit does.
-async function predictAndLog(env) {
+async function predictAndLog(env, horizonHours = 24) {
   await logBtcData(env);
   const resolvedCount = await backfillPredictions(env);
   const geminiResolvedCount = await backfillGeminiBiasShort(env);
-  const result = await runPrediction(env);
+  const result = await runPrediction(env, horizonHours);
   result.backfilled_this_call = resolvedCount;
   result.gemini_bias_backfilled_this_call = geminiResolvedCount;
   return result;
@@ -384,13 +389,13 @@ async function predictAndLog(env) {
 // ---- Chart data: BTC price series + the full predictions log in one call,
 // so the frontend can filter to 1D/1W/1M/ALL client-side without refetching
 // on every range-tab click. ----
-async function getChartData(env) {
+async function getChartData(env, horizonHours = 24) {
   const { results: prices } = await env.DB.prepare(
     'SELECT ts, btc_price FROM btc_data ORDER BY ts ASC'
   ).all();
   const { results: predictions } = await env.DB.prepare(
-    'SELECT id, ts, target_ts, btc_price_at_prediction, p_up, median_analog_return, realized_up, realized_return FROM predictions ORDER BY ts ASC'
-  ).all();
+    'SELECT id, ts, target_ts, btc_price_at_prediction, p_up, median_analog_return, realized_up, realized_return FROM predictions WHERE horizon_hours = ? ORDER BY ts ASC'
+  ).bind(horizonHours).all();
   return { ok: true, prices, predictions };
 }
 
@@ -761,7 +766,9 @@ const LINK_FEATURE_KEYS = ['technical_score', 'btc_regime_mag', 'sentiment_score
 const LINK_MIN_COMPLETE_ROWS = 30;
 const LINK_MIN_RESOLVED_ANALOGS = 5;
 
-async function runLinkPrediction(env) {
+async function runLinkPrediction(env, horizonHours = 24) {
+  const lagMs = horizonHours * 60 * 60 * 1000;
+  const tolMs = lagMs * 0.2;
   const { results: linkRows } = await env.DB.prepare(
     'SELECT ts, link_price, technical_score, funding_adj FROM link_data ORDER BY ts ASC'
   ).all();
@@ -828,7 +835,7 @@ async function runLinkPrediction(env) {
 
   const resolved = neighbors
     .map(n => {
-      const fwd = nearestRow(linkRows, n.row.ts + LAG_MS);
+      const fwd = nearestRow(linkRows, n.row.ts + lagMs, tolMs);
       if (!fwd) return null;
       return { analog_ts: n.row.ts, dist: n.dist, return_pct: (fwd.link_price - n.row.link_price) / n.row.link_price * 100 };
     })
@@ -848,13 +855,13 @@ async function runLinkPrediction(env) {
   const features = Object.fromEntries(LINK_FEATURE_KEYS.map(k => [k, today[k]]));
 
   const insert = await env.DB.prepare(
-    'INSERT INTO link_predictions (ts, target_ts, link_price_at_prediction, p_up, n_analogs, median_analog_return, return_p25, return_p75, features_json) VALUES (?,?,?,?,?,?,?,?,?)'
-  ).bind(nowTs, nowTs + LAG_MS, today.link_price, pUp, resolved.length, median, p25, p75, JSON.stringify(features)).run();
+    'INSERT INTO link_predictions (ts, target_ts, link_price_at_prediction, p_up, n_analogs, median_analog_return, return_p25, return_p75, features_json, horizon_hours) VALUES (?,?,?,?,?,?,?,?,?,?)'
+  ).bind(nowTs, nowTs + lagMs, today.link_price, pUp, resolved.length, median, p25, p75, JSON.stringify(features), horizonHours).run();
 
   const nImputedInNeighbors = neighbors.filter(n => n.row.context_imputed).length;
 
   return {
-    ok: true, status: 'ok', prediction_id: insert.meta.last_row_id, ts: nowTs, horizon_hours: 24,
+    ok: true, status: 'ok', prediction_id: insert.meta.last_row_id, ts: nowTs, horizon_hours: horizonHours,
     p_up: Number(pUp.toFixed(3)), n_analogs: resolved.length,
     median_analog_return_pct: Number(median.toFixed(2)),
     return_range_pct: [Number(p25.toFixed(2)), Number(p75.toFixed(2))],
@@ -885,20 +892,20 @@ async function backfillLinkPredictions(env) {
   return resolvedCount;
 }
 
-async function linkPredictAndLog(env) {
+async function linkPredictAndLog(env, horizonHours = 24) {
   await logLinkData(env);
   const resolvedCount = await backfillLinkPredictions(env);
-  const result = await runLinkPrediction(env);
+  const result = await runLinkPrediction(env, horizonHours);
   result.backfilled_this_call = resolvedCount;
   return result;
 }
 
-async function getLinkCalibration(env) {
+async function getLinkCalibration(env, horizonHours = 24) {
   const { results } = await env.DB.prepare(
-    'SELECT p_up, realized_up FROM link_predictions WHERE realized_up IS NOT NULL'
-  ).all();
+    'SELECT p_up, realized_up FROM link_predictions WHERE realized_up IS NOT NULL AND horizon_hours = ?'
+  ).bind(horizonHours).all();
   const n = results.length;
-  if (n === 0) return { ok: true, n_resolved: 0, note: 'No resolved LINK predictions yet — the first ones need 24h to mature, and this model is newer than BTC\'s.' };
+  if (n === 0) return { ok: true, n_resolved: 0, note: `No resolved LINK ${horizonHours}h predictions yet — this model is newer than BTC's.` };
   const accuracy = results.filter(r => (r.p_up >= 0.5) === (r.realized_up === 1)).length / n;
   const brier = results.reduce((s, r) => s + (r.p_up - r.realized_up) ** 2, 0) / n;
   const upRate = results.filter(r => r.realized_up === 1).length / n;
@@ -917,13 +924,13 @@ async function getLinkCalibration(env) {
   };
 }
 
-async function getLinkChartData(env) {
+async function getLinkChartData(env, horizonHours = 24) {
   const { results: prices } = await env.DB.prepare(
     'SELECT ts, link_price FROM link_data ORDER BY ts ASC'
   ).all();
   const { results: predictions } = await env.DB.prepare(
-    'SELECT id, ts, target_ts, link_price_at_prediction, p_up, median_analog_return, realized_up, realized_return FROM link_predictions ORDER BY ts ASC'
-  ).all();
+    'SELECT id, ts, target_ts, link_price_at_prediction, p_up, median_analog_return, realized_up, realized_return FROM link_predictions WHERE horizon_hours = ? ORDER BY ts ASC'
+  ).bind(horizonHours).all();
   return { ok: true, prices, predictions };
 }
 
@@ -1037,7 +1044,8 @@ export default {
     // to firing on page visits. ----
     if (url.pathname === '/predict' && request.method === 'GET') {
       try {
-        const result = await predictAndLog(env);
+        const horizon = [12, 24].includes(parseInt(url.searchParams.get('horizon'), 10)) ? parseInt(url.searchParams.get('horizon'), 10) : 24;
+        const result = await predictAndLog(env, horizon);
         return new Response(JSON.stringify(result), {
           headers: { ...corsHeaders, 'Content-Type': 'application/json' },
         });
@@ -1052,7 +1060,8 @@ export default {
     // ---- GET /chart-data — price series + predictions log for the price-vs-prediction chart ----
     if (url.pathname === '/chart-data' && request.method === 'GET') {
       try {
-        const result = await getChartData(env);
+        const horizon = [12, 24].includes(parseInt(url.searchParams.get('horizon'), 10)) ? parseInt(url.searchParams.get('horizon'), 10) : 24;
+        const result = await getChartData(env, horizon);
         return new Response(JSON.stringify(result), {
           headers: { ...corsHeaders, 'Content-Type': 'application/json' },
         });
@@ -1068,7 +1077,8 @@ export default {
     // prediction that has actually resolved so far ----
     if (url.pathname === '/calibration' && request.method === 'GET') {
       try {
-        const result = await getCalibration(env);
+        const horizon = [12, 24].includes(parseInt(url.searchParams.get('horizon'), 10)) ? parseInt(url.searchParams.get('horizon'), 10) : 24;
+        const result = await getCalibration(env, horizon);
         return new Response(JSON.stringify(result), {
           headers: { ...corsHeaders, 'Content-Type': 'application/json' },
         });
@@ -1134,7 +1144,8 @@ export default {
     }
     if (url.pathname === '/link-predict' && request.method === 'GET') {
       try {
-        const result = await linkPredictAndLog(env);
+        const horizon = [12, 24].includes(parseInt(url.searchParams.get('horizon'), 10)) ? parseInt(url.searchParams.get('horizon'), 10) : 24;
+        const result = await linkPredictAndLog(env, horizon);
         return new Response(JSON.stringify(result), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
       } catch (err) {
         return new Response(JSON.stringify({ ok: false, error: String(err) }), { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
@@ -1142,7 +1153,8 @@ export default {
     }
     if (url.pathname === '/link-calibration' && request.method === 'GET') {
       try {
-        const result = await getLinkCalibration(env);
+        const horizon = [12, 24].includes(parseInt(url.searchParams.get('horizon'), 10)) ? parseInt(url.searchParams.get('horizon'), 10) : 24;
+        const result = await getLinkCalibration(env, horizon);
         return new Response(JSON.stringify(result), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
       } catch (err) {
         return new Response(JSON.stringify({ ok: false, error: String(err) }), { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
@@ -1150,7 +1162,8 @@ export default {
     }
     if (url.pathname === '/link-chart-data' && request.method === 'GET') {
       try {
-        const result = await getLinkChartData(env);
+        const horizon = [12, 24].includes(parseInt(url.searchParams.get('horizon'), 10)) ? parseInt(url.searchParams.get('horizon'), 10) : 24;
+        const result = await getLinkChartData(env, horizon);
         return new Response(JSON.stringify(result), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
       } catch (err) {
         return new Response(JSON.stringify({ ok: false, error: String(err) }), { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
@@ -1192,8 +1205,14 @@ export default {
       ctx.waitUntil(runGeminiDailyAnalysis(env).catch(err => console.error('Daily Gemini analysis failed:', err)));
       ctx.waitUntil(runLinkGeminiAnalysis(env).catch(err => console.error('Daily LINK Gemini analysis failed:', err)));
     } else {
-      ctx.waitUntil(predictAndLog(env));
-      ctx.waitUntil(linkPredictAndLog(env).catch(err => console.error('LINK predict-and-log failed:', err)));
+      // Both horizons, both coins, every 6h tick. logBtcData/logLinkData and
+      // the backfill steps inside predictAndLog/linkPredictAndLog are
+      // horizon-agnostic and safely re-run each call (idempotent — just an
+      // extra D1 read at our tiny data scale, not worth avoiding).
+      ctx.waitUntil(predictAndLog(env, 24).catch(err => console.error('BTC 24h predict-and-log failed:', err)));
+      ctx.waitUntil(predictAndLog(env, 12).catch(err => console.error('BTC 12h predict-and-log failed:', err)));
+      ctx.waitUntil(linkPredictAndLog(env, 24).catch(err => console.error('LINK 24h predict-and-log failed:', err)));
+      ctx.waitUntil(linkPredictAndLog(env, 12).catch(err => console.error('LINK 12h predict-and-log failed:', err)));
     }
   },
 };

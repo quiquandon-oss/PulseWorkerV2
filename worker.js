@@ -1052,7 +1052,7 @@ export default {
 
     // ---- GET /predict — BTC 24h k-NN historical analog prediction. Also
     // backfills any past predictions whose horizon has now passed. Runs
-    // automatically every 6h via cron (see scheduled() below) in addition
+    // automatically every 3h via cron (see scheduled() below) in addition
     // to firing on page visits. ----
     if (url.pathname === '/predict' && request.method === 'GET') {
       try {
@@ -1223,10 +1223,10 @@ export default {
     });
   },
 
-  // Fires every 6h (see wrangler.toml [triggers]) so predictions get logged
+  // Fires every 3h (see wrangler.toml [triggers]) so predictions get logged
   // and old ones get resolved regardless of whether anyone opens the page.
   // Same predictAndLog() the /predict route uses — one code path either way.
-  // Two crons share this handler (see wrangler.toml): every 6h for
+  // Two crons share this handler (see wrangler.toml): every 3h for
   // predict-and-log, once daily for the comprehensive Gemini analysis.
   // event.cron tells us which one fired, same dispatch pattern the
   // original PulseWorker already uses for its own two crons.
@@ -1235,7 +1235,7 @@ export default {
       ctx.waitUntil(runGeminiDailyAnalysis(env).catch(err => console.error('Daily Gemini analysis failed:', err)));
       ctx.waitUntil(runLinkGeminiAnalysis(env).catch(err => console.error('Daily LINK Gemini analysis failed:', err)));
     } else {
-      // Both horizons, both coins, every 6h tick. logBtcData/logLinkData and
+      // Both horizons, both coins, every 3h tick. logBtcData/logLinkData and
       // the backfill steps inside predictAndLog/linkPredictAndLog are
       // horizon-agnostic and safely re-run each call (idempotent — just an
       // extra D1 read at our tiny data scale, not worth avoiding).

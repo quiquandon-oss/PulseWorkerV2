@@ -21,8 +21,10 @@ binding = "DB"
 database_name = "sentiment-history"
 database_id = "f91ca980-b886-423a-bd6f-f3baea46d181"
 
-# 6h: predict-and-log. Daily at 07:00 UTC: comprehensive Gemini analysis
-# (arbitrary fixed hour, just needs to be consistent so "daily" means once
-# a day rather than drifting).
+# 3h: predict-and-log (tightened from 6h — doubles data accumulation rate
+# at every existing horizon, no new noise problem introduced, unlike adding
+# a shorter prediction horizon would). Daily at 07:00 UTC: comprehensive
+# Gemini analysis (arbitrary fixed hour, just needs to be consistent so
+# "daily" means once a day rather than drifting).
 [triggers]
-crons = ["0 */6 * * *", "0 7 * * *"]
+crons = ["0 */3 * * *", "0 7 * * *"]

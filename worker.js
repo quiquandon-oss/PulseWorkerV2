@@ -680,13 +680,13 @@ function computeSimpleTechnicalScore(prices) {
 // day's own trailing window of PRIOR candles — no lookahead bias, same as
 // any real technical indicator. Generic over coin/table so BTC reuses this
 // unchanged.
-async function backfillCoinHistory(env, { coin, table, priceCol, days = 90 }) {
+async function backfillCoinHistory(env, { coin, table, priceCol, days = 90, interval = '1d', dedupToleranceMs = 12 * 60 * 60 * 1000 }) {
   const endTime = Date.now();
   const startTime = endTime - days * 24 * 60 * 60 * 1000;
   const res = await fetch('https://api.hyperliquid.xyz/info', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ type: 'candleSnapshot', req: { coin, interval: '1d', startTime, endTime } }),
+    body: JSON.stringify({ type: 'candleSnapshot', req: { coin, interval, startTime, endTime } }),
   });
   if (!res.ok) throw new Error(coin + ' candleSnapshot ' + res.status);
   const candles = await res.json();
@@ -705,7 +705,7 @@ async function backfillCoinHistory(env, { coin, table, priceCol, days = 90 }) {
   for (const c of sorted) {
     window.push(c.price);
     if (window.length > 30) window.shift();
-    const nearDup = existingTs.some(ts => Math.abs(ts - c.ts) < 12 * 60 * 60 * 1000);
+    const nearDup = existingTs.some(ts => Math.abs(ts - c.ts) < dedupToleranceMs);
     if (nearDup) continue;
     const techScore = computeSimpleTechnicalScore(window.slice());
     await env.DB.prepare(
@@ -723,6 +723,18 @@ async function backfillLinkHistory(env, days = 90) {
 }
 async function backfillBtcHistory(env, days = 90) {
   return backfillCoinHistory(env, { coin: 'BTC', table: 'btc_data', priceCol: 'btc_price', days });
+}
+// Hourly, shorter-window backfill — the daily backfill above is 24h-spaced
+// by construction, so it can never satisfy a 12h-forward lookup for any
+// historical candidate (confirmed directly: zero BTC 12h predictions could
+// resolve until this existed). 30 min dedup tolerance instead of 12h, or
+// every hourly candle near an existing daily one would get wrongly skipped
+// as a "duplicate."
+async function backfillLinkHistoryHourly(env, days = 20) {
+  return backfillCoinHistory(env, { coin: 'LINK', table: 'link_data', priceCol: 'link_price', days, interval: '1h', dedupToleranceMs: 30 * 60 * 1000 });
+}
+async function backfillBtcHistoryHourly(env, days = 20) {
+  return backfillCoinHistory(env, { coin: 'BTC', table: 'btc_data', priceCol: 'btc_price', days, interval: '1h', dedupToleranceMs: 30 * 60 * 1000 });
 }
 
 async function logLinkData(env) {
@@ -1133,10 +1145,28 @@ export default {
         return new Response(JSON.stringify({ ok: false, error: String(err) }), { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
       }
     }
+    if (url.pathname === '/btc-backfill-hourly' && request.method === 'GET') {
+      try {
+        const days = Math.min(30, parseInt(url.searchParams.get('days') || '20', 10));
+        const result = await backfillBtcHistoryHourly(env, days);
+        return new Response(JSON.stringify(result), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+      } catch (err) {
+        return new Response(JSON.stringify({ ok: false, error: String(err) }), { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+      }
+    }
     if (url.pathname === '/link-backfill' && request.method === 'GET') {
       try {
         const days = Math.min(365, parseInt(url.searchParams.get('days') || '90', 10));
         const result = await backfillLinkHistory(env, days);
+        return new Response(JSON.stringify(result), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+      } catch (err) {
+        return new Response(JSON.stringify({ ok: false, error: String(err) }), { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+      }
+    }
+    if (url.pathname === '/link-backfill-hourly' && request.method === 'GET') {
+      try {
+        const days = Math.min(30, parseInt(url.searchParams.get('days') || '20', 10));
+        const result = await backfillLinkHistoryHourly(env, days);
         return new Response(JSON.stringify(result), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
       } catch (err) {
         return new Response(JSON.stringify({ ok: false, error: String(err) }), { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });

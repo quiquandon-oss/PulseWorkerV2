@@ -362,6 +362,39 @@ async function getCalibration(env, horizonHours = 24) {
   };
 }
 
+// Expanding cumulative Brier score over time — deliberately NOT another
+// single snapshot number. The point is to see whether an apparent edge
+// (like the experimental variant's early lead) is stable as more data
+// comes in, or was a fluke from one market stretch — exactly the trap the
+// V1 Track Record tile fell into (a 99% "hit rate" that just reflected one
+// persistent-trend period, never actually tested against a reversal).
+// Each point is "the Brier score using every resolved prediction up to and
+// including this one," so early noise settles as the line matures instead
+// of being judged on a single cherry-pickable snapshot.
+async function getCalibrationHistory(env, horizonHours = 24) {
+  const { results } = await env.DB.prepare(
+    'SELECT resolved_ts, p_up, p_up_experimental, realized_up FROM predictions WHERE realized_up IS NOT NULL AND horizon_hours = ? ORDER BY resolved_ts ASC'
+  ).bind(horizonHours).all();
+
+  let sumOrig = 0, nOrig = 0, sumExp = 0, nExp = 0;
+  const points = results.map(r => {
+    sumOrig += (r.p_up - r.realized_up) ** 2;
+    nOrig++;
+    if (r.p_up_experimental != null) {
+      sumExp += (r.p_up_experimental - r.realized_up) ** 2;
+      nExp++;
+    }
+    return {
+      ts: r.resolved_ts,
+      brier_original: Number((sumOrig / nOrig).toFixed(4)),
+      n_original: nOrig,
+      brier_experimental: nExp > 0 ? Number((sumExp / nExp).toFixed(4)) : null,
+      n_experimental: nExp,
+    };
+  });
+  return { ok: true, points, naive_baseline_5050: 0.25 };
+}
+
 //
 // Deliberately separate from the original PulseWorker (sentiment-ff75) so
 // prediction-model experimentation here can never destabilize the working
@@ -936,6 +969,22 @@ async function getLinkCalibration(env, horizonHours = 24) {
   };
 }
 
+// LINK never got the adaptive-K/weighted experiment (only BTC did), so this
+// only tracks the one line — same expanding-cumulative-Brier idea as BTC's
+// version, just without a second series to compare against.
+async function getLinkCalibrationHistory(env, horizonHours = 24) {
+  const { results } = await env.DB.prepare(
+    'SELECT resolved_ts, p_up, realized_up FROM link_predictions WHERE realized_up IS NOT NULL AND horizon_hours = ? ORDER BY resolved_ts ASC'
+  ).bind(horizonHours).all();
+  let sum = 0, n2 = 0;
+  const points = results.map(r => {
+    sum += (r.p_up - r.realized_up) ** 2;
+    n2++;
+    return { ts: r.resolved_ts, brier_original: Number((sum / n2).toFixed(4)), n_original: n2, brier_experimental: null, n_experimental: 0 };
+  });
+  return { ok: true, points, naive_baseline_5050: 0.25 };
+}
+
 async function getLinkChartData(env, horizonHours = 24) {
   const { results: prices } = await env.DB.prepare(
     'SELECT ts, link_price FROM link_data ORDER BY ts ASC'
@@ -1102,6 +1151,16 @@ export default {
       }
     }
 
+    if (url.pathname === '/calibration-history' && request.method === 'GET') {
+      try {
+        const horizon = [12, 24].includes(parseInt(url.searchParams.get('horizon'), 10)) ? parseInt(url.searchParams.get('horizon'), 10) : 24;
+        const result = await getCalibrationHistory(env, horizon);
+        return new Response(JSON.stringify(result), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+      } catch (err) {
+        return new Response(JSON.stringify({ ok: false, error: String(err) }), { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+      }
+    }
+
     // ---- GET /gemini-analysis — latest N daily analyses (default 10) ----
     if (url.pathname === '/gemini-analysis' && request.method === 'GET') {
       try {
@@ -1185,6 +1244,15 @@ export default {
       try {
         const horizon = [12, 24].includes(parseInt(url.searchParams.get('horizon'), 10)) ? parseInt(url.searchParams.get('horizon'), 10) : 24;
         const result = await getLinkCalibration(env, horizon);
+        return new Response(JSON.stringify(result), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+      } catch (err) {
+        return new Response(JSON.stringify({ ok: false, error: String(err) }), { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+      }
+    }
+    if (url.pathname === '/link-calibration-history' && request.method === 'GET') {
+      try {
+        const horizon = [12, 24].includes(parseInt(url.searchParams.get('horizon'), 10)) ? parseInt(url.searchParams.get('horizon'), 10) : 24;
+        const result = await getLinkCalibrationHistory(env, horizon);
         return new Response(JSON.stringify(result), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
       } catch (err) {
         return new Response(JSON.stringify({ ok: false, error: String(err) }), { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });

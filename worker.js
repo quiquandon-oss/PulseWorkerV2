@@ -140,7 +140,14 @@ async function runPrediction(env, horizonHours = 24) {
   for (const k of FEATURE_KEYS) stats[k] = meanStd(complete.map(r => r[k]));
 
   const today = complete[complete.length - 1];
-  const candidates = complete.slice(0, -1); // every complete row except today itself
+  // Exclude candidates too recent to possibly have a resolved forward
+  // outcome yet (their own +lagMs point would land after "today", which
+  // doesn't exist) — otherwise a dense recent cluster (heavy testing,
+  // frequent live snapshots) can crowd every k-NN slot with unresolvable
+  // candidates even though genuinely resolvable ones exist further back.
+  // Confirmed happening for real: a live run returned 15 neighbors, 0
+  // resolved, entirely because of this.
+  const candidates = complete.slice(0, -1).filter(r => r.ts <= today.ts - (lagMs + tolMs));
 
   const distances = candidates.map(r => {
     let d = 0;
@@ -863,7 +870,10 @@ async function runLinkPrediction(env, horizonHours = 24) {
   for (const k of LINK_FEATURE_KEYS) stats[k] = meanStd(complete.map(r => r[k]));
 
   const today = complete[complete.length - 1];
-  const candidates = complete.slice(0, -1);
+  // Same fix as BTC's model: exclude candidates too recent to possibly have
+  // resolved yet, so a dense recent cluster can't crowd out genuinely
+  // resolvable older candidates.
+  const candidates = complete.slice(0, -1).filter(r => r.ts <= today.ts - (lagMs + tolMs));
 
   const distances = candidates.map(r => {
     let d = 0;

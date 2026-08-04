@@ -27,13 +27,13 @@ function meanStd(vals) {
 // retrospectively, to build a reference distribution of "what volatility
 // has looked like historically" so today's reading can be percentile-ranked
 // against it rather than compared to an arbitrary hardcoded threshold.
-function trailingVolatility(sortedRows, endIdx, lookback = 14) {
+function trailingVolatility(sortedRows, endIdx, lookback = 14, priceField = 'btc_price') {
   const start = Math.max(0, endIdx - lookback + 1);
   const window = sortedRows.slice(start, endIdx + 1);
   if (window.length < 4) return null;
   const rets = [];
   for (let i = 1; i < window.length; i++) {
-    rets.push((window[i].btc_price - window[i - 1].btc_price) / window[i - 1].btc_price * 100);
+    rets.push((window[i][priceField] - window[i - 1][priceField]) / window[i - 1][priceField] * 100);
   }
   return meanStd(rets).std;
 }
@@ -896,12 +896,72 @@ async function runLinkPrediction(env, horizonHours = 24) {
   const pct = (p) => returns[Math.min(returns.length - 1, Math.floor(returns.length * p))];
   const median = pct(0.5), p25 = pct(0.25), p75 = pct(0.75);
 
+  // ---- Experimental: adaptive K + distance-weighted aggregation ----
+  // Same technique proven on BTC's model, ported here to check whether it's
+  // a real methodological improvement or something that happened to fit
+  // BTC's specific sample. Runs alongside the fixed-K/unweighted numbers
+  // above, not instead of them.
+  const historicalVol = candidates.map((_, i) => trailingVolatility(candidates, i, 14, 'link_price'));
+  const todayVol = trailingVolatility(complete, complete.length - 1, 14, 'link_price');
+  const volPercentile = todayVol != null ? percentileRank(todayVol, historicalVol) : null;
+  let kAdaptive = K;
+  if (volPercentile != null) {
+    if (volPercentile >= 0.66) kAdaptive = Math.max(5, Math.floor(K * 0.6));
+    else if (volPercentile <= 0.33) kAdaptive = Math.min(candidates.length, Math.floor(K * 1.4));
+  }
+  const neighborsAdaptive = distances.slice(0, kAdaptive);
+  const resolvedAdaptive = neighborsAdaptive
+    .map(n => {
+      const fwd = nearestRow(linkRows, n.row.ts + lagMs, tolMs);
+      if (!fwd) return null;
+      return { dist: n.dist, return_pct: (fwd.link_price - n.row.link_price) / n.row.link_price * 100 };
+    })
+    .filter(Boolean);
+
+  let pUpExperimental = null, medianReturnExperimental = null;
+  if (resolvedAdaptive.length >= LINK_MIN_RESOLVED_ANALOGS) {
+    const EPS = 0.05;
+    const weighted = resolvedAdaptive.map(r => ({ value: r.return_pct, weight: 1 / (r.dist + EPS) }));
+    const totalWeight = weighted.reduce((s, w) => s + w.weight, 0);
+    const upWeight = weighted.filter(w => w.value > 0).reduce((s, w) => s + w.weight, 0);
+    pUpExperimental = upWeight / totalWeight;
+    medianReturnExperimental = weightedQuantile(weighted, 0.5);
+  }
+
+  // Regime-anomaly tripwire — same idea as BTC's: is even the closest
+  // analog unusually far away compared to every closest-match distance
+  // seen historically for LINK specifically.
+  const closestDist = distances[0].dist;
+  const historicalClosestDists = candidates.map((_, i) => {
+    if (i === 0) return null;
+    let best = Infinity;
+    for (let j = 0; j < i; j++) {
+      let d = 0;
+      for (const k of LINK_FEATURE_KEYS) {
+        const z1 = (candidates[i][k] - stats[k].mean) / stats[k].std;
+        const z2 = (candidates[j][k] - stats[k].mean) / stats[k].std;
+        d += (z1 - z2) ** 2;
+      }
+      d = Math.sqrt(d);
+      if (d < best) best = d;
+    }
+    return Number.isFinite(best) ? best : null;
+  });
+  const closestDistPercentile = percentileRank(closestDist, historicalClosestDists);
+  const isRegimeAnomaly = closestDistPercentile != null && closestDistPercentile >= 0.9;
+
   const nowTs = Date.now();
   const features = Object.fromEntries(LINK_FEATURE_KEYS.map(k => [k, today[k]]));
 
   const insert = await env.DB.prepare(
-    'INSERT INTO link_predictions (ts, target_ts, link_price_at_prediction, p_up, n_analogs, median_analog_return, return_p25, return_p75, features_json, horizon_hours) VALUES (?,?,?,?,?,?,?,?,?,?)'
-  ).bind(nowTs, nowTs + lagMs, today.link_price, pUp, resolved.length, median, p25, p75, JSON.stringify(features), horizonHours).run();
+    `INSERT INTO link_predictions
+     (ts, target_ts, link_price_at_prediction, p_up, n_analogs, median_analog_return, return_p25, return_p75, features_json, horizon_hours,
+      k_used, volatility_percentile, closest_analog_dist, is_regime_anomaly, p_up_experimental, median_return_experimental)
+     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
+  ).bind(
+    nowTs, nowTs + lagMs, today.link_price, pUp, resolved.length, median, p25, p75, JSON.stringify(features), horizonHours,
+    kAdaptive, volPercentile, closestDist, isRegimeAnomaly ? 1 : 0, pUpExperimental, medianReturnExperimental
+  ).run();
 
   const nImputedInNeighbors = neighbors.filter(n => n.row.context_imputed).length;
 
@@ -912,6 +972,14 @@ async function runLinkPrediction(env, horizonHours = 24) {
     return_range_pct: [Number(p25.toFixed(2)), Number(p75.toFixed(2))],
     link_price_now: today.link_price, features,
     top_analogs: resolved.slice(0, 5).map(r => ({ date: new Date(r.analog_ts).toISOString().slice(0, 10), return_pct: Number(r.return_pct.toFixed(2)) })),
+    regime_anomaly: isRegimeAnomaly,
+    experimental: {
+      k_used: kAdaptive,
+      volatility_percentile: volPercentile != null ? Number(volPercentile.toFixed(2)) : null,
+      p_up: pUpExperimental != null ? Number(pUpExperimental.toFixed(3)) : null,
+      median_return_pct: medianReturnExperimental != null ? Number(medianReturnExperimental.toFixed(2)) : null,
+      note: 'Adaptive-K + distance-weighted variant, logged in parallel — proven on BTC first, now being independently tested on LINK\'s own data.',
+    },
     note: `Based on the ${resolved.length} most similar days in ${candidates.length} days of LINK history (${nImputedInNeighbors} of the ${neighbors.length} matched days used an averaged macro/sentiment reading, real BTC data only goes back 7 days). Technical score is a simplified RSI-style read, not V1's full indicator system — and this whole model is much younger than BTC's. Read with extra caution relative to the BTC prediction.`,
   };
 }
@@ -947,7 +1015,7 @@ async function linkPredictAndLog(env, horizonHours = 24) {
 
 async function getLinkCalibration(env, horizonHours = 24) {
   const { results } = await env.DB.prepare(
-    'SELECT p_up, realized_up FROM link_predictions WHERE realized_up IS NOT NULL AND horizon_hours = ?'
+    'SELECT p_up, realized_up, p_up_experimental FROM link_predictions WHERE realized_up IS NOT NULL AND horizon_hours = ?'
   ).bind(horizonHours).all();
   const n = results.length;
   if (n === 0) return { ok: true, n_resolved: 0, note: `No resolved LINK ${horizonHours}h predictions yet — this model is newer than BTC's.` };
@@ -957,10 +1025,35 @@ async function getLinkCalibration(env, horizonHours = 24) {
   const brierAlwaysBaseRate = results.reduce((s, r) => s + (upRate - r.realized_up) ** 2, 0) / n;
   const bestNaiveBrier = Math.min(0.25, brierAlwaysBaseRate);
   const beatsNaiveBaseline = brier < bestNaiveBrier;
+
+  // Same tracker BTC has: only meaningful once enough resolved predictions
+  // actually carry an experimental value (predictions logged before this
+  // was ported to LINK won't have one).
+  const withExperimental = results.filter(r => r.p_up_experimental != null);
+  let experimentalComparison = { available: false, note: 'Not enough resolved predictions with the experimental variant logged yet.' };
+  if (withExperimental.length >= 20) {
+    const nExp = withExperimental.length;
+    const accuracyExp = withExperimental.filter(r => (r.p_up_experimental >= 0.5) === (r.realized_up === 1)).length / nExp;
+    const brierExp = withExperimental.reduce((s, r) => s + (r.p_up_experimental - r.realized_up) ** 2, 0) / nExp;
+    const brierOrigSameSet = withExperimental.reduce((s, r) => s + (r.p_up - r.realized_up) ** 2, 0) / nExp;
+    experimentalComparison = {
+      available: true,
+      n_resolved: nExp,
+      accuracy_experimental: Number(accuracyExp.toFixed(3)),
+      brier_experimental: Number(brierExp.toFixed(3)),
+      brier_original_same_set: Number(brierOrigSameSet.toFixed(3)),
+      experimental_wins: brierExp < brierOrigSameSet,
+      note: brierExp < brierOrigSameSet
+        ? 'The adaptive-K/weighted variant is currently outperforming the original on LINK too — check whether this matches what BTC showed.'
+        : 'The original approach is still doing as well or better on LINK — worth noting if this differs from BTC\'s result.',
+    };
+  }
+
   return {
     ok: true, n_resolved: n, accuracy: Number(accuracy.toFixed(3)), brier_score: Number(brier.toFixed(3)),
     historical_up_rate: Number(upRate.toFixed(3)), brier_baseline_5050: 0.25,
     brier_baseline_up_rate: Number(brierAlwaysBaseRate.toFixed(3)), beats_naive_baseline: beatsNaiveBaseline,
+    experimental_vs_original: experimentalComparison,
     note: n < 20
       ? `Only ${n} resolved LINK predictions — noise at this size, not a verdict yet.`
       : beatsNaiveBaseline
@@ -969,18 +1062,29 @@ async function getLinkCalibration(env, horizonHours = 24) {
   };
 }
 
-// LINK never got the adaptive-K/weighted experiment (only BTC did), so this
-// only tracks the one line — same expanding-cumulative-Brier idea as BTC's
-// version, just without a second series to compare against.
+// LINK now logs the same adaptive-K/weighted experiment BTC does (ported
+// after BTC's own result looked promising, to check whether it's a real
+// technique or a BTC-specific fluke) — same expanding-cumulative-Brier
+// idea as BTC's version, now with a real second series to compare.
 async function getLinkCalibrationHistory(env, horizonHours = 24) {
   const { results } = await env.DB.prepare(
-    'SELECT resolved_ts, p_up, realized_up FROM link_predictions WHERE realized_up IS NOT NULL AND horizon_hours = ? ORDER BY resolved_ts ASC'
+    'SELECT resolved_ts, p_up, p_up_experimental, realized_up FROM link_predictions WHERE realized_up IS NOT NULL AND horizon_hours = ? ORDER BY resolved_ts ASC'
   ).bind(horizonHours).all();
-  let sum = 0, n2 = 0;
+  let sumOrig = 0, nOrig = 0, sumExp = 0, nExp = 0;
   const points = results.map(r => {
-    sum += (r.p_up - r.realized_up) ** 2;
-    n2++;
-    return { ts: r.resolved_ts, brier_original: Number((sum / n2).toFixed(4)), n_original: n2, brier_experimental: null, n_experimental: 0 };
+    sumOrig += (r.p_up - r.realized_up) ** 2;
+    nOrig++;
+    if (r.p_up_experimental != null) {
+      sumExp += (r.p_up_experimental - r.realized_up) ** 2;
+      nExp++;
+    }
+    return {
+      ts: r.resolved_ts,
+      brier_original: Number((sumOrig / nOrig).toFixed(4)),
+      n_original: nOrig,
+      brier_experimental: nExp > 0 ? Number((sumExp / nExp).toFixed(4)) : null,
+      n_experimental: nExp,
+    };
   });
   return { ok: true, points, naive_baseline_5050: 0.25 };
 }

@@ -973,6 +973,103 @@ async function runHistoryFeatureBacktest(env, featureName, K = 10) {
   return result;
 }
 
+// Combined 4-feature backtest — the closest thing to an honest backtest of
+// the ACTUAL live model, over the shared window where score/technical_score/
+// regime_mag/bottom_score all coexist (~9 days right now, limited by
+// regime_mag being the newest field). Unlike the single-feature tests,
+// z-scoring genuinely matters here (4 differently-scaled features), and is
+// computed fresh from ONLY prior data at each step — walk-forward honest,
+// actually stricter than the live model itself (which reuses one set of
+// whole-history stats per prediction cycle rather than recomputing them
+// day by day). Answers the real question the single-feature results raised:
+// does combining four individually-non-predictive features do any better
+// than each alone, or does averaging noise just produce more noise.
+const COMBINED_BACKTEST_FEATURES = ['score', 'technical_score', 'regime_mag', 'bottom_score'];
+
+function runCombinedFeatureBacktest(rows, featureKeys, K) {
+  const predictions = [];
+  const warmup = Math.max(15, Math.floor(rows.length * 0.2)); // a bit more than the single-feature warmup — stats need to stabilize across 4 dimensions, not 1
+  for (let i = warmup; i < rows.length - 1; i++) {
+    const today = rows[i];
+    const candidates = rows.slice(0, i); // strictly before today — same no-lookahead rule as every other backtest here
+
+    const stats = {};
+    for (const k of featureKeys) {
+      const vals = candidates.map(r => r[k]);
+      const mean = vals.reduce((a, b) => a + b, 0) / vals.length;
+      const variance = vals.reduce((a, b) => a + (b - mean) ** 2, 0) / vals.length;
+      stats[k] = { mean, std: Math.sqrt(variance) || 1 };
+    }
+
+    const withReturns = candidates
+      .map((c, ci) => {
+        const next = rows[ci + 1];
+        if (!next) return null;
+        let d = 0;
+        for (const k of featureKeys) {
+          const z1 = (today[k] - stats[k].mean) / stats[k].std;
+          const z2 = (c[k] - stats[k].mean) / stats[k].std;
+          d += (z1 - z2) ** 2;
+        }
+        return { dist: Math.sqrt(d), return_pct: (next.price - c.price) / c.price * 100 };
+      })
+      .filter(Boolean)
+      .sort((a, b) => a.dist - b.dist);
+
+    if (withReturns.length < K) continue;
+    const neighbors = withReturns.slice(0, K);
+    const pUp = neighbors.filter(n => n.return_pct > 0).length / neighbors.length;
+    const tomorrow = rows[i + 1];
+    const realizedReturn = (tomorrow.price - today.price) / today.price * 100;
+    predictions.push({ ts: today.ts, p_up: pUp, realized_up: realizedReturn > 0 ? 1 : 0 });
+  }
+
+  const n = predictions.length;
+  if (n === 0) return { ok: true, n_predictions: 0, note: 'Not enough shared history across all 4 features yet to run any predictions.' };
+
+  const accuracy = predictions.filter(p => (p.p_up >= 0.5) === (p.realized_up === 1)).length / n;
+  const brier = predictions.reduce((s, p) => s + (p.p_up - p.realized_up) ** 2, 0) / n;
+  const upRate = predictions.filter(p => p.realized_up === 1).length / n;
+  const brierBaseRate = predictions.reduce((s, p) => s + (upRate - p.realized_up) ** 2, 0) / n;
+  const bestNaive = Math.min(0.25, brierBaseRate);
+
+  return {
+    ok: true,
+    n_predictions: n,
+    accuracy: Number(accuracy.toFixed(3)),
+    brier_score: Number(brier.toFixed(3)),
+    historical_up_rate: Number(upRate.toFixed(3)),
+    naive_baseline_brier: Number(bestNaive.toFixed(3)),
+    beats_naive_baseline: brier < bestNaive,
+    date_range_start: predictions[0].ts,
+    date_range_end: predictions[n - 1].ts,
+    note: n < 50
+      ? `Only ${n} predictions — limited by regime_mag being the newest field (~9 days of shared history). Directional only.`
+      : 'Combined 4-feature test, walk-forward stats — the closest available backtest of the actual live model.',
+  };
+}
+
+async function runHistoryCombinedBacktest(env, K = 10) {
+  const cols = COMBINED_BACKTEST_FEATURES;
+  const whereClause = cols.map(c => `${c} IS NOT NULL`).join(' AND ');
+  const { results } = await env.DB.prepare(
+    `SELECT ts, btc_price as price, score, technical_score, regime_mag, bottom_score FROM history WHERE btc_price IS NOT NULL AND ${whereClause} ORDER BY ts ASC`
+  ).all();
+
+  const result = runCombinedFeatureBacktest(results, cols, K);
+
+  await env.DB.prepare(
+    `INSERT INTO backtest_results (run_ts, coin, years_tested, n_days_in_source, n_predictions, accuracy, brier_score, naive_baseline_brier, beats_naive_baseline, date_range_start, date_range_end)
+     VALUES (?,?,?,?,?,?,?,?,?,?,?)`
+  ).bind(
+    Date.now(), 'BTC-combined4', 0, results.length, result.n_predictions,
+    result.accuracy ?? null, result.brier_score ?? null, result.naive_baseline_brier ?? null,
+    result.beats_naive_baseline ? 1 : 0, result.date_range_start ?? null, result.date_range_end ?? null
+  ).run();
+
+  return result;
+}
+
 async function logLinkData(env) {
   const snap = await fetchLinkSnapshot();
   const { results: recent } = await env.DB.prepare(
@@ -1536,6 +1633,14 @@ export default {
       try {
         const feature = url.searchParams.get('feature') || 'regime_mag';
         const result = await runHistoryFeatureBacktest(env, feature);
+        return new Response(JSON.stringify(result), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+      } catch (err) {
+        return new Response(JSON.stringify({ ok: false, error: String(err) }), { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+      }
+    }
+    if (url.pathname === '/backtest-combined' && request.method === 'GET') {
+      try {
+        const result = await runHistoryCombinedBacktest(env);
         return new Response(JSON.stringify(result), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
       } catch (err) {
         return new Response(JSON.stringify({ ok: false, error: String(err) }), { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });

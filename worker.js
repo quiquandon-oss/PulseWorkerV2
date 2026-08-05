@@ -1070,6 +1070,13 @@ async function runHistoryCombinedBacktest(env, K = 10) {
   return result;
 }
 
+async function getBacktestHistory(env, limit = 50) {
+  const { results } = await env.DB.prepare(
+    'SELECT id, run_ts, coin, n_predictions, accuracy, brier_score, naive_baseline_brier, beats_naive_baseline, date_range_start, date_range_end FROM backtest_results ORDER BY run_ts DESC LIMIT ?'
+  ).bind(limit).all();
+  return { ok: true, runs: results };
+}
+
 async function logLinkData(env) {
   const snap = await fetchLinkSnapshot();
   const { results: recent } = await env.DB.prepare(
@@ -1641,6 +1648,14 @@ export default {
     if (url.pathname === '/backtest-combined' && request.method === 'GET') {
       try {
         const result = await runHistoryCombinedBacktest(env);
+        return new Response(JSON.stringify(result), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+      } catch (err) {
+        return new Response(JSON.stringify({ ok: false, error: String(err) }), { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+      }
+    }
+    if (url.pathname === '/backtest-history' && request.method === 'GET') {
+      try {
+        const result = await getBacktestHistory(env);
         return new Response(JSON.stringify(result), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
       } catch (err) {
         return new Response(JSON.stringify({ ok: false, error: String(err) }), { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });

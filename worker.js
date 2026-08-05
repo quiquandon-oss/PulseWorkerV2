@@ -894,6 +894,85 @@ async function runBtcOfflineBacktest(env, years = 3) {
   return result;
 }
 
+// Same walk-forward single-feature backtest, generalized for regime_mag /
+// sentiment — UNLIKE technical_score, neither has a multi-year external
+// source (Yahoo has price, not V1's own composite calculations), so this
+// is necessarily limited to whatever D1 has logged since V1 started
+// tracking these (~July 25 2026 onward) — a much smaller, honestly
+// weaker test than the 1035-day technical_score backtest. Built anyway,
+// on the same "verify before trusting" discipline as everything else —
+// small-sample results reported as directional, not conclusive.
+const HISTORY_BACKTEST_FEATURES = { regime_mag: 'regime_mag', sentiment: 'score' };
+
+function runGenericSingleFeatureBacktest(rows, K) {
+  const predictions = [];
+  const warmup = Math.max(10, Math.floor(rows.length * 0.15));
+  for (let i = warmup; i < rows.length - 1; i++) {
+    const today = rows[i];
+    const candidates = rows.slice(0, i);
+    const withReturns = candidates
+      .map((c, ci) => {
+        const next = rows[ci + 1];
+        if (!next) return null;
+        return { dist: Math.abs(c.feat - today.feat), return_pct: (next.price - c.price) / c.price * 100 };
+      })
+      .filter(Boolean)
+      .sort((a, b) => a.dist - b.dist);
+    if (withReturns.length < K) continue;
+    const neighbors = withReturns.slice(0, K);
+    const pUp = neighbors.filter(n => n.return_pct > 0).length / neighbors.length;
+    const tomorrow = rows[i + 1];
+    const realizedReturn = (tomorrow.price - today.price) / today.price * 100;
+    predictions.push({ ts: today.ts, p_up: pUp, realized_up: realizedReturn > 0 ? 1 : 0 });
+  }
+
+  const n = predictions.length;
+  if (n === 0) return { ok: true, n_predictions: 0, note: 'Not enough history in D1 to run any predictions yet — this feature is still too young.' };
+
+  const accuracy = predictions.filter(p => (p.p_up >= 0.5) === (p.realized_up === 1)).length / n;
+  const brier = predictions.reduce((s, p) => s + (p.p_up - p.realized_up) ** 2, 0) / n;
+  const upRate = predictions.filter(p => p.realized_up === 1).length / n;
+  const brierBaseRate = predictions.reduce((s, p) => s + (upRate - p.realized_up) ** 2, 0) / n;
+  const bestNaive = Math.min(0.25, brierBaseRate);
+
+  return {
+    ok: true,
+    n_predictions: n,
+    accuracy: Number(accuracy.toFixed(3)),
+    brier_score: Number(brier.toFixed(3)),
+    historical_up_rate: Number(upRate.toFixed(3)),
+    naive_baseline_brier: Number(bestNaive.toFixed(3)),
+    beats_naive_baseline: brier < bestNaive,
+    date_range_start: predictions[0].ts,
+    date_range_end: predictions[n - 1].ts,
+    note: n < 50
+      ? `Only ${n} predictions — this feature has been logged for under 2 weeks, treat as directional only, not conclusive.`
+      : 'Single-feature test, same discipline as the technical_score backtest.',
+  };
+}
+
+async function runHistoryFeatureBacktest(env, featureName, K = 10) {
+  const col = HISTORY_BACKTEST_FEATURES[featureName];
+  if (!col) throw new Error(`Unknown feature "${featureName}" — must be one of: ${Object.keys(HISTORY_BACKTEST_FEATURES).join(', ')}`);
+
+  const { results } = await env.DB.prepare(
+    `SELECT ts, btc_price as price, ${col} as feat FROM history WHERE btc_price IS NOT NULL AND ${col} IS NOT NULL ORDER BY ts ASC`
+  ).all();
+
+  const result = runGenericSingleFeatureBacktest(results, K);
+
+  await env.DB.prepare(
+    `INSERT INTO backtest_results (run_ts, coin, years_tested, n_days_in_source, n_predictions, accuracy, brier_score, naive_baseline_brier, beats_naive_baseline, date_range_start, date_range_end)
+     VALUES (?,?,?,?,?,?,?,?,?,?,?)`
+  ).bind(
+    Date.now(), `BTC-${featureName}`, null, results.length, result.n_predictions,
+    result.accuracy ?? null, result.brier_score ?? null, result.naive_baseline_brier ?? null,
+    result.beats_naive_baseline ? 1 : 0, result.date_range_start ?? null, result.date_range_end ?? null
+  ).run();
+
+  return result;
+}
+
 async function logLinkData(env) {
   const snap = await fetchLinkSnapshot();
   const { results: recent } = await env.DB.prepare(
@@ -1448,6 +1527,15 @@ export default {
       try {
         const years = Math.min(10, Math.max(1, parseFloat(url.searchParams.get('years') || '3')));
         const result = await runBtcOfflineBacktest(env, years);
+        return new Response(JSON.stringify(result), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+      } catch (err) {
+        return new Response(JSON.stringify({ ok: false, error: String(err) }), { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+      }
+    }
+    if (url.pathname === '/backtest-feature' && request.method === 'GET') {
+      try {
+        const feature = url.searchParams.get('feature') || 'regime_mag';
+        const result = await runHistoryFeatureBacktest(env, feature);
         return new Response(JSON.stringify(result), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
       } catch (err) {
         return new Response(JSON.stringify({ ok: false, error: String(err) }), { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });

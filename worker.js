@@ -777,6 +777,123 @@ async function backfillBtcHistoryHourly(env, days = 20) {
   return backfillCoinHistory(env, { coin: 'BTC', table: 'btc_data', priceCol: 'btc_price', days, interval: '1h', dedupToleranceMs: 30 * 60 * 1000 });
 }
 
+// ==================================================================
+// Offline backtest — a genuinely different test than the live model's
+// calibration loop. The live loop needs weeks to accumulate enough
+// resolved predictions to say anything real; this replays YEARS of real
+// BTC price history in one call, using the same Yahoo v8/chart endpoint
+// V1's "9 Magnificent" tile already uses (same URL pattern, same
+// User-Agent, proven working — not a new integration).
+//
+// Deliberately a SIMPLIFIED version of the live model: technical_score is
+// the only feature, because it's the only one computable from price alone
+// — sentiment/regime_mag/bottom_score don't exist for years back, they
+// only started being logged in July 2026. This tests whether the CORE
+// analog-matching idea has any merit at all, not the full live feature
+// set. With one feature, z-scoring is a no-op (a monotonic transform of a
+// single dimension doesn't change nearest-neighbor ordering), so it's
+// skipped entirely here — genuine simplification, not an oversight.
+//
+// Walk-forward, not just historical: predicting day i only ever uses
+// candidate days STRICTLY BEFORE day i (never future days, even though
+// the whole series is already known) — the same no-lookahead discipline
+// as the live model, replayed against history instead of real time.
+// ==================================================================
+
+async function fetchYahooDailyHistory(symbol, range) {
+  const res = await fetch(
+    `https://query1.finance.yahoo.com/v8/finance/chart/${symbol}?interval=1d&range=${range}`,
+    { headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36' } }
+  );
+  if (!res.ok) throw new Error(`Yahoo ${symbol} ${res.status}`);
+  const json = await res.json();
+  const result = json?.chart?.result?.[0];
+  if (!result) throw new Error(`Yahoo ${symbol}: no result in response`);
+  const timestamps = result.timestamp || [];
+  const closes = result.indicators?.quote?.[0]?.close || [];
+  return timestamps
+    .map((t, i) => ({ ts: t * 1000, price: closes[i] }))
+    .filter(p => p.price != null)
+    .sort((a, b) => a.ts - b.ts);
+}
+
+function runOfflineBacktest(priceSeries, K = 15) {
+  // technical_score per day, walk-forward (only prior days feed each day's
+  // own score) — reuses the exact same function the live pipeline uses.
+  const scored = priceSeries.map((p, i) => {
+    const window = priceSeries.slice(Math.max(0, i - 29), i + 1).map(r => r.price);
+    return { ts: p.ts, price: p.price, technical_score: computeSimpleTechnicalScore(window) };
+  });
+
+  const predictions = [];
+  // Start once there's a reasonable amount of walk-forward history behind
+  // us (60 days — arbitrary but modest warmup), stop one day early so
+  // there's always a real "tomorrow" to grade against.
+  for (let i = 60; i < scored.length - 1; i++) {
+    const today = scored[i];
+    const candidates = scored.slice(0, i); // strictly before today — no lookahead
+    const withReturns = candidates
+      .map((c, ci) => {
+        const next = scored[ci + 1]; // the day immediately after this candidate — already-known history, since ci+1 <= i (today), never a future leak
+        if (!next) return null;
+        return { dist: Math.abs(c.technical_score - today.technical_score), return_pct: (next.price - c.price) / c.price * 100 };
+      })
+      .filter(Boolean)
+      .sort((a, b) => a.dist - b.dist);
+
+    if (withReturns.length < K) continue; // not enough history yet for this K
+    const neighbors = withReturns.slice(0, K);
+    const pUp = neighbors.filter(n => n.return_pct > 0).length / neighbors.length;
+
+    const tomorrow = scored[i + 1];
+    const realizedReturn = (tomorrow.price - today.price) / today.price * 100;
+    const realizedUp = realizedReturn > 0 ? 1 : 0;
+
+    predictions.push({ ts: today.ts, p_up: pUp, realized_up: realizedUp });
+  }
+
+  const n = predictions.length;
+  if (n === 0) return { ok: true, n_predictions: 0, note: 'Not enough history in the fetched range to run any predictions.' };
+
+  const accuracy = predictions.filter(p => (p.p_up >= 0.5) === (p.realized_up === 1)).length / n;
+  const brier = predictions.reduce((s, p) => s + (p.p_up - p.realized_up) ** 2, 0) / n;
+  const upRate = predictions.filter(p => p.realized_up === 1).length / n;
+  const brierBaseRate = predictions.reduce((s, p) => s + (upRate - p.realized_up) ** 2, 0) / n;
+  const bestNaive = Math.min(0.25, brierBaseRate);
+
+  return {
+    ok: true,
+    n_predictions: n,
+    accuracy: Number(accuracy.toFixed(3)),
+    brier_score: Number(brier.toFixed(3)),
+    historical_up_rate: Number(upRate.toFixed(3)),
+    naive_baseline_brier: Number(bestNaive.toFixed(3)),
+    beats_naive_baseline: brier < bestNaive,
+    date_range_start: predictions[0].ts,
+    date_range_end: predictions[n - 1].ts,
+    note: 'Technical_score only (single feature) — sentiment/regime don\'t exist this far back. Tests the core analog-matching idea, not the full live model.',
+  };
+}
+
+async function runBtcOfflineBacktest(env, years = 3) {
+  const range = `${Math.min(10, Math.max(1, Math.round(years)))}y`;
+  const priceSeries = await fetchYahooDailyHistory('BTC-USD', range);
+  if (priceSeries.length < 100) throw new Error(`Yahoo returned only ${priceSeries.length} days — too little to backtest`);
+
+  const result = runOfflineBacktest(priceSeries);
+
+  await env.DB.prepare(
+    `INSERT INTO backtest_results (run_ts, coin, years_tested, n_days_in_source, n_predictions, accuracy, brier_score, naive_baseline_brier, beats_naive_baseline, date_range_start, date_range_end)
+     VALUES (?,?,?,?,?,?,?,?,?,?,?)`
+  ).bind(
+    Date.now(), 'BTC', years, priceSeries.length, result.n_predictions,
+    result.accuracy ?? null, result.brier_score ?? null, result.naive_baseline_brier ?? null,
+    result.beats_naive_baseline ? 1 : 0, result.date_range_start ?? null, result.date_range_end ?? null
+  ).run();
+
+  return result;
+}
+
 async function logLinkData(env) {
   const snap = await fetchLinkSnapshot();
   const { results: recent } = await env.DB.prepare(
@@ -1322,6 +1439,15 @@ export default {
       try {
         const days = Math.min(30, parseInt(url.searchParams.get('days') || '20', 10));
         const result = await backfillBtcHistoryHourly(env, days);
+        return new Response(JSON.stringify(result), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+      } catch (err) {
+        return new Response(JSON.stringify({ ok: false, error: String(err) }), { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+      }
+    }
+    if (url.pathname === '/backtest-technical' && request.method === 'GET') {
+      try {
+        const years = Math.min(10, Math.max(1, parseFloat(url.searchParams.get('years') || '3')));
+        const result = await runBtcOfflineBacktest(env, years);
         return new Response(JSON.stringify(result), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
       } catch (err) {
         return new Response(JSON.stringify({ ok: false, error: String(err) }), { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });

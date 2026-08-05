@@ -965,7 +965,7 @@ async function runHistoryFeatureBacktest(env, featureName, K = 10) {
     `INSERT INTO backtest_results (run_ts, coin, years_tested, n_days_in_source, n_predictions, accuracy, brier_score, naive_baseline_brier, beats_naive_baseline, date_range_start, date_range_end)
      VALUES (?,?,?,?,?,?,?,?,?,?,?)`
   ).bind(
-    Date.now(), `BTC-${featureName}`, null, results.length, result.n_predictions,
+    Date.now(), `BTC-${featureName}`, 0, results.length, result.n_predictions,
     result.accuracy ?? null, result.brier_score ?? null, result.naive_baseline_brier ?? null,
     result.beats_naive_baseline ? 1 : 0, result.date_range_start ?? null, result.date_range_end ?? null
   ).run();

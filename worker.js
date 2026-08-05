@@ -1077,6 +1077,100 @@ async function getBacktestHistory(env, limit = 50) {
   return { ok: true, runs: results };
 }
 
+// Tests a specific, sharper hypothesis than "maybe reweight the features" —
+// one paper found technical indicators' predictive power is CONDITIONAL on
+// sentiment regime (better during "greed," worse during "fear"), not just
+// a fixed weight to tune. Same walk-forward technical_score-only backtest
+// as before, but every prediction is tagged with that day's actual
+// sentiment reading, then split by whether it was above or below the
+// median seen across the whole run — testing whether technical_score's
+// OWN accuracy genuinely differs by regime, not building two separate
+// models.
+function runRegimeSplitBacktest(rows, K = 10) {
+  const predictions = [];
+  const warmup = Math.max(10, Math.floor(rows.length * 0.15));
+  for (let i = warmup; i < rows.length - 1; i++) {
+    const today = rows[i];
+    const candidates = rows.slice(0, i);
+    const withReturns = candidates
+      .map((c, ci) => {
+        const next = rows[ci + 1];
+        if (!next) return null;
+        return { dist: Math.abs(c.technical_score - today.technical_score), return_pct: (next.price - c.price) / c.price * 100 };
+      })
+      .filter(Boolean)
+      .sort((a, b) => a.dist - b.dist);
+    if (withReturns.length < K) continue;
+    const neighbors = withReturns.slice(0, K);
+    const pUp = neighbors.filter(n => n.return_pct > 0).length / neighbors.length;
+    const tomorrow = rows[i + 1];
+    const realizedReturn = (tomorrow.price - today.price) / today.price * 100;
+    predictions.push({ ts: today.ts, p_up: pUp, realized_up: realizedReturn > 0 ? 1 : 0, sentiment: today.sentiment });
+  }
+
+  if (predictions.length === 0) return { ok: true, n_total: 0, note: 'Not enough shared technical_score/sentiment history yet.' };
+
+  const sortedSentiments = predictions.map(p => p.sentiment).sort((a, b) => a - b);
+  const medianSentiment = sortedSentiments[Math.floor(sortedSentiments.length / 2)];
+  const highRegime = predictions.filter(p => p.sentiment >= medianSentiment);
+  const lowRegime = predictions.filter(p => p.sentiment < medianSentiment);
+
+  function aggregate(preds) {
+    const n = preds.length;
+    if (n === 0) return null;
+    const accuracy = preds.filter(p => (p.p_up >= 0.5) === (p.realized_up === 1)).length / n;
+    const brier = preds.reduce((s, p) => s + (p.p_up - p.realized_up) ** 2, 0) / n;
+    const upRate = preds.filter(p => p.realized_up === 1).length / n;
+    const brierBase = preds.reduce((s, p) => s + (upRate - p.realized_up) ** 2, 0) / n;
+    const bestNaive = Math.min(0.25, brierBase);
+    return {
+      n_predictions: n,
+      accuracy: Number(accuracy.toFixed(3)),
+      brier_score: Number(brier.toFixed(3)),
+      naive_baseline_brier: Number(bestNaive.toFixed(3)),
+      beats_naive_baseline: brier < bestNaive,
+    };
+  }
+
+  return {
+    ok: true,
+    n_total: predictions.length,
+    median_sentiment_threshold: Number(medianSentiment.toFixed(1)),
+    high_sentiment: aggregate(highRegime),
+    low_sentiment: aggregate(lowRegime),
+    note: 'Same technical_score-only k-NN as the standalone backtest, split post-hoc by that day\'s actual sentiment reading — tests whether technical_score\'s own accuracy genuinely differs by regime, not two separately-tuned models.',
+  };
+}
+
+async function runBtcRegimeSplitBacktest(env) {
+  const { results } = await env.DB.prepare(
+    `SELECT ts, btc_price as price, technical_score, score as sentiment FROM history WHERE btc_price IS NOT NULL AND technical_score IS NOT NULL AND score IS NOT NULL ORDER BY ts ASC`
+  ).all();
+
+  const result = runRegimeSplitBacktest(results);
+  const runTs = Date.now();
+
+  if (result.high_sentiment) {
+    await env.DB.prepare(
+      `INSERT INTO regime_split_results (run_ts, split_label, median_sentiment_threshold, n_predictions, accuracy, brier_score, naive_baseline_brier, beats_naive_baseline) VALUES (?,?,?,?,?,?,?,?)`
+    ).bind(runTs, 'high_sentiment', result.median_sentiment_threshold, result.high_sentiment.n_predictions, result.high_sentiment.accuracy, result.high_sentiment.brier_score, result.high_sentiment.naive_baseline_brier, result.high_sentiment.beats_naive_baseline ? 1 : 0).run();
+  }
+  if (result.low_sentiment) {
+    await env.DB.prepare(
+      `INSERT INTO regime_split_results (run_ts, split_label, median_sentiment_threshold, n_predictions, accuracy, brier_score, naive_baseline_brier, beats_naive_baseline) VALUES (?,?,?,?,?,?,?,?)`
+    ).bind(runTs, 'low_sentiment', result.median_sentiment_threshold, result.low_sentiment.n_predictions, result.low_sentiment.accuracy, result.low_sentiment.brier_score, result.low_sentiment.naive_baseline_brier, result.low_sentiment.beats_naive_baseline ? 1 : 0).run();
+  }
+
+  return result;
+}
+
+async function getRegimeSplitHistory(env, limit = 50) {
+  const { results } = await env.DB.prepare(
+    'SELECT id, run_ts, split_label, median_sentiment_threshold, n_predictions, accuracy, brier_score, naive_baseline_brier, beats_naive_baseline FROM regime_split_results ORDER BY run_ts DESC LIMIT ?'
+  ).bind(limit).all();
+  return { ok: true, runs: results };
+}
+
 async function logLinkData(env) {
   const snap = await fetchLinkSnapshot();
   const { results: recent } = await env.DB.prepare(
@@ -1656,6 +1750,22 @@ export default {
     if (url.pathname === '/backtest-history' && request.method === 'GET') {
       try {
         const result = await getBacktestHistory(env);
+        return new Response(JSON.stringify(result), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+      } catch (err) {
+        return new Response(JSON.stringify({ ok: false, error: String(err) }), { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+      }
+    }
+    if (url.pathname === '/backtest-regime-split' && request.method === 'GET') {
+      try {
+        const result = await runBtcRegimeSplitBacktest(env);
+        return new Response(JSON.stringify(result), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+      } catch (err) {
+        return new Response(JSON.stringify({ ok: false, error: String(err) }), { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+      }
+    }
+    if (url.pathname === '/backtest-regime-split-history' && request.method === 'GET') {
+      try {
+        const result = await getRegimeSplitHistory(env);
         return new Response(JSON.stringify(result), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
       } catch (err) {
         return new Response(JSON.stringify({ ok: false, error: String(err) }), { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });

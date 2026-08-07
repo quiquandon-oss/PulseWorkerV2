@@ -416,6 +416,229 @@ async function getCalibrationHistory(env, horizonHours = 24) {
 // Shared by the /predict HTTP route and the cron handler below, so both
 // paths run identical logic rather than the schedule quietly drifting from
 // what a manual visit does.
+// ---- Challenger model: regime-conditional trend/reversion ----
+// Deliberately NOT a k-NN variant, and deliberately NOT wired into the
+// original model in any way — this is a genuinely different approach,
+// logged in parallel for comparison, same "log but don't replace"
+// discipline already proven with adaptive-K. Motivated by a specific,
+// confirmed finding: the 35 resolved is_regime_anomaly=1 predictions
+// scored 22.9% accuracy (worse than the original model's own opposite-of-
+// coinflip miss rate) against a naive "trend continues" baseline that
+// would have scored 97.1% in that same window. The tripwire correctly
+// flags novel conditions; the k-NN's own read during those conditions has
+// now been empirically bad twice (once in the offline fear/greed regime
+// split, once here) — this tests whether a simple, transparent,
+// deterministic trend-persistence read does better specifically in the
+// conditions the tripwire flags, while deferring to the existing model
+// when today's setup DOES resemble history well.
+//
+// Isolation is deliberate: this function does NOT import or recompute any
+// part of runPrediction's k-NN distance matrix — it reads the SAME
+// is_regime_anomaly value runPrediction already computed for today in
+// this same cycle (passed in via coreResult), rather than an independent
+// approximation that could quietly drift from the original definition.
+// Everything else here — trailing return, the Foufi driver tilt — is
+// fully separate logic that cannot affect the original model even if it
+// has a bug.
+async function runChallengerPrediction(env, { coin, horizonHours, priceTable, priceCol, priceNow, coreResult }) {
+  if (!coreResult || coreResult.status !== 'ok') {
+    return { ok: true, status: 'skipped_core_not_ok' };
+  }
+  const lagMs = horizonHours * 60 * 60 * 1000;
+  const nowTs = coreResult.ts;
+  const isAnomalous = !!coreResult.regime_anomaly;
+
+  // Trailing return over the SAME window as the horizon being predicted
+  // (24h trailing to inform a 24h-forward guess, 12h to inform 12h) —
+  // symmetric and easy to audit, not tuned for best fit.
+  const { results: priceRows } = await env.DB.prepare(
+    `SELECT ts, ${priceCol} as price FROM ${priceTable} WHERE ts <= ? ORDER BY ts DESC LIMIT 200`
+  ).bind(nowTs).all();
+  const trailingTarget = nowTs - lagMs;
+  const trailingRow = priceRows.find(r => r.ts <= trailingTarget) || priceRows[priceRows.length - 1];
+  const trailingReturnPct = trailingRow && trailingRow.price
+    ? (priceNow - trailingRow.price) / trailingRow.price * 100
+    : null;
+
+  // Flat variant: pure regime gate. Anomalous -> trend-persistence read
+  // (simple, transparent, capped mapping: every 1% of trailing return
+  // shifts p_up 5 points from 0.5, capped at +-35 points so it's never
+  // fully certain). Not anomalous -> defer to the original model's own
+  // p_up, on the theory that when today's setup DOES resemble history
+  // well, the k-NN's own logic is the more trustworthy read.
+  let pUpFlat;
+  if (isAnomalous && trailingReturnPct != null) {
+    const shift = Math.sign(trailingReturnPct) * Math.min(0.35, Math.abs(trailingReturnPct) * 0.05);
+    pUpFlat = 0.5 + shift;
+  } else {
+    pUpFlat = coreResult.p_up;
+  }
+  pUpFlat = Math.max(0.05, Math.min(0.95, pUpFlat));
+
+  // Tilted variant: identical to flat UNLESS today is anomalous AND a
+  // fresh (<=30h, same convention as V1's srcFoufi) Foufi digest names a
+  // driver this Worker has a mapped lean for (macro/tradfi only - micro
+  // has no mapped lean, logged as uncovered rather than faked). When
+  // available, Foufi's stated lean for that category either reinforces
+  // (agrees with trailing-return direction -> push further from 0.5) or
+  // dampens (disagrees -> pull toward 0.5) the flat read. Fixed +-0.10,
+  // same "modest, not an override" conservatism as V1's own driver boost.
+  let pUpTilted = pUpFlat, driverUsed = null, driverAgreement = null, foufiVideoId = null;
+  if (isAnomalous && trailingReturnPct != null) {
+    try {
+      const digest = await env.DB.prepare(
+        'SELECT video_id, published_ts, transcript_status, summary_json FROM foufi_digest ORDER BY published_ts DESC LIMIT 1'
+      ).first();
+      if (digest && digest.transcript_status === 'ok' && digest.published_ts && (nowTs - digest.published_ts) / 3600000 <= 30) {
+        const summary = JSON.parse(digest.summary_json || '{}');
+        const drivers = [summary.dominant_driver, summary.secondary_driver].filter(d => d && d !== 'none');
+        const driverLeanMap = { macro: summary.macro?.lean, tradfi: summary.tradfi?.lean };
+        const mappedDriver = drivers.find(d => driverLeanMap[d]);
+        if (mappedDriver) {
+          const lean = driverLeanMap[mappedDriver];
+          const trailingDir = trailingReturnPct > 0 ? 'bullish' : trailingReturnPct < 0 ? 'bearish' : 'neutral';
+          driverUsed = mappedDriver;
+          foufiVideoId = digest.video_id;
+          if (lean === trailingDir) {
+            driverAgreement = 'agree';
+            pUpTilted = pUpFlat + (pUpFlat >= 0.5 ? 0.10 : -0.10);
+          } else if (lean !== 'neutral' && trailingDir !== 'neutral') {
+            driverAgreement = 'disagree';
+            pUpTilted = 0.5 + (pUpFlat - 0.5) * 0.5; // dampen toward neutral, don't flip
+          } else {
+            driverAgreement = 'na';
+          }
+        } else if (drivers.includes('micro')) {
+          driverUsed = 'micro'; driverAgreement = 'uncovered'; // no mapped lean - logged, not faked
+        }
+      }
+    } catch (e) {
+      // Foufi lookup failing must never break the challenger prediction itself
+      driverAgreement = 'lookup_error';
+    }
+  }
+  pUpTilted = Math.max(0.05, Math.min(0.95, pUpTilted));
+
+  const insert = await env.DB.prepare(
+    `INSERT INTO challenger_predictions
+     (coin, ts, target_ts, horizon_hours, price_at_prediction, is_regime_anomaly, trailing_return_pct,
+      p_up_flat, p_up_tilted, driver_used, driver_agreement, foufi_digest_video_id)
+     VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`
+  ).bind(
+    coin, nowTs, nowTs + lagMs, horizonHours, priceNow, isAnomalous ? 1 : 0, trailingReturnPct,
+    pUpFlat, pUpTilted, driverUsed, driverAgreement, foufiVideoId
+  ).run();
+
+  return {
+    ok: true, status: 'ok', id: insert.meta.last_row_id, coin, horizon_hours: horizonHours,
+    is_regime_anomaly: isAnomalous, trailing_return_pct: trailingReturnPct != null ? Number(trailingReturnPct.toFixed(2)) : null,
+    p_up_flat: Number(pUpFlat.toFixed(3)), p_up_tilted: Number(pUpTilted.toFixed(3)),
+    driver_used: driverUsed, driver_agreement: driverAgreement,
+  };
+}
+
+// Resolves any challenger prediction whose horizon has passed. Fully
+// separate from backfillPredictions (the original model's resolver) -
+// same isolation principle as the prediction function itself.
+async function backfillChallengerPredictions(env) {
+  const nowTs = Date.now();
+  const { results: pending } = await env.DB.prepare(
+    'SELECT * FROM challenger_predictions WHERE resolved_ts IS NULL AND target_ts <= ?'
+  ).bind(nowTs).all();
+  let resolvedCount = 0;
+  for (const p of pending) {
+    const priceTable = p.coin === 'LINK' ? 'link_data' : 'btc_data';
+    const priceCol = p.coin === 'LINK' ? 'link_price' : 'btc_price';
+    const tolMs = p.horizon_hours * 60 * 60 * 1000 * 0.2;
+    const { results: rows } = await env.DB.prepare(
+      `SELECT ts, ${priceCol} as price FROM ${priceTable} WHERE ts BETWEEN ? AND ? ORDER BY ABS(ts - ?) ASC LIMIT 1`
+    ).bind(p.target_ts - tolMs, p.target_ts + tolMs, p.target_ts).all();
+    if (!rows.length) continue;
+    const realizedPrice = rows[0].price;
+    const realizedReturn = (realizedPrice - p.price_at_prediction) / p.price_at_prediction * 100;
+    await env.DB.prepare(
+      'UPDATE challenger_predictions SET realized_price=?, realized_return=?, realized_up=?, resolved_ts=? WHERE id=?'
+    ).bind(realizedPrice, realizedReturn, realizedReturn > 0 ? 1 : 0, nowTs, p.id).run();
+    resolvedCount++;
+  }
+  return resolvedCount;
+}
+
+// Calibration for the challenger: both variants (flat/tilted) against BOTH
+// naive-baseline (low bar — always guess the historically-more-common
+// direction) AND a real MA-crossover momentum strategy (higher bar — price
+// vs. its own trailing 20-point average at prediction time). Beating naive
+// baseline alone isn't a meaningful claim; beating a real momentum strategy
+// is closer to one.
+async function getChallengerCalibration(env, coin, horizonHours) {
+  const { results: rows } = await env.DB.prepare(
+    'SELECT * FROM challenger_predictions WHERE coin=? AND horizon_hours=? AND resolved_ts IS NOT NULL ORDER BY ts ASC'
+  ).bind(coin, horizonHours).all();
+  const n = rows.length;
+  if (n < 5) return { ok: true, coin, horizon_hours: horizonHours, n_resolved: n, note: 'Not enough resolved challenger predictions yet — check back once more have accumulated.' };
+
+  const priceTable = coin === 'LINK' ? 'link_data' : 'btc_data';
+  const priceCol = coin === 'LINK' ? 'link_price' : 'btc_price';
+  const { results: allPrices } = await env.DB.prepare(
+    `SELECT ts, ${priceCol} as price FROM ${priceTable} ORDER BY ts ASC`
+  ).all();
+
+  function maCrossoverPrediction(predTs, priceAtPred) {
+    const priorRows = allPrices.filter(r => r.ts <= predTs).slice(-20);
+    if (priorRows.length < 10 || !priceAtPred) return null;
+    const ma = priorRows.reduce((s, r) => s + r.price, 0) / priorRows.length;
+    return priceAtPred > ma ? 1 : 0;
+  }
+
+  let accFlat = 0, accTilted = 0, accMa = 0, upCount = 0;
+  let brierFlat = 0, brierTilted = 0;
+  let maCount = 0;
+  for (const r of rows) {
+    const actual = r.realized_up;
+    if (actual === 1) upCount++;
+    if ((r.p_up_flat > 0.5) === (actual === 1)) accFlat++;
+    if ((r.p_up_tilted > 0.5) === (actual === 1)) accTilted++;
+    brierFlat += (r.p_up_flat - actual) ** 2;
+    brierTilted += (r.p_up_tilted - actual) ** 2;
+    const maPred = maCrossoverPrediction(r.ts, r.price_at_prediction);
+    if (maPred != null) { maCount++; if (maPred === actual) accMa++; }
+  }
+  const upRate = upCount / n;
+  const naiveBest = Math.max(upRate, 1 - upRate);
+  const maAcc = maCount >= 5 ? accMa / maCount : null;
+
+  return {
+    ok: true, coin, horizon_hours: horizonHours, n_resolved: n,
+    historical_up_rate: Number(upRate.toFixed(3)),
+    accuracy_flat: Number((accFlat / n).toFixed(3)),
+    accuracy_tilted: Number((accTilted / n).toFixed(3)),
+    brier_flat: Number((brierFlat / n).toFixed(3)),
+    brier_tilted: Number((brierTilted / n).toFixed(3)),
+    naive_baseline_accuracy: Number(naiveBest.toFixed(3)),
+    brier_baseline_5050: 0.25,
+    brier_baseline_up_rate: Number((upRate * (1 - upRate)).toFixed(3)),
+    ma_crossover_baseline: maAcc != null ? { n: maCount, accuracy: Number(maAcc.toFixed(3)) } : { n: maCount, note: 'not enough trailing price history yet' },
+    beats_naive_flat: (accFlat / n) > naiveBest,
+    beats_naive_tilted: (accTilted / n) > naiveBest,
+    beats_ma_crossover_flat: maAcc != null ? (accFlat / n) > maAcc : null,
+    beats_ma_crossover_tilted: maAcc != null ? (accTilted / n) > maAcc : null,
+    driver_usage: {
+      agree: rows.filter(r => r.driver_agreement === 'agree').length,
+      disagree: rows.filter(r => r.driver_agreement === 'disagree').length,
+      uncovered: rows.filter(r => r.driver_agreement === 'uncovered').length,
+      no_driver_applied: rows.filter(r => !r.driver_agreement).length,
+    },
+    note: 'beats_naive alone is a low bar (matches this app\'s own established convention elsewhere) — beats_ma_crossover is the more meaningful claim.',
+  };
+}
+
+async function getChallengerRecent(env, limit = 20) {
+  const { results } = await env.DB.prepare(
+    'SELECT * FROM challenger_predictions ORDER BY ts DESC LIMIT ?'
+  ).bind(limit).all();
+  return { ok: true, predictions: results };
+}
+
 async function predictAndLog(env, horizonHours = 24) {
   await logBtcData(env);
   const resolvedCount = await backfillPredictions(env);
@@ -423,6 +646,17 @@ async function predictAndLog(env, horizonHours = 24) {
   const result = await runPrediction(env, horizonHours);
   result.backfilled_this_call = resolvedCount;
   result.gemini_bias_backfilled_this_call = geminiResolvedCount;
+  try {
+    const challengerResolvedCount = await backfillChallengerPredictions(env);
+    const challengerResult = await runChallengerPrediction(env, {
+      coin: 'BTC', horizonHours, priceTable: 'btc_data', priceCol: 'btc_price', priceNow: result.btc_price_now, coreResult: result,
+    });
+    result.challenger = challengerResult;
+    result.challenger_backfilled_this_call = challengerResolvedCount;
+  } catch (e) {
+    // Challenger failing must never break the original model's own cron cycle.
+    result.challenger = { ok: false, error: String(e) };
+  }
   return result;
 }
 
@@ -1414,6 +1648,16 @@ async function linkPredictAndLog(env, horizonHours = 24) {
   const resolvedCount = await backfillLinkPredictions(env);
   const result = await runLinkPrediction(env, horizonHours);
   result.backfilled_this_call = resolvedCount;
+  try {
+    const challengerResolvedCount = await backfillChallengerPredictions(env);
+    const challengerResult = await runChallengerPrediction(env, {
+      coin: 'LINK', horizonHours, priceTable: 'link_data', priceCol: 'link_price', priceNow: result.link_price_now, coreResult: result,
+    });
+    result.challenger = challengerResult;
+    result.challenger_backfilled_this_call = challengerResolvedCount;
+  } catch (e) {
+    result.challenger = { ok: false, error: String(e) };
+  }
   return result;
 }
 
@@ -1656,6 +1900,29 @@ export default {
           status: 500,
           headers: { ...corsHeaders, 'Content-Type': 'application/json' },
         });
+      }
+    }
+
+    // ---- GET /challenger-calibration?coin=BTC|LINK&horizon=12|24 ----
+    if (url.pathname === '/challenger-calibration' && request.method === 'GET') {
+      try {
+        const coin = url.searchParams.get('coin') === 'LINK' ? 'LINK' : 'BTC';
+        const horizon = [12, 24].includes(parseInt(url.searchParams.get('horizon'), 10)) ? parseInt(url.searchParams.get('horizon'), 10) : 24;
+        const result = await getChallengerCalibration(env, coin, horizon);
+        return new Response(JSON.stringify(result), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+      } catch (err) {
+        return new Response(JSON.stringify({ ok: false, error: String(err) }), { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+      }
+    }
+
+    // ---- GET /challenger-recent?limit=20 ----
+    if (url.pathname === '/challenger-recent' && request.method === 'GET') {
+      try {
+        const limit = Math.min(100, parseInt(url.searchParams.get('limit') || '20', 10));
+        const result = await getChallengerRecent(env, limit);
+        return new Response(JSON.stringify(result), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+      } catch (err) {
+        return new Response(JSON.stringify({ ok: false, error: String(err) }), { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
       }
     }
 

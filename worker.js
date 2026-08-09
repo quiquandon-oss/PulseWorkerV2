@@ -78,6 +78,75 @@ function nearestRow(history, targetTs, tolMs = TOL_MS) {
   return best;
 }
 
+// Trend-strength guardrail. MA-slope based (no external deps, Workers-safe).
+// Returns -1 (strong downtrend) to +1 (strong uptrend), 0 = no clear trend.
+function trendStrength(sortedRows, priceField, shortN = 8, longN = 21) {
+  if (sortedRows.length < longN + 1) return 0;
+  const recent = sortedRows.slice(-longN);
+  const avg = (arr) => arr.reduce((a, r) => a + r[priceField], 0) / arr.length;
+  const shortMA = avg(recent.slice(-shortN));
+  const longMA = avg(recent);
+  if (!longMA) return 0;
+  const slope = (shortMA - longMA) / longMA;
+  return Math.max(-1, Math.min(1, slope * 20)); // capped, bounded multiplier not a raw %
+}
+
+// Applies only when a strong trend disagrees with the model's own lean —
+// dampens further (does not flip the call outright, same conservatism as
+// the anomaly shrink it sits alongside).
+function applyTrendGuardrail(pUp, trend) {
+  if (trend == null) return pUp;
+  const disagreesWithUp = pUp < 0.5 && trend > 0.5;
+  const disagreesWithDown = pUp > 0.5 && trend < -0.5;
+  if (disagreesWithUp || disagreesWithDown) {
+    return 0.5 + (pUp - 0.5) * 0.5;
+  }
+  return pUp;
+}
+
+// Decile-bucket empirical recalibration (hand-rolled — no isotonic
+// regression lib available in Workers). Rebuilt periodically from resolved
+// predictions; buckets under 10 samples are dropped as untrustworthy.
+function buildCalibrationCurve(resolvedRows) {
+  const sorted = [...resolvedRows].sort((a, b) => a.p_up - b.p_up);
+  const deciles = [];
+  const bucketSize = Math.ceil(sorted.length / 10);
+  for (let i = 0; i < 10; i++) {
+    const bucket = sorted.slice(i * bucketSize, (i + 1) * bucketSize);
+    if (bucket.length < 10) continue;
+    const midP = bucket.reduce((s, r) => s + r.p_up, 0) / bucket.length;
+    const empiricalUp = bucket.reduce((s, r) => s + r.realized_up, 0) / bucket.length;
+    deciles.push({ decile: i, predicted_p_up_mid: midP, empirical_up_rate: empiricalUp, n_samples: bucket.length });
+  }
+  return deciles;
+}
+
+// Additive, never replaces the raw model output — falls back to rawPUp if
+// no curve exists yet or the nearest bucket is too thin to trust.
+function applyCalibratedProbability(rawPUp, curveRows) {
+  if (!Array.isArray(curveRows) || curveRows.length === 0) return rawPUp;
+  if (typeof rawPUp !== 'number' || rawPUp < 0 || rawPUp > 1) return rawPUp;
+  let closest = curveRows[0], bestDiff = Infinity;
+  for (const row of curveRows) {
+    const diff = Math.abs(row.predicted_p_up_mid - rawPUp);
+    if (diff < bestDiff) { bestDiff = diff; closest = row; }
+  }
+  return closest.n_samples >= 10 ? closest.empirical_up_rate : rawPUp;
+}
+
+// Pulls the most recent computed batch for this coin/horizon. Returns []
+// (not null) when nothing exists yet — applyCalibratedProbability already
+// treats an empty array as "no curve, use raw p_up".
+async function getLatestCalibrationCurve(env, coin, horizonHours) {
+  const { results } = await env.DB.prepare(
+    `SELECT decile, predicted_p_up_mid, empirical_up_rate, n_samples FROM calibration_curve
+     WHERE coin = ? AND horizon_hours = ? AND computed_ts = (
+       SELECT MAX(computed_ts) FROM calibration_curve WHERE coin = ? AND horizon_hours = ?
+     )`
+  ).bind(coin, horizonHours, coin, horizonHours).all();
+  return results || [];
+}
+
 const HISTORY_FRESHNESS_MS = 48 * 60 * 60 * 1000; // beyond this, a "history" match is too stale to trust as real, falls back to imputed
 
 async function runPrediction(env, horizonHours = 24) {
@@ -246,17 +315,29 @@ async function runPrediction(env, horizonHours = 24) {
   const closestDistPercentile = percentileRank(closestDist, historicalClosestDists);
   const isRegimeAnomaly = closestDistPercentile != null && closestDistPercentile >= 0.9;
 
+  // Trend-strength: MA-slope over the same price series already loaded
+  // above (complete, ascending). Guardrail only — never a distance-metric
+  // feature, so K/weight tuning elsewhere is untouched.
+  const trend = trendStrength(complete, 'btc_price');
+
+  // Additive decile recalibration — falls back to raw pUp if no curve
+  // exists yet or the closest bucket is too thin (see applyCalibratedProbability).
+  const curveRows = await getLatestCalibrationCurve(env, 'BTC', horizonHours);
+  const calibratedPUp = applyCalibratedProbability(pUp, curveRows);
+
   const nowTs = Date.now();
   const features = Object.fromEntries(FEATURE_KEYS.map(k => [k, today[k]]));
 
   const insert = await env.DB.prepare(
     `INSERT INTO predictions
      (ts, target_ts, btc_price_at_prediction, p_up, n_analogs, median_analog_return, return_p25, return_p75, features_json,
-      k_used, volatility_percentile, closest_analog_dist, is_regime_anomaly, p_up_experimental, median_return_experimental, horizon_hours)
-     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
+      k_used, volatility_percentile, closest_analog_dist, is_regime_anomaly, p_up_experimental, median_return_experimental, horizon_hours,
+      trend_strength, calibrated_p_up)
+     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
   ).bind(
     nowTs, nowTs + lagMs, today.btc_price, pUp, resolved.length, median, p25, p75, JSON.stringify(features),
-    kAdaptive, volPercentile, closestDist, isRegimeAnomaly ? 1 : 0, pUpExperimental, medianReturnExperimental, horizonHours
+    kAdaptive, volPercentile, closestDist, isRegimeAnomaly ? 1 : 0, pUpExperimental, medianReturnExperimental, horizonHours,
+    trend, calibratedPUp
   ).run();
 
   return {
@@ -266,6 +347,8 @@ async function runPrediction(env, horizonHours = 24) {
     ts: nowTs,
     horizon_hours: horizonHours,
     p_up: Number(pUp.toFixed(3)),
+    calibrated_p_up: Number(calibratedPUp.toFixed(3)),
+    trend_strength: Number(trend.toFixed(3)),
     n_analogs: resolved.length,
     median_analog_return_pct: Number(median.toFixed(2)),
     return_range_pct: [Number(p25.toFixed(2)), Number(p75.toFixed(2))],
@@ -402,6 +485,30 @@ async function getCalibrationHistory(env, horizonHours = 24) {
   return { ok: true, points, naive_baseline_5050: 0.25 };
 }
 
+// Rebuilds the decile calibration curve for one coin/horizon from every
+// currently-resolved prediction, replacing the previous batch for that
+// coin/horizon (old rows kept under their own computed_ts for history,
+// getLatestCalibrationCurve only ever reads the newest batch). Cheap and
+// safe to call manually — cron runs it once daily (see scheduled()).
+async function refreshCalibrationCurve(env, coin, horizonHours) {
+  const table = coin === 'LINK' ? 'link_predictions' : 'predictions';
+  const { results } = await env.DB.prepare(
+    `SELECT p_up, realized_up FROM ${table} WHERE realized_up IS NOT NULL AND horizon_hours = ?`
+  ).bind(horizonHours).all();
+  if (results.length < 20) {
+    return { ok: true, coin, horizon_hours: horizonHours, status: 'insufficient_data', n_resolved: results.length, min_required: 20 };
+  }
+  const curve = buildCalibrationCurve(results);
+  const computedTs = Date.now();
+  for (const row of curve) {
+    await env.DB.prepare(
+      `INSERT INTO calibration_curve (coin, horizon_hours, decile, predicted_p_up_mid, empirical_up_rate, n_samples, computed_ts)
+       VALUES (?,?,?,?,?,?,?)`
+    ).bind(coin, horizonHours, row.decile, row.predicted_p_up_mid, row.empirical_up_rate, row.n_samples, computedTs).run();
+  }
+  return { ok: true, coin, horizon_hours: horizonHours, status: 'ok', n_resolved: results.length, n_buckets: curve.length, computed_ts: computedTs };
+}
+
 //
 // Deliberately separate from the original PulseWorker (sentiment-ff75) so
 // prediction-model experimentation here can never destabilize the working
@@ -482,6 +589,13 @@ async function runChallengerPrediction(env, { coin, horizonHours, priceTable, pr
   }
   pUpFlat = Math.max(0.05, Math.min(0.95, pUpFlat));
 
+  // Trend-strength guardrail: if a strong trend disagrees with pUpFlat's
+  // own lean (in either direction), dampen further. Reuses the core
+  // model's trend_strength (computed once in runPrediction/runLinkPrediction)
+  // rather than recomputing here.
+  pUpFlat = applyTrendGuardrail(pUpFlat, coreResult.trend_strength);
+  pUpFlat = Math.max(0.05, Math.min(0.95, pUpFlat));
+
   // Tilted variant: identical to flat UNLESS today is anomalous AND a
   // fresh (<=30h, same convention as V1's srcFoufi) Foufi digest names a
   // driver this Worker has a mapped lean for (macro/tradfi only - micro
@@ -529,18 +643,18 @@ async function runChallengerPrediction(env, { coin, horizonHours, priceTable, pr
   const insert = await env.DB.prepare(
     `INSERT INTO challenger_predictions
      (coin, ts, target_ts, horizon_hours, price_at_prediction, is_regime_anomaly, trailing_return_pct,
-      p_up_flat, p_up_tilted, driver_used, driver_agreement, foufi_digest_video_id)
-     VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`
+      p_up_flat, p_up_tilted, driver_used, driver_agreement, foufi_digest_video_id, trend_strength)
+     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`
   ).bind(
     coin, nowTs, nowTs + lagMs, horizonHours, priceNow, isAnomalous ? 1 : 0, trailingReturnPct,
-    pUpFlat, pUpTilted, driverUsed, driverAgreement, foufiVideoId
+    pUpFlat, pUpTilted, driverUsed, driverAgreement, foufiVideoId, coreResult.trend_strength ?? null
   ).run();
 
   return {
     ok: true, status: 'ok', id: insert.meta.last_row_id, coin, horizon_hours: horizonHours,
     is_regime_anomaly: isAnomalous, trailing_return_pct: trailingReturnPct != null ? Number(trailingReturnPct.toFixed(2)) : null,
     p_up_flat: Number(pUpFlat.toFixed(3)), p_up_tilted: Number(pUpTilted.toFixed(3)),
-    driver_used: driverUsed, driver_agreement: driverAgreement,
+    driver_used: driverUsed, driver_agreement: driverAgreement, trend_strength: coreResult.trend_strength ?? null,
   };
 }
 
@@ -1595,24 +1709,31 @@ async function runLinkPrediction(env, horizonHours = 24) {
   const closestDistPercentile = percentileRank(closestDist, historicalClosestDists);
   const isRegimeAnomaly = closestDistPercentile != null && closestDistPercentile >= 0.9;
 
+  const trend = trendStrength(complete, 'link_price');
+  const curveRows = await getLatestCalibrationCurve(env, 'LINK', horizonHours);
+  const calibratedPUp = applyCalibratedProbability(pUp, curveRows);
+
   const nowTs = Date.now();
   const features = Object.fromEntries(LINK_FEATURE_KEYS.map(k => [k, today[k]]));
 
   const insert = await env.DB.prepare(
     `INSERT INTO link_predictions
      (ts, target_ts, link_price_at_prediction, p_up, n_analogs, median_analog_return, return_p25, return_p75, features_json, horizon_hours,
-      k_used, volatility_percentile, closest_analog_dist, is_regime_anomaly, p_up_experimental, median_return_experimental)
-     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
+      k_used, volatility_percentile, closest_analog_dist, is_regime_anomaly, p_up_experimental, median_return_experimental,
+      trend_strength, calibrated_p_up)
+     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
   ).bind(
     nowTs, nowTs + lagMs, today.link_price, pUp, resolved.length, median, p25, p75, JSON.stringify(features), horizonHours,
-    kAdaptive, volPercentile, closestDist, isRegimeAnomaly ? 1 : 0, pUpExperimental, medianReturnExperimental
+    kAdaptive, volPercentile, closestDist, isRegimeAnomaly ? 1 : 0, pUpExperimental, medianReturnExperimental,
+    trend, calibratedPUp
   ).run();
 
   const nImputedInNeighbors = neighbors.filter(n => n.row.context_imputed).length;
 
   return {
     ok: true, status: 'ok', prediction_id: insert.meta.last_row_id, ts: nowTs, horizon_hours: horizonHours,
-    p_up: Number(pUp.toFixed(3)), n_analogs: resolved.length,
+    p_up: Number(pUp.toFixed(3)), calibrated_p_up: Number(calibratedPUp.toFixed(3)), trend_strength: Number(trend.toFixed(3)),
+    n_analogs: resolved.length,
     median_analog_return_pct: Number(median.toFixed(2)),
     return_range_pct: [Number(p25.toFixed(2)), Number(p75.toFixed(2))],
     link_price_now: today.link_price, features,
@@ -1943,6 +2064,30 @@ export default {
       }
     }
 
+    // ---- GET /recalibrate-refresh — manual trigger, same logic the daily cron runs ----
+    if (url.pathname === '/recalibrate-refresh' && request.method === 'GET') {
+      try {
+        const coin = url.searchParams.get('coin') === 'LINK' ? 'LINK' : 'BTC';
+        const horizon = [12, 24].includes(parseInt(url.searchParams.get('horizon'), 10)) ? parseInt(url.searchParams.get('horizon'), 10) : 24;
+        const result = await refreshCalibrationCurve(env, coin, horizon);
+        return new Response(JSON.stringify(result), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+      } catch (err) {
+        return new Response(JSON.stringify({ ok: false, error: String(err) }), { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+      }
+    }
+
+    // ---- GET /calibration-curve — inspect the current decile mapping ----
+    if (url.pathname === '/calibration-curve' && request.method === 'GET') {
+      try {
+        const coin = url.searchParams.get('coin') === 'LINK' ? 'LINK' : 'BTC';
+        const horizon = [12, 24].includes(parseInt(url.searchParams.get('horizon'), 10)) ? parseInt(url.searchParams.get('horizon'), 10) : 24;
+        const curve = await getLatestCalibrationCurve(env, coin, horizon);
+        return new Response(JSON.stringify({ ok: true, coin, horizon_hours: horizon, curve }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+      } catch (err) {
+        return new Response(JSON.stringify({ ok: false, error: String(err) }), { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+      }
+    }
+
     // ---- GET /gemini-analysis — latest N daily analyses (default 10) ----
     if (url.pathname === '/gemini-analysis' && request.method === 'GET') {
       try {
@@ -2134,6 +2279,13 @@ export default {
     if (event.cron === '0 7 * * *') {
       ctx.waitUntil(runGeminiDailyAnalysis(env).catch(err => console.error('Daily Gemini analysis failed:', err)));
       ctx.waitUntil(runLinkGeminiAnalysis(env).catch(err => console.error('Daily LINK Gemini analysis failed:', err)));
+      // Recalibration is cheap and only needs daily freshness — resolved
+      // counts move by at most a handful of predictions per day.
+      for (const coin of ['BTC', 'LINK']) {
+        for (const h of [12, 24]) {
+          ctx.waitUntil(refreshCalibrationCurve(env, coin, h).catch(err => console.error(`Calibration refresh ${coin}/${h}h failed:`, err)));
+        }
+      }
     } else {
       // Both horizons, both coins, every 3h tick. logBtcData/logLinkData and
       // the backfill steps inside predictAndLog/linkPredictAndLog are

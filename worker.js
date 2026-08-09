@@ -753,6 +753,36 @@ async function getChallengerCalibration(env, coin, horizonHours) {
   };
 }
 
+// Expanding-window accuracy + Brier over time for Challenger's flat/tilted
+// variants — same "not a single cherry-pickable snapshot" principle as the
+// core model's getCalibrationHistory, applied here for the Lab tab's
+// precision-over-time graph. Unlike the core model (split across
+// predictions/link_predictions tables), challenger_predictions already
+// has a coin column, so one function covers both coins.
+async function getChallengerCalibrationHistory(env, coin, horizonHours) {
+  const { results } = await env.DB.prepare(
+    'SELECT resolved_ts, p_up_flat, p_up_tilted, realized_up FROM challenger_predictions WHERE coin=? AND horizon_hours=? AND resolved_ts IS NOT NULL ORDER BY resolved_ts ASC'
+  ).bind(coin, horizonHours).all();
+
+  let correctFlat = 0, correctTilted = 0, sumBrierFlat = 0, sumBrierTilted = 0, n = 0;
+  const points = results.map(r => {
+    n++;
+    if ((r.p_up_flat > 0.5) === (r.realized_up === 1)) correctFlat++;
+    if ((r.p_up_tilted > 0.5) === (r.realized_up === 1)) correctTilted++;
+    sumBrierFlat += (r.p_up_flat - r.realized_up) ** 2;
+    sumBrierTilted += (r.p_up_tilted - r.realized_up) ** 2;
+    return {
+      ts: r.resolved_ts,
+      n,
+      accuracy_flat: Number((correctFlat / n).toFixed(3)),
+      accuracy_tilted: Number((correctTilted / n).toFixed(3)),
+      brier_flat: Number((sumBrierFlat / n).toFixed(4)),
+      brier_tilted: Number((sumBrierTilted / n).toFixed(4)),
+    };
+  });
+  return { ok: true, coin, horizon_hours: horizonHours, points };
+}
+
 async function getChallengerRecent(env, limit = 20) {
   const { results } = await env.DB.prepare(
     'SELECT * FROM challenger_predictions ORDER BY ts DESC LIMIT ?'
@@ -2048,6 +2078,18 @@ export default {
       try {
         const limit = Math.min(100, parseInt(url.searchParams.get('limit') || '20', 10));
         const result = await getChallengerRecent(env, limit);
+        return new Response(JSON.stringify(result), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+      } catch (err) {
+        return new Response(JSON.stringify({ ok: false, error: String(err) }), { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+      }
+    }
+
+    // ---- GET /challenger-calibration-history?coin=BTC|LINK&horizon=12|24 ----
+    if (url.pathname === '/challenger-calibration-history' && request.method === 'GET') {
+      try {
+        const coin = url.searchParams.get('coin') === 'LINK' ? 'LINK' : 'BTC';
+        const horizon = [12, 24].includes(parseInt(url.searchParams.get('horizon'), 10)) ? parseInt(url.searchParams.get('horizon'), 10) : 24;
+        const result = await getChallengerCalibrationHistory(env, coin, horizon);
         return new Response(JSON.stringify(result), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
       } catch (err) {
         return new Response(JSON.stringify({ ok: false, error: String(err) }), { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });

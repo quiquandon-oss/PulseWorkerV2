@@ -460,16 +460,23 @@ async function runChallengerPrediction(env, { coin, horizonHours, priceTable, pr
     ? (priceNow - trailingRow.price) / trailingRow.price * 100
     : null;
 
-  // Flat variant: pure regime gate. Anomalous -> trend-persistence read
-  // (simple, transparent, capped mapping: every 1% of trailing return
-  // shifts p_up 5 points from 0.5, capped at +-35 points so it's never
-  // fully certain). Not anomalous -> defer to the original model's own
-  // p_up, on the theory that when today's setup DOES resemble history
-  // well, the k-NN's own logic is the more trustworthy read.
+  // Flat variant: pure regime gate. Anomalous -> shrink the core k-NN's
+  // own p_up toward 0.5 (same direction, less confidence) instead of
+  // betting on trailing-return continuation. Calibration check (2026-08)
+  // showed the old trend-persistence bet was backwards: of 29 resolved
+  // BTC anomaly cases, 18 had a negative trailing return, and all 18
+  // resolved up -- dips inside an anomaly got bought back within the
+  // horizon essentially every time in this dataset. Flipping the sign
+  // would just overfit to that same bull-market pattern. "Anomalous"
+  // only means no good historical analog exists; the honest response to
+  // that is less confidence, not a punchier directional call either way.
+  // Not anomalous -> defer to the original model's own p_up, on the
+  // theory that when today's setup DOES resemble history well, the
+  // k-NN's own logic is the more trustworthy read.
+  const ANOMALY_SHRINK = 0.5; // halve the distance from 0.5 when no good analog exists
   let pUpFlat;
-  if (isAnomalous && trailingReturnPct != null) {
-    const shift = Math.sign(trailingReturnPct) * Math.min(0.35, Math.abs(trailingReturnPct) * 0.05);
-    pUpFlat = 0.5 + shift;
+  if (isAnomalous) {
+    pUpFlat = 0.5 + (coreResult.p_up - 0.5) * ANOMALY_SHRINK;
   } else {
     pUpFlat = coreResult.p_up;
   }

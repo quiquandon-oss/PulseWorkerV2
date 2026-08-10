@@ -466,20 +466,29 @@ async function getCalibrationHistory(env, horizonHours = 24) {
     'SELECT resolved_ts, p_up, p_up_experimental, realized_up FROM predictions WHERE realized_up IS NOT NULL AND horizon_hours = ? ORDER BY resolved_ts ASC'
   ).bind(horizonHours).all();
 
-  let sumOrig = 0, nOrig = 0, sumExp = 0, nExp = 0;
+  // Accuracy tracking added alongside the existing Brier tracking (not a
+  // replacement) — for the Lab tab's combined multi-model history chart,
+  // which needs the same metric (accuracy%) across k-NN and Challenger to
+  // be comparable on one axis. Brier stays as the primary calibration
+  // metric everywhere else that already reads this endpoint.
+  let sumOrig = 0, nOrig = 0, sumExp = 0, nExp = 0, correctOrig = 0, correctExp = 0;
   const points = results.map(r => {
     sumOrig += (r.p_up - r.realized_up) ** 2;
     nOrig++;
+    if ((r.p_up > 0.5) === (r.realized_up === 1)) correctOrig++;
     if (r.p_up_experimental != null) {
       sumExp += (r.p_up_experimental - r.realized_up) ** 2;
       nExp++;
+      if ((r.p_up_experimental > 0.5) === (r.realized_up === 1)) correctExp++;
     }
     return {
       ts: r.resolved_ts,
       brier_original: Number((sumOrig / nOrig).toFixed(4)),
       n_original: nOrig,
+      accuracy_original: Number((correctOrig / nOrig).toFixed(3)),
       brier_experimental: nExp > 0 ? Number((sumExp / nExp).toFixed(4)) : null,
       n_experimental: nExp,
+      accuracy_experimental: nExp > 0 ? Number((correctExp / nExp).toFixed(3)) : null,
     };
   });
   return { ok: true, points, naive_baseline_5050: 0.25 };
@@ -1876,20 +1885,24 @@ async function getLinkCalibrationHistory(env, horizonHours = 24) {
   const { results } = await env.DB.prepare(
     'SELECT resolved_ts, p_up, p_up_experimental, realized_up FROM link_predictions WHERE realized_up IS NOT NULL AND horizon_hours = ? ORDER BY resolved_ts ASC'
   ).bind(horizonHours).all();
-  let sumOrig = 0, nOrig = 0, sumExp = 0, nExp = 0;
+  let sumOrig = 0, nOrig = 0, sumExp = 0, nExp = 0, correctOrig = 0, correctExp = 0;
   const points = results.map(r => {
     sumOrig += (r.p_up - r.realized_up) ** 2;
     nOrig++;
+    if ((r.p_up > 0.5) === (r.realized_up === 1)) correctOrig++;
     if (r.p_up_experimental != null) {
       sumExp += (r.p_up_experimental - r.realized_up) ** 2;
       nExp++;
+      if ((r.p_up_experimental > 0.5) === (r.realized_up === 1)) correctExp++;
     }
     return {
       ts: r.resolved_ts,
       brier_original: Number((sumOrig / nOrig).toFixed(4)),
       n_original: nOrig,
+      accuracy_original: Number((correctOrig / nOrig).toFixed(3)),
       brier_experimental: nExp > 0 ? Number((sumExp / nExp).toFixed(4)) : null,
       n_experimental: nExp,
+      accuracy_experimental: nExp > 0 ? Number((correctExp / nExp).toFixed(3)) : null,
     };
   });
   return { ok: true, points, naive_baseline_5050: 0.25 };

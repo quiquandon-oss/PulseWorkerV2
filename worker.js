@@ -147,6 +147,45 @@ async function getLatestCalibrationCurve(env, coin, horizonHours) {
   return results || [];
 }
 
+// Challenger's own version of the above two functions -- direct build for
+// the stated goal: the final model must adjust based on accumulated
+// experience, not stay fixed on constants chosen once from a single past
+// analysis. Every number in runChallengerPrediction (the 0.5 anomaly-
+// shrink, the trend-guardrail threshold, the +-0.10 tilt) was exactly that
+// kind of frozen, one-time-chosen constant before this. This doesn't
+// replace those constants -- it adds a genuinely adaptive layer on top,
+// tracked as its own new variant (see calibrated_p_up_flat below), proven
+// or not over real time, never silently promoted to "the" Challenger
+// prediction the way the core model's calibrated_p_up was left unproven
+// and unused for months.
+async function getLatestChallengerCalibrationCurve(env, coin, horizonHours) {
+  const { results } = await env.DB.prepare(
+    `SELECT decile, predicted_p_up_mid, empirical_up_rate, n_samples FROM challenger_calibration_curve
+     WHERE coin = ? AND horizon_hours = ? AND computed_ts = (
+       SELECT MAX(computed_ts) FROM challenger_calibration_curve WHERE coin = ? AND horizon_hours = ?
+     )`
+  ).bind(coin, horizonHours, coin, horizonHours).all();
+  return results || [];
+}
+
+async function refreshChallengerCalibrationCurve(env, coin, horizonHours) {
+  const { results } = await env.DB.prepare(
+    `SELECT p_up_flat as p_up, realized_up FROM challenger_predictions WHERE coin=? AND horizon_hours=? AND realized_up IS NOT NULL`
+  ).bind(coin, horizonHours).all();
+  if (results.length < 20) {
+    return { ok: true, coin, horizon_hours: horizonHours, status: 'insufficient_data', n_resolved: results.length, min_required: 20 };
+  }
+  const curve = buildCalibrationCurve(results); // same function, same deciles/threshold as the core model's curve
+  const computedTs = Date.now();
+  for (const row of curve) {
+    await env.DB.prepare(
+      `INSERT INTO challenger_calibration_curve (coin, horizon_hours, decile, predicted_p_up_mid, empirical_up_rate, n_samples, computed_ts)
+       VALUES (?,?,?,?,?,?,?)`
+    ).bind(coin, horizonHours, row.decile, row.predicted_p_up_mid, row.empirical_up_rate, row.n_samples, computedTs).run();
+  }
+  return { ok: true, coin, horizon_hours: horizonHours, status: 'ok', n_resolved: results.length, n_buckets: curve.length, computed_ts: computedTs };
+}
+
 const HISTORY_FRESHNESS_MS = 48 * 60 * 60 * 1000; // beyond this, a "history" match is too stale to trust as real, falls back to imputed
 
 async function runPrediction(env, horizonHours = 24) {
@@ -463,7 +502,7 @@ async function getCalibration(env, horizonHours = 24) {
 // of being judged on a single cherry-pickable snapshot.
 async function getCalibrationHistory(env, horizonHours = 24) {
   const { results } = await env.DB.prepare(
-    'SELECT resolved_ts, p_up, p_up_experimental, realized_up FROM predictions WHERE realized_up IS NOT NULL AND horizon_hours = ? ORDER BY resolved_ts ASC'
+    'SELECT resolved_ts, p_up, p_up_experimental, calibrated_p_up, realized_up FROM predictions WHERE realized_up IS NOT NULL AND horizon_hours = ? ORDER BY resolved_ts ASC'
   ).bind(horizonHours).all();
 
   // Accuracy tracking added alongside the existing Brier tracking (not a
@@ -471,7 +510,15 @@ async function getCalibrationHistory(env, horizonHours = 24) {
   // which needs the same metric (accuracy%) across k-NN and Challenger to
   // be comparable on one axis. Brier stays as the primary calibration
   // metric everywhere else that already reads this endpoint.
-  let sumOrig = 0, nOrig = 0, sumExp = 0, nExp = 0, correctOrig = 0, correctExp = 0;
+  //
+  // calibrated_p_up scored here for the first time — it's been computed
+  // and stored on every prediction for a while, but nothing ever actually
+  // tracked whether it performs any differently from the raw p_up it's
+  // derived from. Direct build for the "must adjust based on accumulated
+  // experience, and prove it before it's trusted" goal — this is the
+  // proving, not an assumption that it already helps.
+  let sumOrig = 0, nOrig = 0, sumExp = 0, nExp = 0, sumCal = 0, nCal = 0;
+  let correctOrig = 0, correctExp = 0, correctCal = 0;
   const points = results.map(r => {
     sumOrig += (r.p_up - r.realized_up) ** 2;
     nOrig++;
@@ -481,6 +528,11 @@ async function getCalibrationHistory(env, horizonHours = 24) {
       nExp++;
       if ((r.p_up_experimental > 0.5) === (r.realized_up === 1)) correctExp++;
     }
+    if (r.calibrated_p_up != null) {
+      sumCal += (r.calibrated_p_up - r.realized_up) ** 2;
+      nCal++;
+      if ((r.calibrated_p_up > 0.5) === (r.realized_up === 1)) correctCal++;
+    }
     return {
       ts: r.resolved_ts,
       brier_original: Number((sumOrig / nOrig).toFixed(4)),
@@ -489,6 +541,9 @@ async function getCalibrationHistory(env, horizonHours = 24) {
       brier_experimental: nExp > 0 ? Number((sumExp / nExp).toFixed(4)) : null,
       n_experimental: nExp,
       accuracy_experimental: nExp > 0 ? Number((correctExp / nExp).toFixed(3)) : null,
+      brier_calibrated: nCal > 0 ? Number((sumCal / nCal).toFixed(4)) : null,
+      n_calibrated: nCal,
+      accuracy_calibrated: nCal > 0 ? Number((correctCal / nCal).toFixed(3)) : null,
     };
   });
   return { ok: true, points, naive_baseline_5050: 0.25 };
@@ -605,6 +660,17 @@ async function runChallengerPrediction(env, { coin, horizonHours, priceTable, pr
   pUpFlat = applyTrendGuardrail(pUpFlat, coreResult.trend_strength);
   pUpFlat = Math.max(0.05, Math.min(0.95, pUpFlat));
 
+  // Genuinely adaptive layer: decile-bucket recalibration built from
+  // CHALLENGER'S OWN resolved track record (not the core model's), same
+  // technique already proven safe for the core model (buildCalibrationCurve/
+  // applyCalibratedProbability, unchanged, reused as-is). Additive -- never
+  // replaces pUpFlat, which stays exactly what it's always been. Tracked as
+  // its own separate, scored variant (see getChallengerCalibrationHistory)
+  // so whether this actually helps gets decided by real accumulated
+  // evidence, not assumed on the way in.
+  const challengerCurveRows = await getLatestChallengerCalibrationCurve(env, coin, horizonHours);
+  const calibratedPUpFlat = applyCalibratedProbability(pUpFlat, challengerCurveRows);
+
   // Tilted variant: identical to flat UNLESS today is anomalous AND a
   // fresh (<=30h, same convention as V1's srcFoufi) Foufi digest names a
   // driver this Worker has a mapped lean for (macro/tradfi only - micro
@@ -652,17 +718,19 @@ async function runChallengerPrediction(env, { coin, horizonHours, priceTable, pr
   const insert = await env.DB.prepare(
     `INSERT INTO challenger_predictions
      (coin, ts, target_ts, horizon_hours, price_at_prediction, is_regime_anomaly, trailing_return_pct,
-      p_up_flat, p_up_tilted, driver_used, driver_agreement, foufi_digest_video_id, trend_strength)
-     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`
+      p_up_flat, p_up_tilted, driver_used, driver_agreement, foufi_digest_video_id, trend_strength, calibrated_p_up_flat)
+     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
   ).bind(
     coin, nowTs, nowTs + lagMs, horizonHours, priceNow, isAnomalous ? 1 : 0, trailingReturnPct,
-    pUpFlat, pUpTilted, driverUsed, driverAgreement, foufiVideoId, coreResult.trend_strength ?? null
+    pUpFlat, pUpTilted, driverUsed, driverAgreement, foufiVideoId, coreResult.trend_strength ?? null,
+    Number(calibratedPUpFlat.toFixed(3))
   ).run();
 
   return {
     ok: true, status: 'ok', id: insert.meta.last_row_id, coin, horizon_hours: horizonHours,
     is_regime_anomaly: isAnomalous, trailing_return_pct: trailingReturnPct != null ? Number(trailingReturnPct.toFixed(2)) : null,
     p_up_flat: Number(pUpFlat.toFixed(3)), p_up_tilted: Number(pUpTilted.toFixed(3)),
+    calibrated_p_up_flat: Number(calibratedPUpFlat.toFixed(3)),
     driver_used: driverUsed, driver_agreement: driverAgreement, trend_strength: coreResult.trend_strength ?? null,
   };
 }
@@ -770,17 +838,18 @@ async function getChallengerCalibration(env, coin, horizonHours) {
 // has a coin column, so one function covers both coins.
 async function getChallengerCalibrationHistory(env, coin, horizonHours) {
   const { results } = await env.DB.prepare(
-    'SELECT resolved_ts, p_up_flat, p_up_tilted, realized_up FROM challenger_predictions WHERE coin=? AND horizon_hours=? AND resolved_ts IS NOT NULL ORDER BY resolved_ts ASC'
+    'SELECT resolved_ts, p_up_flat, p_up_tilted, calibrated_p_up_flat, realized_up FROM challenger_predictions WHERE coin=? AND horizon_hours=? AND resolved_ts IS NOT NULL ORDER BY resolved_ts ASC'
   ).bind(coin, horizonHours).all();
 
-  let correctFlat = 0, correctTilted = 0, sumBrierFlat = 0, sumBrierTilted = 0, n = 0;
+  let correctFlat = 0, correctTilted = 0, correctCal = 0, n = 0, nCal = 0;
+  let sumBrierFlat = 0, sumBrierTilted = 0, sumBrierCal = 0;
   const points = results.map(r => {
     n++;
     if ((r.p_up_flat > 0.5) === (r.realized_up === 1)) correctFlat++;
     if ((r.p_up_tilted > 0.5) === (r.realized_up === 1)) correctTilted++;
     sumBrierFlat += (r.p_up_flat - r.realized_up) ** 2;
     sumBrierTilted += (r.p_up_tilted - r.realized_up) ** 2;
-    return {
+    const point = {
       ts: r.resolved_ts,
       n,
       accuracy_flat: Number((correctFlat / n).toFixed(3)),
@@ -788,6 +857,24 @@ async function getChallengerCalibrationHistory(env, coin, horizonHours) {
       brier_flat: Number((sumBrierFlat / n).toFixed(4)),
       brier_tilted: Number((sumBrierTilted / n).toFixed(4)),
     };
+    // Calibrated-flat scored here for the first time — genuinely new
+    // variant, not previously computed at all for Challenger. n_calibrated
+    // lags n (the curve needs 20+ resolved rows before it exists, see
+    // refreshChallengerCalibrationCurve) — early points will correctly show
+    // null rather than a misleading number.
+    if (r.calibrated_p_up_flat != null) {
+      nCal++;
+      if ((r.calibrated_p_up_flat > 0.5) === (r.realized_up === 1)) correctCal++;
+      sumBrierCal += (r.calibrated_p_up_flat - r.realized_up) ** 2;
+      point.accuracy_calibrated_flat = Number((correctCal / nCal).toFixed(3));
+      point.brier_calibrated_flat = Number((sumBrierCal / nCal).toFixed(4));
+      point.n_calibrated = nCal;
+    } else {
+      point.accuracy_calibrated_flat = null;
+      point.brier_calibrated_flat = null;
+      point.n_calibrated = nCal;
+    }
+    return point;
   });
   return { ok: true, coin, horizon_hours: horizonHours, points };
 }
@@ -1883,9 +1970,10 @@ async function getLinkCalibration(env, horizonHours = 24) {
 // idea as BTC's version, now with a real second series to compare.
 async function getLinkCalibrationHistory(env, horizonHours = 24) {
   const { results } = await env.DB.prepare(
-    'SELECT resolved_ts, p_up, p_up_experimental, realized_up FROM link_predictions WHERE realized_up IS NOT NULL AND horizon_hours = ? ORDER BY resolved_ts ASC'
+    'SELECT resolved_ts, p_up, p_up_experimental, calibrated_p_up, realized_up FROM link_predictions WHERE realized_up IS NOT NULL AND horizon_hours = ? ORDER BY resolved_ts ASC'
   ).bind(horizonHours).all();
-  let sumOrig = 0, nOrig = 0, sumExp = 0, nExp = 0, correctOrig = 0, correctExp = 0;
+  let sumOrig = 0, nOrig = 0, sumExp = 0, nExp = 0, sumCal = 0, nCal = 0;
+  let correctOrig = 0, correctExp = 0, correctCal = 0;
   const points = results.map(r => {
     sumOrig += (r.p_up - r.realized_up) ** 2;
     nOrig++;
@@ -1895,6 +1983,11 @@ async function getLinkCalibrationHistory(env, horizonHours = 24) {
       nExp++;
       if ((r.p_up_experimental > 0.5) === (r.realized_up === 1)) correctExp++;
     }
+    if (r.calibrated_p_up != null) {
+      sumCal += (r.calibrated_p_up - r.realized_up) ** 2;
+      nCal++;
+      if ((r.calibrated_p_up > 0.5) === (r.realized_up === 1)) correctCal++;
+    }
     return {
       ts: r.resolved_ts,
       brier_original: Number((sumOrig / nOrig).toFixed(4)),
@@ -1903,6 +1996,9 @@ async function getLinkCalibrationHistory(env, horizonHours = 24) {
       brier_experimental: nExp > 0 ? Number((sumExp / nExp).toFixed(4)) : null,
       n_experimental: nExp,
       accuracy_experimental: nExp > 0 ? Number((correctExp / nExp).toFixed(3)) : null,
+      brier_calibrated: nCal > 0 ? Number((sumCal / nCal).toFixed(4)) : null,
+      n_calibrated: nCal,
+      accuracy_calibrated: nCal > 0 ? Number((correctCal / nCal).toFixed(3)) : null,
     };
   });
   return { ok: true, points, naive_baseline_5050: 0.25 };
@@ -2339,6 +2435,7 @@ export default {
       for (const coin of ['BTC', 'LINK']) {
         for (const h of [12, 24]) {
           ctx.waitUntil(refreshCalibrationCurve(env, coin, h).catch(err => console.error(`Calibration refresh ${coin}/${h}h failed:`, err)));
+          ctx.waitUntil(refreshChallengerCalibrationCurve(env, coin, h).catch(err => console.error(`Challenger calibration refresh ${coin}/${h}h failed:`, err)));
         }
       }
     } else {

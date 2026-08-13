@@ -1,0 +1,12 @@
+{
+  "name": "pulseworkerv2-tests",
+  "private": true,
+  "description": "Test suite only — worker.js itself is deployed as-is via wrangler-action, unaffected by anything here.",
+  "type": "module",
+  "scripts": {
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "vitest": "^2.1.0"
+  }
+}

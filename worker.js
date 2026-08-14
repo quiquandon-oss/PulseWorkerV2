@@ -2227,6 +2227,21 @@ export default {
       }
     }
 
+    // ---- GET /recalibrate-refresh-challenger?coin=X&horizon=Y — manual
+    // trigger for Challenger's own calibration curve, same purpose as the
+    // core model's version above: force a rebuild now rather than waiting
+    // for the next 07:00 UTC daily cron tick.
+    if (url.pathname === '/recalibrate-refresh-challenger' && request.method === 'GET') {
+      try {
+        const coin = url.searchParams.get('coin') === 'LINK' ? 'LINK' : 'BTC';
+        const horizon = [12, 24].includes(parseInt(url.searchParams.get('horizon'), 10)) ? parseInt(url.searchParams.get('horizon'), 10) : 24;
+        const result = await refreshChallengerCalibrationCurve(env, coin, horizon);
+        return new Response(JSON.stringify(result), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+      } catch (err) {
+        return new Response(JSON.stringify({ ok: false, error: String(err) }), { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+      }
+    }
+
     // ---- GET /calibration-curve — inspect the current decile mapping ----
     if (url.pathname === '/calibration-curve' && request.method === 'GET') {
       try {

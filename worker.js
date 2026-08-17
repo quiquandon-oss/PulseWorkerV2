@@ -408,6 +408,178 @@ async function runPrediction(env, horizonHours = 24) {
   };
 }
 
+// Self-computed regime signal for ETH, purely from ETH's own price series —
+// deliberately NOT borrowed from another asset. Direct response to what was
+// found investigating LINK: its model draws 2 of its 3 features
+// (btc_regime_mag AND sentiment_score) from BTC's own data, only
+// technical_score is genuinely LINK's. That's a real, confirmed design
+// smell, not a hypothesis — ETH's model is built to not repeat it, even
+// though that means a narrower feature set than BTC (4 features, itself
+// partly enriched from V1's BTC-centric history table) or LINK (3, mostly
+// borrowed). Same short-MA vs long-MA deviation technique already proven
+// in trendStrength, but uncapped here since it's a distance-metric input
+// (z-score normalized downstream) rather than a bounded guardrail multiplier.
+function computeEthRegimeMag(sortedRows, endIdx, shortN = 8, longN = 21) {
+  if (endIdx + 1 < longN) return null;
+  const recent = sortedRows.slice(endIdx + 1 - longN, endIdx + 1);
+  const avg = (arr) => arr.reduce((a, r) => a + r.eth_price, 0) / arr.length;
+  const shortMA = avg(recent.slice(-shortN));
+  const longMA = avg(recent);
+  if (!longMA) return null;
+  return (shortMA - longMA) / longMA * 100;
+}
+
+const ETH_FEATURE_KEYS = ['technical_score', 'eth_regime_mag'];
+const ETH_MIN_COMPLETE_ROWS = 30;
+const ETH_MIN_RESOLVED_ANALOGS = 5;
+
+async function runEthPrediction(env, horizonHours = 24) {
+  const lagMs = horizonHours * 60 * 60 * 1000;
+  const tolMs = lagMs * 0.2;
+
+  const { results: ethRows } = await env.DB.prepare(
+    'SELECT ts, eth_price, technical_score FROM eth_data ORDER BY ts ASC'
+  ).all();
+  if (ethRows.length < ETH_MIN_COMPLETE_ROWS) {
+    return { ok: true, status: 'insufficient_data', n_available: ethRows.length, min_required: ETH_MIN_COMPLETE_ROWS };
+  }
+
+  const complete = ethRows
+    .map((r, i) => ({
+      ts: r.ts, eth_price: r.eth_price, technical_score: r.technical_score,
+      eth_regime_mag: computeEthRegimeMag(ethRows, i),
+    }))
+    .filter(r => r.technical_score != null && r.eth_regime_mag != null);
+  if (complete.length < ETH_MIN_COMPLETE_ROWS) {
+    return { ok: true, status: 'insufficient_data', n_available: complete.length, min_required: ETH_MIN_COMPLETE_ROWS };
+  }
+
+  const stats = {};
+  for (const k of ETH_FEATURE_KEYS) stats[k] = meanStd(complete.map(r => r[k]));
+
+  const today = complete[complete.length - 1];
+  const candidates = complete.slice(0, -1).filter(r => r.ts <= today.ts - (lagMs + tolMs));
+
+  const distances = candidates.map(r => {
+    let d = 0;
+    for (const k of ETH_FEATURE_KEYS) {
+      const z1 = (today[k] - stats[k].mean) / stats[k].std;
+      const z2 = (r[k] - stats[k].mean) / stats[k].std;
+      d += (z1 - z2) ** 2;
+    }
+    return { row: r, dist: Math.sqrt(d) };
+  }).sort((a, b) => a.dist - b.dist);
+
+  const K = Math.min(15, Math.max(5, Math.floor(candidates.length / 3)));
+  const neighbors = distances.slice(0, K);
+
+  const resolved = neighbors
+    .map(n => {
+      const fwd = nearestRow(ethRows, n.row.ts + lagMs, tolMs);
+      if (!fwd) return null;
+      return { analog_ts: n.row.ts, dist: n.dist, return_pct: (fwd.eth_price - n.row.eth_price) / n.row.eth_price * 100 };
+    })
+    .filter(Boolean);
+
+  if (resolved.length < ETH_MIN_RESOLVED_ANALOGS) {
+    return { ok: true, status: 'insufficient_resolved_analogs', n_neighbors: neighbors.length, n_resolved: resolved.length, min_required: ETH_MIN_RESOLVED_ANALOGS };
+  }
+
+  const returns = resolved.map(r => r.return_pct).sort((a, b) => a - b);
+  const nUp = returns.filter(r => r > 0).length;
+  const pUp = nUp / returns.length;
+  const pct = (p) => returns[Math.min(returns.length - 1, Math.floor(returns.length * p))];
+  const median = pct(0.5);
+  const p25 = pct(0.25);
+  const p75 = pct(0.75);
+
+  // Adaptive K + distance-weighted variant, same technique as BTC/LINK,
+  // logged alongside the headline number, not replacing it.
+  const historicalVol = candidates.map((_, i) => trailingVolatility(candidates, i, 14, 'eth_price'));
+  const todayVol = trailingVolatility(complete, complete.length - 1, 14, 'eth_price');
+  const volPercentile = todayVol != null ? percentileRank(todayVol, historicalVol) : null;
+  let kAdaptive = K;
+  if (volPercentile != null) {
+    if (volPercentile >= 0.66) kAdaptive = Math.max(5, Math.floor(K * 0.6));
+    else if (volPercentile <= 0.33) kAdaptive = Math.min(candidates.length, Math.floor(K * 1.4));
+  }
+  const neighborsAdaptive = distances.slice(0, kAdaptive);
+  const resolvedAdaptive = neighborsAdaptive
+    .map(n => {
+      const fwd = nearestRow(ethRows, n.row.ts + lagMs, tolMs);
+      if (!fwd) return null;
+      return { dist: n.dist, return_pct: (fwd.eth_price - n.row.eth_price) / n.row.eth_price * 100 };
+    })
+    .filter(Boolean);
+
+  let pUpExperimental = null, medianReturnExperimental = null;
+  if (resolvedAdaptive.length >= ETH_MIN_RESOLVED_ANALOGS) {
+    const EPS = 0.05;
+    const weighted = resolvedAdaptive.map(r => ({ value: r.return_pct, weight: 1 / (r.dist + EPS) }));
+    const totalWeight = weighted.reduce((s, w) => s + w.weight, 0);
+    const upWeight = weighted.filter(w => w.value > 0).reduce((s, w) => s + w.weight, 0);
+    pUpExperimental = upWeight / totalWeight;
+    medianReturnExperimental = weightedQuantile(weighted, 0.5);
+  }
+
+  const closestDist = distances[0].dist;
+  const historicalClosestDists = candidates.map((_, i) => {
+    if (i === 0) return null;
+    let best = Infinity;
+    for (let j = 0; j < i; j++) {
+      let d = 0;
+      for (const k of ETH_FEATURE_KEYS) {
+        const z1 = (candidates[i][k] - stats[k].mean) / stats[k].std;
+        const z2 = (candidates[j][k] - stats[k].mean) / stats[k].std;
+        d += (z1 - z2) ** 2;
+      }
+      d = Math.sqrt(d);
+      if (d < best) best = d;
+    }
+    return Number.isFinite(best) ? best : null;
+  });
+  const closestDistPercentile = percentileRank(closestDist, historicalClosestDists);
+  const isRegimeAnomaly = closestDistPercentile != null && closestDistPercentile >= 0.9;
+
+  const trend = trendStrength(complete, 'eth_price');
+
+  const curveRows = await getLatestCalibrationCurve(env, 'ETH', horizonHours);
+  const calibratedPUp = applyCalibratedProbability(pUp, curveRows);
+
+  const nowTs = Date.now();
+  const features = Object.fromEntries(ETH_FEATURE_KEYS.map(k => [k, today[k]]));
+
+  const insert = await env.DB.prepare(
+    `INSERT INTO eth_predictions
+     (ts, target_ts, eth_price_at_prediction, p_up, n_analogs, median_analog_return, return_p25, return_p75, features_json,
+      k_used, volatility_percentile, closest_analog_dist, is_regime_anomaly, p_up_experimental, median_return_experimental, horizon_hours,
+      trend_strength, calibrated_p_up)
+     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
+  ).bind(
+    nowTs, nowTs + lagMs, today.eth_price, pUp, resolved.length, median, p25, p75, JSON.stringify(features),
+    kAdaptive, volPercentile, closestDist, isRegimeAnomaly ? 1 : 0, pUpExperimental, medianReturnExperimental, horizonHours,
+    trend, calibratedPUp
+  ).run();
+
+  return {
+    ok: true, status: 'ok', prediction_id: insert.meta.last_row_id, ts: nowTs, horizon_hours: horizonHours,
+    p_up: Number(pUp.toFixed(3)), calibrated_p_up: Number(calibratedPUp.toFixed(3)), trend_strength: Number(trend.toFixed(3)),
+    n_analogs: resolved.length, median_analog_return_pct: Number(median.toFixed(2)),
+    return_range_pct: [Number(p25.toFixed(2)), Number(p75.toFixed(2))], eth_price_now: today.eth_price, features,
+    top_analogs: resolved.slice(0, 5).map(r => ({ date: new Date(r.analog_ts).toISOString().slice(0, 10), return_pct: Number(r.return_pct.toFixed(2)) })),
+    regime_anomaly: isRegimeAnomaly,
+    experimental: {
+      k_used: kAdaptive, volatility_percentile: volPercentile != null ? Number(volPercentile.toFixed(2)) : null,
+      p_up: pUpExperimental != null ? Number(pUpExperimental.toFixed(3)) : null,
+      median_return_pct: medianReturnExperimental != null ? Number(medianReturnExperimental.toFixed(2)) : null,
+      note: 'Adaptive-K + distance-weighted variant, logged in parallel — not yet trusted over the headline number above.',
+    },
+    note: isRegimeAnomaly
+      ? `Today's setup doesn't closely resemble anything in ${candidates.length} days of history — the analogs behind this number are weaker matches than usual. Read with extra caution.`
+      : `Based on the ${resolved.length} most similar days in ${candidates.length} days of history. Small sample — read as a rough lean and a plausible range, not a forecast. ETH's model has far less history than BTC/LINK right now — treat every number here as considerably less proven.`,
+  };
+}
+
 // Fills in what actually happened for any prediction whose 24h horizon has
 // passed but hasn't been resolved yet. This is the calibration loop — the
 // part that actually lets the model be checked against reality over time.
@@ -430,6 +602,44 @@ async function backfillPredictions(env) {
     resolvedCount++;
   }
   return resolvedCount;
+}
+
+// Mirrors backfillPredictions exactly, same reasoning: this is the loop
+// that actually lets ETH's model be checked against reality over time.
+async function backfillEthPredictions(env) {
+  const { results: ethRows } = await env.DB.prepare(
+    'SELECT ts, eth_price FROM eth_data ORDER BY ts ASC'
+  ).all();
+  const { results: unresolved } = await env.DB.prepare(
+    'SELECT id, target_ts, eth_price_at_prediction FROM eth_predictions WHERE realized_up IS NULL AND target_ts <= ?'
+  ).bind(Date.now()).all();
+
+  let resolvedCount = 0;
+  for (const p of unresolved) {
+    const match = nearestRow(ethRows, p.target_ts);
+    if (!match) continue;
+    const ret = (match.eth_price - p.eth_price_at_prediction) / p.eth_price_at_prediction * 100;
+    await env.DB.prepare(
+      'UPDATE eth_predictions SET realized_eth_price=?, realized_return=?, realized_up=?, resolved_ts=? WHERE id=?'
+    ).bind(match.eth_price, ret, ret > 0 ? 1 : 0, Date.now(), p.id).run();
+    resolvedCount++;
+  }
+  return resolvedCount;
+}
+
+// Deliberately does NOT include a Challenger call, unlike predictAndLog/
+// linkPredictAndLog. Same "prove before extending" principle already
+// applied everywhere else this session: ETH's core model has zero
+// resolved predictions yet — building a Challenger variant on top of a
+// model with no track record of its own would be extending something
+// before there's anything to extend. Revisit once ETH's own core model
+// has real resolved history.
+async function ethPredictAndLog(env, horizonHours = 24) {
+  await logEthData(env);
+  const resolvedCount = await backfillEthPredictions(env);
+  const result = await runEthPrediction(env, horizonHours);
+  result.backfilled_this_call = resolvedCount;
+  return result;
 }
 
 async function getCalibration(env, horizonHours = 24) {
@@ -488,6 +698,53 @@ async function getCalibration(env, horizonHours = 24) {
       : beatsNaiveBaseline
         ? `Beats the best naive baseline (${bestNaiveBrier.toFixed(3)}) — there's a real, if modest, edge here.`
         : `Does NOT beat the best naive baseline (${bestNaiveBrier.toFixed(3)}) — right now a constant guess would have done as well or better. Worth taking seriously, not explaining away.`,
+  };
+}
+
+// Mirrors getCalibration exactly, scoped to eth_predictions.
+async function getEthCalibration(env, horizonHours = 24) {
+  const { results } = await env.DB.prepare(
+    'SELECT p_up, realized_up, p_up_experimental FROM eth_predictions WHERE realized_up IS NOT NULL AND horizon_hours = ?'
+  ).bind(horizonHours).all();
+  const n = results.length;
+  if (n === 0) return { ok: true, n_resolved: 0, note: `No resolved ETH ${horizonHours}h predictions yet — the model is brand new, this is expected.` };
+
+  const accuracy = results.filter(r => (r.p_up >= 0.5) === (r.realized_up === 1)).length / n;
+  const brier = results.reduce((s, r) => s + (r.p_up - r.realized_up) ** 2, 0) / n;
+
+  const upRate = results.filter(r => r.realized_up === 1).length / n;
+  const brierAlways5050 = 0.25;
+  const brierAlwaysBaseRate = results.reduce((s, r) => s + (upRate - r.realized_up) ** 2, 0) / n;
+  const bestNaiveBrier = Math.min(brierAlways5050, brierAlwaysBaseRate);
+  const beatsNaiveBaseline = brier < bestNaiveBrier;
+
+  const withExperimental = results.filter(r => r.p_up_experimental != null);
+  let experimentalComparison = { available: false, note: 'Not enough resolved predictions with the experimental variant logged yet.' };
+  if (withExperimental.length >= 20) {
+    const nExp = withExperimental.length;
+    const accuracyExp = withExperimental.filter(r => (r.p_up_experimental >= 0.5) === (r.realized_up === 1)).length / nExp;
+    const brierExp = withExperimental.reduce((s, r) => s + (r.p_up_experimental - r.realized_up) ** 2, 0) / nExp;
+    const brierOrigSameSet = withExperimental.reduce((s, r) => s + (r.p_up - r.realized_up) ** 2, 0) / nExp;
+    experimentalComparison = {
+      available: true, n_resolved: nExp,
+      accuracy_experimental: Number(accuracyExp.toFixed(3)), brier_experimental: Number(brierExp.toFixed(3)),
+      brier_original_same_set: Number(brierOrigSameSet.toFixed(3)), experimental_wins: brierExp < brierOrigSameSet,
+      note: brierExp < brierOrigSameSet
+        ? 'The adaptive-K/weighted variant is currently outperforming the original on the same set of days.'
+        : 'The original fixed-K/unweighted approach is still doing as well or better.',
+    };
+  }
+
+  return {
+    ok: true, n_resolved: n, accuracy: Number(accuracy.toFixed(3)), brier_score: Number(brier.toFixed(3)),
+    historical_up_rate: Number(upRate.toFixed(3)), brier_baseline_5050: brierAlways5050,
+    brier_baseline_up_rate: Number(brierAlwaysBaseRate.toFixed(3)), beats_naive_baseline: beatsNaiveBaseline,
+    experimental_vs_original: experimentalComparison,
+    note: n < 20
+      ? `Only ${n} resolved predictions — this is noise at this size, not a real verdict. ETH's model is new; expect this for a while.`
+      : beatsNaiveBaseline
+        ? `Beats the best naive baseline (${bestNaiveBrier.toFixed(3)}) — a real, if modest, edge.`
+        : `Does NOT beat the best naive baseline (${bestNaiveBrier.toFixed(3)}) — a constant guess would currently do as well or better.`,
   };
 }
 
@@ -555,7 +812,10 @@ async function getCalibrationHistory(env, horizonHours = 24) {
 // getLatestCalibrationCurve only ever reads the newest batch). Cheap and
 // safe to call manually — cron runs it once daily (see scheduled()).
 async function refreshCalibrationCurve(env, coin, horizonHours) {
-  const table = coin === 'LINK' ? 'link_predictions' : 'predictions';
+  // Explicit per-coin mapping, not a binary ternary — a ternary defaulting
+  // anything-not-LINK to 'predictions' would have silently pointed ETH at
+  // BTC's own table, corrupting ETH's calibration curve with BTC's data.
+  const table = coin === 'LINK' ? 'link_predictions' : coin === 'ETH' ? 'eth_predictions' : 'predictions';
   const { results } = await env.DB.prepare(
     `SELECT p_up, realized_up FROM ${table} WHERE realized_up IS NOT NULL AND horizon_hours = ?`
   ).bind(horizonHours).all();
@@ -1166,6 +1426,10 @@ async function fetchBtcSnapshot() {
   const { price } = await fetchHyperliquidPrice('BTC');
   return { price };
 }
+async function fetchEthSnapshot() {
+  const { price } = await fetchHyperliquidPrice('ETH');
+  return { price };
+}
 
 // Self-bootstrapping technical score (0-100): a simple RSI-style momentum
 // read over whatever's accumulated in link_data so far. Explicitly NOT a
@@ -1245,6 +1509,9 @@ async function backfillLinkHistory(env, days = 90) {
 async function backfillBtcHistory(env, days = 90) {
   return backfillCoinHistory(env, { coin: 'BTC', table: 'btc_data', priceCol: 'btc_price', days });
 }
+async function backfillEthHistory(env, days = 90) {
+  return backfillCoinHistory(env, { coin: 'ETH', table: 'eth_data', priceCol: 'eth_price', days });
+}
 // Hourly, shorter-window backfill — the daily backfill above is 24h-spaced
 // by construction, so it can never satisfy a 12h-forward lookup for any
 // historical candidate (confirmed directly: zero BTC 12h predictions could
@@ -1256,6 +1523,9 @@ async function backfillLinkHistoryHourly(env, days = 20) {
 }
 async function backfillBtcHistoryHourly(env, days = 20) {
   return backfillCoinHistory(env, { coin: 'BTC', table: 'btc_data', priceCol: 'btc_price', days, interval: '1h', dedupToleranceMs: 30 * 60 * 1000 });
+}
+async function backfillEthHistoryHourly(env, days = 20) {
+  return backfillCoinHistory(env, { coin: 'ETH', table: 'eth_data', priceCol: 'eth_price', days, interval: '1h', dedupToleranceMs: 30 * 60 * 1000 });
 }
 
 // ==================================================================
@@ -1679,6 +1949,20 @@ async function logBtcData(env) {
   const technicalScore = computeSimpleTechnicalScore(recent.reverse().map(r => r.btc_price));
   await env.DB.prepare(
     'INSERT INTO btc_data (ts, btc_price, technical_score) VALUES (?,?,?)'
+  ).bind(Date.now(), snap.price, technicalScore).run();
+  return { price: snap.price, technical_score: technicalScore };
+}
+// Mirrors logBtcData exactly, same reasoning: without this, ETH predictions
+// could never resolve against reality between V1 page visits, same
+// dependency gap that would have silently stalled BTC/LINK too.
+async function logEthData(env) {
+  const snap = await fetchEthSnapshot();
+  const { results: recent } = await env.DB.prepare(
+    'SELECT eth_price FROM eth_data ORDER BY ts DESC LIMIT 30'
+  ).all();
+  const technicalScore = computeSimpleTechnicalScore(recent.reverse().map(r => r.eth_price));
+  await env.DB.prepare(
+    'INSERT INTO eth_data (ts, eth_price, technical_score) VALUES (?,?,?)'
   ).bind(Date.now(), snap.price, technicalScore).run();
   return { price: snap.price, technical_score: technicalScore };
 }
@@ -2137,6 +2421,32 @@ export default {
       }
     }
 
+    // ---- GET /eth-predict — same shape as /predict, scoped to ETH ----
+    if (url.pathname === '/eth-predict' && request.method === 'GET') {
+      try {
+        const horizon = [12, 24].includes(parseInt(url.searchParams.get('horizon'), 10)) ? parseInt(url.searchParams.get('horizon'), 10) : 24;
+        const result = await ethPredictAndLog(env, horizon);
+        return new Response(JSON.stringify(result), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+      } catch (err) {
+        return new Response(JSON.stringify({ ok: false, error: String(err) }), { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+      }
+    }
+
+    // ---- GET /eth-backfill-history?days=90 — manual trigger to pull real
+    // historical depth from Hyperliquid, same source already proven for
+    // BTC/LINK. This is the actual first-run step: without it, ETH's model
+    // only has whatever's accumulated from the live 3h cron since deploy. ----
+    if (url.pathname === '/eth-backfill-history' && request.method === 'GET') {
+      try {
+        const days = Math.min(365, Math.max(1, parseInt(url.searchParams.get('days'), 10) || 90));
+        const daily = await backfillEthHistory(env, days);
+        const hourly = await backfillEthHistoryHourly(env, Math.min(days, 20));
+        return new Response(JSON.stringify({ ok: true, daily, hourly }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+      } catch (err) {
+        return new Response(JSON.stringify({ ok: false, error: String(err) }), { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+      }
+    }
+
     // ---- GET /chart-data — price series + predictions log for the price-vs-prediction chart ----
     if (url.pathname === '/chart-data' && request.method === 'GET') {
       try {
@@ -2167,6 +2477,17 @@ export default {
           status: 500,
           headers: { ...corsHeaders, 'Content-Type': 'application/json' },
         });
+      }
+    }
+
+    // ---- GET /eth-calibration — same shape as /calibration, scoped to ETH ----
+    if (url.pathname === '/eth-calibration' && request.method === 'GET') {
+      try {
+        const horizon = [12, 24].includes(parseInt(url.searchParams.get('horizon'), 10)) ? parseInt(url.searchParams.get('horizon'), 10) : 24;
+        const result = await getEthCalibration(env, horizon);
+        return new Response(JSON.stringify(result), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+      } catch (err) {
+        return new Response(JSON.stringify({ ok: false, error: String(err) }), { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
       }
     }
 
@@ -2453,6 +2774,11 @@ export default {
           ctx.waitUntil(refreshChallengerCalibrationCurve(env, coin, h).catch(err => console.error(`Challenger calibration refresh ${coin}/${h}h failed:`, err)));
         }
       }
+      // ETH: core-model calibration only, no Challenger loop — see
+      // ethPredictAndLog's comment for why.
+      for (const h of [12, 24]) {
+        ctx.waitUntil(refreshCalibrationCurve(env, 'ETH', h).catch(err => console.error(`ETH calibration refresh ${h}h failed:`, err)));
+      }
     } else {
       // Both horizons, both coins, every 3h tick. logBtcData/logLinkData and
       // the backfill steps inside predictAndLog/linkPredictAndLog are
@@ -2462,6 +2788,8 @@ export default {
       ctx.waitUntil(predictAndLog(env, 12).catch(err => console.error('BTC 12h predict-and-log failed:', err)));
       ctx.waitUntil(linkPredictAndLog(env, 24).catch(err => console.error('LINK 24h predict-and-log failed:', err)));
       ctx.waitUntil(linkPredictAndLog(env, 12).catch(err => console.error('LINK 12h predict-and-log failed:', err)));
+      ctx.waitUntil(ethPredictAndLog(env, 24).catch(err => console.error('ETH 24h predict-and-log failed:', err)));
+      ctx.waitUntil(ethPredictAndLog(env, 12).catch(err => console.error('ETH 12h predict-and-log failed:', err)));
     }
   },
 };

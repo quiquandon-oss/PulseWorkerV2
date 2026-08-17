@@ -748,6 +748,37 @@ async function getEthCalibration(env, horizonHours = 24) {
   };
 }
 
+// Mirrors getCalibrationHistory exactly, scoped to eth_predictions.
+async function getEthCalibrationHistory(env, horizonHours = 24) {
+  const { results } = await env.DB.prepare(
+    'SELECT resolved_ts, p_up, p_up_experimental, calibrated_p_up, realized_up FROM eth_predictions WHERE realized_up IS NOT NULL AND horizon_hours = ? ORDER BY resolved_ts ASC'
+  ).bind(horizonHours).all();
+  let sumOrig = 0, nOrig = 0, sumExp = 0, nExp = 0, sumCal = 0, nCal = 0;
+  let correctOrig = 0, correctExp = 0, correctCal = 0;
+  const points = results.map(r => {
+    sumOrig += (r.p_up - r.realized_up) ** 2;
+    nOrig++;
+    if ((r.p_up > 0.5) === (r.realized_up === 1)) correctOrig++;
+    if (r.p_up_experimental != null) {
+      sumExp += (r.p_up_experimental - r.realized_up) ** 2;
+      nExp++;
+      if ((r.p_up_experimental > 0.5) === (r.realized_up === 1)) correctExp++;
+    }
+    if (r.calibrated_p_up != null) {
+      sumCal += (r.calibrated_p_up - r.realized_up) ** 2;
+      nCal++;
+      if ((r.calibrated_p_up > 0.5) === (r.realized_up === 1)) correctCal++;
+    }
+    return {
+      ts: r.resolved_ts,
+      brier_original: Number((sumOrig / nOrig).toFixed(4)), n_original: nOrig, accuracy_original: Number((correctOrig / nOrig).toFixed(3)),
+      brier_experimental: nExp > 0 ? Number((sumExp / nExp).toFixed(4)) : null, n_experimental: nExp, accuracy_experimental: nExp > 0 ? Number((correctExp / nExp).toFixed(3)) : null,
+      brier_calibrated: nCal > 0 ? Number((sumCal / nCal).toFixed(4)) : null, n_calibrated: nCal, accuracy_calibrated: nCal > 0 ? Number((correctCal / nCal).toFixed(3)) : null,
+    };
+  });
+  return { ok: true, points, naive_baseline_5050: 0.25 };
+}
+
 // Expanding cumulative Brier score over time — deliberately NOT another
 // single snapshot number. The point is to see whether an apparent edge
 // (like the experimental variant's early lead) is stable as more data
@@ -1176,6 +1207,17 @@ async function getChartData(env, horizonHours = 24) {
   ).all();
   const { results: predictions } = await env.DB.prepare(
     'SELECT id, ts, target_ts, btc_price_at_prediction, p_up, median_analog_return, realized_up, realized_return FROM predictions WHERE horizon_hours = ? ORDER BY ts ASC'
+  ).bind(horizonHours).all();
+  return { ok: true, prices, predictions };
+}
+
+// Mirrors getChartData exactly, scoped to ETH.
+async function getEthChartData(env, horizonHours = 24) {
+  const { results: prices } = await env.DB.prepare(
+    'SELECT ts, eth_price FROM eth_data ORDER BY ts ASC'
+  ).all();
+  const { results: predictions } = await env.DB.prepare(
+    'SELECT id, ts, target_ts, eth_price_at_prediction, p_up, median_analog_return, realized_up, realized_return FROM eth_predictions WHERE horizon_hours = ? ORDER BY ts ASC'
   ).bind(horizonHours).all();
   return { ok: true, prices, predictions };
 }
@@ -2463,6 +2505,17 @@ export default {
       }
     }
 
+    // ---- GET /eth-chart-data — same shape as /chart-data, scoped to ETH ----
+    if (url.pathname === '/eth-chart-data' && request.method === 'GET') {
+      try {
+        const horizon = [12, 24].includes(parseInt(url.searchParams.get('horizon'), 10)) ? parseInt(url.searchParams.get('horizon'), 10) : 24;
+        const result = await getEthChartData(env, horizon);
+        return new Response(JSON.stringify(result), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+      } catch (err) {
+        return new Response(JSON.stringify({ ok: false, error: String(err) }), { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+      }
+    }
+
     // ---- GET /calibration — rolling accuracy/Brier score across every
     // prediction that has actually resolved so far ----
     if (url.pathname === '/calibration' && request.method === 'GET') {
@@ -2530,6 +2583,17 @@ export default {
       try {
         const horizon = [12, 24].includes(parseInt(url.searchParams.get('horizon'), 10)) ? parseInt(url.searchParams.get('horizon'), 10) : 24;
         const result = await getCalibrationHistory(env, horizon);
+        return new Response(JSON.stringify(result), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+      } catch (err) {
+        return new Response(JSON.stringify({ ok: false, error: String(err) }), { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+      }
+    }
+
+    // ---- GET /eth-calibration-history — same shape, scoped to ETH ----
+    if (url.pathname === '/eth-calibration-history' && request.method === 'GET') {
+      try {
+        const horizon = [12, 24].includes(parseInt(url.searchParams.get('horizon'), 10)) ? parseInt(url.searchParams.get('horizon'), 10) : 24;
+        const result = await getEthCalibrationHistory(env, horizon);
         return new Response(JSON.stringify(result), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
       } catch (err) {
         return new Response(JSON.stringify({ ok: false, error: String(err) }), { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });

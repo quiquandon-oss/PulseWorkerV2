@@ -29,6 +29,30 @@ export function extractFunctions(...names) {
   return pieces.join('\n\n');
 }
 
+// Extracts one or more top-level `const NAME = ...;` declarations by name —
+// needed alongside extractFunctions when a function references module-level
+// constants (e.g. decideSelection reading SELECTION_CRITICAL_Z). Matches
+// through to the first top-level semicolon, handling nested {}/[] correctly
+// so an object or array literal doesn't get truncated early.
+export function extractConstants(...names) {
+  const src = getSource();
+  const pieces = [];
+  for (const name of names) {
+    const startMatch = src.match(new RegExp(`const\\s+${name}\\s*=`));
+    if (!startMatch) throw new Error(`Could not find "const ${name} =" in worker.js`);
+    const startIdx = startMatch.index;
+    let depth = 0, i = startIdx, end = -1;
+    for (; i < src.length; i++) {
+      if (src[i] === '{' || src[i] === '[' || src[i] === '(') depth++;
+      else if (src[i] === '}' || src[i] === ']' || src[i] === ')') depth--;
+      else if (src[i] === ';' && depth === 0) { end = i + 1; break; }
+    }
+    if (end === -1) throw new Error(`Could not find terminating semicolon for const ${name}`);
+    pieces.push(src.slice(startIdx, end));
+  }
+  return pieces.join('\n');
+}
+
 export function evalInScope(source, extraGlobals = {}) {
   const sandbox = { console, ...extraGlobals };
   const keys = Object.keys(sandbox);

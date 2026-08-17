@@ -642,6 +642,215 @@ async function ethPredictAndLog(env, horizonHours = 24) {
   return result;
 }
 
+// ============================================================
+// Condition-Matched Selection layer ("the council build")
+// ============================================================
+// Direct build from a real 4-AI consultation (Claude architecture + Gemini's
+// DCS-LA algorithm + ChatGPT's schema/significance design + Grok's catalyst-
+// checking pattern reused for the "why" attachment). Selects which variant's
+// prediction to trust RIGHT NOW, per coin/horizon, using Dynamic Classifier
+// Selection with Local Class Accuracy (LCA) scoring -- not "who has the best
+// recent accuracy globally" (the naive, explicitly-rejected approach this
+// session already identified as reintroducing shallow number-chasing), but
+// "among historical moments that looked like THIS one, which variant was
+// actually right when it made THIS SAME directional call." Gated by a
+// Bonferroni-corrected significance bar scaled to how many variants are
+// actually being compared (never a flat six) -- multiple-testing correction
+// borrowed directly from the Deflated Sharpe Ratio literature's core insight:
+// comparing many things and picking the best inflates the winner's apparent
+// edge even with zero real skill anywhere in the pool.
+
+// Registry: which variants exist for which coin. ETH deliberately has no
+// challenger entries -- none exist yet, consistent with ethPredictAndLog's
+// own "prove before extending" comment above.
+const SELECTION_VARIANTS = {
+  BTC: [
+    { key: 'original', table: 'predictions', field: 'p_up', coinFilter: false },
+    { key: 'experimental', table: 'predictions', field: 'p_up_experimental', coinFilter: false },
+    { key: 'calibrated', table: 'predictions', field: 'calibrated_p_up', coinFilter: false },
+    { key: 'challenger_flat', table: 'challenger_predictions', field: 'p_up_flat', coinFilter: true },
+    { key: 'challenger_tilted', table: 'challenger_predictions', field: 'p_up_tilted', coinFilter: true },
+    { key: 'challenger_calibrated', table: 'challenger_predictions', field: 'calibrated_p_up_flat', coinFilter: true },
+  ],
+  LINK: [
+    { key: 'original', table: 'link_predictions', field: 'p_up', coinFilter: false },
+    { key: 'experimental', table: 'link_predictions', field: 'p_up_experimental', coinFilter: false },
+    { key: 'calibrated', table: 'link_predictions', field: 'calibrated_p_up', coinFilter: false },
+    { key: 'challenger_flat', table: 'challenger_predictions', field: 'p_up_flat', coinFilter: true },
+    { key: 'challenger_tilted', table: 'challenger_predictions', field: 'p_up_tilted', coinFilter: true },
+    { key: 'challenger_calibrated', table: 'challenger_predictions', field: 'calibrated_p_up_flat', coinFilter: true },
+  ],
+  ETH: [
+    { key: 'original', table: 'eth_predictions', field: 'p_up', coinFilter: false },
+    { key: 'experimental', table: 'eth_predictions', field: 'p_up_experimental', coinFilter: false },
+    { key: 'calibrated', table: 'eth_predictions', field: 'calibrated_p_up', coinFilter: false },
+  ],
+};
+const SELECTION_MIN_HISTORY = 50; // matches Model Health's own recent/prior threshold, not a new number invented for this
+const SELECTION_MIN_MATCHED = 3; // minimum same-direction neighborhood matches before a variant's LCA score is trusted at all
+// One-sided critical z-values for alpha=0.05, Bonferroni-corrected for
+// m=1..6 simultaneous comparisons. Exact standard-normal quantiles, not an
+// approximation -- comparison count is bounded 1-6 by the variant registry
+// above, so a small lookup table is more reliable than an inverse-CDF
+// approximation function that could have its own subtle error.
+const SELECTION_CRITICAL_Z = { 1: 1.6449, 2: 1.9600, 3: 2.1280, 4: 2.2414, 5: 2.3263, 6: 2.3940 };
+
+function coreTableForCoin(coin) {
+  return coin === 'BTC' ? 'predictions' : coin === 'LINK' ? 'link_predictions' : 'eth_predictions';
+}
+
+// Pure function -- takes already-fetched rows, computes LCA score for one
+// variant against one neighborhood. Extracted separately from the D1-coupled
+// orchestration below specifically so this, the actual statistical core, is
+// unit-testable without mocking a database.
+function computeLcaScore(variantRows, neighborhood, todaysCallUp, tolMs) {
+  let numerator = 0, denominator = 0;
+  for (const n of neighborhood) {
+    const match = nearestRow(variantRows, n.ts, tolMs);
+    if (!match) continue;
+    const callUp = match.p_up >= 0.5;
+    if (callUp !== todaysCallUp) continue; // LCA restricts to same-direction historical calls, per Gemini's formula
+    denominator++;
+    if ((match.p_up >= 0.5) === (match.realized_up === 1)) numerator++;
+  }
+  if (denominator < SELECTION_MIN_MATCHED) return null;
+  return { lca: numerator / denominator, n_matched: denominator };
+}
+
+// Pure function -- given each eligible variant's LCA score, decides the
+// winner and whether it clears the significance bar. Separated from the
+// data-fetching orchestration for the same testability reason as above.
+function decideSelection(scores) {
+  if (!scores.length) return { chosen: null, clearedGate: false, winner: null, requiredMargin: null };
+  const sorted = [...scores].sort((a, b) => b.lca - a.lca);
+  const winner = sorted[0];
+  const m = Math.min(6, Math.max(1, scores.length));
+  const z = SELECTION_CRITICAL_Z[m];
+  const requiredMargin = z * Math.sqrt(0.25 / winner.n_matched);
+  const clearedGate = (winner.lca - 0.5) > requiredMargin;
+  return { chosen: clearedGate ? winner.variant : 'original', clearedGate, winner, requiredMargin, m };
+}
+
+async function selectBestVariant(env, coin, horizonHours) {
+  const variantDefs = SELECTION_VARIANTS[coin];
+  if (!variantDefs) return { ok: false, error: 'unknown coin' };
+  const coreTable = coreTableForCoin(coin);
+
+  // Step 1: eligibility. A variant must have its OWN 50+ resolved
+  // predictions before it's even considered -- same bar Model Health
+  // already uses, not a new one invented for this.
+  const eligible = [];
+  for (const v of variantDefs) {
+    const whereCoin = v.coinFilter ? `coin = '${coin}' AND ` : '';
+    const { results } = await env.DB.prepare(
+      `SELECT COUNT(*) as n FROM ${v.table} WHERE ${whereCoin}horizon_hours=? AND realized_up IS NOT NULL AND ${v.field} IS NOT NULL`
+    ).bind(horizonHours).all();
+    if (results[0].n >= SELECTION_MIN_HISTORY) eligible.push(v);
+  }
+  if (!eligible.length) {
+    return { ok: true, status: 'no_eligible_variants', chosen_variant: 'original', cleared_gate: false, reason: `No variant has ${SELECTION_MIN_HISTORY}+ resolved predictions yet -- defaulting to Original k-NN.` };
+  }
+
+  // Step 2: today's query condition, from the core table's own stored
+  // features_json (already computed by the underlying model, not
+  // recomputed here).
+  const latestCore = await env.DB.prepare(
+    `SELECT ts, features_json FROM ${coreTable} WHERE horizon_hours=? ORDER BY ts DESC LIMIT 1`
+  ).bind(horizonHours).first();
+  if (!latestCore || !latestCore.features_json) {
+    return { ok: true, status: 'no_query_features', chosen_variant: 'original', cleared_gate: false, reason: 'No recent prediction with feature data to match a condition against.' };
+  }
+  let queryFeatures;
+  try { queryFeatures = JSON.parse(latestCore.features_json); } catch { return { ok: true, status: 'bad_features', chosen_variant: 'original', cleared_gate: false, reason: 'Could not parse the latest feature vector.' }; }
+  const featureKeys = Object.keys(queryFeatures);
+
+  // Step 3: meta-neighborhood. The core table's own resolved history
+  // (up to 300 most recent, well within D1's comfort zone at this scale)
+  // defines the shared "condition timeline" every variant is matched
+  // against -- the condition is a property of the MOMENT, not the variant.
+  const { results: coreHistory } = await env.DB.prepare(
+    `SELECT ts, features_json, realized_up FROM ${coreTable} WHERE horizon_hours=? AND realized_up IS NOT NULL AND features_json IS NOT NULL AND ts < ? ORDER BY ts DESC LIMIT 300`
+  ).bind(horizonHours, latestCore.ts).all();
+  if (coreHistory.length < 15) {
+    return { ok: true, status: 'insufficient_meta_history', chosen_variant: 'original', cleared_gate: false, reason: `Only ${coreHistory.length} historical moments with feature data -- not enough to define a neighborhood yet.` };
+  }
+
+  const stats = {};
+  for (const k of featureKeys) {
+    const vals = [];
+    for (const r of coreHistory) { try { const f = JSON.parse(r.features_json); if (f[k] != null) vals.push(f[k]); } catch {} }
+    if (vals.length < 5) continue;
+    const mean = vals.reduce((a, b) => a + b, 0) / vals.length;
+    const std = Math.sqrt(vals.reduce((a, b) => a + (b - mean) ** 2, 0) / vals.length) || 1;
+    stats[k] = { mean, std };
+  }
+  const usableKeys = featureKeys.filter(k => stats[k]);
+
+  const distances = coreHistory.map(r => {
+    let feat;
+    try { feat = JSON.parse(r.features_json); } catch { return null; }
+    let d = 0;
+    for (const k of usableKeys) {
+      if (feat[k] == null || queryFeatures[k] == null) continue;
+      const z1 = (queryFeatures[k] - stats[k].mean) / stats[k].std;
+      const z2 = (feat[k] - stats[k].mean) / stats[k].std;
+      d += (z1 - z2) ** 2;
+    }
+    return { ts: r.ts, dist: Math.sqrt(d) };
+  }).filter(Boolean).sort((a, b) => a.dist - b.dist);
+
+  // K_SEL per Gemini's guidance: literature standard [7,15], scaled to
+  // available history rather than fixed, floored/ceilinged to that range.
+  const kSel = Math.min(15, Math.max(7, Math.floor(distances.length / 10)));
+  const neighborhood = distances.slice(0, kSel);
+  const TOL_MS_META = 6 * 3600000; // 6h tolerance matching a variant's own prediction to a neighborhood timestamp
+
+  // Step 4: LCA score per eligible variant.
+  const scores = [];
+  for (const v of eligible) {
+    const whereCoin = v.coinFilter ? `coin = '${coin}' AND ` : '';
+    const { results: variantRows } = await env.DB.prepare(
+      `SELECT ts, ${v.field} as p_up, realized_up FROM ${v.table} WHERE ${whereCoin}horizon_hours=? AND realized_up IS NOT NULL AND ${v.field} IS NOT NULL ORDER BY ts ASC`
+    ).bind(horizonHours).all();
+    if (!variantRows.length) continue;
+    const latestVariantRow = variantRows[variantRows.length - 1];
+    const todaysCallUp = latestVariantRow.p_up >= 0.5;
+    const scored = computeLcaScore(variantRows, neighborhood, todaysCallUp, TOL_MS_META);
+    if (scored) scores.push({ variant: v.key, p_up: latestVariantRow.p_up, ...scored });
+  }
+  if (!scores.length) {
+    return { ok: true, status: 'no_scorable_variants', chosen_variant: 'original', cleared_gate: false, reason: `No eligible variant had ${SELECTION_MIN_MATCHED}+ same-direction matches in the neighborhood -- defaulting to Original k-NN.` };
+  }
+
+  // Step 5: significance-gated decision.
+  const decision = decideSelection(scores);
+  const winnerScore = scores.find(s => s.variant === decision.winner.variant);
+  const chosenScore = scores.find(s => s.variant === decision.chosen) || winnerScore;
+
+  const reason = decision.clearedGate
+    ? `${decision.winner.variant} locally outperformed (${(decision.winner.lca * 100).toFixed(0)}% correct on ${decision.winner.n_matched} same-direction matches among the ${kSel} most similar historical moments), clearing the significance bar for ${decision.m} variant(s) compared.`
+    : `No variant's local edge cleared the significance bar (needed >${(decision.requiredMargin * 100).toFixed(1)}pts above 50%, best was ${decision.winner.variant} at +${((decision.winner.lca - 0.5) * 100).toFixed(1)}pts on n=${decision.winner.n_matched}) -- defaulting to Original k-NN.`;
+
+  const ts = Date.now();
+  await env.DB.prepare(
+    `INSERT INTO selection_decisions (ts, coin, horizon_hours, chosen_variant, chosen_p_up, lca_score, comparison_count, corrected_alpha, cleared_gate, k_sel, neighborhood_json, reason, prediction_ts)
+     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`
+  ).bind(
+    ts, coin, horizonHours, decision.chosen, chosenScore ? chosenScore.p_up : null, decision.winner.lca, decision.m,
+    0.05 / decision.m, decision.clearedGate ? 1 : 0, kSel,
+    JSON.stringify(neighborhood.map(n => ({ ts: n.ts, dist: Number(n.dist.toFixed(3)) }))),
+    reason, latestCore.ts
+  ).run();
+
+  return {
+    ok: true, status: 'ok', coin, horizon_hours: horizonHours, chosen_variant: decision.chosen,
+    chosen_p_up: chosenScore ? Number(chosenScore.p_up.toFixed(3)) : null,
+    cleared_gate: decision.clearedGate, comparison_count: decision.m, k_sel: kSel,
+    scores: scores.map(s => ({ variant: s.variant, p_up: Number(s.p_up.toFixed(3)), lca: Number(s.lca.toFixed(3)), n_matched: s.n_matched })),
+    reason,
+  };
+}
+
 async function getCalibration(env, horizonHours = 24) {
   const { results } = await env.DB.prepare(
     'SELECT p_up, realized_up, p_up_experimental FROM predictions WHERE realized_up IS NOT NULL AND horizon_hours = ?'
@@ -2464,6 +2673,36 @@ export default {
     }
 
     // ---- GET /eth-predict — same shape as /predict, scoped to ETH ----
+    // ---- GET /select-variant?coin=BTC|LINK|ETH&horizon=12|24 — runs the
+    // condition-matched selection layer once, on demand. See
+    // selectBestVariant's comment block for the full design. ----
+    if (url.pathname === '/select-variant' && request.method === 'GET') {
+      try {
+        const coin = ['BTC', 'LINK', 'ETH'].includes(url.searchParams.get('coin')) ? url.searchParams.get('coin') : 'BTC';
+        const horizon = [12, 24].includes(parseInt(url.searchParams.get('horizon'), 10)) ? parseInt(url.searchParams.get('horizon'), 10) : 24;
+        const result = await selectBestVariant(env, coin, horizon);
+        return new Response(JSON.stringify(result), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+      } catch (err) {
+        return new Response(JSON.stringify({ ok: false, error: String(err) }), { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+      }
+    }
+
+    // ---- GET /selection-history?coin=X&horizon=Y&limit=N — recent
+    // selection decisions, for frontend display ----
+    if (url.pathname === '/selection-history' && request.method === 'GET') {
+      try {
+        const coin = ['BTC', 'LINK', 'ETH'].includes(url.searchParams.get('coin')) ? url.searchParams.get('coin') : 'BTC';
+        const horizon = [12, 24].includes(parseInt(url.searchParams.get('horizon'), 10)) ? parseInt(url.searchParams.get('horizon'), 10) : 24;
+        const limit = Math.min(50, parseInt(url.searchParams.get('limit'), 10) || 10);
+        const { results } = await env.DB.prepare(
+          'SELECT * FROM selection_decisions WHERE coin=? AND horizon_hours=? ORDER BY ts DESC LIMIT ?'
+        ).bind(coin, horizon, limit).all();
+        return new Response(JSON.stringify({ ok: true, coin, horizon_hours: horizon, decisions: results }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+      } catch (err) {
+        return new Response(JSON.stringify({ ok: false, error: String(err) }), { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+      }
+    }
+
     if (url.pathname === '/eth-predict' && request.method === 'GET') {
       try {
         const horizon = [12, 24].includes(parseInt(url.searchParams.get('horizon'), 10)) ? parseInt(url.searchParams.get('horizon'), 10) : 24;
@@ -2848,12 +3087,23 @@ export default {
       // the backfill steps inside predictAndLog/linkPredictAndLog are
       // horizon-agnostic and safely re-run each call (idempotent — just an
       // extra D1 read at our tiny data scale, not worth avoiding).
-      ctx.waitUntil(predictAndLog(env, 24).catch(err => console.error('BTC 24h predict-and-log failed:', err)));
-      ctx.waitUntil(predictAndLog(env, 12).catch(err => console.error('BTC 12h predict-and-log failed:', err)));
-      ctx.waitUntil(linkPredictAndLog(env, 24).catch(err => console.error('LINK 24h predict-and-log failed:', err)));
-      ctx.waitUntil(linkPredictAndLog(env, 12).catch(err => console.error('LINK 12h predict-and-log failed:', err)));
-      ctx.waitUntil(ethPredictAndLog(env, 24).catch(err => console.error('ETH 24h predict-and-log failed:', err)));
-      ctx.waitUntil(ethPredictAndLog(env, 12).catch(err => console.error('ETH 12h predict-and-log failed:', err)));
+      //
+      // Each coin/horizon's predict-then-select is sequenced explicitly
+      // (await, not two independent waitUntil calls) — selectBestVariant
+      // reads the LATEST prediction's features_json, so it must run after
+      // that specific prediction exists, not race it. Different coin/
+      // horizon pairs still run concurrently with each other via separate
+      // waitUntil calls, just not with themselves.
+      const predictThenSelect = async (predictFn, coin, horizon) => {
+        await predictFn(env, horizon);
+        await selectBestVariant(env, coin, horizon).catch(err => console.error(`Selection ${coin}/${horizon}h failed:`, err));
+      };
+      ctx.waitUntil(predictThenSelect(predictAndLog, 'BTC', 24).catch(err => console.error('BTC 24h predict-and-log failed:', err)));
+      ctx.waitUntil(predictThenSelect(predictAndLog, 'BTC', 12).catch(err => console.error('BTC 12h predict-and-log failed:', err)));
+      ctx.waitUntil(predictThenSelect(linkPredictAndLog, 'LINK', 24).catch(err => console.error('LINK 24h predict-and-log failed:', err)));
+      ctx.waitUntil(predictThenSelect(linkPredictAndLog, 'LINK', 12).catch(err => console.error('LINK 12h predict-and-log failed:', err)));
+      ctx.waitUntil(predictThenSelect(ethPredictAndLog, 'ETH', 24).catch(err => console.error('ETH 24h predict-and-log failed:', err)));
+      ctx.waitUntil(predictThenSelect(ethPredictAndLog, 'ETH', 12).catch(err => console.error('ETH 12h predict-and-log failed:', err)));
     }
   },
 };

@@ -1355,15 +1355,15 @@ function computeDrift(rows, nowTs) {
 // catalyst row itself only stores its own timestamps, not a precomputed
 // verdict that would silently go stale as it's reused against different predictions.
 async function recordCatalyst(env, opts) {
-  const { coin, ts, category, direction, priceMovePct, headlineSource, sourceUrl, extractedReason, discoveryTimestamp, confidence, marketClassification } = opts;
+  const { coin, ts, category, direction, priceMovePct, headlineSource, sourceUrl, extractedReason, discoveryTimestamp, confidence, marketClassification, firstPublicTimestamp, investigationId } = opts;
   const insert = await env.DB.prepare(
     `INSERT INTO coin_catalyst_log
-     (ts, coin, price_move_pct, headline_source, extracted_reason, category, direction, source_url, discovery_timestamp, confidence, market_classification)
-     VALUES (?,?,?,?,?,?,?,?,?,?,?)`
+     (ts, coin, price_move_pct, headline_source, extracted_reason, category, direction, source_url, discovery_timestamp, confidence, market_classification, first_public_timestamp, investigation_id)
+     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`
   ).bind(
     ts, coin, priceMovePct ?? null, headlineSource ?? null, extractedReason ?? null,
     category ?? null, direction ?? null, sourceUrl ?? null, discoveryTimestamp ?? null,
-    confidence ?? null, marketClassification ?? null
+    confidence ?? null, marketClassification ?? null, firstPublicTimestamp ?? null, investigationId ?? null
   ).run();
   return { ok: true, id: insert.meta.last_row_id };
 }
@@ -1600,6 +1600,338 @@ function isDuplicateCatalyst(candidate, existingCatalysts, toleranceMs = 6 * 60 
     existing.category === candidate.category &&
     Math.abs(existing.ts - candidate.ts) <= toleranceMs
   );
+}
+
+// =====================================================================
+// ---- Gemini Market Intelligence: LIVE implementation ----
+// Implements PR #2's approved design (learning/GEMINI_IMPLEMENTATION_PLAN.md,
+// .ai/GEMINI_MARKET_INTELLIGENCE.md). Wired into scheduled() below via its
+// own independent ctx.waitUntil, positioned after the six existing
+// predictThenSelect calls -- see the "Gemini investigation" waitUntil in
+// scheduled(). NEVER called from /predict, /link-predict, /eth-predict, or
+// any other synchronous request route: Gemini's latency and availability
+// must not affect prediction generation, full stop.
+//
+// Flow (matches the reviewed architecture exactly):
+//   predictions already stored (by the six predictThenSelect calls, which
+//   already ran and already backfilled/resolved this cycle's due predictions
+//   as part of their own existing logic)
+//     -> buildInvestigationCandidates (read-only, this cycle's fresh signals)
+//     -> rankInvestigationCandidates / selectWithinBudget (pure, PR #2)
+//     -> investigateMarketEvent per selected candidate
+//          -> callGeminiForMarketInvestigation (the only network call in this block)
+//          -> validateGeminiInvestigationResponse / validateCatalystPayload (pure)
+//          -> isDuplicateCatalyst (pure)
+//          -> recordCatalyst (D1 write -- Gemini itself never touches D1)
+//          -> recordGeminiInvestigation (audit row, always written, success or failure)
+// =====================================================================
+
+const GEMINI_INVESTIGATION_TIMEOUT_MS = 20000;
+const GEMINI_INVESTIGATION_MODEL = 'gemini-3.6-flash'; // same model as the existing daily-analysis calls
+
+// ---- Candidate generation (read-only D1 queries) ----
+// Builds one candidate per core asset from THIS cycle's freshly-resolved
+// predictions (a ~3.5h trailing window -- slightly wider than one 3-hourly
+// cron tick so a resolution that lands just before/after this invocation
+// still gets picked up next cycle rather than silently skipped).
+async function buildInvestigationCandidates(env, nowTs) {
+  const WINDOW_MS = 3.5 * 3600 * 1000;
+  const ASSETS = [
+    { coin: 'BTC', table: 'predictions', dataTable: 'btc_data', priceCol: 'btc_price' },
+    { coin: 'LINK', table: 'link_predictions', dataTable: 'link_data', priceCol: 'link_price' },
+    { coin: 'ETH', table: 'eth_predictions', dataTable: 'eth_data', priceCol: 'eth_price' },
+  ];
+
+  const resolvedByAsset = {};
+  for (const a of ASSETS) {
+    const { results } = await env.DB.prepare(
+      `SELECT ts, p_up, calibrated_p_up, realized_up, is_regime_anomaly
+       FROM ${a.table} WHERE resolved_ts IS NOT NULL AND resolved_ts >= ? ORDER BY resolved_ts DESC LIMIT 5`
+    ).bind(nowTs - WINDOW_MS).all();
+    resolvedByAsset[a.coin] = results;
+  }
+
+  const wasAssetWrong = (row) => {
+    const p = row.calibrated_p_up ?? row.p_up;
+    return (p >= 0.5 ? 1 : 0) !== row.realized_up;
+  };
+  const failedAssetCount = ASSETS.filter(a => resolvedByAsset[a.coin].some(wasAssetWrong)).length;
+
+  const candidates = [];
+  for (const a of ASSETS) {
+    const rows = resolvedByAsset[a.coin];
+    if (!rows.length) continue; // nothing resolved this window for this asset -- no candidate, not an error
+    const latest = rows[0];
+    const p = latest.calibrated_p_up ?? latest.p_up;
+    const wasWrong = wasAssetWrong(latest);
+    const confidence = Math.max(p, 1 - p);
+
+    const oldest = await env.DB.prepare(
+      `SELECT ${a.priceCol} as price FROM ${a.dataTable} WHERE ts >= ? ORDER BY ts ASC LIMIT 1`
+    ).bind(nowTs - WINDOW_MS).first();
+    const newest = await env.DB.prepare(
+      `SELECT ${a.priceCol} as price FROM ${a.dataTable} ORDER BY ts DESC LIMIT 1`
+    ).first();
+    const priceMovePct = (oldest?.price && newest?.price)
+      ? ((newest.price - oldest.price) / oldest.price) * 100
+      : 0;
+
+    candidates.push({
+      id: a.coin,
+      assets: [a.coin],
+      signals: {
+        priceMovePct,
+        wasWrong,
+        confidence,
+        correlatedFailureAssetCount: failedAssetCount,
+        isVolatilityAnomaly: !!latest.is_regime_anomaly,
+        recentFailureCount: rows.filter(wasAssetWrong).length,
+        // No clean existing regime-change signal yet (see plan doc's
+        // "Recommended next steps" #4) -- defaulting to false rather than
+        // fabricating a heuristic. Documented, not silently guessed.
+        isRegimeChange: false,
+      },
+    });
+  }
+  return candidates;
+}
+
+// ---- Budget accounting (read-only D1 query) ----
+async function getGeminiInvestigationCounts(env, nowTs) {
+  const DAY_MS = 24 * 3600 * 1000, HOUR_MS = 3600 * 1000;
+  const dayRow = await env.DB.prepare('SELECT COUNT(*) as n FROM gemini_investigations WHERE request_ts >= ?').bind(nowTs - DAY_MS).first();
+  const hourRow = await env.DB.prepare('SELECT COUNT(*) as n FROM gemini_investigations WHERE request_ts >= ?').bind(nowTs - HOUR_MS).first();
+  return { investigationsToday: dayRow?.n || 0, investigationsThisHour: hourRow?.n || 0 };
+}
+
+// ---- Audit write (always called, success or failure -- see investigateMarketEvent) ----
+async function recordGeminiInvestigation(env, { investigationId, requestTs, triggerReasons, assets, modelIdentifier, responseStatus, sourceCount, validationStatus, errorMessage, catalystsWritten }) {
+  await env.DB.prepare(
+    `INSERT INTO gemini_investigations
+     (investigation_id, request_ts, trigger_reasons_json, assets_json, model_identifier, response_status, source_count, validation_status, error_message, catalysts_written)
+     VALUES (?,?,?,?,?,?,?,?,?,?)`
+  ).bind(
+    investigationId, requestTs, JSON.stringify(triggerReasons ?? {}), JSON.stringify(assets ?? []),
+    modelIdentifier ?? null, responseStatus ?? null, sourceCount ?? 0, validationStatus ?? null,
+    errorMessage ?? null, catalystsWritten ?? 0
+  ).run();
+}
+
+// ---- The Gemini client (the only network call in this whole block) ----
+// Follows the same request pattern as the existing runGeminiDailyAnalysis/
+// runLinkGeminiAnalysis (env.GEMINI_API_KEY, x-goog-api-key header, same
+// model). Adds Google Search grounding (`tools: [{ google_search: {} }]`) --
+// UNLIKE the existing daily-analysis calls, which don't use grounding.
+// This is the one piece flagged in the plan doc as unverified against the
+// live API in this session (no network egress to
+// generativelanguage.googleapis.com from the sandbox this was written in) --
+// the request shape follows Google's documented grounding tool schema for
+// this model generation, but should be spot-checked against a real response
+// after deploy, per the final implementation report.
+function buildGeminiInvestigationPrompt(candidate) {
+  const { assets, signals } = candidate;
+  return `You are a market intelligence analyst investigating a specific crypto market event. Use web search to find real, current, verifiable sources -- do not rely on general knowledge alone for this task.
+
+EVENT CONTEXT (already computed by CryptoPulse, not your job to re-derive):
+Assets involved: ${assets.join(', ')}
+Approximate price move (trailing ~3.5h window): ${signals.priceMovePct?.toFixed(2)}%
+Prediction outcome: ${signals.wasWrong ? "the model's prediction was WRONG" : "the model's prediction was correct"}
+Model confidence at prediction time: ${(signals.confidence * 100).toFixed(0)}%
+Correlated asset failures this cycle: ${signals.correlatedFailureAssetCount}
+
+TASK: Investigate what likely caused this price movement. Search for real news, announcements, or events from credible sources (official announcements, regulatory sources, established financial/crypto news outlets) published around this time window.
+
+RULES:
+- Only report a catalyst if you find credible, verifiable evidence. If you cannot find a credible catalyst, return an empty catalysts array -- do not invent one.
+- Never fabricate a source URL, publisher name, or timestamp. If a timestamp cannot be verified, omit that field (do not guess).
+- For each catalyst, report event_timestamp (when it happened) and first_public_timestamp (when credible public information became available) as SEPARATE fields if you can establish them -- they are often different.
+- Category must be exactly one of: MACRO, FED_RATES, INFLATION, EMPLOYMENT, USD, ETF_FLOWS, REGULATION, EXCHANGE, STABLECOIN, LIQUIDATION, LEVERAGE, TECHNICAL, ON_CHAIN, GEOPOLITICAL, SECURITY, PROTOCOL, OTHER.
+- market_classification must be exactly one of: MARKET_WIDE, SECTOR_SPECIFIC, ASSET_SPECIFIC, NO_CLEAR_CATALYST.
+
+Respond with ONLY valid JSON, no other text, in exactly this shape:
+{"investigation_id":"","assets":${JSON.stringify(assets)},"market_classification":"","catalysts":[{"category":"","event_timestamp":null,"first_public_timestamp":null,"direction":"","confidence":"HIGH|MEDIUM|LOW","description":"","assets":[],"sources":[{"title":"","publisher":"","url":"","published_at":null}]}]}`;
+}
+
+async function callGeminiForMarketInvestigation(env, candidate) {
+  if (!env.GEMINI_API_KEY) throw new Error('GEMINI_API_KEY not configured on this Worker');
+
+  const prompt = buildGeminiInvestigationPrompt(candidate);
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), GEMINI_INVESTIGATION_TIMEOUT_MS);
+
+  try {
+    const res = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_INVESTIGATION_MODEL}:generateContent`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'x-goog-api-key': env.GEMINI_API_KEY },
+        body: JSON.stringify({
+          contents: [{ parts: [{ text: prompt }] }],
+          tools: [{ google_search: {} }],
+        }),
+        signal: controller.signal,
+      }
+    );
+    if (res.status === 429) {
+      const err = new Error('Gemini API rate limited');
+      err.status = 429;
+      throw err;
+    }
+    if (!res.ok) {
+      const body = await res.text();
+      throw new Error(`Gemini API returned ${res.status}: ${body.slice(0, 500)}`);
+    }
+    const data = await res.json();
+    const text = data?.candidates?.[0]?.content?.parts?.map(p => p.text).join('') ?? '';
+    return text;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+// Pure. Strips markdown code fences if Gemini wraps its JSON despite
+// instructions, then parses. Throws (caller catches) on genuinely malformed
+// JSON -- never silently returns a partial/guessed structure.
+function parseGeminiInvestigationResponse(rawText) {
+  const cleaned = rawText.trim().replace(/^```json\s*/i, '').replace(/^```\s*/i, '').replace(/```\s*$/i, '').trim();
+  return JSON.parse(cleaned);
+}
+
+// Pure. Structural validation of the parsed response, BEFORE any per-
+// catalyst field validation (validateCatalystPayload handles that, per
+// catalyst). Checks the shape Gemini must return, not the content quality.
+function validateGeminiInvestigationResponse(parsed) {
+  const errors = [];
+  if (parsed == null || typeof parsed !== 'object') { return { valid: false, errors: ['response is not a JSON object'] }; }
+  if (!Array.isArray(parsed.assets)) errors.push('missing or invalid assets array');
+  if (parsed.market_classification != null && !ALLOWED_MARKET_CLASSIFICATIONS.includes(parsed.market_classification)) {
+    errors.push(`invalid market_classification: ${parsed.market_classification}`);
+  }
+  if (parsed.catalysts != null && !Array.isArray(parsed.catalysts)) errors.push('catalysts must be an array');
+  for (const catalyst of parsed.catalysts || []) {
+    const sourceCheck = validateCatalystSources(catalyst.sources);
+    if (!sourceCheck.valid) errors.push(...sourceCheck.errors);
+  }
+  return { valid: errors.length === 0, errors };
+}
+
+// Pure. Source validation per .ai/GEMINI_MARKET_INTELLIGENCE.md's "Source
+// Requirements" -- every source needs at minimum a URL, and if a source
+// array is present it must not be empty (a catalyst with zero sources is
+// not evidence, per "Gemini must not invent URLs" -- an empty/missing
+// source list should have produced NO_CLEAR_CATALYST instead of a catalyst
+// entry at all).
+function validateCatalystSources(sources) {
+  const errors = [];
+  if (!Array.isArray(sources) || sources.length === 0) {
+    errors.push('catalyst has no sources -- a catalyst without at least one source is not valid evidence');
+    return { valid: false, errors };
+  }
+  for (const [i, source] of sources.entries()) {
+    if (!source.url) errors.push(`source[${i}] missing url`);
+    else if (!/^https?:\/\/\S+$/.test(source.url)) errors.push(`source[${i}] url is not well-formed: ${source.url}`);
+  }
+  return { valid: errors.length === 0, errors };
+}
+
+// ---- Orchestrates one investigation end-to-end. NEVER throws -- every
+// failure path (timeout, malformed response, rate limit, network error,
+// validation failure, no credible catalyst) is caught and recorded as an
+// audit row, never propagated. Callers (evaluateGeminiTriggers) rely on
+// this never throwing so one candidate's failure can't stop the others in
+// the same cycle. ----
+async function investigateMarketEvent(env, candidate) {
+  const investigationId = `MI-${Date.now()}-${candidate.id}`;
+  const requestTs = Date.now();
+  let responseStatus = 'error', sourceCount = 0, validationStatus = 'not_attempted', errorMessage = null, catalystsWritten = 0;
+
+  try {
+    const rawText = await callGeminiForMarketInvestigation(env, candidate);
+    const parsed = parseGeminiInvestigationResponse(rawText);
+    const structureCheck = validateGeminiInvestigationResponse(parsed);
+
+    if (!structureCheck.valid) {
+      responseStatus = 'invalid_response';
+      validationStatus = 'failed';
+      errorMessage = structureCheck.errors.join('; ');
+    } else if (!parsed.catalysts || parsed.catalysts.length === 0) {
+      // A valid, well-formed "we found nothing credible" response -- per
+      // .ai/MARKET_CATALYST.md, this is a legitimate outcome, not a failure.
+      responseStatus = 'no_catalyst_found';
+      validationStatus = 'ok';
+    } else {
+      responseStatus = 'ok';
+      validationStatus = 'ok';
+      sourceCount = parsed.catalysts.reduce((s, c) => s + (c.sources?.length || 0), 0);
+
+      const existing = await fetchCatalystsForPeriod(env, requestTs - 24 * 3600 * 1000, requestTs + 1);
+      for (const catalyst of parsed.catalysts) {
+        const affectedAssets = Array.isArray(catalyst.assets) && catalyst.assets.length ? catalyst.assets : candidate.assets;
+        for (const asset of affectedAssets) {
+          const eventTimestamp = catalyst.event_timestamp ? Date.parse(catalyst.event_timestamp) : null;
+          const firstPublicTimestamp = catalyst.first_public_timestamp ? Date.parse(catalyst.first_public_timestamp) : null;
+          const payload = {
+            coin: asset,
+            category: catalyst.category,
+            marketClassification: parsed.market_classification,
+            sourceUrl: catalyst.sources?.[0]?.url,
+            eventTimestamp: Number.isFinite(eventTimestamp) ? eventTimestamp : null,
+            firstPublicTimestamp: Number.isFinite(firstPublicTimestamp) ? firstPublicTimestamp : null,
+            discoveryTimestamp: requestTs,
+          };
+          const payloadCheck = validateCatalystPayload(payload);
+          if (!payloadCheck.valid) continue; // skip silently-invalid entries, don't write, don't throw
+
+          const dedupeCandidate = { coin: asset, category: catalyst.category, ts: payload.eventTimestamp ?? requestTs };
+          if (isDuplicateCatalyst(dedupeCandidate, existing)) continue;
+
+          await recordCatalyst(env, {
+            coin: asset,
+            ts: payload.eventTimestamp ?? requestTs,
+            category: catalyst.category,
+            direction: catalyst.direction ?? null,
+            marketClassification: parsed.market_classification ?? null,
+            sourceUrl: payload.sourceUrl ?? null,
+            discoveryTimestamp: requestTs,
+            firstPublicTimestamp: payload.firstPublicTimestamp,
+            confidence: catalyst.confidence ?? null,
+            investigationId,
+          });
+          catalystsWritten++;
+        }
+      }
+    }
+  } catch (err) {
+    if (err.name === 'AbortError') responseStatus = 'timeout';
+    else if (err.status === 429) responseStatus = 'rate_limited';
+    else if (err instanceof SyntaxError) responseStatus = 'malformed_response';
+    else responseStatus = 'error';
+    errorMessage = String(err?.message || err).slice(0, 1000);
+  }
+
+  await recordGeminiInvestigation(env, {
+    investigationId, requestTs, triggerReasons: candidate.signals, assets: candidate.assets,
+    modelIdentifier: GEMINI_INVESTIGATION_MODEL, responseStatus, sourceCount, validationStatus, errorMessage, catalystsWritten,
+  }).catch(auditErr => console.error('Failed to write gemini_investigations audit row:', auditErr));
+}
+
+// ---- Entry point, called from scheduled() via its own ctx.waitUntil.
+// Never throws -- the caller's .catch() is defense in depth, not the
+// primary mechanism (investigateMarketEvent already never throws). ----
+async function evaluateGeminiTriggers(env) {
+  const nowTs = Date.now();
+  const candidates = await buildInvestigationCandidates(env, nowTs);
+  if (candidates.length === 0) return { candidatesEvaluated: 0, investigationsRun: 0 };
+
+  const ranked = rankInvestigationCandidates(candidates);
+  const counts = await getGeminiInvestigationCounts(env, nowTs);
+  const budget = remainingGeminiBudget(counts);
+  const { selected } = selectWithinBudget(ranked, budget);
+
+  for (const candidate of selected) {
+    await investigateMarketEvent(env, candidate);
+  }
+  return { candidatesEvaluated: candidates.length, investigationsRun: selected.length };
 }
 
 // ---- D1 orchestration: gathers rows, never mutates anything ----
@@ -3805,6 +4137,13 @@ export default {
       ctx.waitUntil(predictThenSelect(linkPredictAndLog, 'LINK', 12).catch(err => console.error('LINK 12h predict-and-log failed:', err)));
       ctx.waitUntil(predictThenSelect(ethPredictAndLog, 'ETH', 24).catch(err => console.error('ETH 24h predict-and-log failed:', err)));
       ctx.waitUntil(predictThenSelect(ethPredictAndLog, 'ETH', 12).catch(err => console.error('ETH 12h predict-and-log failed:', err)));
+
+      // Gemini market-intelligence investigation -- its own independent
+      // waitUntil, deliberately NOT chained after the six calls above.
+      // evaluateGeminiTriggers only READS this cycle's already-resolved
+      // predictions; it never blocks, delays, or is a prerequisite for any
+      // prediction being made. See learning/GEMINI_IMPLEMENTATION_PLAN.md.
+      ctx.waitUntil(evaluateGeminiTriggers(env).catch(err => console.error('Gemini trigger evaluation failed:', err)));
     }
   },
 };

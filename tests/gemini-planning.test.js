@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll } from 'vitest';
+import { describe, it, expect, beforeAll, afterEach } from 'vitest';
 import { extractFunctions, extractConstants, evalInScope } from './helpers/extract.js';
 
 // These tests cover ONLY the deterministic, side-effect-free pieces of the
@@ -351,5 +351,427 @@ describe('Gemini planning — isDuplicateCatalyst', () => {
 
   it('returns false against an empty existing-catalyst list', () => {
     expect(scope.isDuplicateCatalyst({ coin: 'BTC', category: 'MACRO', ts: 1000 }, [], 3600000)).toBe(false);
+  });
+});
+
+// =====================================================================
+// LIVE implementation tests -- investigateMarketEvent and its direct
+// dependencies. These mock fetch() and D1 (env.DB) since the functions
+// under test are no longer pure. Per ChatGPT's specific audit focus: the
+// Gemini prompt/grounding request shape, source handling, D1 writes,
+// timestamp enforcement, and whether the scheduled job can call Gemini
+// excessively.
+// =====================================================================
+
+function makeFakeDb({ existingCatalysts = [] } = {}) {
+  const inserts = [];
+  const selects = [];
+  const db = {
+    prepare(sql) {
+      return {
+        bind(...args) {
+          return {
+            async all() {
+              selects.push({ sql, args });
+              if (/FROM coin_catalyst_log/i.test(sql)) return { results: existingCatalysts };
+              return { results: [] };
+            },
+            async first() {
+              return null;
+            },
+            async run() {
+              const table = /INSERT INTO (\w+)/i.exec(sql)?.[1] || 'unknown';
+              const row = { table, sql, args };
+              inserts.push(row);
+              return { meta: { last_row_id: inserts.length } };
+            },
+          };
+        },
+      };
+    },
+  };
+  return { db, inserts, selects };
+}
+
+function validGeminiJson(overrides = {}) {
+  return JSON.stringify({
+    investigation_id: 'MI-test',
+    assets: ['BTC'],
+    market_classification: 'ASSET_SPECIFIC',
+    catalysts: [{
+      category: 'REGULATION',
+      event_timestamp: '2026-08-18T10:00:00Z',
+      first_public_timestamp: '2026-08-18T10:05:00Z',
+      direction: 'DOWN',
+      confidence: 'HIGH',
+      description: 'test catalyst',
+      assets: ['BTC'],
+      sources: [{ title: 'Test Source', publisher: 'Test Publisher', url: 'https://example.com/article', published_at: '2026-08-18T10:05:00Z' }],
+    }],
+    ...overrides,
+  });
+}
+
+function mockFetchOnce(implementation) {
+  const original = global.fetch;
+  global.fetch = implementation;
+  return () => { global.fetch = original; };
+}
+
+describe('Gemini live — parseGeminiInvestigationResponse', () => {
+  let scope;
+  beforeAll(() => { scope = evalInScope(extractFunctions('parseGeminiInvestigationResponse')); });
+
+  it('parses clean JSON', () => {
+    expect(scope.parseGeminiInvestigationResponse('{"a":1}')).toEqual({ a: 1 });
+  });
+
+  it('strips a markdown code fence Gemini adds despite instructions not to', () => {
+    expect(scope.parseGeminiInvestigationResponse('```json\n{"a":1}\n```')).toEqual({ a: 1 });
+  });
+
+  it('throws (does not silently return a guess) on genuinely malformed JSON', () => {
+    expect(() => scope.parseGeminiInvestigationResponse('not json at all')).toThrow();
+  });
+});
+
+describe('Gemini live — validateCatalystSources', () => {
+  let scope;
+  beforeAll(() => { scope = evalInScope(extractFunctions('validateCatalystSources')); });
+
+  it('rejects a missing sources field entirely', () => {
+    expect(scope.validateCatalystSources(undefined).valid).toBe(false);
+  });
+
+  it('rejects an empty sources array -- a catalyst with zero sources is not evidence', () => {
+    expect(scope.validateCatalystSources([]).valid).toBe(false);
+  });
+
+  it('rejects a source with no url', () => {
+    expect(scope.validateCatalystSources([{ title: 'x' }]).valid).toBe(false);
+  });
+
+  it('rejects a malformed url', () => {
+    expect(scope.validateCatalystSources([{ url: 'not-a-url' }]).valid).toBe(false);
+  });
+
+  it('accepts a well-formed source', () => {
+    expect(scope.validateCatalystSources([{ url: 'https://example.com/a' }]).valid).toBe(true);
+  });
+});
+
+describe('Gemini live — validateGeminiInvestigationResponse', () => {
+  let scope;
+  beforeAll(() => {
+    const src = extractFunctions('validateGeminiInvestigationResponse', 'validateCatalystSources')
+      + '\n\n' + extractConstants('ALLOWED_MARKET_CLASSIFICATIONS');
+    scope = evalInScope(src);
+  });
+
+  it('accepts a fully valid response', () => {
+    const parsed = JSON.parse(validGeminiJson());
+    expect(scope.validateGeminiInvestigationResponse(parsed).valid).toBe(true);
+  });
+
+  it('rejects a non-object response', () => {
+    expect(scope.validateGeminiInvestigationResponse(null).valid).toBe(false);
+    expect(scope.validateGeminiInvestigationResponse('a string').valid).toBe(false);
+  });
+
+  it('rejects a missing assets array', () => {
+    const parsed = { catalysts: [] };
+    expect(scope.validateGeminiInvestigationResponse(parsed).valid).toBe(false);
+  });
+
+  it('rejects an invalid market_classification', () => {
+    const parsed = JSON.parse(validGeminiJson({ market_classification: 'EXTREMELY_WIDE' }));
+    expect(scope.validateGeminiInvestigationResponse(parsed).valid).toBe(false);
+  });
+
+  it('rejects a catalyst with a missing source -- the "missing source" case', () => {
+    const parsed = JSON.parse(validGeminiJson());
+    parsed.catalysts[0].sources = [];
+    expect(scope.validateGeminiInvestigationResponse(parsed).valid).toBe(false);
+  });
+
+  it('accepts an empty catalysts array -- "Gemini cannot find a credible catalyst" is a valid response shape', () => {
+    const parsed = JSON.parse(validGeminiJson({ catalysts: [] }));
+    expect(scope.validateGeminiInvestigationResponse(parsed).valid).toBe(true);
+  });
+});
+
+describe('Gemini live — investigateMarketEvent (mocked fetch + D1)', () => {
+  let scope;
+  let restoreFetch;
+
+  beforeAll(() => {
+    const src = extractFunctions(
+      'investigateMarketEvent', 'callGeminiForMarketInvestigation', 'buildGeminiInvestigationPrompt',
+      'parseGeminiInvestigationResponse', 'validateGeminiInvestigationResponse', 'validateCatalystSources',
+      'validateCatalystPayload', 'isDuplicateCatalyst', 'fetchCatalystsForPeriod', 'recordCatalyst', 'recordGeminiInvestigation'
+    ) + '\n\n' + extractConstants(
+      'ALLOWED_MARKET_CLASSIFICATIONS', 'ALLOWED_CATALYST_CATEGORIES',
+      'GEMINI_INVESTIGATION_TIMEOUT_MS', 'GEMINI_INVESTIGATION_MODEL'
+    );
+    scope = evalInScope(src);
+  });
+
+  afterEach(() => { if (restoreFetch) { restoreFetch(); restoreFetch = null; } });
+
+  const candidate = { id: 'BTC', assets: ['BTC'], signals: { priceMovePct: 8, wasWrong: true, confidence: 0.65, correlatedFailureAssetCount: 0 } };
+
+  it('happy path: writes exactly one catalyst and one audit row for a single-asset, single-source catalyst', async () => {
+    restoreFetch = mockFetchOnce(async () => ({
+      ok: true, status: 200,
+      json: async () => ({ candidates: [{ content: { parts: [{ text: validGeminiJson() }] } }] }),
+    }));
+    const { db, inserts } = makeFakeDb();
+    await scope.investigateMarketEvent({ DB: db, GEMINI_API_KEY: 'fake-key' }, candidate);
+
+    const catalystInserts = inserts.filter(i => i.table === 'coin_catalyst_log');
+    const auditInserts = inserts.filter(i => i.table === 'gemini_investigations');
+    expect(catalystInserts.length).toBe(1);
+    expect(auditInserts.length).toBe(1);
+  });
+
+  it('multiple assets, one catalyst: writes one row PER asset, not one shared row', async () => {
+    restoreFetch = mockFetchOnce(async () => ({
+      ok: true, status: 200,
+      json: async () => ({ candidates: [{ content: { parts: [{ text: validGeminiJson({
+        catalysts: [{
+          category: 'MACRO', event_timestamp: '2026-08-18T10:00:00Z', first_public_timestamp: '2026-08-18T10:05:00Z',
+          direction: 'DOWN', confidence: 'HIGH', description: 'market-wide', assets: ['BTC', 'ETH', 'LINK'],
+          sources: [{ url: 'https://example.com/market-wide' }],
+        }],
+      }) }] } }] }),
+    }));
+    const { db, inserts } = makeFakeDb();
+    await scope.investigateMarketEvent({ DB: db, GEMINI_API_KEY: 'fake-key' }, { ...candidate, assets: ['BTC', 'ETH', 'LINK'] });
+
+    const catalystInserts = inserts.filter(i => i.table === 'coin_catalyst_log');
+    expect(catalystInserts.length).toBe(3); // one per affected asset
+  });
+
+  it('duplicate catalyst: does not write a catalyst that already exists in the recent window', async () => {
+    restoreFetch = mockFetchOnce(async () => ({
+      ok: true, status: 200,
+      json: async () => ({ candidates: [{ content: { parts: [{ text: validGeminiJson() }] } }] }),
+    }));
+    const eventTs = Date.parse('2026-08-18T10:00:00Z');
+    const { db, inserts } = makeFakeDb({ existingCatalysts: [{ coin: 'BTC', category: 'REGULATION', ts: eventTs }] });
+    await scope.investigateMarketEvent({ DB: db, GEMINI_API_KEY: 'fake-key' }, candidate);
+
+    const catalystInserts = inserts.filter(i => i.table === 'coin_catalyst_log');
+    const auditInserts = inserts.filter(i => i.table === 'gemini_investigations');
+    expect(catalystInserts.length).toBe(0); // deduped
+    expect(auditInserts.length).toBe(1); // investigation is still audited even though nothing new was written
+  });
+
+  it('invalid timestamp ordering on one catalyst: skips that catalyst, still audits the investigation as ok', async () => {
+    restoreFetch = mockFetchOnce(async () => ({
+      ok: true, status: 200,
+      json: async () => ({ candidates: [{ content: { parts: [{ text: validGeminiJson({
+        catalysts: [{
+          category: 'MACRO',
+          event_timestamp: '2026-08-18T10:00:00Z',
+          first_public_timestamp: '2026-08-10T00:00:00Z', // impossibly early -- "event timestamp after publication timestamp" case
+          direction: 'DOWN', confidence: 'HIGH', description: 'bad timestamps', assets: ['BTC'],
+          sources: [{ url: 'https://example.com/a' }],
+        }],
+      }) }] } }] }),
+    }));
+    const { db, inserts } = makeFakeDb();
+    await scope.investigateMarketEvent({ DB: db, GEMINI_API_KEY: 'fake-key' }, candidate);
+
+    const catalystInserts = inserts.filter(i => i.table === 'coin_catalyst_log');
+    const auditRow = inserts.find(i => i.table === 'gemini_investigations');
+    expect(catalystInserts.length).toBe(0); // skipped, not written
+    expect(auditRow).toBeTruthy(); // but the investigation itself is still recorded
+  });
+
+  it('unknown first_public_timestamp: writes the catalyst with a null first_public_timestamp, never a guess', async () => {
+    restoreFetch = mockFetchOnce(async () => ({
+      ok: true, status: 200,
+      json: async () => ({ candidates: [{ content: { parts: [{ text: validGeminiJson({
+        catalysts: [{
+          category: 'MACRO', event_timestamp: '2026-08-18T10:00:00Z', first_public_timestamp: null,
+          direction: 'DOWN', confidence: 'MEDIUM', description: 'unverified timing', assets: ['BTC'],
+          sources: [{ url: 'https://example.com/a' }],
+        }],
+      }) }] } }] }),
+    }));
+    const { db, inserts } = makeFakeDb();
+    await scope.investigateMarketEvent({ DB: db, GEMINI_API_KEY: 'fake-key' }, candidate);
+
+    const catalystInsert = inserts.find(i => i.table === 'coin_catalyst_log');
+    expect(catalystInsert).toBeTruthy(); // still written -- missing first_public_timestamp isn't a validation failure by itself
+  });
+
+  it('Gemini cannot find a credible catalyst: valid response, empty catalysts, no D1 catalyst write, audited as no_catalyst_found', async () => {
+    restoreFetch = mockFetchOnce(async () => ({
+      ok: true, status: 200,
+      json: async () => ({ candidates: [{ content: { parts: [{ text: validGeminiJson({ catalysts: [] }) }] } }] }),
+    }));
+    const { db, inserts } = makeFakeDb();
+    await scope.investigateMarketEvent({ DB: db, GEMINI_API_KEY: 'fake-key' }, candidate);
+
+    expect(inserts.filter(i => i.table === 'coin_catalyst_log').length).toBe(0);
+    const auditInsert = inserts.find(i => i.table === 'gemini_investigations');
+    expect(auditInsert.args).toContain('no_catalyst_found');
+  });
+
+  it('malformed Gemini response (not valid JSON): does not throw, audits as malformed_response, no catalyst written', async () => {
+    restoreFetch = mockFetchOnce(async () => ({
+      ok: true, status: 200,
+      json: async () => ({ candidates: [{ content: { parts: [{ text: 'this is not json' }] } }] }),
+    }));
+    const { db, inserts } = makeFakeDb();
+    await expect(scope.investigateMarketEvent({ DB: db, GEMINI_API_KEY: 'fake-key' }, candidate)).resolves.not.toThrow();
+    expect(inserts.filter(i => i.table === 'coin_catalyst_log').length).toBe(0);
+    const auditInsert = inserts.find(i => i.table === 'gemini_investigations');
+    expect(auditInsert.args).toContain('malformed_response');
+  });
+
+  it('missing source (structurally invalid response): audits as invalid_response, no catalyst written', async () => {
+    restoreFetch = mockFetchOnce(async () => ({
+      ok: true, status: 200,
+      json: async () => ({ candidates: [{ content: { parts: [{ text: validGeminiJson({
+        catalysts: [{ category: 'MACRO', direction: 'DOWN', confidence: 'HIGH', description: 'no sources', assets: ['BTC'], sources: [] }],
+      }) }] } }] }),
+    }));
+    const { db, inserts } = makeFakeDb();
+    await scope.investigateMarketEvent({ DB: db, GEMINI_API_KEY: 'fake-key' }, candidate);
+
+    expect(inserts.filter(i => i.table === 'coin_catalyst_log').length).toBe(0);
+    const auditInsert = inserts.find(i => i.table === 'gemini_investigations');
+    expect(auditInsert.args).toContain('invalid_response');
+  });
+
+  it('Gemini API failure (non-2xx, non-429): does not throw, audits as error', async () => {
+    restoreFetch = mockFetchOnce(async () => ({ ok: false, status: 500, text: async () => 'internal server error' }));
+    const { db, inserts } = makeFakeDb();
+    await expect(scope.investigateMarketEvent({ DB: db, GEMINI_API_KEY: 'fake-key' }, candidate)).resolves.not.toThrow();
+    const auditInsert = inserts.find(i => i.table === 'gemini_investigations');
+    expect(auditInsert.args).toContain('error');
+  });
+
+  it('Gemini rate limit (429): does not throw, audits as rate_limited specifically (not generic error)', async () => {
+    restoreFetch = mockFetchOnce(async () => ({ ok: false, status: 429, text: async () => 'rate limited' }));
+    const { db, inserts } = makeFakeDb();
+    await scope.investigateMarketEvent({ DB: db, GEMINI_API_KEY: 'fake-key' }, candidate);
+    const auditInsert = inserts.find(i => i.table === 'gemini_investigations');
+    expect(auditInsert.args).toContain('rate_limited');
+  });
+
+  it('Gemini timeout (fetch rejects with an AbortError): does not throw, audits as timeout', async () => {
+    restoreFetch = mockFetchOnce(async () => {
+      const err = new Error('The operation was aborted');
+      err.name = 'AbortError';
+      throw err;
+    });
+    const { db, inserts } = makeFakeDb();
+    await expect(scope.investigateMarketEvent({ DB: db, GEMINI_API_KEY: 'fake-key' }, candidate)).resolves.not.toThrow();
+    const auditInsert = inserts.find(i => i.table === 'gemini_investigations');
+    expect(auditInsert.args).toContain('timeout');
+  });
+
+  it('a network-level throw (e.g. DNS failure) is caught, not propagated, and still audited', async () => {
+    restoreFetch = mockFetchOnce(async () => { throw new TypeError('fetch failed'); });
+    const { db, inserts } = makeFakeDb();
+    await expect(scope.investigateMarketEvent({ DB: db, GEMINI_API_KEY: 'fake-key' }, candidate)).resolves.not.toThrow();
+    expect(inserts.find(i => i.table === 'gemini_investigations')).toBeTruthy();
+  });
+
+  it('every investigation is audited even on total failure -- auditability holds regardless of outcome', async () => {
+    restoreFetch = mockFetchOnce(async () => ({ ok: false, status: 503, text: async () => 'unavailable' }));
+    const { db, inserts } = makeFakeDb();
+    await scope.investigateMarketEvent({ DB: db, GEMINI_API_KEY: 'fake-key' }, candidate);
+    expect(inserts.filter(i => i.table === 'gemini_investigations').length).toBe(1);
+  });
+
+  it('the Gemini request includes google_search grounding tool', async () => {
+    let capturedBody = null;
+    restoreFetch = mockFetchOnce(async (url, opts) => {
+      capturedBody = JSON.parse(opts.body);
+      return { ok: true, status: 200, json: async () => ({ candidates: [{ content: { parts: [{ text: validGeminiJson({ catalysts: [] }) }] } }] }) };
+    });
+    const { db } = makeFakeDb();
+    await scope.investigateMarketEvent({ DB: db, GEMINI_API_KEY: 'fake-key' }, candidate);
+    expect(capturedBody.tools).toEqual([{ google_search: {} }]);
+  });
+
+  it('throws immediately (before any fetch) if GEMINI_API_KEY is not configured -- caught and audited, never crashes the caller', async () => {
+    const { db, inserts } = makeFakeDb();
+    await expect(scope.investigateMarketEvent({ DB: db }, candidate)).resolves.not.toThrow();
+    const auditInsert = inserts.find(i => i.table === 'gemini_investigations');
+    expect(auditInsert).toBeTruthy();
+    expect(auditInsert.args.some(a => typeof a === 'string' && a.includes('GEMINI_API_KEY'))).toBe(true);
+  });
+});
+
+describe('Gemini live — evaluateGeminiTriggers respects the budget (excessive-call-volume guard)', () => {
+  let scope;
+
+  beforeAll(() => {
+    // Mocks buildInvestigationCandidates/getGeminiInvestigationCounts/
+    // investigateMarketEvent (D1/network-dependent) so this test isolates
+    // exactly the concern ChatGPT flagged: can the scheduled job call
+    // Gemini more times than the budget allows? Real ranking/budget logic
+    // (rankInvestigationCandidates, remainingGeminiBudget, selectWithinBudget)
+    // is NOT mocked -- it's the real, already-tested implementation.
+    const mocks = `
+      async function buildInvestigationCandidates(env) { return env.__mockCandidates; }
+      async function getGeminiInvestigationCounts(env) { return env.__mockCounts; }
+      async function investigateMarketEvent(env, candidate) { env.__investigated.push(candidate.id); }
+    `;
+    const src = mocks + '\n\n' + extractFunctions(
+      'rankInvestigationCandidates', 'computeInvestigationPriority', 'remainingGeminiBudget', 'selectWithinBudget', 'evaluateGeminiTriggers'
+    ) + '\n\n' + extractConstants('INVESTIGATION_PRIORITY_WEIGHTS', 'INVESTIGATION_PRIORITY_THRESHOLD', 'GEMINI_TRIGGER_CONFIG');
+    scope = evalInScope(src);
+  });
+
+  it('never investigates more candidates than the remaining budget, even with many high-priority candidates ranked', async () => {
+    const manyHighPriorityCandidates = ['BTC', 'ETH', 'LINK'].map(id => ({
+      id, assets: [id],
+      signals: { priceMovePct: 12, wasWrong: true, confidence: 0.9, correlatedFailureAssetCount: 3, isVolatilityAnomaly: true, isRegimeChange: true },
+    }));
+    const env = {
+      __mockCandidates: manyHighPriorityCandidates,
+      __mockCounts: { investigationsToday: 7, investigationsThisHour: 0 }, // only 1 left today (MAX_GEMINI_INVESTIGATIONS_PER_DAY=8)
+      __investigated: [],
+    };
+    const result = await scope.evaluateGeminiTriggers(env);
+    expect(env.__investigated.length).toBe(1); // budget of 1, not 3
+    expect(result.investigationsRun).toBe(1);
+    expect(result.candidatesEvaluated).toBe(3);
+  });
+
+  it('investigates zero candidates when the budget is exhausted, regardless of priority', async () => {
+    const env = {
+      __mockCandidates: [{ id: 'BTC', assets: ['BTC'], signals: { priceMovePct: 20, wasWrong: true, confidence: 0.99, correlatedFailureAssetCount: 3 } }],
+      __mockCounts: { investigationsToday: 8, investigationsThisHour: 0 }, // daily limit already reached
+      __investigated: [],
+    };
+    const result = await scope.evaluateGeminiTriggers(env);
+    expect(env.__investigated.length).toBe(0);
+    expect(result.investigationsRun).toBe(0);
+  });
+
+  it('investigates zero candidates when there is nothing to evaluate this cycle -- no D1 write, no fetch attempted', async () => {
+    const env = { __mockCandidates: [], __mockCounts: { investigationsToday: 0, investigationsThisHour: 0 }, __investigated: [] };
+    const result = await scope.evaluateGeminiTriggers(env);
+    expect(result).toEqual({ candidatesEvaluated: 0, investigationsRun: 0 });
+    expect(env.__investigated.length).toBe(0);
+  });
+
+  it('a LOW-priority candidate is never investigated even with full budget available', async () => {
+    const env = {
+      __mockCandidates: [{ id: 'BTC', assets: ['BTC'], signals: { priceMovePct: 0.2, wasWrong: false, confidence: 0.9 } }], // Example-A-shaped: LOW
+      __mockCounts: { investigationsToday: 0, investigationsThisHour: 0 },
+      __investigated: [],
+    };
+    const result = await scope.evaluateGeminiTriggers(env);
+    expect(env.__investigated.length).toBe(0);
+    expect(result.investigationsRun).toBe(0);
   });
 });

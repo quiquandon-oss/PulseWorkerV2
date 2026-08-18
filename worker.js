@@ -1387,6 +1387,114 @@ async function fetchCatalystsForPeriod(env, sinceTs, untilTs) {
   return results;
 }
 
+// =====================================================================
+// ---- Gemini Market Intelligence: PLANNING-ONLY building blocks ----
+// See .ai/GEMINI_MARKET_INTELLIGENCE.md. NONE of the functions below are
+// called from any HTTP route or from scheduled() -- they exist so the
+// deterministic, side-effect-free parts of the eventual integration
+// (trigger thresholds, payload validation, deduplication) can be designed,
+// reviewed, and unit-tested BEFORE any Gemini API call, D1 write from this
+// path, or Worker route is added. See learning/GEMINI_IMPLEMENTATION_PLAN.md
+// for where these are intended to be wired in, once that plan is reviewed
+// and a separate PR implements the actual integration.
+// =====================================================================
+
+const GEMINI_TRIGGER_CONFIG = {
+  MARKET_MOVE_TRIGGER_PCT: 3,       // trailing-window price move %, see plan doc for which window
+  HIGH_CONFIDENCE_TRIGGER: 0.85,    // NOT the doc's example 0.75 -- see plan doc's call-volume analysis for why
+  MULTI_ASSET_TRIGGER_COUNT: 3,
+  MAX_INVESTIGATIONS_PER_DAY: 8,
+  MAX_INVESTIGATIONS_PER_HOUR: 2,
+  MAX_ASSETS_PER_INVESTIGATION: 3,
+};
+
+const ALLOWED_CATALYST_CATEGORIES = [
+  'MACRO', 'FED_RATES', 'INFLATION', 'EMPLOYMENT', 'USD', 'ETF_FLOWS', 'REGULATION',
+  'EXCHANGE', 'STABLECOIN', 'LIQUIDATION', 'LEVERAGE', 'TECHNICAL', 'ON_CHAIN',
+  'GEOPOLITICAL', 'SECURITY', 'PROTOCOL', 'OTHER',
+];
+
+const ALLOWED_MARKET_CLASSIFICATIONS = ['MARKET_WIDE', 'SECTOR_SPECIFIC', 'ASSET_SPECIFIC', 'NO_CLEAR_CATALYST'];
+
+// Pure. Decides WHETHER a Gemini investigation would be justified, given
+// already-computed signals (price move %, whether a high-confidence
+// prediction just failed, how many assets are correlated). Does not call
+// Gemini, does not read D1, does not know about rate limits (see
+// withinGeminiRateLimit below for that, kept separate on purpose --
+// "should this event be investigated" and "can we afford to investigate it
+// right now" are different questions and conflating them would make both
+// harder to test).
+function shouldTriggerInvestigation(signals, config = GEMINI_TRIGGER_CONFIG) {
+  const reasons = [];
+  if (signals.priceMovePct != null && Math.abs(signals.priceMovePct) >= config.MARKET_MOVE_TRIGGER_PCT) {
+    reasons.push(`price_move_${signals.priceMovePct >= 0 ? 'up' : 'down'}_${Math.abs(signals.priceMovePct).toFixed(1)}pct`);
+  }
+  if (signals.highConfidenceFailureConfidence != null && signals.highConfidenceFailureConfidence >= config.HIGH_CONFIDENCE_TRIGGER) {
+    reasons.push(`high_confidence_failure_${signals.highConfidenceFailureConfidence.toFixed(2)}`);
+  }
+  if (signals.correlatedFailureAssetCount != null && signals.correlatedFailureAssetCount >= config.MULTI_ASSET_TRIGGER_COUNT) {
+    reasons.push(`correlated_failures_${signals.correlatedFailureAssetCount}_assets`);
+  }
+  return { trigger: reasons.length > 0, reasons };
+}
+
+// Pure, given already-known counts (caller queries D1 for today's/this-hour's
+// investigation count -- not done here, keeps this testable without a
+// database). Bounds Gemini usage per .ai/GEMINI_MARKET_INTELLIGENCE.md's
+// Rate Limiting section.
+function withinGeminiRateLimit({ investigationsToday, investigationsThisHour }, config = GEMINI_TRIGGER_CONFIG) {
+  if (investigationsToday >= config.MAX_INVESTIGATIONS_PER_DAY) return { allowed: false, reason: 'daily_limit_reached' };
+  if (investigationsThisHour >= config.MAX_INVESTIGATIONS_PER_HOUR) return { allowed: false, reason: 'hourly_limit_reached' };
+  return { allowed: true, reason: null };
+}
+
+// Pure. Validates a candidate catalyst payload BEFORE it's ever written to
+// D1 -- per .ai/GEMINI_MARKET_INTELLIGENCE.md's "Catalyst Validation"
+// checklist (items 1-6; items 7-9, duplicate/fabrication detection, are
+// separate concerns -- see isDuplicateCatalyst below; fabrication can't be
+// mechanically detected, only guarded against by never inventing a value
+// when Gemini returns null, which is a call-site discipline, not something
+// this function can enforce).
+function validateCatalystPayload(catalyst) {
+  const errors = [];
+  if (!catalyst.coin) errors.push('missing coin');
+  if (!catalyst.category) errors.push('missing category');
+  else if (!ALLOWED_CATALYST_CATEGORIES.includes(catalyst.category)) errors.push(`invalid category: ${catalyst.category}`);
+  if (catalyst.marketClassification && !ALLOWED_MARKET_CLASSIFICATIONS.includes(catalyst.marketClassification)) {
+    errors.push(`invalid market_classification: ${catalyst.marketClassification}`);
+  }
+  if (catalyst.sourceUrl != null && !/^https?:\/\/\S+$/.test(catalyst.sourceUrl)) {
+    errors.push('source_url is not a well-formed http(s) URL');
+  }
+  // Timestamp ordering sanity checks -- generous tolerance for clock skew
+  // (1h) since these come from an external LLM's own timestamp parsing,
+  // not a system clock.
+  const TOLERANCE_MS = 60 * 60 * 1000;
+  if (catalyst.eventTimestamp != null && catalyst.firstPublicTimestamp != null) {
+    if (catalyst.firstPublicTimestamp < catalyst.eventTimestamp - TOLERANCE_MS) {
+      errors.push('first_public_timestamp is implausibly before event_timestamp');
+    }
+  }
+  if (catalyst.firstPublicTimestamp != null && catalyst.discoveryTimestamp != null) {
+    if (catalyst.discoveryTimestamp < catalyst.firstPublicTimestamp - TOLERANCE_MS) {
+      errors.push('discovery_timestamp is implausibly before first_public_timestamp');
+    }
+  }
+  return { valid: errors.length === 0, errors };
+}
+
+// Pure. "One market event + multiple affected assets" preferred over
+// duplicate rows, per .ai/MARKET_CATALYST.md's Duplicate Detection section.
+// Same coin + same category within toleranceMs of an existing catalyst's
+// `ts` counts as a duplicate candidate.
+function isDuplicateCatalyst(candidate, existingCatalysts, toleranceMs = 6 * 60 * 60 * 1000) {
+  return existingCatalysts.some(existing =>
+    existing.coin === candidate.coin &&
+    existing.category === candidate.category &&
+    Math.abs(existing.ts - candidate.ts) <= toleranceMs
+  );
+}
+
 // ---- D1 orchestration: gathers rows, never mutates anything ----
 async function fetchResolvedRows(env, table, { coin, horizonHours, sinceResolvedTs, probColumn = 'p_up', calibratedColumn = 'calibrated_p_up' } = {}) {
   const conditions = ['realized_up IS NOT NULL'];

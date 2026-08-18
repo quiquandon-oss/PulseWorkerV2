@@ -15,6 +15,28 @@ const TOL_MS = LAG_MS * 0.2;        // matching tolerance for "nearest row to t+
 const MIN_COMPLETE_ROWS = 30;       // below this, refuse to predict rather than overfit noise
 const MIN_RESOLVED_ANALOGS = 5;     // below this among the k neighbors, refuse rather than report a probability built on almost nothing
 
+// ---- Continuous-learning ledger: model identity ----
+// First formal version tags introduced alongside the prediction ledger
+// (see .ai/DATA_CONTRACT.md). Prediction LOGIC is unchanged by this —
+// these strings identify "the k-NN core model as it exists today", not a
+// new model. Bump the relevant string only when that model's actual
+// decision logic changes (feature set, K rule, calibration method, etc.),
+// not for unrelated infra work.
+const MODEL_VERSIONS = {
+  btc_core: 'knn-core-v1',
+  link_core: 'knn-core-v1',
+  eth_core: 'knn-core-v1-selfcontained', // distinct tag: self-contained feature set, deliberately not sharing BTC's borrowed-context pattern
+  challenger: 'regime-trend-v1',
+};
+
+// git_commit_sha is captured from an environment var set at deploy time
+// (see wrangler.toml [vars] + .github/workflows/deploy.yml), not computed
+// at runtime -- Workers have no git access. Falls back to 'unknown' for
+// local/test environments where the var isn't injected, never fabricated.
+function currentGitSha(env) {
+  return (env && env.GIT_COMMIT_SHA) ? env.GIT_COMMIT_SHA : 'unknown';
+}
+
 function meanStd(vals) {
   const mean = vals.reduce((a, b) => a + b, 0) / vals.length;
   const variance = vals.reduce((a, b) => a + (b - mean) ** 2, 0) / vals.length;
@@ -443,12 +465,12 @@ async function runPrediction(env, horizonHours = 24) {
     `INSERT INTO predictions
      (ts, target_ts, btc_price_at_prediction, p_up, n_analogs, median_analog_return, return_p25, return_p75, features_json,
       k_used, volatility_percentile, closest_analog_dist, is_regime_anomaly, p_up_experimental, median_return_experimental, horizon_hours,
-      trend_strength, calibrated_p_up, calibrated_conditional_p_up)
-     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
+      trend_strength, calibrated_p_up, calibrated_conditional_p_up, model_version, git_commit_sha)
+     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
   ).bind(
     nowTs, nowTs + lagMs, today.btc_price, pUp, resolved.length, median, p25, p75, JSON.stringify(features),
     kAdaptive, volPercentile, closestDist, isRegimeAnomaly ? 1 : 0, pUpExperimental, medianReturnExperimental, horizonHours,
-    trend, calibratedPUp, calibratedConditionalPUp
+    trend, calibratedPUp, calibratedConditionalPUp, MODEL_VERSIONS.btc_core, currentGitSha(env)
   ).run();
 
   return {
@@ -627,12 +649,12 @@ async function runEthPrediction(env, horizonHours = 24) {
     `INSERT INTO eth_predictions
      (ts, target_ts, eth_price_at_prediction, p_up, n_analogs, median_analog_return, return_p25, return_p75, features_json,
       k_used, volatility_percentile, closest_analog_dist, is_regime_anomaly, p_up_experimental, median_return_experimental, horizon_hours,
-      trend_strength, calibrated_p_up)
-     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
+      trend_strength, calibrated_p_up, model_version, git_commit_sha)
+     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
   ).bind(
     nowTs, nowTs + lagMs, today.eth_price, pUp, resolved.length, median, p25, p75, JSON.stringify(features),
     kAdaptive, volPercentile, closestDist, isRegimeAnomaly ? 1 : 0, pUpExperimental, medianReturnExperimental, horizonHours,
-    trend, calibratedPUp
+    trend, calibratedPUp, MODEL_VERSIONS.eth_core, currentGitSha(env)
   ).run();
 
   return {
@@ -1161,6 +1183,338 @@ async function refreshCalibrationCurve(env, coin, horizonHours) {
   return { ok: true, coin, horizon_hours: horizonHours, status: 'ok', n_resolved: results.length, n_buckets: curve.length, computed_ts: computedTs };
 }
 
+// =====================================================================
+// ---- Continuous-Learning Engine: daily audit metrics ----
+// See .ai/DAILY_AUDIT.md and .ai/DATA_CONTRACT.md for the contract this
+// implements. Pure, unit-testable functions below; D1-coupled
+// orchestration (buildDailyReport) further down. Nothing here writes to
+// or alters predictions/link_predictions/eth_predictions/challenger_predictions
+// — this is a read-only measurement layer over data those models already
+// produced.
+// =====================================================================
+
+const LEARNING_MIN_SAMPLE = 20; // same bar refreshCalibrationCurve already uses -- not a new threshold invented for this
+
+function computeBrierScore(rows) {
+  if (!rows.length) return null;
+  const sum = rows.reduce((s, r) => s + (r.p - r.realized_up) ** 2, 0);
+  return sum / rows.length;
+}
+
+function computeLogLoss(rows) {
+  if (!rows.length) return null;
+  const EPS = 1e-9;
+  const sum = rows.reduce((s, r) => {
+    const p = Math.min(1 - EPS, Math.max(EPS, r.p));
+    return s - (r.realized_up * Math.log(p) + (1 - r.realized_up) * Math.log(1 - p));
+  }, 0);
+  return sum / rows.length;
+}
+
+function computeDirectionalAccuracy(rows) {
+  if (!rows.length) return null;
+  const correct = rows.filter(r => (r.p >= 0.5 ? 1 : 0) === r.realized_up).length;
+  return correct / rows.length;
+}
+
+// Reuses buildCalibrationCurve exactly as-is (same decile logic already
+// proven for the live /calibration route) rather than a second, possibly
+// inconsistent calibration-error formula.
+function computeCalibrationError(rows) {
+  if (rows.length < LEARNING_MIN_SAMPLE) return null;
+  const curve = buildCalibrationCurve(rows.map(r => ({ p_up: r.p, realized_up: r.realized_up })));
+  const totalN = curve.reduce((s, c) => s + c.n_samples, 0);
+  if (!totalN) return null;
+  const weighted = curve.reduce((s, c) => s + c.n_samples * Math.abs(c.predicted_p_up_mid - c.empirical_up_rate), 0);
+  return weighted / totalN;
+}
+
+const CONFIDENCE_BUCKET_BOUNDS = [0.50, 0.55, 0.60, 0.65, 0.70, 0.75, 0.80, 1.001];
+
+// Buckets by DISTANCE FROM 50/50 (i.e. how confident the call was),
+// matching .ai/DAILY_AUDIT.md's literal bucket list (0.50-0.55 ... 0.80+),
+// which only makes sense as a confidence scale, not a raw p_up scale.
+function bucketByConfidence(rows) {
+  const buckets = [];
+  for (let i = 0; i < CONFIDENCE_BUCKET_BOUNDS.length - 1; i++) {
+    const lo = CONFIDENCE_BUCKET_BOUNDS[i], hi = CONFIDENCE_BUCKET_BOUNDS[i + 1];
+    buckets.push({ range: hi > 1 ? `${lo.toFixed(2)}+` : `${lo.toFixed(2)}-${hi.toFixed(2)}`, lo, hi, n: 0, correct: 0 });
+  }
+  for (const r of rows) {
+    const conf = Math.max(r.p, 1 - r.p);
+    const b = buckets.find(b => conf >= b.lo && conf < b.hi);
+    if (b) { b.n++; if ((r.p >= 0.5 ? 1 : 0) === r.realized_up) b.correct++; }
+  }
+  return buckets.map(b => ({
+    range: b.range,
+    n: b.n,
+    accuracy: b.n ? Number((b.correct / b.n).toFixed(3)) : null,
+    // "predicted confidence exceeds realized accuracy by >5pts" -- a fixed,
+    // documented threshold, not a statistically-derived significance test.
+    // Flags direction for a human/ChatGPT to investigate, doesn't itself
+    // conclude miscalibration.
+    overconfident_flag: b.n ? ((b.lo + Math.min(b.hi, 1)) / 2 - (b.correct / b.n)) > 0.05 : null,
+  }));
+}
+
+function mostConfidentMistakes(rows, limit = 5) {
+  return rows
+    .filter(r => (r.p >= 0.5 ? 1 : 0) !== r.realized_up)
+    .map(r => ({ ts: r.ts, p: Number(r.p.toFixed(3)), confidence: Number(Math.max(r.p, 1 - r.p).toFixed(3)), realized_up: r.realized_up, horizon_hours: r.horizon_hours }))
+    .sort((a, b) => b.confidence - a.confidence)
+    .slice(0, limit);
+}
+
+// Heuristic regime tags derived ONLY from fields the core models already
+// store per prediction (volatility_percentile, trend_strength,
+// is_regime_anomaly) -- no new inputs, no effect on any prediction.
+// Thresholds are a documented first pass for reporting purposes, not a
+// statistically fitted boundary; revisit once enough regime-split evidence
+// accumulates (see .ai/DAILY_AUDIT.md section 5).
+function classifyRegime(row) {
+  let trend_regime = 'neutral';
+  if (row.trend_strength != null) {
+    if (row.trend_strength > 0.15) trend_regime = 'bullish';
+    else if (row.trend_strength < -0.15) trend_regime = 'bearish';
+  }
+  let vol_regime = 'normal_volatility';
+  if (row.volatility_percentile != null) {
+    if (row.volatility_percentile >= 0.85) vol_regime = 'high_volatility';
+    else if (row.volatility_percentile <= 0.15) vol_regime = 'low_volatility';
+  }
+  return { trend_regime, vol_regime, is_anomaly: !!row.is_regime_anomaly };
+}
+
+function groupByRegime(rows) {
+  const groups = {};
+  for (const r of rows) {
+    const { trend_regime, vol_regime, is_anomaly } = classifyRegime(r);
+    for (const key of [`trend:${trend_regime}`, `volatility:${vol_regime}`, is_anomaly ? 'anomaly:yes' : 'anomaly:no']) {
+      (groups[key] ||= []).push(r);
+    }
+  }
+  const out = {};
+  for (const key of Object.keys(groups)) out[key] = summarizeRows(groups[key]);
+  return out;
+}
+
+// Single insufficient-sample gate reused everywhere in this engine so the
+// "explicitly report insufficient evidence, never manufacture a
+// conclusion" rule can't accidentally be skipped in one call site.
+function summarizeRows(rows, minSample = LEARNING_MIN_SAMPLE) {
+  if (rows.length < minSample) {
+    return { status: 'insufficient_data', n: rows.length, min_required: minSample };
+  }
+  return {
+    status: 'ok',
+    n: rows.length,
+    accuracy: Number(computeDirectionalAccuracy(rows).toFixed(4)),
+    brier_score: Number(computeBrierScore(rows).toFixed(4)),
+    log_loss: Number(computeLogLoss(rows).toFixed(4)),
+    calibration_error: computeCalibrationError(rows) != null ? Number(computeCalibrationError(rows).toFixed(4)) : null,
+    realized_up_rate: Number((rows.reduce((s, r) => s + r.realized_up, 0) / rows.length).toFixed(4)),
+    avg_predicted_p_up: Number((rows.reduce((s, r) => s + r.p, 0) / rows.length).toFixed(4)),
+  };
+}
+
+// ---- Catalyst timestamp integrity (.ai/MARKET_CATALYST.md) ----
+// T1 <= T0 => available_before_prediction = true. Pure function, the only
+// place this comparison is allowed to happen, so it can't drift between
+// call sites.
+function classifyCatalystTiming(catalystEventTs, predictionTs) {
+  if (catalystEventTs == null || predictionTs == null) return null;
+  return catalystEventTs <= predictionTs;
+}
+
+// ---- Model drift (.ai/DAILY_AUDIT.md section 10) ----
+function computeDrift(rows, nowTs) {
+  const DAY = 24 * 3600 * 1000;
+  const windows = { last_24h: nowTs - DAY, last_7d: nowTs - 7 * DAY, last_30d: nowTs - 30 * DAY, full_history: 0 };
+  const out = {};
+  for (const [label, cutoff] of Object.entries(windows)) {
+    out[label] = summarizeRows(rows.filter(r => r.resolved_ts != null && r.resolved_ts >= cutoff));
+  }
+  // Flag only when both windows have enough evidence to compare -- an
+  // insufficient-data window is never silently treated as "no drift".
+  let flag = null;
+  if (out.last_7d.status === 'ok' && out.full_history.status === 'ok') {
+    const delta = out.last_7d.accuracy - out.full_history.accuracy;
+    flag = Math.abs(delta) > 0.15 ? { deviation: Number(delta.toFixed(4)), note: 'last 7d accuracy differs from full-history accuracy by >15pts' } : null;
+  }
+  return { windows: out, flag };
+}
+
+// ---- Market catalyst layer (.ai/MARKET_CATALYST.md) ----
+// Schema + data contract only, per IMPLEMENTATION_PLAN Phase 6 -- this is
+// NOT an automatic ingestion pipeline and catalysts are NOT fed into any
+// prediction. recordCatalyst exists so there's a single correct way to
+// write a row (human-entered, or a future explicitly-scoped ingestion job);
+// nothing currently calls it automatically. available_before_prediction is
+// deliberately NOT computed here -- it depends on WHICH prediction a
+// catalyst is being compared against (classifyCatalystTiming above), so a
+// catalyst row itself only stores its own timestamps, not a precomputed
+// verdict that would silently go stale as it's reused against different predictions.
+async function recordCatalyst(env, opts) {
+  const { coin, ts, category, direction, priceMovePct, headlineSource, sourceUrl, extractedReason, discoveryTimestamp, confidence, marketClassification } = opts;
+  const insert = await env.DB.prepare(
+    `INSERT INTO coin_catalyst_log
+     (ts, coin, price_move_pct, headline_source, extracted_reason, category, direction, source_url, discovery_timestamp, confidence, market_classification)
+     VALUES (?,?,?,?,?,?,?,?,?,?,?)`
+  ).bind(
+    ts, coin, priceMovePct ?? null, headlineSource ?? null, extractedReason ?? null,
+    category ?? null, direction ?? null, sourceUrl ?? null, discoveryTimestamp ?? null,
+    confidence ?? null, marketClassification ?? null
+  ).run();
+  return { ok: true, id: insert.meta.last_row_id };
+}
+
+// Read-only. `ts` is used as the period filter (when the catalyst was
+// logged) since it's the one column guaranteed populated on every row,
+// including the 2 pre-existing V1 rows that predate this contract and
+// were left untouched by the migration (their new columns are NULL,
+// reported as-is, never backfilled with guessed values).
+async function fetchCatalystsForPeriod(env, sinceTs, untilTs) {
+  let sql = `SELECT id, ts, coin, category, direction, price_move_pct, source_url, headline_source,
+                    discovery_timestamp, confidence, market_classification
+             FROM coin_catalyst_log`;
+  const params = [];
+  if (sinceTs != null && untilTs != null) {
+    sql += ' WHERE ts >= ? AND ts < ?';
+    params.push(sinceTs, untilTs);
+  }
+  sql += ' ORDER BY ts DESC LIMIT 100';
+  const { results } = await env.DB.prepare(sql).bind(...params).all();
+  return results;
+}
+
+// ---- D1 orchestration: gathers rows, never mutates anything ----
+async function fetchResolvedRows(env, table, { coin, horizonHours, sinceResolvedTs, probColumn = 'p_up', calibratedColumn = 'calibrated_p_up' } = {}) {
+  const conditions = ['realized_up IS NOT NULL'];
+  const params = [];
+  if (coin) { conditions.push('coin = ?'); params.push(coin); }
+  if (horizonHours) { conditions.push('horizon_hours = ?'); params.push(horizonHours); }
+  if (sinceResolvedTs) { conditions.push('resolved_ts >= ?'); params.push(sinceResolvedTs); }
+  const sql = `SELECT ts, resolved_ts, horizon_hours, realized_up, volatility_percentile, trend_strength, is_regime_anomaly,
+                      ${probColumn} as raw_p, ${calibratedColumn} as calibrated_p
+               FROM ${table} WHERE ${conditions.join(' AND ')} ORDER BY ts ASC`;
+  const { results } = await env.DB.prepare(sql).bind(...params).all();
+  return results.map(r => ({
+    ts: r.ts, resolved_ts: r.resolved_ts, horizon_hours: r.horizon_hours, realized_up: r.realized_up,
+    volatility_percentile: r.volatility_percentile, trend_strength: r.trend_strength, is_regime_anomaly: r.is_regime_anomaly,
+    // Prefer the calibrated probability when present -- same fallback
+    // semantics runPrediction itself uses (calibrated_p_up falls back to
+    // raw pUp when no curve exists yet).
+    p: r.calibrated_p != null ? r.calibrated_p : r.raw_p,
+  }));
+}
+
+const LEARNING_ASSETS = [
+  { key: 'BTC', table: 'predictions', coinFilter: false, probColumn: 'p_up', calibratedColumn: 'calibrated_p_up' },
+  { key: 'LINK', table: 'link_predictions', coinFilter: false, probColumn: 'p_up', calibratedColumn: 'calibrated_p_up' },
+  { key: 'ETH', table: 'eth_predictions', coinFilter: false, probColumn: 'p_up', calibratedColumn: 'calibrated_p_up' },
+];
+
+async function buildDailyReport(env, { dateStr } = {}) {
+  const nowTs = Date.now();
+  const DAY = 24 * 3600 * 1000;
+  let sinceResolvedTs = null, untilResolvedTs = null;
+  if (dateStr) {
+    const dayStart = Date.parse(`${dateStr}T00:00:00Z`);
+    if (Number.isNaN(dayStart)) return { ok: false, error: 'invalid date, expected YYYY-MM-DD' };
+    sinceResolvedTs = dayStart;
+    untilResolvedTs = dayStart + DAY;
+  }
+
+  const report = {
+    ok: true,
+    generated_at: nowTs,
+    date: dateStr || 'all_time',
+    dataset_health: {},
+    overall_performance: {},
+    confidence_analysis: {},
+    model_comparison: {},
+    regime_analysis: {},
+    error_analysis: {},
+    market_catalysts: { status: 'no_catalysts_logged_for_period', catalysts: [] },
+    model_drift: {},
+    candidate_experiments: [],
+    status: 'GREEN',
+  };
+
+  const perAsset = {};
+  for (const asset of LEARNING_ASSETS) {
+    let rows = await fetchResolvedRows(env, asset.table, { horizonHours: null, probColumn: asset.probColumn, calibratedColumn: asset.calibratedColumn });
+    if (untilResolvedTs) rows = rows.filter(r => r.resolved_ts >= sinceResolvedTs && r.resolved_ts < untilResolvedTs);
+    perAsset[asset.key] = rows;
+  }
+
+  // ---- Dataset health ----
+  for (const asset of LEARNING_ASSETS) {
+    const { results } = await env.DB.prepare(`SELECT COUNT(*) as n, SUM(realized_up IS NULL) as unresolved FROM ${asset.table}`).all();
+    report.dataset_health[asset.key] = { total_rows: results[0].n, unresolved: results[0].unresolved, resolved_in_period: perAsset[asset.key].length };
+  }
+
+  // ---- Overall performance + confidence + regime + error + drift, per asset+horizon ----
+  for (const asset of LEARNING_ASSETS) {
+    const rows = perAsset[asset.key];
+    report.overall_performance[asset.key] = summarizeRows(rows);
+    report.confidence_analysis[asset.key] = rows.length >= LEARNING_MIN_SAMPLE
+      ? { buckets: bucketByConfidence(rows), most_confident_mistakes: mostConfidentMistakes(rows) }
+      : { status: 'insufficient_data', n: rows.length };
+    report.regime_analysis[asset.key] = groupByRegime(rows);
+    report.error_analysis[asset.key] = mostConfidentMistakes(rows, 10);
+    report.model_drift[asset.key] = computeDrift(rows, nowTs);
+
+    for (const h of [12, 24]) {
+      const hRows = rows.filter(r => r.horizon_hours === h);
+      report.overall_performance[`${asset.key}_${h}h`] = summarizeRows(hRows);
+    }
+  }
+
+  // ---- Challenger vs Production comparison (BTC + LINK only -- ETH has no challenger yet) ----
+  for (const coin of ['BTC', 'LINK']) {
+    const coreRows = perAsset[coin];
+    const challengerRows = await fetchResolvedRows(env, 'challenger_predictions', { coin, probColumn: 'p_up_tilted', calibratedColumn: 'calibrated_p_up_flat' });
+    const filteredChallenger = untilResolvedTs ? challengerRows.filter(r => r.resolved_ts >= sinceResolvedTs && r.resolved_ts < untilResolvedTs) : challengerRows;
+    report.model_comparison[coin] = {
+      production: summarizeRows(coreRows),
+      challenger: summarizeRows(filteredChallenger),
+    };
+  }
+
+  // ---- Market catalysts (real query, see fetchCatalystsForPeriod) ----
+  const catalystRows = await fetchCatalystsForPeriod(env, sinceResolvedTs, untilResolvedTs);
+  report.market_catalysts = catalystRows.length
+    ? { status: 'ok', catalysts: catalystRows }
+    : { status: 'no_catalysts_logged_for_period', catalysts: [] };
+
+  // ---- Status rollup ----
+  const anyInsufficient = Object.values(report.overall_performance).every(v => v.status === 'insufficient_data');
+  const anyDriftFlag = LEARNING_ASSETS.some(a => report.model_drift[a.key]?.flag);
+  if (anyInsufficient) report.status = 'YELLOW';
+  if (anyDriftFlag) report.status = report.status === 'GREEN' ? 'YELLOW' : report.status;
+
+  return report;
+}
+
+// Compact, AI-analysis-optimized projection of the same report -- smaller
+// payload, no secrets, no raw DB access, read-only (per .ai/ARCHITECTURE.md
+// Security section).
+function compactForChatGpt(report) {
+  return {
+    generated_at: report.generated_at,
+    date: report.date,
+    status: report.status,
+    dataset_health: report.dataset_health,
+    key_metrics: report.overall_performance,
+    model_comparison: report.model_comparison,
+    regime_changes: Object.fromEntries(LEARNING_ASSETS.map(a => [a.key, report.model_drift[a.key]?.flag || null])),
+    important_errors: Object.fromEntries(LEARNING_ASSETS.map(a => [a.key, report.error_analysis[a.key]])),
+    market_catalysts: report.market_catalysts,
+    candidate_experiments: report.candidate_experiments,
+  };
+}
+
 //
 // Deliberately separate from the original PulseWorker (sentiment-ff75) so
 // prediction-model experimentation here can never destabilize the working
@@ -1306,12 +1660,13 @@ async function runChallengerPrediction(env, { coin, horizonHours, priceTable, pr
   const insert = await env.DB.prepare(
     `INSERT INTO challenger_predictions
      (coin, ts, target_ts, horizon_hours, price_at_prediction, is_regime_anomaly, trailing_return_pct,
-      p_up_flat, p_up_tilted, driver_used, driver_agreement, foufi_digest_video_id, trend_strength, calibrated_p_up_flat)
-     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
+      p_up_flat, p_up_tilted, driver_used, driver_agreement, foufi_digest_video_id, trend_strength, calibrated_p_up_flat,
+      model_version, git_commit_sha)
+     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
   ).bind(
     coin, nowTs, nowTs + lagMs, horizonHours, priceNow, isAnomalous ? 1 : 0, trailingReturnPct,
     pUpFlat, pUpTilted, driverUsed, driverAgreement, foufiVideoId, coreResult.trend_strength ?? null,
-    Number(calibratedPUpFlat.toFixed(3))
+    Number(calibratedPUpFlat.toFixed(3)), MODEL_VERSIONS.challenger, currentGitSha(env)
   ).run();
 
   return {
@@ -2469,12 +2824,12 @@ async function runLinkPrediction(env, horizonHours = 24) {
     `INSERT INTO link_predictions
      (ts, target_ts, link_price_at_prediction, p_up, n_analogs, median_analog_return, return_p25, return_p75, features_json, horizon_hours,
       k_used, volatility_percentile, closest_analog_dist, is_regime_anomaly, p_up_experimental, median_return_experimental,
-      trend_strength, calibrated_p_up)
-     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
+      trend_strength, calibrated_p_up, model_version, git_commit_sha)
+     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
   ).bind(
     nowTs, nowTs + lagMs, today.link_price, pUp, resolved.length, median, p25, p75, JSON.stringify(features), horizonHours,
     kAdaptive, volPercentile, closestDist, isRegimeAnomaly ? 1 : 0, pUpExperimental, medianReturnExperimental,
-    trend, calibratedPUp
+    trend, calibratedPUp, MODEL_VERSIONS.link_core, currentGitSha(env)
   ).run();
 
   const nImputedInNeighbors = neighbors.filter(n => n.row.context_imputed).length;
@@ -2731,6 +3086,49 @@ export default {
           'SELECT COUNT(*) as cnt, MIN(ts) as min_ts, MAX(ts) as max_ts FROM history'
         ).first();
         return new Response(JSON.stringify({ ok: true, history: row }), {
+          headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+      } catch (err) {
+        return new Response(JSON.stringify({ ok: false, error: String(err) }), {
+          status: 500,
+          headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+      }
+    }
+
+    // ---- GET /api/learning/daily — read-only daily audit report. See
+    // .ai/DAILY_AUDIT.md. Optional ?date=YYYY-MM-DD scopes to one UTC day
+    // (matched against resolved_ts, i.e. "predictions that resolved that
+    // day", not "predictions created that day" -- resolution is when an
+    // outcome becomes knowable, which is what an audit of results cares
+    // about). No params returns all-time. ----
+    if (url.pathname === '/api/learning/daily' && request.method === 'GET') {
+      try {
+        const dateStr = url.searchParams.get('date') || null;
+        const report = await buildDailyReport(env, { dateStr });
+        return new Response(JSON.stringify(report), {
+          status: report.ok === false ? 400 : 200,
+          headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+      } catch (err) {
+        return new Response(JSON.stringify({ ok: false, error: String(err) }), {
+          status: 500,
+          headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+      }
+    }
+
+    // ---- GET /api/learning/chatgpt — compact projection of the same
+    // report, sized for AI analysis. Read-only, no secrets, no raw D1
+    // access -- per .ai/ARCHITECTURE.md Security section. ----
+    if (url.pathname === '/api/learning/chatgpt' && request.method === 'GET') {
+      try {
+        const dateStr = url.searchParams.get('date') || null;
+        const report = await buildDailyReport(env, { dateStr });
+        if (report.ok === false) {
+          return new Response(JSON.stringify(report), { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+        }
+        return new Response(JSON.stringify(compactForChatGpt(report)), {
           headers: { ...corsHeaders, 'Content-Type': 'application/json' },
         });
       } catch (err) {

@@ -15,7 +15,7 @@ export function extractFunctions(...names) {
   const src = getSource();
   const pieces = [];
   for (const name of names) {
-    const startMatch = src.match(new RegExp(`function\\s+${name}\\s*\\(`));
+    const startMatch = src.match(new RegExp(`(async\\s+)?function\\s+${name}\\s*\\(`));
     if (!startMatch) throw new Error(`Could not find "function ${name}(" in worker.js`);
     const startIdx = startMatch.index;
     const braceStart = src.indexOf('{', startIdx);
@@ -56,7 +56,12 @@ export function extractConstants(...names) {
 export function evalInScope(source, extraGlobals = {}) {
   const sandbox = { console, ...extraGlobals };
   const keys = Object.keys(sandbox);
-  const names = [...source.matchAll(/^(?:async\s+)?function\s+([A-Za-z_$][\w$]*)\s*\(/gm)].map(m => m[1]);
+  const fnNames = [...source.matchAll(/^(?:async\s+)?function\s+([A-Za-z_$][\w$]*)\s*\(/gm)].map(m => m[1]);
+  // Also expose top-level `const NAME = ...;` declarations (e.g. via
+  // extractConstants) so tests can assert on constant values directly, not
+  // just observe their effect through a function.
+  const constNames = [...source.matchAll(/^const\s+([A-Za-z_$][\w$]*)\s*=/gm)].map(m => m[1]);
+  const names = [...new Set([...fnNames, ...constNames])];
   const fn = new Function(...keys, `${source}\nreturn { ${names.join(',')} };`);
   return fn(...keys.map(k => sandbox[k]));
 }

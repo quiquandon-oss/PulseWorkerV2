@@ -1355,15 +1355,16 @@ function computeDrift(rows, nowTs) {
 // catalyst row itself only stores its own timestamps, not a precomputed
 // verdict that would silently go stale as it's reused against different predictions.
 async function recordCatalyst(env, opts) {
-  const { coin, ts, category, direction, priceMovePct, headlineSource, sourceUrl, extractedReason, discoveryTimestamp, confidence, marketClassification, firstPublicTimestamp, investigationId } = opts;
+  const { coin, ts, category, direction, priceMovePct, headlineSource, sourceUrl, extractedReason, discoveryTimestamp, confidence, marketClassification, firstPublicTimestamp, investigationId, sourceGrounded, timestampSource, timestampConfidence } = opts;
   const insert = await env.DB.prepare(
     `INSERT INTO coin_catalyst_log
-     (ts, coin, price_move_pct, headline_source, extracted_reason, category, direction, source_url, discovery_timestamp, confidence, market_classification, first_public_timestamp, investigation_id)
-     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`
+     (ts, coin, price_move_pct, headline_source, extracted_reason, category, direction, source_url, discovery_timestamp, confidence, market_classification, first_public_timestamp, investigation_id, source_grounded, timestamp_source, timestamp_confidence)
+     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
   ).bind(
     ts, coin, priceMovePct ?? null, headlineSource ?? null, extractedReason ?? null,
     category ?? null, direction ?? null, sourceUrl ?? null, discoveryTimestamp ?? null,
-    confidence ?? null, marketClassification ?? null, firstPublicTimestamp ?? null, investigationId ?? null
+    confidence ?? null, marketClassification ?? null, firstPublicTimestamp ?? null, investigationId ?? null,
+    sourceGrounded == null ? null : (sourceGrounded ? 1 : 0), timestampSource ?? null, timestampConfidence ?? null
   ).run();
   return { ok: true, id: insert.meta.last_row_id };
 }
@@ -1705,15 +1706,15 @@ async function getGeminiInvestigationCounts(env, nowTs) {
 }
 
 // ---- Audit write (always called, success or failure -- see investigateMarketEvent) ----
-async function recordGeminiInvestigation(env, { investigationId, requestTs, triggerReasons, assets, modelIdentifier, responseStatus, sourceCount, validationStatus, errorMessage, catalystsWritten }) {
+async function recordGeminiInvestigation(env, { investigationId, requestTs, triggerReasons, assets, modelIdentifier, responseStatus, sourceCount, validationStatus, errorMessage, catalystsWritten, groundingMetadata }) {
   await env.DB.prepare(
     `INSERT INTO gemini_investigations
-     (investigation_id, request_ts, trigger_reasons_json, assets_json, model_identifier, response_status, source_count, validation_status, error_message, catalysts_written)
-     VALUES (?,?,?,?,?,?,?,?,?,?)`
+     (investigation_id, request_ts, trigger_reasons_json, assets_json, model_identifier, response_status, source_count, validation_status, error_message, catalysts_written, grounding_metadata_json)
+     VALUES (?,?,?,?,?,?,?,?,?,?,?)`
   ).bind(
     investigationId, requestTs, JSON.stringify(triggerReasons ?? {}), JSON.stringify(assets ?? []),
     modelIdentifier ?? null, responseStatus ?? null, sourceCount ?? 0, validationStatus ?? null,
-    errorMessage ?? null, catalystsWritten ?? 0
+    errorMessage ?? null, catalystsWritten ?? 0, JSON.stringify(groundingMetadata ?? { searchQueries: [], groundedSources: [] })
   ).run();
 }
 
@@ -1745,11 +1746,61 @@ RULES:
 - Only report a catalyst if you find credible, verifiable evidence. If you cannot find a credible catalyst, return an empty catalysts array -- do not invent one.
 - Never fabricate a source URL, publisher name, or timestamp. If a timestamp cannot be verified, omit that field (do not guess).
 - For each catalyst, report event_timestamp (when it happened) and first_public_timestamp (when credible public information became available) as SEPARATE fields if you can establish them -- they are often different.
+- Report first_public_timestamp_confidence as exactly one of HIGH, MEDIUM, LOW, or UNKNOWN, reflecting how confident you are in the first_public_timestamp value specifically (not your confidence in the catalyst overall). If first_public_timestamp is null, this must be UNKNOWN.
 - Category must be exactly one of: MACRO, FED_RATES, INFLATION, EMPLOYMENT, USD, ETF_FLOWS, REGULATION, EXCHANGE, STABLECOIN, LIQUIDATION, LEVERAGE, TECHNICAL, ON_CHAIN, GEOPOLITICAL, SECURITY, PROTOCOL, OTHER.
 - market_classification must be exactly one of: MARKET_WIDE, SECTOR_SPECIFIC, ASSET_SPECIFIC, NO_CLEAR_CATALYST.
 
 Respond with ONLY valid JSON, no other text, in exactly this shape:
-{"investigation_id":"","assets":${JSON.stringify(assets)},"market_classification":"","catalysts":[{"category":"","event_timestamp":null,"first_public_timestamp":null,"direction":"","confidence":"HIGH|MEDIUM|LOW","description":"","assets":[],"sources":[{"title":"","publisher":"","url":"","published_at":null}]}]}`;
+{"investigation_id":"","assets":${JSON.stringify(assets)},"market_classification":"","catalysts":[{"category":"","event_timestamp":null,"first_public_timestamp":null,"first_public_timestamp_confidence":"HIGH|MEDIUM|LOW|UNKNOWN","direction":"","confidence":"HIGH|MEDIUM|LOW","description":"","assets":[],"sources":[{"title":"","publisher":"","url":"","published_at":null}]}]}`;
+}
+
+// Pure. PR #2 review, BLOCKER 3: never invents a value. timestamp_source is
+// 'gemini_reported' whenever a first_public_timestamp was actually provided
+// (currently the only source of this data), or 'unknown' when it wasn't --
+// there is no third case, since nothing else in this system populates
+// first_public_timestamp yet. timestamp_confidence trusts Gemini's own
+// reported confidence ONLY if it's one of the four allowed values;
+// anything else (missing, malformed, hallucinated) is downgraded to
+// 'UNKNOWN' rather than passed through or guessed. discovery_timestamp is
+// never substituted for first_public_timestamp anywhere in this function or
+// its callers -- see the dedicated regression test.
+function deriveTimestampProvenance(firstPublicTimestamp, reportedConfidence) {
+  if (firstPublicTimestamp == null) {
+    return { timestampSource: 'unknown', timestampConfidence: 'UNKNOWN' };
+  }
+  const ALLOWED = ['HIGH', 'MEDIUM', 'LOW', 'UNKNOWN'];
+  const timestampConfidence = ALLOWED.includes(reportedConfidence) ? reportedConfidence : 'UNKNOWN';
+  return { timestampSource: 'gemini_reported', timestampConfidence };
+}
+
+// Pure. Normalizes Gemini's raw groundingMetadata into the shape this
+// system stores/uses -- deliberately NOT the raw internal Gemini response
+// shape (per PR #2 review, BLOCKER 2: "Do NOT expose raw internal Gemini
+// response unnecessarily"). Handles groundingMetadata being entirely absent
+// (older/non-grounded responses, or a response that genuinely found nothing
+// to ground) by returning empty arrays rather than throwing or returning
+// null/undefined -- callers can always destructure the result safely.
+function extractGroundingMetadata(geminiApiResponseJson) {
+  const gm = geminiApiResponseJson?.candidates?.[0]?.groundingMetadata;
+  if (!gm) return { searchQueries: [], groundedSources: [] };
+  const searchQueries = Array.isArray(gm.webSearchQueries) ? gm.webSearchQueries : [];
+  const groundedSources = Array.isArray(gm.groundingChunks)
+    ? gm.groundingChunks
+        .map(chunk => ({ url: chunk.web?.uri ?? null, title: chunk.web?.title ?? null }))
+        .filter(source => source.url != null)
+    : [];
+  return { searchQueries, groundedSources };
+}
+
+// Pure. Per PR #2 review, BLOCKER 2: "the system must retain whether the
+// source was actually present in Google grounding metadata" -- a catalyst's
+// reported source_url may or may not actually correspond to a URL Google's
+// grounding step surfaced. This is an exact-match check on purpose: a URL
+// Gemini wrote from its own knowledge (not from a grounded search result)
+// should NOT be marked as grounded just because it looks plausible.
+function isSourceGrounded(sourceUrl, groundingMetadata) {
+  if (!sourceUrl || !groundingMetadata?.groundedSources?.length) return false;
+  return groundingMetadata.groundedSources.some(source => source.url === sourceUrl);
 }
 
 async function callGeminiForMarketInvestigation(env, candidate) {
@@ -1783,7 +1834,8 @@ async function callGeminiForMarketInvestigation(env, candidate) {
     }
     const data = await res.json();
     const text = data?.candidates?.[0]?.content?.parts?.map(p => p.text).join('') ?? '';
-    return text;
+    const groundingMetadata = extractGroundingMetadata(data);
+    return { text, groundingMetadata };
   } finally {
     clearTimeout(timeout);
   }
@@ -1844,10 +1896,12 @@ async function investigateMarketEvent(env, candidate) {
   const investigationId = `MI-${Date.now()}-${candidate.id}`;
   const requestTs = Date.now();
   let responseStatus = 'error', sourceCount = 0, validationStatus = 'not_attempted', errorMessage = null, catalystsWritten = 0;
+  let groundingMetadata = { searchQueries: [], groundedSources: [] };
 
   try {
-    const rawText = await callGeminiForMarketInvestigation(env, candidate);
-    const parsed = parseGeminiInvestigationResponse(rawText);
+    const geminiResult = await callGeminiForMarketInvestigation(env, candidate);
+    groundingMetadata = geminiResult.groundingMetadata;
+    const parsed = parseGeminiInvestigationResponse(geminiResult.text);
     const structureCheck = validateGeminiInvestigationResponse(parsed);
 
     if (!structureCheck.valid) {
@@ -1876,6 +1930,9 @@ async function investigateMarketEvent(env, candidate) {
             marketClassification: parsed.market_classification,
             sourceUrl: catalyst.sources?.[0]?.url,
             eventTimestamp: Number.isFinite(eventTimestamp) ? eventTimestamp : null,
+            // Never substituted with discoveryTimestamp when absent -- stays
+            // null all the way through to the D1 row. See
+            // deriveTimestampProvenance and the dedicated regression test.
             firstPublicTimestamp: Number.isFinite(firstPublicTimestamp) ? firstPublicTimestamp : null,
             discoveryTimestamp: requestTs,
           };
@@ -1884,6 +1941,8 @@ async function investigateMarketEvent(env, candidate) {
 
           const dedupeCandidate = { coin: asset, category: catalyst.category, ts: payload.eventTimestamp ?? requestTs };
           if (isDuplicateCatalyst(dedupeCandidate, existing)) continue;
+
+          const { timestampSource, timestampConfidence } = deriveTimestampProvenance(payload.firstPublicTimestamp, catalyst.first_public_timestamp_confidence);
 
           await recordCatalyst(env, {
             coin: asset,
@@ -1896,6 +1955,9 @@ async function investigateMarketEvent(env, candidate) {
             firstPublicTimestamp: payload.firstPublicTimestamp,
             confidence: catalyst.confidence ?? null,
             investigationId,
+            sourceGrounded: isSourceGrounded(payload.sourceUrl, groundingMetadata),
+            timestampSource,
+            timestampConfidence,
           });
           catalystsWritten++;
         }
@@ -1912,6 +1974,7 @@ async function investigateMarketEvent(env, candidate) {
   await recordGeminiInvestigation(env, {
     investigationId, requestTs, triggerReasons: candidate.signals, assets: candidate.assets,
     modelIdentifier: GEMINI_INVESTIGATION_MODEL, responseStatus, sourceCount, validationStatus, errorMessage, catalystsWritten,
+    groundingMetadata,
   }).catch(auditErr => console.error('Failed to write gemini_investigations audit row:', auditErr));
 }
 
@@ -1932,6 +1995,24 @@ async function evaluateGeminiTriggers(env) {
     await investigateMarketEvent(env, candidate);
   }
   return { candidatesEvaluated: candidates.length, investigationsRun: selected.length };
+}
+
+// ---- The ordering fix from PR #2 review, BLOCKER 1. Takes the cycle's
+// already-started prediction/resolution task promises (each already wrapping
+// its own .catch(), so none of them reject -- but Promise.allSettled is used
+// anyway, not Promise.all, so this is correct even if a future edit removes
+// one of those inner .catch() calls and a task genuinely rejects) and
+// GUARANTEES geminiEvaluationFn does not start until every one of them has
+// settled, successfully or not. This is the entire fix: previously
+// scheduled() fired the six prediction tasks and evaluateGeminiTriggers as
+// separate, independent ctx.waitUntil calls with no ordering relationship
+// between them. Extracted as its own named function (rather than left
+// inline in scheduled()) specifically so the ordering guarantee itself is
+// unit-testable without needing to exercise the real prediction pipeline --
+// see tests/gemini-planning.test.js's "scheduled ordering" suite.
+async function runPredictionCycleThenGemini(predictionTasks, geminiEvaluationFn) {
+  await Promise.allSettled(predictionTasks);
+  await geminiEvaluationFn();
 }
 
 // ---- D1 orchestration: gathers rows, never mutates anything ----
@@ -4125,25 +4206,35 @@ export default {
       // (await, not two independent waitUntil calls) — selectBestVariant
       // reads the LATEST prediction's features_json, so it must run after
       // that specific prediction exists, not race it. Different coin/
-      // horizon pairs still run concurrently with each other via separate
-      // waitUntil calls, just not with themselves.
+      // horizon pairs still run concurrently with each other, just not with
+      // themselves.
       const predictThenSelect = async (predictFn, coin, horizon) => {
         await predictFn(env, horizon);
         await selectBestVariant(env, coin, horizon).catch(err => console.error(`Selection ${coin}/${horizon}h failed:`, err));
       };
-      ctx.waitUntil(predictThenSelect(predictAndLog, 'BTC', 24).catch(err => console.error('BTC 24h predict-and-log failed:', err)));
-      ctx.waitUntil(predictThenSelect(predictAndLog, 'BTC', 12).catch(err => console.error('BTC 12h predict-and-log failed:', err)));
-      ctx.waitUntil(predictThenSelect(linkPredictAndLog, 'LINK', 24).catch(err => console.error('LINK 24h predict-and-log failed:', err)));
-      ctx.waitUntil(predictThenSelect(linkPredictAndLog, 'LINK', 12).catch(err => console.error('LINK 12h predict-and-log failed:', err)));
-      ctx.waitUntil(predictThenSelect(ethPredictAndLog, 'ETH', 24).catch(err => console.error('ETH 24h predict-and-log failed:', err)));
-      ctx.waitUntil(predictThenSelect(ethPredictAndLog, 'ETH', 12).catch(err => console.error('ETH 12h predict-and-log failed:', err)));
 
-      // Gemini market-intelligence investigation -- its own independent
-      // waitUntil, deliberately NOT chained after the six calls above.
-      // evaluateGeminiTriggers only READS this cycle's already-resolved
-      // predictions; it never blocks, delays, or is a prerequisite for any
-      // prediction being made. See learning/GEMINI_IMPLEMENTATION_PLAN.md.
-      ctx.waitUntil(evaluateGeminiTriggers(env).catch(err => console.error('Gemini trigger evaluation failed:', err)));
+      // PR #2 review, BLOCKER 1: previously each of these six tasks and
+      // evaluateGeminiTriggers were separate, independent ctx.waitUntil
+      // calls -- source-code ordering doesn't guarantee execution ordering
+      // between independent waitUntil'd promises, so Gemini's candidate
+      // evaluation could genuinely run before this cycle's predictions had
+      // finished resolving. Fixed via runPredictionCycleThenGemini: all six
+      // tasks still run concurrently WITH EACH OTHER (unchanged), but Gemini
+      // evaluation is only started after every one of them has settled --
+      // see that function for the ordering guarantee and its regression
+      // test. A single ctx.waitUntil now covers the whole cycle.
+      const predictionTasks = [
+        predictThenSelect(predictAndLog, 'BTC', 24).catch(err => console.error('BTC 24h predict-and-log failed:', err)),
+        predictThenSelect(predictAndLog, 'BTC', 12).catch(err => console.error('BTC 12h predict-and-log failed:', err)),
+        predictThenSelect(linkPredictAndLog, 'LINK', 24).catch(err => console.error('LINK 24h predict-and-log failed:', err)),
+        predictThenSelect(linkPredictAndLog, 'LINK', 12).catch(err => console.error('LINK 12h predict-and-log failed:', err)),
+        predictThenSelect(ethPredictAndLog, 'ETH', 24).catch(err => console.error('ETH 24h predict-and-log failed:', err)),
+        predictThenSelect(ethPredictAndLog, 'ETH', 12).catch(err => console.error('ETH 12h predict-and-log failed:', err)),
+      ];
+      ctx.waitUntil(runPredictionCycleThenGemini(
+        predictionTasks,
+        () => evaluateGeminiTriggers(env).catch(err => console.error('Gemini trigger evaluation failed:', err))
+      ));
     }
   },
 };

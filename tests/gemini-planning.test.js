@@ -508,7 +508,8 @@ describe('Gemini live — investigateMarketEvent (mocked fetch + D1)', () => {
     const src = extractFunctions(
       'investigateMarketEvent', 'callGeminiForMarketInvestigation', 'buildGeminiInvestigationPrompt',
       'parseGeminiInvestigationResponse', 'validateGeminiInvestigationResponse', 'validateCatalystSources',
-      'validateCatalystPayload', 'isDuplicateCatalyst', 'fetchCatalystsForPeriod', 'recordCatalyst', 'recordGeminiInvestigation'
+      'validateCatalystPayload', 'isDuplicateCatalyst', 'fetchCatalystsForPeriod', 'recordCatalyst', 'recordGeminiInvestigation',
+      'extractGroundingMetadata', 'isSourceGrounded', 'deriveTimestampProvenance'
     ) + '\n\n' + extractConstants(
       'ALLOWED_MARKET_CLASSIFICATIONS', 'ALLOWED_CATALYST_CATEGORIES',
       'GEMINI_INVESTIGATION_TIMEOUT_MS', 'GEMINI_INVESTIGATION_MODEL'
@@ -706,6 +707,299 @@ describe('Gemini live — investigateMarketEvent (mocked fetch + D1)', () => {
     const auditInsert = inserts.find(i => i.table === 'gemini_investigations');
     expect(auditInsert).toBeTruthy();
     expect(auditInsert.args.some(a => typeof a === 'string' && a.includes('GEMINI_API_KEY'))).toBe(true);
+  });
+});
+
+describe('Gemini live — extractGroundingMetadata', () => {
+  let scope;
+  beforeAll(() => { scope = evalInScope(extractFunctions('extractGroundingMetadata')); });
+
+  it('extracts search queries and grounded source URLs when groundingMetadata is present', () => {
+    const raw = {
+      candidates: [{
+        groundingMetadata: {
+          webSearchQueries: ['btc regulation news august 2026'],
+          groundingChunks: [
+            { web: { uri: 'https://example.com/a', title: 'Article A' } },
+            { web: { uri: 'https://example.com/b', title: 'Article B' } },
+          ],
+        },
+      }],
+    };
+    const result = scope.extractGroundingMetadata(raw);
+    expect(result.searchQueries).toEqual(['btc regulation news august 2026']);
+    expect(result.groundedSources).toEqual([
+      { url: 'https://example.com/a', title: 'Article A' },
+      { url: 'https://example.com/b', title: 'Article B' },
+    ]);
+  });
+
+  it('missing groundingMetadata entirely is handled safely -- empty arrays, not a throw', () => {
+    expect(scope.extractGroundingMetadata({ candidates: [{ content: {} }] })).toEqual({ searchQueries: [], groundedSources: [] });
+  });
+
+  it('a completely empty/malformed response is handled safely', () => {
+    expect(scope.extractGroundingMetadata({})).toEqual({ searchQueries: [], groundedSources: [] });
+    expect(scope.extractGroundingMetadata(null)).toEqual({ searchQueries: [], groundedSources: [] });
+  });
+
+  it('a grounding chunk with no web.uri is filtered out rather than producing a null-url entry', () => {
+    const raw = { candidates: [{ groundingMetadata: { groundingChunks: [{ web: { title: 'no url here' } }] } }] };
+    expect(scope.extractGroundingMetadata(raw).groundedSources).toEqual([]);
+  });
+});
+
+describe('Gemini live — isSourceGrounded (source provenance)', () => {
+  let scope;
+  beforeAll(() => { scope = evalInScope(extractFunctions('isSourceGrounded')); });
+
+  it('true when the source URL exactly matches a grounded source', () => {
+    const gm = { groundedSources: [{ url: 'https://example.com/a', title: 'A' }] };
+    expect(scope.isSourceGrounded('https://example.com/a', gm)).toBe(true);
+  });
+
+  it('false when the source URL does not appear in grounding metadata -- Gemini wrote it from its own knowledge, not a grounded result', () => {
+    const gm = { groundedSources: [{ url: 'https://example.com/a', title: 'A' }] };
+    expect(scope.isSourceGrounded('https://example.com/different-article', gm)).toBe(false);
+  });
+
+  it('false (not a throw) when groundingMetadata is empty or missing', () => {
+    expect(scope.isSourceGrounded('https://example.com/a', { groundedSources: [] })).toBe(false);
+    expect(scope.isSourceGrounded('https://example.com/a', undefined)).toBe(false);
+  });
+
+  it('false when there is no source URL to check', () => {
+    expect(scope.isSourceGrounded(null, { groundedSources: [{ url: 'https://example.com/a' }] })).toBe(false);
+  });
+});
+
+describe('Gemini live — deriveTimestampProvenance (BLOCKER 3)', () => {
+  let scope;
+  beforeAll(() => { scope = evalInScope(extractFunctions('deriveTimestampProvenance')); });
+
+  it('gemini_reported + the reported confidence when first_public_timestamp is present and confidence is valid', () => {
+    expect(scope.deriveTimestampProvenance(1700000000000, 'HIGH')).toEqual({ timestampSource: 'gemini_reported', timestampConfidence: 'HIGH' });
+    expect(scope.deriveTimestampProvenance(1700000000000, 'MEDIUM')).toEqual({ timestampSource: 'gemini_reported', timestampConfidence: 'MEDIUM' });
+    expect(scope.deriveTimestampProvenance(1700000000000, 'LOW')).toEqual({ timestampSource: 'gemini_reported', timestampConfidence: 'LOW' });
+  });
+
+  it('unknown source + UNKNOWN confidence when first_public_timestamp is null -- the "cannot establish it reliably" case', () => {
+    expect(scope.deriveTimestampProvenance(null, 'HIGH')).toEqual({ timestampSource: 'unknown', timestampConfidence: 'UNKNOWN' });
+  });
+
+  it('never invents a confidence value -- an out-of-range/hallucinated confidence is downgraded to UNKNOWN, not passed through', () => {
+    expect(scope.deriveTimestampProvenance(1700000000000, 'VERY_SURE')).toEqual({ timestampSource: 'gemini_reported', timestampConfidence: 'UNKNOWN' });
+    expect(scope.deriveTimestampProvenance(1700000000000, undefined)).toEqual({ timestampSource: 'gemini_reported', timestampConfidence: 'UNKNOWN' });
+  });
+});
+
+describe('Gemini live — investigateMarketEvent (mocked fetch + D1) — grounding & timestamp provenance', () => {
+  let scope;
+  let restoreFetch;
+
+  beforeAll(() => {
+    const src = extractFunctions(
+      'investigateMarketEvent', 'callGeminiForMarketInvestigation', 'buildGeminiInvestigationPrompt',
+      'parseGeminiInvestigationResponse', 'validateGeminiInvestigationResponse', 'validateCatalystSources',
+      'validateCatalystPayload', 'isDuplicateCatalyst', 'fetchCatalystsForPeriod', 'recordCatalyst', 'recordGeminiInvestigation',
+      'extractGroundingMetadata', 'isSourceGrounded', 'deriveTimestampProvenance'
+    ) + '\n\n' + extractConstants(
+      'ALLOWED_MARKET_CLASSIFICATIONS', 'ALLOWED_CATALYST_CATEGORIES',
+      'GEMINI_INVESTIGATION_TIMEOUT_MS', 'GEMINI_INVESTIGATION_MODEL'
+    );
+    scope = evalInScope(src);
+  });
+
+  afterEach(() => { if (restoreFetch) { restoreFetch(); restoreFetch = null; } });
+
+  const candidate = { id: 'BTC', assets: ['BTC'], signals: { priceMovePct: 8, wasWrong: true, confidence: 0.65, correlatedFailureAssetCount: 0 } };
+
+  it('grounding metadata is captured and normalized into the audit row when Google returns it', async () => {
+    restoreFetch = mockFetchOnce(async () => ({
+      ok: true, status: 200,
+      json: async () => ({
+        candidates: [{
+          content: { parts: [{ text: validGeminiJson() }] },
+          groundingMetadata: {
+            webSearchQueries: ['btc regulation august 2026'],
+            groundingChunks: [{ web: { uri: 'https://example.com/article', title: 'Test Source' } }],
+          },
+        }],
+      }),
+    }));
+    const { db, inserts } = makeFakeDb();
+    await scope.investigateMarketEvent({ DB: db, GEMINI_API_KEY: 'fake-key' }, candidate);
+
+    const auditInsert = inserts.find(i => i.table === 'gemini_investigations');
+    const groundingJson = auditInsert.args.find(a => typeof a === 'string' && a.includes('webSearchQueries') === false && a.includes('searchQueries'));
+    expect(groundingJson).toBeTruthy();
+    const parsed = JSON.parse(groundingJson);
+    expect(parsed.searchQueries).toEqual(['btc regulation august 2026']);
+    expect(parsed.groundedSources).toEqual([{ url: 'https://example.com/article', title: 'Test Source' }]);
+  });
+
+  it('missing groundingMetadata on the response is handled safely -- audit row still written, empty grounding structure, no crash', async () => {
+    restoreFetch = mockFetchOnce(async () => ({
+      ok: true, status: 200,
+      json: async () => ({ candidates: [{ content: { parts: [{ text: validGeminiJson() }] } }] }), // no groundingMetadata key at all
+    }));
+    const { db, inserts } = makeFakeDb();
+    await expect(scope.investigateMarketEvent({ DB: db, GEMINI_API_KEY: 'fake-key' }, candidate)).resolves.not.toThrow();
+    const auditInsert = inserts.find(i => i.table === 'gemini_investigations');
+    expect(auditInsert).toBeTruthy();
+    const groundingJson = auditInsert.args.find(a => typeof a === 'string' && a.includes('searchQueries'));
+    expect(JSON.parse(groundingJson)).toEqual({ searchQueries: [], groundedSources: [] });
+  });
+
+  it('a catalyst source that matches grounding metadata is recorded as grounded (source_grounded=1)', async () => {
+    restoreFetch = mockFetchOnce(async () => ({
+      ok: true, status: 200,
+      json: async () => ({
+        candidates: [{
+          content: { parts: [{ text: validGeminiJson() }] }, // source url: https://example.com/article
+          groundingMetadata: { groundingChunks: [{ web: { uri: 'https://example.com/article', title: 'Test Source' } }] },
+        }],
+      }),
+    }));
+    const { db, inserts } = makeFakeDb();
+    await scope.investigateMarketEvent({ DB: db, GEMINI_API_KEY: 'fake-key' }, candidate);
+    const catalystInsert = inserts.find(i => i.table === 'coin_catalyst_log');
+    expect(catalystInsert.args).toContain(1); // source_grounded bound as 1
+  });
+
+  it('a catalyst source that does NOT match any grounded URL is recorded as not grounded (source_grounded=0), not silently dropped', async () => {
+    restoreFetch = mockFetchOnce(async () => ({
+      ok: true, status: 200,
+      json: async () => ({
+        candidates: [{
+          content: { parts: [{ text: validGeminiJson() }] }, // source url: https://example.com/article
+          groundingMetadata: { groundingChunks: [{ web: { uri: 'https://example.com/totally-different-page', title: 'Other' } }] },
+        }],
+      }),
+    }));
+    const { db, inserts } = makeFakeDb();
+    await scope.investigateMarketEvent({ DB: db, GEMINI_API_KEY: 'fake-key' }, candidate);
+    const catalystInsert = inserts.find(i => i.table === 'coin_catalyst_log');
+    expect(catalystInsert).toBeTruthy(); // still written -- an ungrounded source is flagged, not rejected
+    expect(catalystInsert.args).toContain(0); // source_grounded bound as 0
+  });
+
+  it('timestamp provenance (timestamp_source, timestamp_confidence) is written alongside the catalyst', async () => {
+    restoreFetch = mockFetchOnce(async () => ({
+      ok: true, status: 200,
+      json: async () => ({ candidates: [{ content: { parts: [{ text: validGeminiJson({
+        catalysts: [{
+          category: 'MACRO', event_timestamp: '2026-08-18T10:00:00Z', first_public_timestamp: '2026-08-18T10:05:00Z',
+          first_public_timestamp_confidence: 'MEDIUM', direction: 'DOWN', confidence: 'HIGH', description: 'x', assets: ['BTC'],
+          sources: [{ url: 'https://example.com/a' }],
+        }],
+      }) }] } }] }),
+    }));
+    const { db, inserts } = makeFakeDb();
+    await scope.investigateMarketEvent({ DB: db, GEMINI_API_KEY: 'fake-key' }, candidate);
+    const catalystInsert = inserts.find(i => i.table === 'coin_catalyst_log');
+    expect(catalystInsert.args).toContain('gemini_reported');
+    expect(catalystInsert.args).toContain('MEDIUM');
+  });
+
+  it('unknown first_public_timestamp confidence: writes timestamp_source=unknown, timestamp_confidence=UNKNOWN', async () => {
+    restoreFetch = mockFetchOnce(async () => ({
+      ok: true, status: 200,
+      json: async () => ({ candidates: [{ content: { parts: [{ text: validGeminiJson({
+        catalysts: [{
+          category: 'MACRO', event_timestamp: '2026-08-18T10:00:00Z', first_public_timestamp: null,
+          direction: 'DOWN', confidence: 'MEDIUM', description: 'unverified timing', assets: ['BTC'],
+          sources: [{ url: 'https://example.com/a' }],
+        }],
+      }) }] } }] }),
+    }));
+    const { db, inserts } = makeFakeDb();
+    await scope.investigateMarketEvent({ DB: db, GEMINI_API_KEY: 'fake-key' }, candidate);
+    const catalystInsert = inserts.find(i => i.table === 'coin_catalyst_log');
+    expect(catalystInsert.args).toContain('unknown');
+    expect(catalystInsert.args).toContain('UNKNOWN');
+  });
+
+  it('never substitutes discovery_timestamp for a missing first_public_timestamp -- the D1 row keeps them as two distinct values', async () => {
+    const discoveryWindowStart = Date.now();
+    restoreFetch = mockFetchOnce(async () => ({
+      ok: true, status: 200,
+      json: async () => ({ candidates: [{ content: { parts: [{ text: validGeminiJson({
+        catalysts: [{
+          category: 'MACRO', event_timestamp: '2026-08-18T10:00:00Z', first_public_timestamp: null,
+          direction: 'DOWN', confidence: 'MEDIUM', description: 'x', assets: ['BTC'],
+          sources: [{ url: 'https://example.com/a' }],
+        }],
+      }) }] } }] }),
+    }));
+    const { db, inserts } = makeFakeDb();
+    await scope.investigateMarketEvent({ DB: db, GEMINI_API_KEY: 'fake-key' }, candidate);
+    const catalystInsert = inserts.find(i => i.table === 'coin_catalyst_log');
+
+    // recordCatalyst's bind order: ts, coin, price_move_pct, headline_source,
+    // extracted_reason, category, direction, source_url, discovery_timestamp,
+    // confidence, market_classification, first_public_timestamp, ...
+    const discoveryTimestampArg = catalystInsert.args[8];
+    const firstPublicTimestampArg = catalystInsert.args[11];
+    expect(firstPublicTimestampArg).toBeNull(); // stayed null
+    expect(discoveryTimestampArg).toBeGreaterThanOrEqual(discoveryWindowStart); // discovery_timestamp is real, recent, and NOT copied into first_public_timestamp's slot
+    expect(firstPublicTimestampArg).not.toBe(discoveryTimestampArg);
+  });
+});
+
+describe('Gemini live — scheduled() ordering (BLOCKER 1 regression tests)', () => {
+  let scope;
+
+  beforeAll(() => {
+    scope = evalInScope(extractFunctions('runPredictionCycleThenGemini'));
+  });
+
+  it('Gemini evaluation does not start until every prediction/resolution task has settled, regardless of individual task speed', async () => {
+    const order = [];
+    const slowTask = new Promise(resolve => setTimeout(() => { order.push('slow-task-done'); resolve(); }, 15));
+    const fastTask = Promise.resolve().then(() => { order.push('fast-task-done'); });
+    const mediumTask = new Promise(resolve => setTimeout(() => { order.push('medium-task-done'); resolve(); }, 5));
+    const geminiFn = async () => { order.push('gemini-started'); };
+
+    await scope.runPredictionCycleThenGemini([slowTask, fastTask, mediumTask], geminiFn);
+
+    expect(order.indexOf('gemini-started')).toBe(order.length - 1); // gemini is always last
+    expect(order).toContain('slow-task-done');
+    expect(order).toContain('fast-task-done');
+    expect(order).toContain('medium-task-done');
+  });
+
+  it('a pre-caught (resolved-after-catch) prediction task failure does not prevent Gemini evaluation from running', async () => {
+    const order = [];
+    const failingTask = Promise.reject(new Error('BTC prediction failed')).catch(() => { order.push('task-failed-caught'); });
+    const okTask = Promise.resolve().then(() => { order.push('task-ok'); });
+    const geminiFn = async () => { order.push('gemini-ran'); };
+
+    await scope.runPredictionCycleThenGemini([failingTask, okTask], geminiFn);
+
+    expect(order).toContain('gemini-ran');
+    expect(order).toContain('task-failed-caught');
+  });
+
+  it('even a genuinely uncaught rejection among the tasks does not stop Gemini evaluation -- Promise.allSettled, not Promise.all', async () => {
+    const order = [];
+    const uncaughtRejection = Promise.reject(new Error('never caught upstream'));
+    const geminiFn = async () => { order.push('gemini-ran'); };
+
+    await expect(scope.runPredictionCycleThenGemini([uncaughtRejection], geminiFn)).resolves.not.toThrow();
+    expect(order).toContain('gemini-ran');
+  });
+
+  it('runs with zero prediction tasks (e.g. all six somehow failed to even start) without erroring', async () => {
+    const order = [];
+    const geminiFn = async () => { order.push('gemini-ran'); };
+    await scope.runPredictionCycleThenGemini([], geminiFn);
+    expect(order).toEqual(['gemini-ran']);
+  });
+
+  it("propagates a genuine failure IN the Gemini evaluation function itself (not swallowed by this helper -- that is evaluateGeminiTriggers's job)", async () => {
+    const geminiFn = async () => { throw new Error('gemini eval blew up'); };
+    await expect(scope.runPredictionCycleThenGemini([Promise.resolve()], geminiFn)).rejects.toThrow('gemini eval blew up');
   });
 });
 

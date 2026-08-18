@@ -188,6 +188,66 @@ async function refreshChallengerCalibrationCurve(env, coin, horizonHours) {
 
 const HISTORY_FRESHNESS_MS = 48 * 60 * 60 * 1000; // beyond this, a "history" match is too stale to trust as real, falls back to imputed
 
+// Evidence-based per-feature weights for BTC's conditional calibration.
+// Derived from a real audit, not chosen a priori: checked each feature's
+// actual discriminative power against 376 resolved BTC 24h predictions.
+// regime_mag showed the strongest split (57.4% vs 38.3% up-rate, a 19.1pt
+// spread) -- nearly double technical_score's 9.7pt spread. bottom_score
+// showed ZERO variance across the entire window (100% of rows fell in one
+// bucket -- BTC hasn't been near a cycle bottom in this window), meaning
+// it's currently pure noise in the distance computation, diluting the
+// genuinely useful signals for no benefit. Not zeroed entirely -- plausible
+// it becomes informative again near a real cycle bottom, and zeroing based
+// on one evaluation window would be its own overcorrection.
+const CONDITIONAL_CALIB_WEIGHTS = { score: 1.0, technical_score: 1.0, regime_mag: 1.5, bottom_score: 0.3 };
+const CONDITIONAL_CALIB_K = 30;
+const CONDITIONAL_CALIB_MIN_NEIGHBORS = 20;
+
+// Pure function -- given today's feature vector and already-fetched
+// historical resolved predictions (each with their own stored feature
+// vector and realized outcome), computes a condition-matched calibrated
+// probability. Direct fix for a confirmed finding, not a hypothesis:
+// global decile calibration was shown to blend two populations with
+// OPPOSITE calibration needs (non-anomalous bearish calls that were
+// already well-calibrated raw, Brier 0.16, vs anomalous bearish calls that
+// genuinely needed correcting) into one curve -- actively hurting the
+// population that didn't need correcting (Brier ballooned to 0.55 after
+// "correction"). This asks a locally-scoped question instead: "among
+// historical moments whose CONDITIONS most resemble today's, what fraction
+// actually went up" -- same underlying idea as the Condition-Matched
+// Selection layer, applied to calibration instead of variant-choice.
+// Extracted separately from D1 fetching specifically so this, the actual
+// statistical core, is unit-testable without mocking a database.
+function computeConditionalCalibration(todayFeatures, historicalRows, weights, k, minNeighbors) {
+  const featureKeys = Object.keys(weights);
+  const stats = {};
+  for (const fk of featureKeys) {
+    const vals = historicalRows.map(r => r.features[fk]).filter(v => v != null);
+    if (vals.length < 5) continue;
+    const mean = vals.reduce((a, b) => a + b, 0) / vals.length;
+    const std = Math.sqrt(vals.reduce((a, b) => a + (b - mean) ** 2, 0) / vals.length) || 1;
+    stats[fk] = { mean, std };
+  }
+  const usableKeys = featureKeys.filter(fk => stats[fk] && todayFeatures[fk] != null);
+  if (!usableKeys.length) return null;
+
+  const distances = historicalRows.map(r => {
+    let d = 0;
+    for (const fk of usableKeys) {
+      if (r.features[fk] == null) continue;
+      const z1 = (todayFeatures[fk] - stats[fk].mean) / stats[fk].std;
+      const z2 = (r.features[fk] - stats[fk].mean) / stats[fk].std;
+      d += weights[fk] * (z1 - z2) ** 2;
+    }
+    return { dist: Math.sqrt(d), realized_up: r.realized_up };
+  }).sort((a, b) => a.dist - b.dist);
+
+  const neighbors = distances.slice(0, k);
+  if (neighbors.length < minNeighbors) return null;
+  const empiricalUpRate = neighbors.reduce((s, n) => s + n.realized_up, 0) / neighbors.length;
+  return { p_up: empiricalUpRate, n_neighbors: neighbors.length };
+}
+
 async function runPrediction(env, horizonHours = 24) {
   const lagMs = horizonHours * 60 * 60 * 1000;
   const tolMs = lagMs * 0.2;
@@ -367,16 +427,28 @@ async function runPrediction(env, horizonHours = 24) {
   const nowTs = Date.now();
   const features = Object.fromEntries(FEATURE_KEYS.map(k => [k, today[k]]));
 
+  // Conditional calibration -- reuses the same historical-resolved-rows
+  // pattern already proven in selectBestVariant's meta-neighborhood, not a
+  // new data-fetching approach.
+  const { results: calibHistoryRows } = await env.DB.prepare(
+    `SELECT features_json, realized_up FROM predictions WHERE horizon_hours=? AND realized_up IS NOT NULL AND features_json IS NOT NULL AND ts < ? ORDER BY ts DESC LIMIT 300`
+  ).bind(horizonHours, today.ts).all();
+  const parsedCalibHistory = calibHistoryRows.map(r => {
+    try { return { features: JSON.parse(r.features_json), realized_up: r.realized_up }; } catch { return null; }
+  }).filter(Boolean);
+  const conditionalResult = computeConditionalCalibration(features, parsedCalibHistory, CONDITIONAL_CALIB_WEIGHTS, CONDITIONAL_CALIB_K, CONDITIONAL_CALIB_MIN_NEIGHBORS);
+  const calibratedConditionalPUp = conditionalResult ? conditionalResult.p_up : null; // null, not a raw fallback -- distinct from calibrated_p_up's own fallback semantics, makes "not enough neighbors yet" visible rather than silently indistinguishable from a real score
+
   const insert = await env.DB.prepare(
     `INSERT INTO predictions
      (ts, target_ts, btc_price_at_prediction, p_up, n_analogs, median_analog_return, return_p25, return_p75, features_json,
       k_used, volatility_percentile, closest_analog_dist, is_regime_anomaly, p_up_experimental, median_return_experimental, horizon_hours,
-      trend_strength, calibrated_p_up)
-     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
+      trend_strength, calibrated_p_up, calibrated_conditional_p_up)
+     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
   ).bind(
     nowTs, nowTs + lagMs, today.btc_price, pUp, resolved.length, median, p25, p75, JSON.stringify(features),
     kAdaptive, volPercentile, closestDist, isRegimeAnomaly ? 1 : 0, pUpExperimental, medianReturnExperimental, horizonHours,
-    trend, calibratedPUp
+    trend, calibratedPUp, calibratedConditionalPUp
   ).run();
 
   return {
@@ -387,6 +459,8 @@ async function runPrediction(env, horizonHours = 24) {
     horizon_hours: horizonHours,
     p_up: Number(pUp.toFixed(3)),
     calibrated_p_up: Number(calibratedPUp.toFixed(3)),
+    calibrated_conditional_p_up: calibratedConditionalPUp != null ? Number(calibratedConditionalPUp.toFixed(3)) : null,
+    conditional_calibration_n_neighbors: conditionalResult ? conditionalResult.n_neighbors : null,
     trend_strength: Number(trend.toFixed(3)),
     n_analogs: resolved.length,
     median_analog_return_pct: Number(median.toFixed(2)),
@@ -999,7 +1073,7 @@ async function getEthCalibrationHistory(env, horizonHours = 24) {
 // of being judged on a single cherry-pickable snapshot.
 async function getCalibrationHistory(env, horizonHours = 24) {
   const { results } = await env.DB.prepare(
-    'SELECT resolved_ts, p_up, p_up_experimental, calibrated_p_up, realized_up FROM predictions WHERE realized_up IS NOT NULL AND horizon_hours = ? ORDER BY resolved_ts ASC'
+    'SELECT resolved_ts, p_up, p_up_experimental, calibrated_p_up, calibrated_conditional_p_up, realized_up FROM predictions WHERE realized_up IS NOT NULL AND horizon_hours = ? ORDER BY resolved_ts ASC'
   ).bind(horizonHours).all();
 
   // Accuracy tracking added alongside the existing Brier tracking (not a
@@ -1014,8 +1088,14 @@ async function getCalibrationHistory(env, horizonHours = 24) {
   // derived from. Direct build for the "must adjust based on accumulated
   // experience, and prove it before it's trusted" goal — this is the
   // proving, not an assumption that it already helps.
-  let sumOrig = 0, nOrig = 0, sumExp = 0, nExp = 0, sumCal = 0, nCal = 0;
-  let correctOrig = 0, correctExp = 0, correctCal = 0;
+  //
+  // calibrated_conditional_p_up scored the same way, from its first
+  // prediction on — direct build from the confirmed finding that global
+  // decile calibration blends two populations with opposite calibration
+  // needs. This is the actual test of whether condition-matching that
+  // fixes it, not an assumption it does.
+  let sumOrig = 0, nOrig = 0, sumExp = 0, nExp = 0, sumCal = 0, nCal = 0, sumCondCal = 0, nCondCal = 0;
+  let correctOrig = 0, correctExp = 0, correctCal = 0, correctCondCal = 0;
   const points = results.map(r => {
     sumOrig += (r.p_up - r.realized_up) ** 2;
     nOrig++;
@@ -1030,6 +1110,11 @@ async function getCalibrationHistory(env, horizonHours = 24) {
       nCal++;
       if ((r.calibrated_p_up > 0.5) === (r.realized_up === 1)) correctCal++;
     }
+    if (r.calibrated_conditional_p_up != null) {
+      sumCondCal += (r.calibrated_conditional_p_up - r.realized_up) ** 2;
+      nCondCal++;
+      if ((r.calibrated_conditional_p_up > 0.5) === (r.realized_up === 1)) correctCondCal++;
+    }
     return {
       ts: r.resolved_ts,
       brier_original: Number((sumOrig / nOrig).toFixed(4)),
@@ -1041,6 +1126,9 @@ async function getCalibrationHistory(env, horizonHours = 24) {
       brier_calibrated: nCal > 0 ? Number((sumCal / nCal).toFixed(4)) : null,
       n_calibrated: nCal,
       accuracy_calibrated: nCal > 0 ? Number((correctCal / nCal).toFixed(3)) : null,
+      brier_calibrated_conditional: nCondCal > 0 ? Number((sumCondCal / nCondCal).toFixed(4)) : null,
+      n_calibrated_conditional: nCondCal,
+      accuracy_calibrated_conditional: nCondCal > 0 ? Number((correctCondCal / nCondCal).toFixed(3)) : null,
     };
   });
   return { ok: true, points, naive_baseline_5050: 0.25 };

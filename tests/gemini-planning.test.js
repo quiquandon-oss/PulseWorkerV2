@@ -64,17 +64,184 @@ describe('Gemini planning — withinGeminiRateLimit', () => {
   });
 
   it('blocks at the daily limit even if the hourly count is fine', () => {
-    const config = { ...scope.GEMINI_TRIGGER_CONFIG, MAX_INVESTIGATIONS_PER_DAY: 8 };
+    const config = { ...scope.GEMINI_TRIGGER_CONFIG, MAX_GEMINI_INVESTIGATIONS_PER_DAY: 8 };
     const result = scope.withinGeminiRateLimit({ investigationsToday: 8, investigationsThisHour: 0 }, config);
     expect(result.allowed).toBe(false);
     expect(result.reason).toBe('daily_limit_reached');
   });
 
   it('blocks at the hourly limit even if the daily count is fine', () => {
-    const config = { ...scope.GEMINI_TRIGGER_CONFIG, MAX_INVESTIGATIONS_PER_HOUR: 2 };
+    const config = { ...scope.GEMINI_TRIGGER_CONFIG, MAX_GEMINI_INVESTIGATIONS_PER_HOUR: 2 };
     const result = scope.withinGeminiRateLimit({ investigationsToday: 0, investigationsThisHour: 2 }, config);
     expect(result.allowed).toBe(false);
     expect(result.reason).toBe('hourly_limit_reached');
+  });
+});
+
+describe('Gemini planning — computeInvestigationPriority (worked examples from PR #2 review)', () => {
+  let scope;
+
+  beforeAll(() => {
+    const src = extractFunctions('computeInvestigationPriority') + '\n\n' + extractConstants('INVESTIGATION_PRIORITY_WEIGHTS');
+    scope = evalInScope(src);
+  });
+
+  // These three mirror learning/GEMINI_IMPLEMENTATION_PLAN.md's worked
+  // examples A/B/C exactly -- the doc and this test must be kept in sync.
+
+  it('Example A — high confidence (0.90), correct call, small market move: LOW priority', () => {
+    const score = scope.computeInvestigationPriority({
+      priceMovePct: 0.4, wasWrong: false, confidence: 0.90,
+      correlatedFailureAssetCount: 0, isVolatilityAnomaly: false, recentFailureCount: 0, isRegimeChange: false,
+    });
+    expect(score).toBeLessThan(4); // INVESTIGATION_PRIORITY_THRESHOLD
+  });
+
+  it('Example B — moderate confidence (0.65), wrong, extreme single-asset move (8%): HIGH priority', () => {
+    const score = scope.computeInvestigationPriority({
+      priceMovePct: 8, wasWrong: true, confidence: 0.65,
+      correlatedFailureAssetCount: 0, isVolatilityAnomaly: true, recentFailureCount: 0, isRegimeChange: false,
+    });
+    expect(score).toBeGreaterThanOrEqual(4);
+  });
+
+  it('Example C — correlated multi-asset failure (BTC 8%, ETH 9%, LINK 12%): HIGHEST priority, exceeds B', () => {
+    const scoreB = scope.computeInvestigationPriority({
+      priceMovePct: 8, wasWrong: true, confidence: 0.65,
+      correlatedFailureAssetCount: 0, isVolatilityAnomaly: true, recentFailureCount: 0, isRegimeChange: false,
+    });
+    const scoreC = scope.computeInvestigationPriority({
+      priceMovePct: 12, wasWrong: true, confidence: 0.65,
+      correlatedFailureAssetCount: 3, isVolatilityAnomaly: true, recentFailureCount: 0, isRegimeChange: true,
+    });
+    expect(scoreC).toBeGreaterThanOrEqual(4);
+    expect(scoreC).toBeGreaterThan(scoreB); // correlation across assets outweighs a single large move
+  });
+
+  it('a correct call contributes zero confidence-adjusted error regardless of how confident it was', () => {
+    const veryConfidentCorrect = scope.computeInvestigationPriority({ priceMovePct: 0, wasWrong: false, confidence: 0.99 });
+    expect(veryConfidentCorrect).toBe(0);
+  });
+
+  it('prediction confidence alone (without an error) never drives priority -- the core PR #2 review distinction', () => {
+    const highConfidenceCorrect = scope.computeInvestigationPriority({ priceMovePct: 1, wasWrong: false, confidence: 0.95 });
+    const lowConfidenceCorrect = scope.computeInvestigationPriority({ priceMovePct: 1, wasWrong: false, confidence: 0.55 });
+    expect(highConfidenceCorrect).toBe(lowConfidenceCorrect); // confidence is irrelevant when there's no error
+  });
+
+  it('a wrong higher-confidence call scores higher than a wrong lower-confidence call, all else equal', () => {
+    const wrongHighConf = scope.computeInvestigationPriority({ priceMovePct: 1, wasWrong: true, confidence: 0.9 });
+    const wrongLowConf = scope.computeInvestigationPriority({ priceMovePct: 1, wasWrong: true, confidence: 0.55 });
+    expect(wrongHighConf).toBeGreaterThan(wrongLowConf);
+  });
+});
+
+describe('Gemini planning — isHighInvestigationPriority', () => {
+  let scope;
+
+  beforeAll(() => {
+    const src = extractFunctions('isHighInvestigationPriority') + '\n\n' + extractConstants('INVESTIGATION_PRIORITY_THRESHOLD');
+    scope = evalInScope(src);
+  });
+
+  it('classifies below-threshold scores as not high priority', () => {
+    expect(scope.isHighInvestigationPriority(3.9)).toBe(false);
+  });
+
+  it('classifies at-or-above-threshold scores as high priority', () => {
+    expect(scope.isHighInvestigationPriority(4)).toBe(true);
+    expect(scope.isHighInvestigationPriority(10)).toBe(true);
+  });
+
+  it('respects a custom threshold', () => {
+    expect(scope.isHighInvestigationPriority(5, 10)).toBe(false);
+  });
+});
+
+describe('Gemini planning — rankInvestigationCandidates + selectWithinBudget', () => {
+  let scope;
+
+  beforeAll(() => {
+    const src = extractFunctions('rankInvestigationCandidates', 'computeInvestigationPriority', 'selectWithinBudget')
+      + '\n\n' + extractConstants('INVESTIGATION_PRIORITY_WEIGHTS', 'INVESTIGATION_PRIORITY_THRESHOLD');
+    scope = evalInScope(src);
+  });
+
+  const candidateA = { id: 'A', signals: { priceMovePct: 0.4, wasWrong: false, confidence: 0.90 } };
+  const candidateB = { id: 'B', signals: { priceMovePct: 8, wasWrong: true, confidence: 0.65, isVolatilityAnomaly: true } };
+  const candidateC = { id: 'C', signals: { priceMovePct: 12, wasWrong: true, confidence: 0.65, correlatedFailureAssetCount: 3, isVolatilityAnomaly: true, isRegimeChange: true } };
+
+  it('ranks candidates highest-priority first: C > B > A', () => {
+    const ranked = scope.rankInvestigationCandidates([candidateA, candidateB, candidateC]);
+    expect(ranked.map(c => c.id)).toEqual(['C', 'B', 'A']);
+  });
+
+  it('selects only what fits the budget, deferring the rest', () => {
+    const ranked = scope.rankInvestigationCandidates([candidateA, candidateB, candidateC]);
+    const { selected, deferred } = scope.selectWithinBudget(ranked, 1);
+    expect(selected.map(c => c.id)).toEqual(['C']); // highest priority takes the one slot
+    expect(deferred.map(c => c.id)).toContain('B');
+  });
+
+  it('never selects a below-threshold candidate even with unlimited budget', () => {
+    const ranked = scope.rankInvestigationCandidates([candidateA, candidateB, candidateC]);
+    const { selected, deferred } = scope.selectWithinBudget(ranked, 99);
+    expect(selected.map(c => c.id)).not.toContain('A'); // A is below INVESTIGATION_PRIORITY_THRESHOLD
+    expect(deferred.map(c => c.id)).toContain('A');
+  });
+
+  it('selects nothing when budget is zero, regardless of priority', () => {
+    const ranked = scope.rankInvestigationCandidates([candidateB, candidateC]);
+    const { selected } = scope.selectWithinBudget(ranked, 0);
+    expect(selected).toEqual([]);
+  });
+});
+
+describe('Gemini planning — remainingGeminiBudget', () => {
+  let scope;
+
+  beforeAll(() => {
+    const src = extractFunctions('remainingGeminiBudget') + '\n\n' + extractConstants('GEMINI_TRIGGER_CONFIG');
+    scope = evalInScope(src);
+  });
+
+  it('is the SMALLER of daily-remaining and hourly-remaining, not their sum', () => {
+    const config = { MAX_GEMINI_INVESTIGATIONS_PER_DAY: 8, MAX_GEMINI_INVESTIGATIONS_PER_HOUR: 2 };
+    // 7 remaining today, but only 1 remaining this hour -- budget is 1
+    const result = scope.remainingGeminiBudget({ investigationsToday: 1, investigationsThisHour: 1 }, config);
+    expect(result).toBe(1);
+  });
+
+  it('never goes negative once a limit is exceeded', () => {
+    const config = { MAX_GEMINI_INVESTIGATIONS_PER_DAY: 8, MAX_GEMINI_INVESTIGATIONS_PER_HOUR: 2 };
+    const result = scope.remainingGeminiBudget({ investigationsToday: 20, investigationsThisHour: 20 }, config);
+    expect(result).toBe(0);
+  });
+});
+
+describe('Gemini planning — computeAvailableBeforePrediction (three-state contract)', () => {
+  let scope;
+
+  beforeAll(() => {
+    scope = evalInScope(extractFunctions('computeAvailableBeforePrediction'));
+  });
+
+  it('true when first_public_timestamp is at or before prediction_timestamp', () => {
+    expect(scope.computeAvailableBeforePrediction(1000, 2000)).toBe(true);
+    expect(scope.computeAvailableBeforePrediction(2000, 2000)).toBe(true); // T1 <= T0 boundary
+  });
+
+  it('false when first_public_timestamp is after prediction_timestamp -- never lets hindsight in', () => {
+    expect(scope.computeAvailableBeforePrediction(3000, 2000)).toBe(false);
+  });
+
+  it('the string "unknown", not null/undefined, when first_public_timestamp is not established', () => {
+    expect(scope.computeAvailableBeforePrediction(null, 2000)).toBe('unknown');
+    expect(scope.computeAvailableBeforePrediction(undefined, 2000)).toBe('unknown');
+  });
+
+  it('never uses event_timestamp -- only takes two arguments, so it structurally cannot', () => {
+    expect(scope.computeAvailableBeforePrediction.length).toBe(2);
   });
 });
 

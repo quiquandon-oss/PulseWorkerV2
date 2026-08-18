@@ -1400,13 +1400,32 @@ async function fetchCatalystsForPeriod(env, sinceTs, untilTs) {
 // =====================================================================
 
 const GEMINI_TRIGGER_CONFIG = {
-  MARKET_MOVE_TRIGGER_PCT: 3,       // trailing-window price move %, see plan doc for which window
-  HIGH_CONFIDENCE_TRIGGER: 0.85,    // NOT the doc's example 0.75 -- see plan doc's call-volume analysis for why
+  MARKET_MOVE_TRIGGER_PCT: 3,          // trailing-window price move %, see plan doc for which window
+  HIGH_CONFIDENCE_TRIGGER: 0.85,       // retained for shouldTriggerInvestigation (superseded design, see below) -- NOT the doc's example 0.75, see plan doc's call-volume analysis for why
   MULTI_ASSET_TRIGGER_COUNT: 3,
-  MAX_INVESTIGATIONS_PER_DAY: 8,
-  MAX_INVESTIGATIONS_PER_HOUR: 2,
+  MAX_GEMINI_INVESTIGATIONS_PER_DAY: 8,
+  MAX_GEMINI_INVESTIGATIONS_PER_HOUR: 2,
   MAX_ASSETS_PER_INVESTIGATION: 3,
 };
+
+// Provisional weights for computeInvestigationPriority below -- a starting
+// point for design review, explicitly NOT a fitted or validated scoring
+// model. See learning/GEMINI_IMPLEMENTATION_PLAN.md section 2 for the
+// worked examples these were chosen to make sense against, and the
+// implementation PR should revisit these once real trigger data exists.
+const INVESTIGATION_PRIORITY_WEIGHTS = {
+  priceMovePct: 0.5,            // per absolute percentage point of the largest affected asset's move
+  confidenceAdjustedError: 3,   // 0..1 range (see computeInvestigationPriority) -- contributes 0..3
+  correlatedAssetCount: 2,      // per asset beyond the first that failed together
+  volatilityAnomaly: 1.5,       // flat bonus if today's setup was flagged is_regime_anomaly
+  repeatedFailureCount: 0.5,    // per additional recent failure in the trailing window
+  regimeChangeFlag: 2,          // flat bonus if a regime-change signal fired
+};
+
+// Below this score, an event is LOW priority and should be skipped without
+// calling Gemini -- matches ChatGPT's "Normal error -> skip" branch.
+// Provisional, same caveat as the weights above.
+const INVESTIGATION_PRIORITY_THRESHOLD = 4;
 
 const ALLOWED_CATALYST_CATEGORIES = [
   'MACRO', 'FED_RATES', 'INFLATION', 'EMPLOYMENT', 'USD', 'ETF_FLOWS', 'REGULATION',
@@ -1416,14 +1435,13 @@ const ALLOWED_CATALYST_CATEGORIES = [
 
 const ALLOWED_MARKET_CLASSIFICATIONS = ['MARKET_WIDE', 'SECTOR_SPECIFIC', 'ASSET_SPECIFIC', 'NO_CLEAR_CATALYST'];
 
-// Pure. Decides WHETHER a Gemini investigation would be justified, given
-// already-computed signals (price move %, whether a high-confidence
-// prediction just failed, how many assets are correlated). Does not call
-// Gemini, does not read D1, does not know about rate limits (see
-// withinGeminiRateLimit below for that, kept separate on purpose --
-// "should this event be investigated" and "can we afford to investigate it
-// right now" are different questions and conflating them would make both
-// harder to test).
+// SUPERSEDED by computeInvestigationPriority/rankInvestigationCandidates
+// below -- kept only for the tests already written against it and as a
+// simple reference implementation of the design this PR's review rejected
+// (a single OR-of-thresholds gate can't express "a 65% call during a
+// 12%-correlated-multi-asset move matters more than a 90% call during a
+// quiet market", which is exactly the distinction the review asked for).
+// Do not wire this one in -- see the plan doc.
 function shouldTriggerInvestigation(signals, config = GEMINI_TRIGGER_CONFIG) {
   const reasons = [];
   if (signals.priceMovePct != null && Math.abs(signals.priceMovePct) >= config.MARKET_MOVE_TRIGGER_PCT) {
@@ -1438,14 +1456,103 @@ function shouldTriggerInvestigation(signals, config = GEMINI_TRIGGER_CONFIG) {
   return { trigger: reasons.length > 0, reasons };
 }
 
+// Pure. Replaces shouldTriggerInvestigation's single-threshold-OR design
+// with a continuous priority score, per PR #2 review. Deliberately keeps
+// PREDICTION CONFIDENCE and INVESTIGATION PRIORITY separate: confidence
+// only enters via confidenceAdjustedError, and even then it's gated on the
+// prediction having actually been wrong -- a correct 90%-confidence call
+// contributes nothing to priority no matter how confident it was, while a
+// wrong 65%-confidence call during a large correlated multi-asset move can
+// score far higher. See learning/GEMINI_IMPLEMENTATION_PLAN.md section 2
+// for three fully worked examples this was calibrated against.
+//
+// signals:
+//   priceMovePct              abs % move of the largest-moving affected asset
+//   wasWrong                  boolean -- did the prediction miss?
+//   confidence                0.5-1.0, max(p, 1-p) at prediction time
+//   correlatedFailureAssetCount  how many assets failed together (0/1 = not correlated)
+//   isVolatilityAnomaly       boolean, e.g. today's is_regime_anomaly flag
+//   recentFailureCount        count of recent failures in a trailing window
+//   isRegimeChange            boolean
+function computeInvestigationPriority(signals, weights = INVESTIGATION_PRIORITY_WEIGHTS) {
+  const confidenceAdjustedError = signals.wasWrong && signals.confidence != null
+    ? Math.max(0, (signals.confidence - 0.5) * 2)
+    : 0;
+  const score =
+    weights.priceMovePct * Math.abs(signals.priceMovePct || 0) +
+    weights.confidenceAdjustedError * confidenceAdjustedError +
+    weights.correlatedAssetCount * Math.max(0, (signals.correlatedFailureAssetCount || 0) - 1) +
+    weights.volatilityAnomaly * (signals.isVolatilityAnomaly ? 1 : 0) +
+    weights.repeatedFailureCount * (signals.recentFailureCount || 0) +
+    weights.regimeChangeFlag * (signals.isRegimeChange ? 1 : 0);
+  return score;
+}
+
+// Pure. LOW/HIGH classification per ChatGPT's proposed
+// "Normal error -> skip / Anomaly-error -> Investigation Score -> HIGH -> Gemini"
+// branch. threshold is provisional -- see INVESTIGATION_PRIORITY_THRESHOLD.
+function isHighInvestigationPriority(score, threshold = INVESTIGATION_PRIORITY_THRESHOLD) {
+  return score >= threshold;
+}
+
+// Pure. Ranks candidate events by investigation priority, highest first --
+// "process the highest-value candidates first" rather than investigating
+// every high-confidence failure. Each candidate must carry an `id` (or
+// similar caller-defined identifier) and a `signals` object as consumed by
+// computeInvestigationPriority.
+function rankInvestigationCandidates(candidates, weights = INVESTIGATION_PRIORITY_WEIGHTS) {
+  return candidates
+    .map(c => ({ ...c, priority: Number(computeInvestigationPriority(c.signals, weights).toFixed(3)) }))
+    .sort((a, b) => b.priority - a.priority);
+}
+
+// Pure. How many more investigations can run right now, the smaller of the
+// daily and hourly remaining allowance. Separate from withinGeminiRateLimit
+// (a simple yes/no gate, still useful on its own) because ranking needs a
+// COUNT to slice the ranked list by, not just a boolean.
+function remainingGeminiBudget({ investigationsToday, investigationsThisHour }, config = GEMINI_TRIGGER_CONFIG) {
+  const dailyRemaining = Math.max(0, config.MAX_GEMINI_INVESTIGATIONS_PER_DAY - (investigationsToday || 0));
+  const hourlyRemaining = Math.max(0, config.MAX_GEMINI_INVESTIGATIONS_PER_HOUR - (investigationsThisHour || 0));
+  return Math.min(dailyRemaining, hourlyRemaining);
+}
+
+// Pure. Takes a ranked candidate list (highest priority first, from
+// rankInvestigationCandidates) and a budget count, and splits it into what
+// gets investigated now vs. deferred. Candidates below
+// INVESTIGATION_PRIORITY_THRESHOLD are deferred regardless of remaining
+// budget -- a LOW-priority event doesn't become worth investigating just
+// because the budget happens to be free that hour.
+function selectWithinBudget(rankedCandidates, budget, threshold = INVESTIGATION_PRIORITY_THRESHOLD) {
+  const eligible = rankedCandidates.filter(c => c.priority >= threshold);
+  return {
+    selected: eligible.slice(0, Math.max(0, budget)),
+    deferred: eligible.slice(Math.max(0, budget)).concat(rankedCandidates.filter(c => c.priority < threshold)),
+  };
+}
+
 // Pure, given already-known counts (caller queries D1 for today's/this-hour's
 // investigation count -- not done here, keeps this testable without a
 // database). Bounds Gemini usage per .ai/GEMINI_MARKET_INTELLIGENCE.md's
 // Rate Limiting section.
 function withinGeminiRateLimit({ investigationsToday, investigationsThisHour }, config = GEMINI_TRIGGER_CONFIG) {
-  if (investigationsToday >= config.MAX_INVESTIGATIONS_PER_DAY) return { allowed: false, reason: 'daily_limit_reached' };
-  if (investigationsThisHour >= config.MAX_INVESTIGATIONS_PER_HOUR) return { allowed: false, reason: 'hourly_limit_reached' };
+  if (investigationsToday >= config.MAX_GEMINI_INVESTIGATIONS_PER_DAY) return { allowed: false, reason: 'daily_limit_reached' };
+  if (investigationsThisHour >= config.MAX_GEMINI_INVESTIGATIONS_PER_HOUR) return { allowed: false, reason: 'hourly_limit_reached' };
   return { allowed: true, reason: null };
+}
+
+// Pure. The exact three-state contract from PR #2 review: CryptoPulse (not
+// Gemini) computes this, from first_public_timestamp vs prediction_timestamp
+// ONLY -- never from event_timestamp, per .ai/MARKET_CATALYST.md's
+// Deterministic Availability section. Returns the string 'unknown' (not
+// null/undefined) when first_public_timestamp isn't established, matching
+// the review's explicit spec, distinct from classifyCatalystTiming (PR #1)
+// which is a generic two-timestamp comparator used elsewhere and returns
+// null for "don't know" -- this function is specifically the
+// available_before_prediction contract and always returns one of exactly
+// three values.
+function computeAvailableBeforePrediction(firstPublicTimestamp, predictionTimestamp) {
+  if (firstPublicTimestamp == null) return 'unknown';
+  return firstPublicTimestamp <= predictionTimestamp;
 }
 
 // Pure. Validates a candidate catalyst payload BEFORE it's ever written to

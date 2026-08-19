@@ -21,6 +21,7 @@ on:
         description: 'Environment label for the report'
         required: false
         default: 'production'
+  pull_request:
 
 permissions:
   contents: write   # to commit the audit report files back to this branch

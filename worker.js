@@ -1404,8 +1404,16 @@ const GEMINI_TRIGGER_CONFIG = {
   MARKET_MOVE_TRIGGER_PCT: 3,          // trailing-window price move %, see plan doc for which window
   HIGH_CONFIDENCE_TRIGGER: 0.85,       // retained for shouldTriggerInvestigation (superseded design, see below) -- NOT the doc's example 0.75, see plan doc's call-volume analysis for why
   MULTI_ASSET_TRIGGER_COUNT: 3,
-  MAX_GEMINI_INVESTIGATIONS_PER_DAY: 8,
-  MAX_GEMINI_INVESTIGATIONS_PER_HOUR: 2,
+  // ---- CANARY CONFIG -- deliberately 1/1, not the design's 8/2 ----
+  // Set for a single controlled production canary call per explicit
+  // human go-ahead. The objective of this canary is NOT to gather useful
+  // catalyst data yet -- it's to verify the full chain (scheduled() ->
+  // candidate -> ranking -> budget -> Gemini -> grounding -> validation ->
+  // D1) actually works end-to-end against the real API. Do NOT raise these
+  // back to the design values (8/2) without a fresh, explicit go-ahead
+  // after the canary result has been independently audited.
+  MAX_GEMINI_INVESTIGATIONS_PER_DAY: 1,
+  MAX_GEMINI_INVESTIGATIONS_PER_HOUR: 1,
   MAX_ASSETS_PER_INVESTIGATION: 3,
 };
 

@@ -59,7 +59,11 @@ describe('Gemini planning — withinGeminiRateLimit', () => {
   });
 
   it('allows when under both daily and hourly limits', () => {
-    const result = scope.withinGeminiRateLimit({ investigationsToday: 1, investigationsThisHour: 0 });
+    // Explicit config (not the bare default) so this test's meaning doesn't
+    // silently change if GEMINI_TRIGGER_CONFIG's live values change (e.g.
+    // the canary's temporarily-tightened 1/1 budget).
+    const config = { ...scope.GEMINI_TRIGGER_CONFIG, MAX_GEMINI_INVESTIGATIONS_PER_DAY: 8, MAX_GEMINI_INVESTIGATIONS_PER_HOUR: 2 };
+    const result = scope.withinGeminiRateLimit({ investigationsToday: 1, investigationsThisHour: 0 }, config);
     expect(result.allowed).toBe(true);
   });
 
@@ -1031,7 +1035,11 @@ describe('Gemini live — evaluateGeminiTriggers respects the budget (excessive-
     }));
     const env = {
       __mockCandidates: manyHighPriorityCandidates,
-      __mockCounts: { investigationsToday: 7, investigationsThisHour: 0 }, // only 1 left today (MAX_GEMINI_INVESTIGATIONS_PER_DAY=8)
+      // 1 remaining today regardless of the current configured daily limit
+      // (references the real GEMINI_TRIGGER_CONFIG rather than hardcoding a
+      // number that would silently go stale if the budget is ever
+      // reconfigured -- e.g. the canary config currently in effect).
+      __mockCounts: { investigationsToday: scope.GEMINI_TRIGGER_CONFIG.MAX_GEMINI_INVESTIGATIONS_PER_DAY - 1, investigationsThisHour: 0 },
       __investigated: [],
     };
     const result = await scope.evaluateGeminiTriggers(env);
@@ -1043,7 +1051,7 @@ describe('Gemini live — evaluateGeminiTriggers respects the budget (excessive-
   it('investigates zero candidates when the budget is exhausted, regardless of priority', async () => {
     const env = {
       __mockCandidates: [{ id: 'BTC', assets: ['BTC'], signals: { priceMovePct: 20, wasWrong: true, confidence: 0.99, correlatedFailureAssetCount: 3 } }],
-      __mockCounts: { investigationsToday: 8, investigationsThisHour: 0 }, // daily limit already reached
+      __mockCounts: { investigationsToday: scope.GEMINI_TRIGGER_CONFIG.MAX_GEMINI_INVESTIGATIONS_PER_DAY, investigationsThisHour: 0 }, // daily limit already reached, whatever it currently is
       __investigated: [],
     };
     const result = await scope.evaluateGeminiTriggers(env);

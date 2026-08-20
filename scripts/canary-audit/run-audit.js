@@ -371,7 +371,20 @@ async function main() {
     writeFileSync(process.env.GITHUB_OUTPUT, `md_path=${mdPath}\njson_path=${jsonPath}\nresult=${report.result}\naudit_id=${auditId}\n`, { flag: 'a' });
   }
 
-  process.exitCode = report.result === 'FAIL' ? 1 : 0; // UNVERIFIED and PASS both exit 0 -- FAIL is a real problem, UNVERIFIED just means "go look"
+  // BUG FIX (H2's actual, confirmed root cause -- not a crash, ever): this
+  // used to be `report.result === 'FAIL' ? 1 : 0`, which conflated two
+  // different things -- "did the SCRIPT run successfully" vs. "what did
+  // the audit CONCLUDE about the system it audited". GitHub Actions
+  // treats any non-zero exit as a failed step, which cascaded into
+  // skipping the commit/upload/secret-check steps (all gated on step
+  // success) EVEN THOUGH the script had already completed correctly and
+  // written a fully valid, real report. The script succeeding and the
+  // audit concluding FAIL are not the same fact and must not share one
+  // exit code. Always 0 here now -- the audit's actual PASS/FAIL/
+  // UNVERIFIED verdict lives in the report content and in
+  // GITHUB_OUTPUT's `result`, which the workflow now checks in its own
+  // separate, later step (after the report is safely committed either way).
+  process.exitCode = 0;
 }
 
 main().catch((err) => {

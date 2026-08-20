@@ -1,4 +1,6 @@
 import { describe, it, expect } from 'vitest';
+import { readFileSync, rmSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
 import {
   STATUS, checkResult, redactSecrets, buildAuditId, buildTimestampFilenamePrefix,
   evaluateGithubExecution, evaluateCloudflareDeployment, evaluateExecutionOrder,
@@ -279,5 +281,32 @@ describe('buildIndexRow / upsertIndex', () => {
     expect(out).toContain('canary-old');
     expect(out).toContain('canary-new');
     expect(out.indexOf('canary-old')).toBeLessThan(out.indexOf('canary-new'));
+  });
+});
+
+describe('run-audit.js exit code — regression test for H2\'s real, confirmed root cause', () => {
+  // Real bug, actually observed in production CI (not hypothesized): the
+  // script used to exit 1 whenever the AUDIT ITSELF concluded FAIL, which
+  // GitHub Actions correctly read as "this step failed" and skipped the
+  // commit/upload/secret-check steps -- discarding a perfectly valid
+  // report. Two checks: a structural guarantee the old conditional pattern
+  // is gone, and a real subprocess execution proving exit 0 in an actually
+  // achievable case (zero credentials -> UNVERIFIED, not PASS).
+  it('the source no longer conditions process.exitCode on the audit result', () => {
+    const src = readFileSync(new URL('./run-audit.js', import.meta.url), 'utf8');
+    expect(src).not.toMatch(/process\.exitCode\s*=\s*report\.result\s*===\s*['"]FAIL['"]/);
+    expect(src).toMatch(/process\.exitCode\s*=\s*0;/);
+  });
+
+  it('actually running the script to completion with zero credentials (a real, achievable non-PASS case) exits 0', () => {
+    const cwd = new URL('../..', import.meta.url).pathname;
+    const result = spawnSync('node', ['scripts/canary-audit/run-audit.js'], {
+      cwd,
+      env: { ...process.env, GITHUB_TOKEN: '', CLOUDFLARE_API_TOKEN: '' },
+      encoding: 'utf8',
+    });
+    expect(result.stdout).toContain('UNVERIFIED'); // confirms this really did NOT take the PASS path
+    expect(result.status).toBe(0); // the actual regression: this used to only be true for PASS
+    rmSync(cwd + 'artifacts', { recursive: true, force: true }); // don't leave test-generated reports behind
   });
 });

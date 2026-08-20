@@ -63,6 +63,14 @@ jobs:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
         run: node scripts/canary-audit/run-audit.js
 
+      # H2's real, confirmed root cause (not a crash -- see the commit this
+      # accompanies): run-audit.js previously exited 1 whenever the AUDIT
+      # ITSELF concluded FAIL, which GitHub Actions correctly read as "this
+      # step failed" and skipped everything below, discarding a perfectly
+      # valid report. run-audit.js now always exits 0 on successful
+      # completion; the sequence below checks the audit's actual verdict
+      # explicitly, in its own step, positioned AFTER the report is safely
+      # committed and uploaded either way.
       - name: Confirm no secrets leaked into the report (Step 15.8)
         if: steps.audit.outcome == 'success'
         run: |
@@ -77,25 +85,19 @@ jobs:
             console.log('No secret patterns detected in report output.');
           "
 
-      # H2 fix, part 1: previously neither ref bug (below) nor a missing
-      # diagnostic path existed to explain a failure -- this step runs
-      # ONLY on failure and commits run-audit.js's own captured error
-      # (message + stack, written by its top-level catch) back to the
-      # branch, since I have no way to fetch raw Actions logs from where
-      # I run (results-receiver.actions.githubusercontent.com is blocked
-      # in that environment) or reliably resolve artifact download
-      # redirects either. A committed file IS reliably fetchable via the
-      # same git/Contents API access already used for everything else.
-      - name: Commit failure diagnostic (only runs if the audit step failed)
+      # Genuine-crash diagnostic (script itself failed to complete, not "the
+      # audit concluded FAIL" -- those are different now). Kept as
+      # defense-in-depth; should rarely fire given the fix above.
+      - name: Commit failure diagnostic (only runs if the script itself crashed)
         if: failure() && steps.audit.outcome == 'failure'
         run: |
           git config user.name "canary-audit-bot"
           git config user.email "canary-audit-bot@users.noreply.github.com"
           git add artifacts/canary-audit/LAST_ERROR.txt artifacts/canary-audit/PROGRESS.log 2>/dev/null || true
           if git diff --cached --quiet; then
-            echo "Audit step failed before writing ANY diagnostic file, including the incremental progress log -- the crash happens before main() even reaches its first logProgress() call, or something outside this script entirely (npm ci, module loading, runner-level issue)."
+            echo "Script crashed before writing ANY diagnostic file, including the incremental progress log."
           else
-            git commit -m "chore(audit): capture canary-audit failure diagnostic"
+            git commit -m "chore(audit): capture canary-audit crash diagnostic"
             git push origin HEAD:${{ github.head_ref || github.ref_name }}
           fi
 
@@ -121,3 +123,13 @@ jobs:
             ${{ steps.audit.outputs.md_path }}
             ${{ steps.audit.outputs.json_path }}
           retention-days: 90
+
+      # The job's own pass/fail status should reflect what the audit
+      # actually concluded about the SYSTEM it audited -- but only after
+      # the report itself is safely persisted above, so a real FAIL verdict
+      # is never lost the way it was before this fix.
+      - name: Fail the job if the audit concluded FAIL
+        if: steps.audit.outcome == 'success' && steps.audit.outputs.result == 'FAIL'
+        run: |
+          echo "::error::Canary audit concluded FAIL — see the committed report (${{ steps.audit.outputs.md_path }}) for which checks failed. The audit tooling itself ran successfully; this failure reflects the system under audit, not this workflow."
+          exit 1

@@ -1,0 +1,135 @@
+name: Canary Audit
+
+# Read-only evidence gathering for the Gemini Market Intelligence canary.
+# This workflow NEVER deploys, NEVER writes to D1, NEVER changes Worker
+# config/budgets, and NEVER reruns the canary itself -- it only reads
+# already-existing GitHub/Cloudflare/D1 state and writes its own audit
+# report files. See scripts/canary-audit/ for the implementation.
+
+on:
+  workflow_dispatch:
+    inputs:
+      target_sha:
+        description: 'Commit SHA to audit'
+        required: false
+        default: '0280f8f'
+      target_branch:
+        description: 'Branch the target SHA is expected to be on'
+        required: false
+        default: 'feature/gemini-market-intelligence-plan'
+      environment:
+        description: 'Environment label for the report'
+        required: false
+        default: 'production'
+  pull_request:
+
+permissions:
+  contents: write   # to commit the audit report files back to this branch
+  actions: read      # to read workflow run history for the GitHub-execution audit
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    # Never allow this to run against main -- the audit reports commit
+    # back to whatever branch triggered it, and this system should only
+    # ever run against the canary's own feature branch.
+    if: github.ref != 'refs/heads/main'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref }}
+          fetch-depth: 0
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run unit tests (Step 15 — validate before trusting the output)
+        run: npm test
+
+      - name: Run canary audit (READ ONLY)
+        id: audit
+        env:
+          TARGET_SHA: ${{ github.event.inputs.target_sha }}
+          TARGET_BRANCH: ${{ github.event.inputs.target_branch }}
+          TARGET_ENVIRONMENT: ${{ github.event.inputs.environment }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: node scripts/canary-audit/run-audit.js
+
+      # H2's real, confirmed root cause (not a crash -- see the commit this
+      # accompanies): run-audit.js previously exited 1 whenever the AUDIT
+      # ITSELF concluded FAIL, which GitHub Actions correctly read as "this
+      # step failed" and skipped everything below, discarding a perfectly
+      # valid report. run-audit.js now always exits 0 on successful
+      # completion; the sequence below checks the audit's actual verdict
+      # explicitly, in its own step, positioned AFTER the report is safely
+      # committed and uploaded either way.
+      - name: Confirm no secrets leaked into the report (Step 15.8)
+        if: steps.audit.outcome == 'success'
+        run: |
+          node -e "
+            const fs = require('fs');
+            const md = fs.readFileSync('${{ steps.audit.outputs.md_path }}', 'utf8');
+            const json = fs.readFileSync('${{ steps.audit.outputs.json_path }}', 'utf8');
+            const patterns = [/CLOUDFLARE_API_TOKEN\s*[:=]\s*[A-Za-z0-9_\-\.]{10,}/, /Bearer [A-Za-z0-9_\-\.]{20,}/, /gemini_api_key\s*[:=]\s*[A-Za-z0-9_\-]{10,}/i];
+            for (const p of patterns) {
+              if (p.test(md) || p.test(json)) { console.error('Potential secret pattern found in report output:', p); process.exit(1); }
+            }
+            console.log('No secret patterns detected in report output.');
+          "
+
+      # Genuine-crash diagnostic (script itself failed to complete, not "the
+      # audit concluded FAIL" -- those are different now). Kept as
+      # defense-in-depth; should rarely fire given the fix above.
+      - name: Commit failure diagnostic (only runs if the script itself crashed)
+        if: failure() && steps.audit.outcome == 'failure'
+        run: |
+          git config user.name "canary-audit-bot"
+          git config user.email "canary-audit-bot@users.noreply.github.com"
+          git add artifacts/canary-audit/LAST_ERROR.txt artifacts/canary-audit/PROGRESS.log 2>/dev/null || true
+          if git diff --cached --quiet; then
+            echo "Script crashed before writing ANY diagnostic file, including the incremental progress log."
+          else
+            git commit -m "chore(audit): capture canary-audit crash diagnostic"
+            git push origin HEAD:${{ github.head_ref || github.ref_name }}
+          fi
+
+      - name: Commit audit artifacts to this branch (never overwrites history)
+        if: steps.audit.outcome == 'success'
+        run: |
+          git config user.name "canary-audit-bot"
+          git config user.email "canary-audit-bot@users.noreply.github.com"
+          git add artifacts/canary-audit/
+          if git diff --cached --quiet; then
+            echo "No new audit files to commit (unexpected — investigate)."
+          else
+            git commit -m "chore(audit): canary audit ${{ steps.audit.outputs.audit_id }} — result ${{ steps.audit.outputs.result }}"
+            git push origin HEAD:${{ github.head_ref || github.ref_name }}
+          fi
+
+      - name: Upload audit artifact
+        if: steps.audit.outcome == 'success'
+        uses: actions/upload-artifact@v4
+        with:
+          name: cryptopulsev2-canary-audit
+          path: |
+            ${{ steps.audit.outputs.md_path }}
+            ${{ steps.audit.outputs.json_path }}
+          retention-days: 90
+
+      # The job's own pass/fail status should reflect what the audit
+      # actually concluded about the SYSTEM it audited -- but only after
+      # the report itself is safely persisted above, so a real FAIL verdict
+      # is never lost the way it was before this fix.
+      - name: Fail the job if the audit concluded FAIL
+        if: steps.audit.outcome == 'success' && steps.audit.outputs.result == 'FAIL'
+        run: |
+          echo "::error::Canary audit concluded FAIL — see the committed report (${{ steps.audit.outputs.md_path }}) for which checks failed. The audit tooling itself ran successfully; this failure reflects the system under audit, not this workflow."
+          exit 1

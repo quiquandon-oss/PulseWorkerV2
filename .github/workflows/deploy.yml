@@ -15,5 +15,10 @@ jobs:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           secrets: |
             GEMINI_API_KEY
+          # Overrides wrangler.toml's placeholder GIT_COMMIT_SHA with the
+          # real commit being deployed, so every prediction row can be
+          # traced back to the exact code that produced it (see
+          # .ai/DATA_CONTRACT.md). No secret involved -- the SHA is public.
+          command: deploy --var GIT_COMMIT_SHA:${{ github.sha }}
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}

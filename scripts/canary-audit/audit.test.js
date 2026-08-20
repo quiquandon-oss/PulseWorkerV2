@@ -1,5 +1,7 @@
 import { describe, it, expect } from 'vitest';
-import { readFileSync, rmSync } from 'node:fs';
+import { readFileSync, mkdtempSync, cpSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import {
   STATUS, checkResult, redactSecrets, buildAuditId, buildTimestampFilenamePrefix,
@@ -299,14 +301,29 @@ describe('run-audit.js exit code — regression test for H2\'s real, confirmed r
   });
 
   it('actually running the script to completion with zero credentials (a real, achievable non-PASS case) exits 0', () => {
-    const cwd = new URL('../..', import.meta.url).pathname;
-    const result = spawnSync('node', ['scripts/canary-audit/run-audit.js'], {
-      cwd,
-      env: { ...process.env, GITHUB_TOKEN: '', CLOUDFLARE_API_TOKEN: '' },
-      encoding: 'utf8',
-    });
-    expect(result.stdout).toContain('UNVERIFIED'); // confirms this really did NOT take the PASS path
-    expect(result.status).toBe(0); // the actual regression: this used to only be true for PASS
-    rmSync(cwd + 'artifacts', { recursive: true, force: true }); // don't leave test-generated reports behind
+    // BUG FIX, found while doing this: the original version of this test
+    // ran the subprocess with cwd = the real repo root, then tried to
+    // clean up afterward with rmSync(cwd + 'artifacts', {recursive:true}) --
+    // which deleted the ENTIRE artifacts/canary-audit/ directory, including
+    // real historical audit reports committed by CI, not just this test's
+    // own output. Fixed properly: copy just the script files this test
+    // needs into an isolated OS temp directory and run the subprocess
+    // there instead, so it structurally cannot write anywhere near the
+    // real repo's artifacts folder, regardless of what it writes or how
+    // this test cleans up after itself.
+    const scriptsDir = new URL('.', import.meta.url).pathname;
+    const tempDir = mkdtempSync(join(tmpdir(), 'canary-audit-test-'));
+    cpSync(scriptsDir, join(tempDir, 'scripts', 'canary-audit'), { recursive: true });
+    try {
+      const result = spawnSync('node', ['scripts/canary-audit/run-audit.js'], {
+        cwd: tempDir,
+        env: { ...process.env, GITHUB_TOKEN: '', CLOUDFLARE_API_TOKEN: '' },
+        encoding: 'utf8',
+      });
+      expect(result.stdout).toContain('UNVERIFIED'); // confirms this really did NOT take the PASS path
+      expect(result.status).toBe(0); // the actual regression: this used to only be true for PASS
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true }); // safe -- this is an isolated OS temp dir, never the real repo
+    }
   });
 });

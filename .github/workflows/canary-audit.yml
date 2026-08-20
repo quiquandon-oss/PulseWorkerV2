@@ -30,15 +30,20 @@ permissions:
 jobs:
   audit:
     runs-on: ubuntu-latest
-    # Never allow this to run against main -- the audit reports commit
-    # back to whatever branch triggered it, and this system should only
-    # ever run against the canary's own feature branch.
-    if: github.ref != 'refs/heads/main'
     steps:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          ref: ${{ github.ref }}
+          # BUG FIX: github.ref on a pull_request event resolves to GitHub's
+          # synthetic merge ref (PR branch + base branch combined), NOT the
+          # actual PR branch tip. Checking that out, then later pushing the
+          # committed report back to the real branch (see the commit steps
+          # below), silently merged main's unrelated content into the PR
+          # branch's history as a side effect (confirmed: this is exactly
+          # how main's .obsidian/ notes ended up on the Gemini branch).
+          # Use the real head SHA for pull_request events; github.ref is
+          # already correct for workflow_dispatch.
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.ref }}
           fetch-depth: 0
 
       - name: Setup Node
@@ -88,8 +93,11 @@ jobs:
       # Genuine-crash diagnostic (script itself failed to complete, not "the
       # audit concluded FAIL" -- those are different now). Kept as
       # defense-in-depth; should rarely fire given the fix above.
+      # Skipped on main: this bot should never push commits directly to a
+      # protected branch, even a diagnostic one -- the artifact upload
+      # below is the retrieval path for a main run instead.
       - name: Commit failure diagnostic (only runs if the script itself crashed)
-        if: failure() && steps.audit.outcome == 'failure'
+        if: failure() && steps.audit.outcome == 'failure' && github.ref != 'refs/heads/main'
         run: |
           git config user.name "canary-audit-bot"
           git config user.email "canary-audit-bot@users.noreply.github.com"
@@ -101,8 +109,12 @@ jobs:
             git push origin HEAD:${{ github.head_ref || github.ref_name }}
           fi
 
+      # Skipped on main for the same reason: this bot commits reports back
+      # to feature branches (auditable history there), never to main
+      # directly. A main run's report is still fully retrievable via the
+      # uploaded artifact below.
       - name: Commit audit artifacts to this branch (never overwrites history)
-        if: steps.audit.outcome == 'success'
+        if: steps.audit.outcome == 'success' && github.ref != 'refs/heads/main'
         run: |
           git config user.name "canary-audit-bot"
           git config user.email "canary-audit-bot@users.noreply.github.com"

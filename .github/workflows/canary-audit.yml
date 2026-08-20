@@ -91,17 +91,12 @@ jobs:
         run: |
           git config user.name "canary-audit-bot"
           git config user.email "canary-audit-bot@users.noreply.github.com"
-          if [ -f artifacts/canary-audit/LAST_ERROR.txt ]; then
-            git add artifacts/canary-audit/LAST_ERROR.txt
-            git commit -m "chore(audit): capture canary-audit failure diagnostic"
-            # H2 fix, part 2: github.ref_name resolves to a PR's synthetic
-            # merge ref name (e.g. "2/merge") on pull_request events, which
-            # isn't a real pushable branch -- use head_ref (only populated
-            # on pull_request) when present, falling back to ref_name for
-            # workflow_dispatch runs where head_ref is empty.
-            git push origin HEAD:${{ github.head_ref || github.ref_name }}
+          git add artifacts/canary-audit/LAST_ERROR.txt artifacts/canary-audit/PROGRESS.log 2>/dev/null || true
+          if git diff --cached --quiet; then
+            echo "Audit step failed before writing ANY diagnostic file, including the incremental progress log -- the crash happens before main() even reaches its first logProgress() call, or something outside this script entirely (npm ci, module loading, runner-level issue)."
           else
-            echo "Audit step failed before writing any diagnostic file at all -- see the job's own log output for whatever ran before that point."
+            git commit -m "chore(audit): capture canary-audit failure diagnostic"
+            git push origin HEAD:${{ github.head_ref || github.ref_name }}
           fi
 
       - name: Commit audit artifacts to this branch (never overwrites history)

@@ -13,12 +13,22 @@ function authHeaders(token) {
 }
 
 async function cfGet(path, token) {
-  const res = await fetch(CF_API + path, { headers: authHeaders(token) });
-  const body = await res.json().catch(() => null);
-  if (!res.ok || !body || body.success === false) {
-    return { ok: false, status: res.status, errors: body ? body.errors : null };
+  // Defensive fix, applied regardless of confirmed root cause: this fetch()
+  // was previously unguarded, unlike d1-checks.js's runQuery() which always
+  // wrapped its equivalent call. Closing this gap either way -- if it
+  // wasn't THE cause of the observed crash, it's still a real inconsistency
+  // with this file's own stated design goal of never letting one
+  // unreachable source take down the whole run.
+  try {
+    const res = await fetch(CF_API + path, { headers: authHeaders(token) });
+    const body = await res.json().catch(() => null);
+    if (!res.ok || !body || body.success === false) {
+      return { ok: false, status: res.status, errors: body ? body.errors : null };
+    }
+    return { ok: true, status: res.status, result: body.result };
+  } catch (e) {
+    return { ok: false, status: null, errors: [String(e && e.message)] };
   }
-  return { ok: true, status: res.status, result: body.result };
 }
 
 // GET-only: confirms the Worker script exists and returns its metadata

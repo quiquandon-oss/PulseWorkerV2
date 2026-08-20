@@ -29,7 +29,22 @@ import {
 } from './d1-checks.js';
 import { buildMarkdownReport, buildJsonReport, buildStepSummary, buildIndexRow, upsertIndex } from './report.js';
 
+// H2 diagnostic: writes an incremental progress marker after every major
+// phase, appending (not overwriting) to a file that survives even if the
+// process crashes somewhere that bypasses main()'s own top-level .catch()
+// (e.g. an unhandled rejection not part of the awaited chain, or something
+// lower-level). If the run fails, this file shows exactly how far it got --
+// far more diagnostic than a single end-of-run catch block, and doesn't
+// depend on correctly guessing where the failure is.
+function logProgress(marker) {
+  try {
+    mkdirSync('artifacts/canary-audit', { recursive: true });
+    writeFileSync('artifacts/canary-audit/PROGRESS.log', `${new Date().toISOString()} ${marker}\n`, { flag: 'a' });
+  } catch { /* best-effort -- never let progress logging itself break the run */ }
+}
+
 async function main() {
+  logProgress('main() started');
   const owner = 'quiquandon-oss';
   const repo = 'PulseWorkerV2';
   const targetSha = process.env.TARGET_SHA || '0280f8f';
@@ -65,6 +80,7 @@ async function main() {
   };
 
   // ==== STEP 3: GitHub execution audit ====
+  logProgress('before STEP 3 (GitHub execution audit)');
   let workflowRun = null;
   if (githubToken) {
     const [repoExists, branchExists, shaExists] = await Promise.all([
@@ -100,12 +116,15 @@ async function main() {
 
   // ==== STEP 5: D1 audit (gathered before Step 4 since Cloudflare's
   // deployment-match check needs D1's observed git_commit_sha) ====
+  logProgress('before STEP 5 (D1 audit) -- GitHub execution audit completed successfully');
   const d1CredsAvailable = !!(cfToken && cfAccountId && d1DatabaseId);
   let investigation = null;
   let deployedShaFromD1 = null;
 
   if (d1CredsAvailable) {
+    logProgress('D1 credentials available -- about to call getLatestGeminiInvestigation (first real D1 network call)');
     const investigationResult = await getLatestGeminiInvestigation(cfAccountId, d1DatabaseId, cfToken);
+    logProgress(`getLatestGeminiInvestigation returned: ok=${investigationResult.ok}`);
     if (investigationResult.ok && investigationResult.row) {
       investigation = investigationResult.row;
       report.d1.investigation = checkResult(STATUS.PASS, [
@@ -280,12 +299,15 @@ async function main() {
   }
 
   // ==== STEP 4: Cloudflare deployment audit ====
+  logProgress('before STEP 4 (Cloudflare deployment audit) -- D1 audit section completed');
   const cfCredsAvailable = !!(cfToken && cfAccountId);
   if (cfCredsAvailable) {
+    logProgress('Cloudflare credentials available -- about to call getWorkerMetadata/getLatestDeployment');
     const [workerMeta, deployment] = await Promise.all([
       getWorkerMetadata(cfAccountId, 'pulseworker-v2', cfToken),
       getLatestDeployment(cfAccountId, 'pulseworker-v2', cfToken),
     ]);
+    logProgress(`getWorkerMetadata/getLatestDeployment returned: workerMeta=${!!workerMeta} deployment=${!!deployment}`);
     report.cloudflare = evaluateCloudflareDeployment({
       credentialsAvailable: true, workerFound: !!workerMeta, deployment, targetSha, deployedShaFromD1,
     });
@@ -309,6 +331,7 @@ async function main() {
   report.result = computeExecutiveResult(allStatuses);
 
   // ==== Write immutable artifacts (Step 9) ====
+  logProgress('before file-write section -- all evidence-gathering completed, report object fully assembled');
   const filePrefix = buildTimestampFilenamePrefix(now);
   const mdPath = `artifacts/canary-audit/${filePrefix}-canary-audit.md`;
   const jsonPath = `artifacts/canary-audit/${filePrefix}-canary-audit.json`;

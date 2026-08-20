@@ -2,6 +2,19 @@ name: Deploy Worker
 on:
   push:
     branches: [main]
+    # PRODUCTION SAFETY FIX (2026-08-20): previously this had no path
+    # filter at all, so ANY push to main -- including an unrelated
+    # .obsidian/ notes-sync commit -- redeployed whatever worker.js was on
+    # main, silently overwriting a deliberately-deployed canary build. Only
+    # files that actually affect what gets deployed should trigger this.
+    # Deliberately narrow, not broad: docs/tests/notes must NOT appear
+    # here, or this fix doesn't fix anything.
+    paths:
+      - 'worker.js'
+      - 'wrangler.toml'
+      - 'package.json'
+      - 'package-lock.json'
+      - '.github/workflows/deploy.yml'
   workflow_dispatch: {}
 
 jobs:

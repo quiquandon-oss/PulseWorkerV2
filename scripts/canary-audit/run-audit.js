@@ -352,6 +352,19 @@ async function main() {
 }
 
 main().catch((err) => {
+  // H2 diagnosis fix: previously this only console.error'd, which becomes
+  // CI log output I have no way to fetch afterward (results-receiver.
+  // actions.githubusercontent.com isn't reachable from this environment).
+  // Persist the actual error to a file that DOES survive as a commit/
+  // artifact, so the real cause is inspectable after the fact instead of
+  // staying a hypothesis.
+  try {
+    mkdirSync('artifacts/canary-audit', { recursive: true });
+    writeFileSync('artifacts/canary-audit/LAST_ERROR.txt',
+      `timestamp: ${new Date().toISOString()}\nmessage: ${err && err.message}\nstack:\n${err && err.stack}\n`);
+  } catch (writeErr) {
+    console.error('Additionally failed to write LAST_ERROR.txt:', writeErr);
+  }
   console.error('Canary audit run failed:', err);
   process.exitCode = 2;
 });

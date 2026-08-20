@@ -11,6 +11,14 @@ account_id = "f58e761fbc8e62dc404d8684290af264"
 [ai]
 binding = "AI"
 
+# GIT_COMMIT_SHA is overridden at deploy time with the real commit SHA via
+# `wrangler deploy --var GIT_COMMIT_SHA:$GITHUB_SHA` in deploy.yml. The
+# static value here is only what local/manual deploys fall back to.
+# MODEL_VERSIONS (per-model tags) live in worker.js itself, not here --
+# see the MODEL_VERSIONS constant.
+[vars]
+GIT_COMMIT_SHA = "unknown"
+
 # Deliberately the SAME database as the original PulseWorker (sentiment-ff75) —
 # gives this Worker read access to the existing history/technical_eval tables
 # (25+ days of real sentiment/technical/regime data) from day one, and a place

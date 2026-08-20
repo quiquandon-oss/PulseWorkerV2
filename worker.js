@@ -3779,10 +3779,27 @@ export default {
     // backfills any past predictions whose horizon has now passed. Runs
     // automatically every 3h via cron (see scheduled() below) in addition
     // to firing on page visits. ----
+    // Selection coverage fix (H1, overnight ground-truth audit): this route
+    // and link-predict/eth-predict below previously called predictAndLog
+    // alone, bypassing selectBestVariant entirely -- only the scheduled()
+    // cron's predictThenSelect wrapper paired them. That left every
+    // manually/dashboard-triggered prediction (these are NOT a separate
+    // diagnostic path -- this is the exact endpoint the live CryptoPulse
+    // frontend's "Refresh" hits, writing into the same predictions table
+    // everything else reads) without a selection_decisions row, a real
+    // audit-coverage gap (measured: 83 BTC/24h predictions vs. 23 selection
+    // decisions in the same window). Fixed by pairing them the same way
+    // scheduled() already does -- selection failure is caught and attached
+    // to the response, never allowed to fail the prediction response itself.
     if (url.pathname === '/predict' && request.method === 'GET') {
       try {
         const horizon = [12, 24].includes(parseInt(url.searchParams.get('horizon'), 10)) ? parseInt(url.searchParams.get('horizon'), 10) : 24;
         const result = await predictAndLog(env, horizon);
+        try {
+          result.selection = await selectBestVariant(env, 'BTC', horizon);
+        } catch (selErr) {
+          result.selection = { ok: false, error: String(selErr) };
+        }
         return new Response(JSON.stringify(result), {
           headers: { ...corsHeaders, 'Content-Type': 'application/json' },
         });
@@ -3829,6 +3846,11 @@ export default {
       try {
         const horizon = [12, 24].includes(parseInt(url.searchParams.get('horizon'), 10)) ? parseInt(url.searchParams.get('horizon'), 10) : 24;
         const result = await ethPredictAndLog(env, horizon);
+        try {
+          result.selection = await selectBestVariant(env, 'ETH', horizon);
+        } catch (selErr) {
+          result.selection = { ok: false, error: String(selErr) };
+        }
         return new Response(JSON.stringify(result), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
       } catch (err) {
         return new Response(JSON.stringify({ ok: false, error: String(err) }), { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
@@ -4124,6 +4146,11 @@ export default {
       try {
         const horizon = [12, 24].includes(parseInt(url.searchParams.get('horizon'), 10)) ? parseInt(url.searchParams.get('horizon'), 10) : 24;
         const result = await linkPredictAndLog(env, horizon);
+        try {
+          result.selection = await selectBestVariant(env, 'LINK', horizon);
+        } catch (selErr) {
+          result.selection = { ok: false, error: String(selErr) };
+        }
         return new Response(JSON.stringify(result), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
       } catch (err) {
         return new Response(JSON.stringify({ ok: false, error: String(err) }), { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });

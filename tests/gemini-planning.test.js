@@ -367,7 +367,13 @@ describe('Gemini planning — isDuplicateCatalyst', () => {
 // excessively.
 // =====================================================================
 
-function makeFakeDb({ existingCatalysts = [] } = {}) {
+// quotaAdmitted controls whether the shared-ledger reservation
+// (reserveGeminiQuotaSlot's UPDATE ... RETURNING statements) succeeds --
+// defaults to true so pre-existing tests exercising the happy Gemini-call
+// path don't need to know the quota mechanism exists at all. Set
+// quotaAdmitted: false to simulate the reservation being rejected (see the
+// dedicated deferred-quota tests below).
+function makeFakeDb({ existingCatalysts = [], quotaAdmitted = true } = {}) {
   const inserts = [];
   const selects = [];
   const db = {
@@ -378,13 +384,19 @@ function makeFakeDb({ existingCatalysts = [] } = {}) {
             async all() {
               selects.push({ sql, args });
               if (/FROM coin_catalyst_log/i.test(sql)) return { results: existingCatalysts };
+              // The atomic reservation statement in reserveGeminiQuotaSlot --
+              // returns a row (admission granted) or an empty array
+              // (rejected) depending on quotaAdmitted.
+              if (/UPDATE gemini_quota_ledger SET reserved = reserved \+ 1/i.test(sql)) {
+                return quotaAdmitted ? { results: [{ reserved: 1 }] } : { results: [] };
+              }
               return { results: [] };
             },
             async first() {
               return null;
             },
             async run() {
-              const table = /INSERT INTO (\w+)/i.exec(sql)?.[1] || 'unknown';
+              const table = /INSERT INTO (\w+)/i.exec(sql)?.[1] || /UPDATE (\w+)/i.exec(sql)?.[1] || 'unknown';
               const row = { table, sql, args };
               inserts.push(row);
               return { meta: { last_row_id: inserts.length } };
@@ -392,6 +404,13 @@ function makeFakeDb({ existingCatalysts = [] } = {}) {
           };
         },
       };
+    },
+    async batch(stmts) {
+      // Real D1 runs these as a single implicit transaction; this fake just
+      // runs each in order, which is faithful enough for the idempotent
+      // "INSERT ... ON CONFLICT DO NOTHING" bucket-creation statements this
+      // is used for (see reserveGeminiQuotaSlot).
+      return Promise.all(stmts.map(s => s.run()));
     },
   };
   return { db, inserts, selects };
@@ -510,13 +529,14 @@ describe('Gemini live — investigateMarketEvent (mocked fetch + D1)', () => {
 
   beforeAll(() => {
     const src = extractFunctions(
-      'investigateMarketEvent', 'callGeminiForMarketInvestigation', 'buildGeminiInvestigationPrompt',
+      'investigateMarketEvent', 'callGeminiGenerateContent', 'buildGeminiInvestigationPrompt',
       'parseGeminiInvestigationResponse', 'validateGeminiInvestigationResponse', 'validateCatalystSources',
       'validateCatalystPayload', 'isDuplicateCatalyst', 'fetchCatalystsForPeriod', 'recordCatalyst', 'recordGeminiInvestigation',
-      'extractGroundingMetadata', 'isSourceGrounded', 'deriveTimestampProvenance'
+      'extractGroundingMetadata', 'isSourceGrounded', 'deriveTimestampProvenance',
+      'reserveGeminiQuotaSlot', 'buildQuotaBucketKeys', 'utcDayBucket', 'utcHourBucket', 'recordGeminiProviderCall'
     ) + '\n\n' + extractConstants(
       'ALLOWED_MARKET_CLASSIFICATIONS', 'ALLOWED_CATALYST_CATEGORIES',
-      'GEMINI_INVESTIGATION_TIMEOUT_MS', 'GEMINI_INVESTIGATION_MODEL'
+      'GEMINI_INVESTIGATION_TIMEOUT_MS', 'GEMINI_INVESTIGATION_MODEL', 'GEMINI_CALL_TIMEOUT_MS', 'GEMINI_TRIGGER_CONFIG', 'GEMINI_SHARED_QUOTA_CONFIG'
     );
     scope = evalInScope(src);
   });
@@ -803,13 +823,14 @@ describe('Gemini live — investigateMarketEvent (mocked fetch + D1) — groundi
 
   beforeAll(() => {
     const src = extractFunctions(
-      'investigateMarketEvent', 'callGeminiForMarketInvestigation', 'buildGeminiInvestigationPrompt',
+      'investigateMarketEvent', 'callGeminiGenerateContent', 'buildGeminiInvestigationPrompt',
       'parseGeminiInvestigationResponse', 'validateGeminiInvestigationResponse', 'validateCatalystSources',
       'validateCatalystPayload', 'isDuplicateCatalyst', 'fetchCatalystsForPeriod', 'recordCatalyst', 'recordGeminiInvestigation',
-      'extractGroundingMetadata', 'isSourceGrounded', 'deriveTimestampProvenance'
+      'extractGroundingMetadata', 'isSourceGrounded', 'deriveTimestampProvenance',
+      'reserveGeminiQuotaSlot', 'buildQuotaBucketKeys', 'utcDayBucket', 'utcHourBucket', 'recordGeminiProviderCall'
     ) + '\n\n' + extractConstants(
       'ALLOWED_MARKET_CLASSIFICATIONS', 'ALLOWED_CATALYST_CATEGORIES',
-      'GEMINI_INVESTIGATION_TIMEOUT_MS', 'GEMINI_INVESTIGATION_MODEL'
+      'GEMINI_INVESTIGATION_TIMEOUT_MS', 'GEMINI_INVESTIGATION_MODEL', 'GEMINI_CALL_TIMEOUT_MS', 'GEMINI_TRIGGER_CONFIG', 'GEMINI_SHARED_QUOTA_CONFIG'
     );
     scope = evalInScope(src);
   });
@@ -1011,20 +1032,23 @@ describe('Gemini live — evaluateGeminiTriggers respects the budget (excessive-
   let scope;
 
   beforeAll(() => {
-    // Mocks buildInvestigationCandidates/getGeminiInvestigationCounts/
+    // Mocks buildInvestigationCandidates/peekGeminiQuotaRemaining/
     // investigateMarketEvent (D1/network-dependent) so this test isolates
     // exactly the concern ChatGPT flagged: can the scheduled job call
     // Gemini more times than the budget allows? Real ranking/budget logic
-    // (rankInvestigationCandidates, remainingGeminiBudget, selectWithinBudget)
-    // is NOT mocked -- it's the real, already-tested implementation.
+    // (rankInvestigationCandidates, selectWithinBudget) is NOT mocked --
+    // it's the real, already-tested implementation. peekGeminiQuotaRemaining
+    // is mocked here because this test isolates evaluateGeminiTriggers's own
+    // pre-filter logic from the shared ledger's D1/atomicity behavior, which
+    // has its own dedicated test suite (see gemini-shared-quota.test.js).
     const mocks = `
       async function buildInvestigationCandidates(env) { return env.__mockCandidates; }
-      async function getGeminiInvestigationCounts(env) { return env.__mockCounts; }
+      async function peekGeminiQuotaRemaining(env) { return env.__mockRemaining; }
       async function investigateMarketEvent(env, candidate) { env.__investigated.push(candidate.id); }
     `;
     const src = mocks + '\n\n' + extractFunctions(
-      'rankInvestigationCandidates', 'computeInvestigationPriority', 'remainingGeminiBudget', 'selectWithinBudget', 'evaluateGeminiTriggers'
-    ) + '\n\n' + extractConstants('INVESTIGATION_PRIORITY_WEIGHTS', 'INVESTIGATION_PRIORITY_THRESHOLD', 'GEMINI_TRIGGER_CONFIG');
+      'rankInvestigationCandidates', 'computeInvestigationPriority', 'selectWithinBudget', 'evaluateGeminiTriggers'
+    ) + '\n\n' + extractConstants('INVESTIGATION_PRIORITY_WEIGHTS', 'INVESTIGATION_PRIORITY_THRESHOLD', 'GEMINI_TRIGGER_CONFIG', 'GEMINI_SHARED_QUOTA_CONFIG');
     scope = evalInScope(src);
   });
 
@@ -1035,11 +1059,7 @@ describe('Gemini live — evaluateGeminiTriggers respects the budget (excessive-
     }));
     const env = {
       __mockCandidates: manyHighPriorityCandidates,
-      // 1 remaining today regardless of the current configured daily limit
-      // (references the real GEMINI_TRIGGER_CONFIG rather than hardcoding a
-      // number that would silently go stale if the budget is ever
-      // reconfigured -- e.g. the canary config currently in effect).
-      __mockCounts: { investigationsToday: scope.GEMINI_TRIGGER_CONFIG.MAX_GEMINI_INVESTIGATIONS_PER_DAY - 1, investigationsThisHour: 0 },
+      __mockRemaining: 1, // budget of 1, not 3, regardless of how many high-priority candidates rank
       __investigated: [],
     };
     const result = await scope.evaluateGeminiTriggers(env);
@@ -1051,7 +1071,7 @@ describe('Gemini live — evaluateGeminiTriggers respects the budget (excessive-
   it('investigates zero candidates when the budget is exhausted, regardless of priority', async () => {
     const env = {
       __mockCandidates: [{ id: 'BTC', assets: ['BTC'], signals: { priceMovePct: 20, wasWrong: true, confidence: 0.99, correlatedFailureAssetCount: 3 } }],
-      __mockCounts: { investigationsToday: scope.GEMINI_TRIGGER_CONFIG.MAX_GEMINI_INVESTIGATIONS_PER_DAY, investigationsThisHour: 0 }, // daily limit already reached, whatever it currently is
+      __mockRemaining: 0, // daily/hourly limit already reached, whatever it currently is
       __investigated: [],
     };
     const result = await scope.evaluateGeminiTriggers(env);
@@ -1060,7 +1080,7 @@ describe('Gemini live — evaluateGeminiTriggers respects the budget (excessive-
   });
 
   it('investigates zero candidates when there is nothing to evaluate this cycle -- no D1 write, no fetch attempted', async () => {
-    const env = { __mockCandidates: [], __mockCounts: { investigationsToday: 0, investigationsThisHour: 0 }, __investigated: [] };
+    const env = { __mockCandidates: [], __mockRemaining: 0, __investigated: [] };
     const result = await scope.evaluateGeminiTriggers(env);
     expect(result).toEqual({ candidatesEvaluated: 0, investigationsRun: 0 });
     expect(env.__investigated.length).toBe(0);
@@ -1069,7 +1089,7 @@ describe('Gemini live — evaluateGeminiTriggers respects the budget (excessive-
   it('a LOW-priority candidate is never investigated even with full budget available', async () => {
     const env = {
       __mockCandidates: [{ id: 'BTC', assets: ['BTC'], signals: { priceMovePct: 0.2, wasWrong: false, confidence: 0.9 } }], // Example-A-shaped: LOW
-      __mockCounts: { investigationsToday: 0, investigationsThisHour: 0 },
+      __mockRemaining: 5,
       __investigated: [],
     };
     const result = await scope.evaluateGeminiTriggers(env);

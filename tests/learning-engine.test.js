@@ -316,6 +316,68 @@ describe('Learning Engine — catalyst logging helpers', () => {
   });
 });
 
+describe('Learning Engine — fetchResolvedRows per-table column handling', () => {
+  let scope;
+
+  beforeAll(() => {
+    scope = evalInScope(extractFunctions('fetchResolvedRows'));
+  });
+
+  function fakeEnv() {
+    let capturedSql = null;
+    return {
+      env: {
+        DB: {
+          prepare(sql) {
+            capturedSql = sql;
+            return { bind: () => ({ all: async () => ({ results: [] }) }) };
+          },
+        },
+      },
+      getSql: () => capturedSql,
+    };
+  }
+
+  // Regression: challenger_predictions has no volatility_percentile column
+  // (only predictions/link_predictions/eth_predictions do). The query used
+  // to select it unconditionally, which threw a real SQLITE_ERROR ("no
+  // such column: volatility_percentile") on every call for this table --
+  // confirmed live against production D1. buildDailyReport's Challenger
+  // vs Production comparison calls fetchResolvedRows(env,
+  // 'challenger_predictions', ...) unconditionally for BTC and LINK, so
+  // this made /api/learning/daily (and /api/learning/chatgpt, same
+  // underlying call) 500 on every single request -- not intermittent, not
+  // a connectivity issue, a genuine column mismatch on every call.
+  it('regression: challenger_predictions is queried WITHOUT the raw volatility_percentile column', async () => {
+    const { env, getSql } = fakeEnv();
+    await scope.fetchResolvedRows(env, 'challenger_predictions', { coin: 'BTC', probColumn: 'p_up_tilted', calibratedColumn: 'calibrated_p_up_flat' });
+    const sql = getSql();
+    expect(sql).not.toMatch(/SELECT[^,]*,\s*volatility_percentile\b/);
+    expect(sql).toMatch(/NULL as volatility_percentile/);
+  });
+
+  it('predictions/link_predictions/eth_predictions still select the real volatility_percentile column', async () => {
+    for (const table of ['predictions', 'link_predictions', 'eth_predictions']) {
+      const { env, getSql } = fakeEnv();
+      await scope.fetchResolvedRows(env, table, {});
+      expect(getSql()).toMatch(/,\s*volatility_percentile\s+as\s+volatility_percentile/);
+    }
+  });
+
+  it('the mapped row shape is identical either way (volatility_percentile key always present, just null for challenger_predictions)', async () => {
+    const env = {
+      DB: {
+        prepare() {
+          return { bind: () => ({ all: async () => ({ results: [{ ts: 1, resolved_ts: 2, horizon_hours: 24, realized_up: 1, volatility_percentile: null, trend_strength: 0.1, is_regime_anomaly: 0, raw_p: 0.6, calibrated_p: null }] }) }) };
+        },
+      },
+    };
+    const rows = await scope.fetchResolvedRows(env, 'challenger_predictions', { coin: 'BTC', probColumn: 'p_up_tilted', calibratedColumn: 'calibrated_p_up_flat' });
+    expect(rows[0]).toHaveProperty('volatility_percentile', null);
+    expect(rows[0].p).toBe(0.6); // falls back to raw_p when calibrated_p is null, same as before
+  });
+});
+
 describe('Immutability — outcome backfill only ever touches outcome columns', () => {
   // Structural check on the actual UPDATE statements, not just a re-test of
   // their behavior -- this is what .ai/DATA_CONTRACT.md's "DO NOT update

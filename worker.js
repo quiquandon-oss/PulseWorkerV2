@@ -2279,7 +2279,19 @@ async function fetchResolvedRows(env, table, { coin, horizonHours, sinceResolved
   if (coin) { conditions.push('coin = ?'); params.push(coin); }
   if (horizonHours) { conditions.push('horizon_hours = ?'); params.push(horizonHours); }
   if (sinceResolvedTs) { conditions.push('resolved_ts >= ?'); params.push(sinceResolvedTs); }
-  const sql = `SELECT ts, resolved_ts, horizon_hours, realized_up, volatility_percentile, trend_strength, is_regime_anomaly,
+  // challenger_predictions has no volatility_percentile column (only
+  // predictions/link_predictions/eth_predictions do) -- selecting it
+  // unconditionally threw a real SQLITE_ERROR ("no such column") on every
+  // call for that table, which buildDailyReport's Challenger-vs-Production
+  // comparison makes unconditionally for BTC and LINK. That's why
+  // /api/learning/daily (and /api/learning/chatgpt, same underlying call)
+  // 500'd on every single request -- not a connectivity issue, a genuine
+  // column mismatch. NULL AS keeps the shape identical for every caller
+  // (mostConfidentMistakes/groupByRegime read volatility_percentile off
+  // the mapped row either way) rather than branching the row-mapping logic
+  // per table.
+  const volatilityExpr = table === 'challenger_predictions' ? 'NULL' : 'volatility_percentile';
+  const sql = `SELECT ts, resolved_ts, horizon_hours, realized_up, ${volatilityExpr} as volatility_percentile, trend_strength, is_regime_anomaly,
                       ${probColumn} as raw_p, ${calibratedColumn} as calibrated_p
                FROM ${table} WHERE ${conditions.join(' AND ')} ORDER BY ts ASC`;
   const { results } = await env.DB.prepare(sql).bind(...params).all();

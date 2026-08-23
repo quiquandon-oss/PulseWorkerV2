@@ -1,0 +1,282 @@
+{
+  "audit_id": "canary-20260823-072829-0280f8f",
+  "timestamp": "2026-08-23T07:28:29.004Z",
+  "repository": "quiquandon-oss/PulseWorkerV2",
+  "target_branch": "feature/gemini-market-intelligence-plan",
+  "target_sha": "0280f8f",
+  "environment": "production",
+  "result": "FAIL",
+  "github": {
+    "target_commit_exists": {
+      "status": "PASS",
+      "evidence": [
+        "0280f8f"
+      ]
+    },
+    "target_branch_exists": {
+      "status": "PASS",
+      "evidence": [
+        "feature/gemini-market-intelligence-plan"
+      ]
+    },
+    "workflow_exists": {
+      "status": "PASS",
+      "evidence": [
+        "run id 32200034743"
+      ]
+    },
+    "workflow_executed": {
+      "status": "PASS",
+      "evidence": [
+        "status=completed"
+      ]
+    },
+    "correct_branch": {
+      "status": "PASS",
+      "evidence": [
+        "head_branch=feature/gemini-market-intelligence-plan",
+        "expected=feature/gemini-market-intelligence-plan"
+      ]
+    },
+    "correct_sha": {
+      "status": "PASS",
+      "evidence": [
+        "head_sha=0280f8fe79ac0eeb633dfffa91889cd77bfd030c",
+        "expected=0280f8f"
+      ]
+    },
+    "workflow_succeeded": {
+      "status": "PASS",
+      "evidence": [
+        "conclusion=success"
+      ]
+    },
+    "_jobs": [
+      {
+        "id": 95911668556,
+        "name": "deploy",
+        "conclusion": "success"
+      }
+    ],
+    "_artifacts": []
+  },
+  "cloudflare": {
+    "worker_identified": {
+      "status": "FAIL",
+      "evidence": [
+        "worker script not found"
+      ]
+    },
+    "deployment_identified": {
+      "status": "PASS",
+      "evidence": [
+        "deployment id 7355a6de-0a9b-41cc-8077-a6e5e1f832ca"
+      ]
+    },
+    "deployment_matches_target": {
+      "status": "FAIL",
+      "evidence": [
+        "git_commit_sha observed in D1: 286bd281dbb46111a9d164712b596f0fd22ccfac",
+        "expected: 0280f8f"
+      ]
+    },
+    "deployment_timestamp": {
+      "status": "PASS",
+      "evidence": [
+        "2026-08-22T23:42:43.870209Z"
+      ]
+    },
+    "live_verification": {
+      "status": "PASS",
+      "evidence": [
+        "Cloudflare API reachable, deployment metadata retrieved"
+      ]
+    }
+  },
+  "d1": {
+    "investigation": {
+      "status": "PASS",
+      "evidence": [
+        "investigation_id=MI-1787443253667-BTC",
+        "request_ts=1787443253667",
+        "response_status=rate_limited"
+      ]
+    },
+    "investigation_catalyst": {
+      "status": "NOT_APPLICABLE",
+      "evidence": [
+        "0 catalyst rows for this investigation (catalysts_written=0)"
+      ]
+    },
+    "_catalystTotal": 3,
+    "gemini": {
+      "status": "PASS",
+      "evidence": [
+        "model=gemini-3.6-flash",
+        "status=rate_limited",
+        "error=Gemini API rate limited"
+      ]
+    },
+    "grounding": {
+      "status": "FAIL",
+      "evidence": [
+        "searchQueries=0",
+        "groundedSources=0",
+        "response_status=rate_limited"
+      ]
+    },
+    "prediction": {
+      "status": "PASS",
+      "evidence": [
+        "id=839",
+        "asset=BTC",
+        "horizon=12h",
+        "resolved_ts=1787442445828"
+      ]
+    },
+    "resolution": {
+      "status": "PASS",
+      "evidence": [
+        "realized_up=1",
+        "resolved_ts=2026-08-22T23:47:25.828Z"
+      ]
+    },
+    "selection": {
+      "status": "PASS",
+      "evidence": [
+        "chosen_variant=original",
+        "cleared_gate=0",
+        "lca_score=0.5833333333333334",
+        "neighborhood_json_valid=true"
+      ]
+    }
+  },
+  "execution_order": {
+    "prediction_before_gemini": {
+      "status": "PASS",
+      "evidence": [
+        "prediction_ts=1787442445828",
+        "gemini_request_ts=1787443253667",
+        "delta_ms=807839"
+      ]
+    }
+  },
+  "gemini": {
+    "invocation": {
+      "status": "PASS",
+      "evidence": [
+        "investigation_id=MI-1787443253667-BTC"
+      ]
+    },
+    "timestamp": {
+      "status": "PASS",
+      "evidence": [
+        "2026-08-23T00:00:53.667Z"
+      ]
+    },
+    "model": {
+      "status": "PASS",
+      "evidence": [
+        "gemini-3.6-flash"
+      ]
+    },
+    "response_status": "rate_limited"
+  },
+  "grounding": {
+    "configured": {
+      "status": "PASS",
+      "evidence": [
+        "tools:[{google_search:{}}] present in deployed source — see cloudflare/source check"
+      ]
+    },
+    "invoked": {
+      "status": "FAIL",
+      "evidence": [
+        "searchQueries=0"
+      ]
+    },
+    "associated_with_call": {
+      "status": "PASS",
+      "evidence": [
+        "investigation_id=MI-1787443253667-BTC"
+      ]
+    }
+  },
+  "budgets": {
+    "hourly": {
+      "status": "PASS",
+      "evidence": [
+        "configured=1",
+        "observed_this_hour=1"
+      ]
+    },
+    "daily": {
+      "status": "FAIL",
+      "evidence": [
+        "configured=1",
+        "observed_this_day=2"
+      ]
+    },
+    "observed_calls": 5,
+    "violation": "YES"
+  },
+  "duplicates": {
+    "investigation": "NO",
+    "gemini": "NO",
+    "audit_event": "NO",
+    "prediction": "NOT_APPLICABLE",
+    "selection_decision": "NOT_APPLICABLE"
+  },
+  "evidence": [
+    {
+      "source": "GitHub Actions workflow run",
+      "timestamp": "2026-08-19T00:07:53Z",
+      "id": 32200034743,
+      "sha": "0280f8fe79ac0eeb633dfffa91889cd77bfd030c",
+      "workflow_run_id": 32200034743,
+      "job_id": "95911668556",
+      "db_record_id": null,
+      "correlation_id": null
+    },
+    {
+      "source": "D1 gemini_investigations",
+      "timestamp": "2026-08-23T00:00:53.667Z",
+      "id": "MI-1787443253667-BTC",
+      "sha": null,
+      "workflow_run_id": null,
+      "job_id": null,
+      "db_record_id": 5,
+      "correlation_id": "MI-1787443253667-BTC"
+    },
+    {
+      "source": "D1 predictions",
+      "timestamp": "2026-08-22T23:47:25.828Z",
+      "id": 839,
+      "sha": "286bd281dbb46111a9d164712b596f0fd22ccfac",
+      "workflow_run_id": null,
+      "job_id": null,
+      "db_record_id": 839,
+      "correlation_id": "MI-1787443253667-BTC"
+    },
+    {
+      "source": "D1 selection_decisions",
+      "timestamp": "2026-08-23T00:00:52.455Z",
+      "id": 323,
+      "sha": null,
+      "workflow_run_id": null,
+      "job_id": null,
+      "db_record_id": 323,
+      "correlation_id": "MI-1787443253667-BTC"
+    },
+    {
+      "source": "Cloudflare Worker deployment",
+      "timestamp": "2026-08-22T23:42:43.870209Z",
+      "id": "7355a6de-0a9b-41cc-8077-a6e5e1f832ca",
+      "sha": "286bd281dbb46111a9d164712b596f0fd22ccfac",
+      "workflow_run_id": null,
+      "job_id": null,
+      "db_record_id": null,
+      "correlation_id": null
+    }
+  ]
+}

@@ -1,0 +1,90 @@
+name: production-chain-audit
+
+# Reusable, read-only end-to-end verification of the CryptoPulseV2
+# production learning chain (prediction -> trigger -> Gemini investigation
+# -> provider call -> grounding -> D1 persistence -> learning/selection).
+# This workflow NEVER writes to production D1, NEVER triggers a
+# prediction or Gemini call, NEVER modifies the Worker or its budget --
+# see scripts/production-chain-audit/ for the implementation, and its own
+# self-tests (run as a step below) for the enforced safety properties.
+#
+# This is a manual, on-demand audit by design -- it must NOT run
+# automatically on every push, per its own build spec.
+
+on:
+  workflow_dispatch: {}
+
+permissions:
+  contents: write   # to (attempt to) commit the audit result back to main
+  actions: read      # to read workflow run history for deployment evidence
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run unit tests (self-test the auditor before trusting its output)
+        run: npm test
+
+      - name: Confirm production queries in this audit are SELECT-only
+        run: node scripts/production-chain-audit/verify-select-only.js
+
+      - name: Run production-chain audit (READ ONLY)
+        id: audit
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: node scripts/production-chain-audit/run-audit.js
+
+      - name: Confirm no secrets leaked into the report
+        if: steps.audit.outcome == 'success'
+        run: node scripts/production-chain-audit/verify-no-leaks.js "${{ steps.audit.outputs.latest_path }}"
+
+      - name: Commit audit result to main (best-effort)
+        id: commit
+        if: steps.audit.outcome == 'success'
+        run: |
+          git config user.name "production-chain-audit-bot"
+          git config user.email "production-chain-audit-bot@users.noreply.github.com"
+          git add .ai/audits/
+          if git diff --cached --quiet; then
+            echo "No new audit files to commit (unexpected -- investigate)."
+            echo "committed=false" >> "$GITHUB_OUTPUT"
+          else
+            git commit -m "chore(audit): production chain audit $(date -u +%Y-%m-%dT%H-%M-%SZ)"
+            if git push origin HEAD:main; then
+              echo "committed=true" >> "$GITHUB_OUTPUT"
+            else
+              echo "Push to main was rejected (likely branch protection) -- falling back to artifact upload only, per this workflow's spec."
+              echo "committed=false" >> "$GITHUB_OUTPUT"
+            fi
+          fi
+
+      - name: Upload audit artifact (always, regardless of whether the commit succeeded)
+        if: steps.audit.outcome == 'success'
+        uses: actions/upload-artifact@v4
+        with:
+          name: production-chain-audit-${{ github.run_id }}
+          path: .ai/audits/
+          retention-days: 90
+
+      - name: Print final verdict
+        if: steps.audit.outcome == 'success'
+        run: |
+          echo "END-TO-END: ${{ steps.audit.outputs.end_to_end }}"
+          echo "BLOCKING REASON: ${{ steps.audit.outputs.blocking_reason }}"
+          echo "COMMITTED TO MAIN: ${{ steps.commit.outputs.committed }}"

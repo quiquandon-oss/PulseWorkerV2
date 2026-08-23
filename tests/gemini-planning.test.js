@@ -1097,3 +1097,143 @@ describe('Gemini live — evaluateGeminiTriggers respects the budget (excessive-
     expect(result.investigationsRun).toBe(0);
   });
 });
+
+describe('Analyst Relay — getAnalystRelayCandidate (mocked candidate-building)', () => {
+  let scope;
+
+  beforeAll(() => {
+    // Mocks buildInvestigationCandidates the same way the
+    // evaluateGeminiTriggers tests above do -- isolates this function's own
+    // logic (ranking + threshold + prompt-building) from D1/network.
+    const mocks = `async function buildInvestigationCandidates(env) { return env.__mockCandidates; }`;
+    const src = mocks + '\n\n' + extractFunctions(
+      'rankInvestigationCandidates', 'computeInvestigationPriority', 'selectWithinBudget',
+      'buildGeminiInvestigationPrompt', 'getAnalystRelayCandidate'
+    ) + '\n\n' + extractConstants('INVESTIGATION_PRIORITY_WEIGHTS', 'INVESTIGATION_PRIORITY_THRESHOLD');
+    scope = evalInScope(src);
+  });
+
+  it('hasCandidate:false when there is nothing to evaluate', async () => {
+    const result = await scope.getAnalystRelayCandidate({ __mockCandidates: [] });
+    expect(result).toEqual({ ok: true, hasCandidate: false });
+  });
+
+  it('hasCandidate:false when candidates exist but none clear the priority threshold', async () => {
+    const result = await scope.getAnalystRelayCandidate({
+      __mockCandidates: [{ id: 'BTC', assets: ['BTC'], signals: { priceMovePct: 0.2, wasWrong: false, confidence: 0.9 } }],
+    });
+    expect(result.hasCandidate).toBe(false);
+  });
+
+  it('returns the top-ranked candidate and a real prompt when one clears the bar -- the same bar the automated investigation uses', async () => {
+    const env = {
+      __mockCandidates: [{
+        id: 'BTC', assets: ['BTC'],
+        signals: { priceMovePct: 12, wasWrong: true, confidence: 0.9, correlatedFailureAssetCount: 3, isVolatilityAnomaly: true, isRegimeChange: true },
+      }],
+    };
+    const result = await scope.getAnalystRelayCandidate(env);
+    expect(result.hasCandidate).toBe(true);
+    expect(result.candidateId).toBe('BTC');
+    expect(result.assets).toEqual(['BTC']);
+    expect(typeof result.prompt).toBe('string');
+    expect(result.prompt).toContain('BTC');
+    expect(typeof result.promptRequestedTs).toBe('number');
+  });
+
+  it('picks only ONE candidate even when multiple clear the bar -- one prompt slot at a time', async () => {
+    const strong = { signals: { priceMovePct: 12, wasWrong: true, confidence: 0.9, correlatedFailureAssetCount: 3, isVolatilityAnomaly: true, isRegimeChange: true } };
+    const env = { __mockCandidates: [{ id: 'BTC', assets: ['BTC'], ...strong }, { id: 'LINK', assets: ['LINK'], ...strong }] };
+    const result = await scope.getAnalystRelayCandidate(env);
+    expect(result.hasCandidate).toBe(true);
+    expect(['BTC', 'LINK']).toContain(result.candidateId); // exactly one, whichever ranks higher
+  });
+});
+
+describe('Analyst Relay — recordAnalystRelay (mocked D1) — reuses the real parse/validate/catalyst pipeline', () => {
+  let scope;
+
+  beforeAll(() => {
+    const src = extractFunctions(
+      'recordAnalystRelay', 'parseGeminiInvestigationResponse', 'validateGeminiInvestigationResponse',
+      'validateCatalystSources', 'validateCatalystPayload', 'isDuplicateCatalyst', 'fetchCatalystsForPeriod',
+      'recordCatalyst', 'deriveTimestampProvenance'
+    ) + '\n\n' + extractConstants('ALLOWED_MARKET_CLASSIFICATIONS', 'ALLOWED_CATALYST_CATEGORIES');
+    scope = evalInScope(src);
+  });
+
+  it('happy path: writes exactly one catalyst with an AR- prefixed investigation_id, and one analyst_relay_log row', async () => {
+    const { db, inserts } = makeFakeDb();
+    const result = await scope.recordAnalystRelay({ DB: db }, {
+      candidateId: 'BTC', assets: ['BTC'], promptRequestedTs: Date.now() - 60000,
+      rawResponseText: validGeminiJson(),
+    });
+    expect(result.ok).toBe(true);
+    expect(result.validationStatus).toBe('ok');
+    expect(result.catalystsWritten).toBe(1);
+    expect(result.relayId).toMatch(/^AR-\d+-BTC$/);
+
+    const catalystInsert = inserts.find(i => i.table === 'coin_catalyst_log');
+    expect(catalystInsert.args).toContain(result.relayId); // investigation_id bound to the relay id, not an MI- id
+    expect(catalystInsert.args).toContain(0); // source_grounded bound as 0 -- always, for a human-relayed response
+
+    const relayInsert = inserts.find(i => i.table === 'analyst_relay_log');
+    expect(relayInsert).toBeTruthy();
+  });
+
+  it('regression: NEVER writes to gemini_investigations or gemini_provider_calls -- structurally cannot be mistaken for a real API call', async () => {
+    const { db, inserts } = makeFakeDb();
+    await scope.recordAnalystRelay({ DB: db }, { candidateId: 'BTC', assets: ['BTC'], rawResponseText: validGeminiJson() });
+    expect(inserts.some(i => i.table === 'gemini_investigations')).toBe(false);
+    expect(inserts.some(i => i.table === 'gemini_provider_calls')).toBe(false);
+  });
+
+  it('malformed pasted text (not JSON at all): validation_status=malformed_response, zero catalysts, still logs the attempt', async () => {
+    const { db, inserts } = makeFakeDb();
+    const result = await scope.recordAnalystRelay({ DB: db }, {
+      candidateId: 'BTC', assets: ['BTC'], rawResponseText: 'I could not find anything relevant, sorry!',
+    });
+    expect(result.validationStatus).toBe('malformed_response');
+    expect(result.catalystsWritten).toBe(0);
+    expect(inserts.some(i => i.table === 'coin_catalyst_log')).toBe(false);
+    expect(inserts.find(i => i.table === 'analyst_relay_log')).toBeTruthy(); // the attempt is still audited
+  });
+
+  it('valid JSON, empty catalysts array: validation_status=no_catalyst_found, not an error', async () => {
+    const { db } = makeFakeDb();
+    const result = await scope.recordAnalystRelay({ DB: db }, {
+      candidateId: 'BTC', assets: ['BTC'], rawResponseText: validGeminiJson({ catalysts: [] }),
+    });
+    expect(result.validationStatus).toBe('no_catalyst_found');
+    expect(result.catalystsWritten).toBe(0);
+  });
+
+  it('structurally invalid response (fails validateGeminiInvestigationResponse): validation_status=invalid_response', async () => {
+    const { db } = makeFakeDb();
+    const result = await scope.recordAnalystRelay({ DB: db }, {
+      candidateId: 'BTC', assets: ['BTC'], rawResponseText: JSON.stringify({ not_the_right_shape: true }),
+    });
+    expect(result.validationStatus).toBe('invalid_response');
+    expect(result.catalystsWritten).toBe(0);
+  });
+
+  it('duplicate catalyst (already exists in the recent window): skipped, still audited', async () => {
+    const eventTs = Date.parse('2026-08-18T10:00:00Z');
+    const { db, inserts } = makeFakeDb({ existingCatalysts: [{ coin: 'BTC', category: 'REGULATION', ts: eventTs }] });
+    const result = await scope.recordAnalystRelay({ DB: db }, {
+      candidateId: 'BTC', assets: ['BTC'], rawResponseText: validGeminiJson(),
+    });
+    expect(result.catalystsWritten).toBe(0);
+    expect(inserts.some(i => i.table === 'coin_catalyst_log')).toBe(false);
+    expect(inserts.find(i => i.table === 'analyst_relay_log')).toBeTruthy();
+  });
+
+  it('the pasted raw text is preserved in the audit row for later review, truncated to a sane cap', async () => {
+    const { db, inserts } = makeFakeDb();
+    const longText = validGeminiJson() + ' '.repeat(30000);
+    await scope.recordAnalystRelay({ DB: db }, { candidateId: 'BTC', assets: ['BTC'], rawResponseText: longText });
+    const relayInsert = inserts.find(i => i.table === 'analyst_relay_log');
+    const storedText = relayInsert.args.find(a => typeof a === 'string' && a.length > 100);
+    expect(storedText.length).toBeLessThanOrEqual(20000);
+  });
+});

@@ -2256,7 +2256,124 @@ async function investigateMarketEvent(env, candidate) {
   }).catch(auditErr => console.error('Failed to write gemini_investigations audit row:', auditErr));
 }
 
-// ---- Entry point, called from scheduled() via its own ctx.waitUntil.
+// =====================================================================
+// ---- Analyst Relay: human-in-the-loop alternative to the automated
+// Market Intelligence investigation, for when the API path is
+// unavailable/rate-limited. Deliberately NOT a substitute the rest of the
+// system can mistake for a real API call:
+//
+// - Writes to its own table (analyst_relay_log) only -- NEVER to
+//   gemini_investigations or gemini_provider_calls. The production-chain-
+//   audit tool's evaluateGemini()/evaluateProviderCall() only ever read
+//   those two tables, so an Analyst Relay submission can structurally
+//   never be counted as proof the automated pipeline succeeded.
+// - Uses a distinct ID prefix (AR- vs MI-) on the catalysts it writes to
+//   coin_catalyst_log, so real catalyst data stays usable by the rest of
+//   the app (tiles, other reads) while remaining traceable to its source.
+// - sourceGrounded is unconditionally false -- a pasted chat response has
+//   no verifiable {searchQueries, groundedSources} the way a real API
+//   response does, regardless of what the model may actually have done.
+// - Never touches reserveGeminiQuotaSlot / GEMINI_SHARED_QUOTA_CONFIG --
+//   this is a fully separate, unbudgeted path, since nothing about it
+//   consumes the API quota Gemini itself enforces.
+// =====================================================================
+
+// Read-only. Surfaces the same candidate the automated investigation would
+// have picked up next, using the exact same ranking/threshold logic --
+// "worth pasting into Gemini yourself" means the same thing "worth
+// spending the automated budget on" does, deliberately not a separate,
+// looser bar. selectWithinBudget's budget of 1 here just means "return at
+// most one candidate for the single prompt slot the UI shows" -- it has
+// nothing to do with any Gemini API quota.
+async function getAnalystRelayCandidate(env) {
+  const nowTs = Date.now();
+  const candidates = await buildInvestigationCandidates(env, nowTs);
+  if (candidates.length === 0) return { ok: true, hasCandidate: false };
+  const ranked = rankInvestigationCandidates(candidates);
+  const { selected } = selectWithinBudget(ranked, 1);
+  if (selected.length === 0) return { ok: true, hasCandidate: false };
+  const candidate = selected[0];
+  return {
+    ok: true, hasCandidate: true,
+    candidateId: candidate.id, assets: candidate.assets,
+    promptRequestedTs: nowTs,
+    prompt: buildGeminiInvestigationPrompt(candidate),
+  };
+}
+
+// Parses and records a human-pasted Gemini-app response. Reuses the exact
+// same parse/validate/catalyst-write pipeline investigateMarketEvent uses
+// for a real API response -- no separate parsing logic to maintain or
+// drift out of sync.
+async function recordAnalystRelay(env, { candidateId, assets, promptRequestedTs, rawResponseText }) {
+  const relayId = `AR-${Date.now()}-${candidateId}`;
+  const submittedTs = Date.now();
+  let validationStatus = 'error', errorMessage = null, catalystsWritten = 0, parsed = null;
+
+  try {
+    parsed = parseGeminiInvestigationResponse(rawResponseText);
+    const structureCheck = validateGeminiInvestigationResponse(parsed);
+
+    if (!structureCheck.valid) {
+      validationStatus = 'invalid_response';
+      errorMessage = structureCheck.errors.join('; ');
+    } else if (!parsed.catalysts || parsed.catalysts.length === 0) {
+      validationStatus = 'no_catalyst_found';
+    } else {
+      validationStatus = 'ok';
+      const existing = await fetchCatalystsForPeriod(env, submittedTs - 24 * 3600 * 1000, submittedTs + 1);
+      for (const catalyst of parsed.catalysts) {
+        const affectedAssets = Array.isArray(catalyst.assets) && catalyst.assets.length ? catalyst.assets : (assets || []);
+        for (const asset of affectedAssets) {
+          const eventTimestamp = catalyst.event_timestamp ? Date.parse(catalyst.event_timestamp) : null;
+          const firstPublicTimestamp = catalyst.first_public_timestamp ? Date.parse(catalyst.first_public_timestamp) : null;
+          const payload = {
+            coin: asset, category: catalyst.category, marketClassification: parsed.market_classification,
+            sourceUrl: catalyst.sources?.[0]?.url,
+            eventTimestamp: Number.isFinite(eventTimestamp) ? eventTimestamp : null,
+            firstPublicTimestamp: Number.isFinite(firstPublicTimestamp) ? firstPublicTimestamp : null,
+            discoveryTimestamp: submittedTs,
+          };
+          const payloadCheck = validateCatalystPayload(payload);
+          if (!payloadCheck.valid) continue;
+
+          const dedupeCandidate = { coin: asset, category: catalyst.category, ts: payload.eventTimestamp ?? submittedTs };
+          if (isDuplicateCatalyst(dedupeCandidate, existing)) continue;
+
+          const { timestampSource, timestampConfidence } = deriveTimestampProvenance(payload.firstPublicTimestamp, catalyst.first_public_timestamp_confidence);
+
+          await recordCatalyst(env, {
+            coin: asset, ts: payload.eventTimestamp ?? submittedTs, category: catalyst.category,
+            direction: catalyst.direction ?? null, marketClassification: parsed.market_classification ?? null,
+            sourceUrl: payload.sourceUrl ?? null, discoveryTimestamp: submittedTs,
+            firstPublicTimestamp: payload.firstPublicTimestamp, confidence: catalyst.confidence ?? null,
+            investigationId: relayId,
+            sourceGrounded: false,
+            timestampSource, timestampConfidence,
+          });
+          catalystsWritten++;
+        }
+      }
+    }
+  } catch (err) {
+    validationStatus = err instanceof SyntaxError ? 'malformed_response' : 'error';
+    errorMessage = String(err?.message || err).slice(0, 1000);
+  }
+
+  await env.DB.prepare(
+    `INSERT INTO analyst_relay_log
+     (relay_id, candidate_id, assets_json, prompt_requested_ts, submitted_ts, raw_response_text, parsed_json, validation_status, error_message, catalysts_written, source)
+     VALUES (?,?,?,?,?,?,?,?,?,?,?)`
+  ).bind(
+    relayId, candidateId ?? null, JSON.stringify(assets || []), promptRequestedTs ?? null, submittedTs,
+    String(rawResponseText || '').slice(0, 20000), parsed ? JSON.stringify(parsed) : null,
+    validationStatus, errorMessage, catalystsWritten, 'human_relay'
+  ).run();
+
+  return { ok: true, relayId, validationStatus, errorMessage, catalystsWritten };
+}
+
+
 // Never throws -- the caller's .catch() is defense in depth, not the
 // primary mechanism (investigateMarketEvent already never throws). ----
 async function evaluateGeminiTriggers(env) {
@@ -4367,6 +4484,38 @@ export default {
         const horizon = [12, 24].includes(parseInt(url.searchParams.get('horizon'), 10)) ? parseInt(url.searchParams.get('horizon'), 10) : 24;
         const curve = await getLatestCalibrationCurve(env, coin, horizon);
         return new Response(JSON.stringify({ ok: true, coin, horizon_hours: horizon, curve }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+      } catch (err) {
+        return new Response(JSON.stringify({ ok: false, error: String(err) }), { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+      }
+    }
+
+    // ---- GET /analyst-relay/prompt — the current best candidate + prompt
+    // to paste into the Gemini app, if one clears the priority bar ----
+    if (url.pathname === '/analyst-relay/prompt' && request.method === 'GET') {
+      try {
+        const result = await getAnalystRelayCandidate(env);
+        return new Response(JSON.stringify(result), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+      } catch (err) {
+        return new Response(JSON.stringify({ ok: false, error: String(err) }), { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+      }
+    }
+
+    // ---- POST /analyst-relay/submit — a human-pasted Gemini-app response.
+    // Never touches gemini_investigations/gemini_provider_calls -- see the
+    // design note above recordAnalystRelay. ----
+    if (url.pathname === '/analyst-relay/submit' && request.method === 'POST') {
+      try {
+        const body = await request.json();
+        if (!body || typeof body.rawResponseText !== 'string' || !body.rawResponseText.trim()) {
+          return new Response(JSON.stringify({ ok: false, error: 'rawResponseText is required' }), { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+        }
+        const result = await recordAnalystRelay(env, {
+          candidateId: body.candidateId ?? 'unknown',
+          assets: Array.isArray(body.assets) ? body.assets : [],
+          promptRequestedTs: Number.isFinite(body.promptRequestedTs) ? body.promptRequestedTs : null,
+          rawResponseText: body.rawResponseText,
+        });
+        return new Response(JSON.stringify(result), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
       } catch (err) {
         return new Response(JSON.stringify({ ok: false, error: String(err) }), { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
       }

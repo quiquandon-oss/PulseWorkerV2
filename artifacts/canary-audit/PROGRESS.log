@@ -52,3 +52,12 @@
 2026-08-23T10:47:10.612Z Cloudflare credentials available -- about to call getWorkerMetadata/getLatestDeployment
 2026-08-23T10:47:11.026Z getWorkerMetadata/getLatestDeployment returned: workerMeta=false deployment=true
 2026-08-23T10:47:11.026Z before file-write section -- all evidence-gathering completed, report object fully assembled
+2026-08-23T23:11:00.843Z main() started
+2026-08-23T23:11:00.844Z before STEP 3 (GitHub execution audit)
+2026-08-23T23:11:04.380Z before STEP 5 (D1 audit) -- GitHub execution audit completed successfully
+2026-08-23T23:11:04.380Z D1 credentials available -- about to call getLatestGeminiInvestigation (first real D1 network call)
+2026-08-23T23:11:04.728Z getLatestGeminiInvestigation returned: ok=true
+2026-08-23T23:11:05.608Z before STEP 4 (Cloudflare deployment audit) -- D1 audit section completed
+2026-08-23T23:11:05.608Z Cloudflare credentials available -- about to call getWorkerMetadata/getLatestDeployment
+2026-08-23T23:11:05.982Z getWorkerMetadata/getLatestDeployment returned: workerMeta=false deployment=true
+2026-08-23T23:11:05.983Z before file-write section -- all evidence-gathering completed, report object fully assembled

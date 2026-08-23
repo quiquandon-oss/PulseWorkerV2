@@ -1773,6 +1773,30 @@ const GEMINI_SHARED_QUOTA_CONFIG = {
   link_narrative_manual: { day: 3, hour: 1 },
 };
 
+// =====================================================================
+// ---- Temporary HOLD: freeze every non-Market-Intelligence Gemini
+// consumer while proving the V2 learning loop with one real grounded
+// investigation ----
+//
+// Deliberately a single flag, not deleted/redesigned code: flip back to
+// false to restore btc_narrative/link_narrative exactly as they were.
+// Checked at the very top of runGeminiDailyAnalysis/runLinkGeminiAnalysis,
+// BEFORE reserveGeminiQuotaSlot is ever called -- a held consumer makes
+// ZERO Gemini requests, reserves ZERO quota (not even a slot it would
+// immediately release), and is still fully observable: every held attempt
+// writes a real gemini_provider_calls row (quota_decision:'held',
+// response_status:'held_for_learning_focus') rather than silently
+// vanishing, so "how many times would this have fired" stays answerable
+// from the same table used for everything else. See
+// isGeminiConsumerOnHold() below for the one place this is read.
+const GEMINI_LEARNING_FOCUS_HOLD = true;
+
+// Pure. The only consumer this hold protects is 'investigation' -- every
+// other named lane (both narrative cron/manual variants) is held.
+function isGeminiConsumerOnHold(consumer) {
+  return GEMINI_LEARNING_FOCUS_HOLD && consumer !== 'investigation';
+}
+
 // Pure. UTC calendar-day key, e.g. 1787302854816 -> '2026-08-21'.
 function utcDayBucket(ts) {
   return new Date(ts).toISOString().slice(0, 10);
@@ -1957,6 +1981,7 @@ async function callGeminiGenerateContent(env, { model, prompt, useGrounding = fa
 function geminiStatusToHttpCode(status) {
   if (status === 'ok') return 200;
   if (status === 'quota_deferred' || status === 'rate_limited') return 429;
+  if (status === 'held_for_learning_focus') return 503;
   if (status === 'timeout') return 504;
   if (status === 'malformed_response' || status === 'error') return 502;
   return 500;
@@ -2832,6 +2857,14 @@ async function runGeminiDailyAnalysis(env, trigger = 'cron') {
   const requestTs = Date.now();
   const correlationId = `GA-${requestTs}-BTC-${trigger}`;
   const model = 'gemini-3.6-flash';
+
+  if (isGeminiConsumerOnHold(consumer)) {
+    await recordGeminiProviderCall(env, {
+      correlationId, consumer, asset: 'BTC', requestTs, model,
+      quotaDecision: 'held', httpStatus: null, responseStatus: 'held_for_learning_focus', errorCategory: null,
+    }).catch(auditErr => console.error('Failed to write gemini_provider_calls row:', auditErr));
+    return { ok: false, status: 'held_for_learning_focus', reason: 'GEMINI_LEARNING_FOCUS_HOLD is active', correlationId };
+  }
 
   const reservation = await reserveGeminiQuotaSlot(env, consumer, GEMINI_SHARED_QUOTA_CONFIG[consumer], requestTs);
   if (!reservation.admitted) {
@@ -3927,6 +3960,14 @@ async function runLinkGeminiAnalysis(env, trigger = 'cron') {
   const requestTs = Date.now();
   const correlationId = `GA-${requestTs}-LINK-${trigger}`;
   const model = 'gemini-3.6-flash';
+
+  if (isGeminiConsumerOnHold(consumer)) {
+    await recordGeminiProviderCall(env, {
+      correlationId, consumer, asset: 'LINK', requestTs, model,
+      quotaDecision: 'held', httpStatus: null, responseStatus: 'held_for_learning_focus', errorCategory: null,
+    }).catch(auditErr => console.error('Failed to write gemini_provider_calls row:', auditErr));
+    return { ok: false, status: 'held_for_learning_focus', reason: 'GEMINI_LEARNING_FOCUS_HOLD is active', correlationId };
+  }
 
   const reservation = await reserveGeminiQuotaSlot(env, consumer, GEMINI_SHARED_QUOTA_CONFIG[consumer], requestTs);
   if (!reservation.admitted) {

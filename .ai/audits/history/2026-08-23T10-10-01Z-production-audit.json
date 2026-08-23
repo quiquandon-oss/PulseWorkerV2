@@ -1,0 +1,130 @@
+{
+  "audit_version": "1.0",
+  "audit_timestamp": "2026-08-23T10:10:01.716Z",
+  "repository": "quiquandon-oss/PulseWorkerV2",
+  "frontend_repository": "quiquandon-oss/CryptoPulseV2",
+  "production": {
+    "worker_url": "https://pulseworker-v2.quiquandon.workers.dev",
+    "worker_sha": "2d30dd1ccc8f8eee50632d809fc492716e8ee61f",
+    "deployment_id": "3ff7f9c1-140d-4e3f-8e52-0e1cf348661a",
+    "worker_version": null,
+    "deployment_timestamp": "2026-08-23T07:29:07Z"
+  },
+  "frontend": {
+    "status": "PASS",
+    "commit_sha": "23c7bf6da015320ca445e336c39fb8743c7e71cc",
+    "worker_url_configured": true,
+    "live_http_verified": false,
+    "evidence": [
+      "worker_url_configured=true",
+      "learning_endpoints_referenced=true",
+      "prediction_endpoints_referenced=true",
+      "mock_markers_found=none",
+      "SOURCE_VERIFIED only -- no live HTTP request was made to the frontend by this audit"
+    ]
+  },
+  "worker_to_d1": {
+    "status": "PASS",
+    "database_id": "f91ca980-b886-423a-bd6f-f3baea46d181",
+    "database_name": "sentiment-history",
+    "evidence": [
+      "configured_database_id=f91ca980-b886-423a-bd6f-f3baea46d181",
+      "live_read_query_succeeded=true"
+    ]
+  },
+  "prediction": {
+    "status": "PASS",
+    "id": 107,
+    "timestamp": 1787421650913,
+    "git_commit_sha": "286bd281dbb46111a9d164712b596f0fd22ccfac",
+    "model_version": "knn-core-v1-selfcontained",
+    "evidence": [
+      "prediction_id=107",
+      "ts=1787421650913",
+      "git_commit_sha=286bd281dbb46111a9d164712b596f0fd22ccfac",
+      "model_version=knn-core-v1-selfcontained",
+      "matches_currently_deployed_sha=false"
+    ]
+  },
+  "gemini": {
+    "status": "FAIL",
+    "investigation_id": "MI-1787443253667-BTC",
+    "response_status": "rate_limited",
+    "timestamp": 1787443253667,
+    "evidence": [
+      "5 attempt(s) found, none with response_status='ok'",
+      "latest attempt: MI-1787443253667-BTC -> rate_limited"
+    ]
+  },
+  "provider_call": {
+    "status": "NOT_VERIFIED",
+    "http_status": null,
+    "provider": null,
+    "model": null,
+    "timestamp": null,
+    "evidence": [
+      "no matching gemini_provider_calls row found for this investigation"
+    ]
+  },
+  "grounding": {
+    "status": "FAIL",
+    "search_queries": [],
+    "grounded_sources": [],
+    "source_count": 0,
+    "evidence": [
+      "search_queries.length=0",
+      "grounded_sources.length=0"
+    ]
+  },
+  "catalyst_ledger": {
+    "status": "NOT_VERIFIED",
+    "record_id": null,
+    "investigation_id": null,
+    "evidence": [
+      "no successful investigation to trace into the catalyst ledger"
+    ]
+  },
+  "learning_loop": {
+    "status": "NOT_VERIFIED",
+    "selection_decision_id": null,
+    "model_version": null,
+    "reason": null,
+    "confidence": null,
+    "evidence": [
+      "no selection_decisions row found near the successful investigation -- a table existing is not evidence the loop ran"
+    ]
+  },
+  "budget": {
+    "status": "FAIL",
+    "configured_daily": 1,
+    "configured_hourly": 1,
+    "required_daily": 5,
+    "required_hourly": 1,
+    "evidence": [
+      "configured=1/day + 1/hour",
+      "required=5/day + 1/hour"
+    ]
+  },
+  "safety": {
+    "status": "PASS",
+    "production_writes_performed": false,
+    "secrets_exposed": false,
+    "evidence": [
+      "production_writes_performed=false",
+      "secrets_exposed=false"
+    ]
+  },
+  "end_to_end": {
+    "status": "YELLOW",
+    "blocking_reason": "[PROVIDER_RATE_LIMIT] 5 attempt(s) found, none with response_status='ok'",
+    "chain": [
+      "prediction",
+      "gemini",
+      "provider_200",
+      "grounding",
+      "d1_persistence",
+      "learning",
+      "selection"
+    ]
+  }
+}

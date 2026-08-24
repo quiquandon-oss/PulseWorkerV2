@@ -21,7 +21,13 @@ on:
         description: 'Environment label for the report'
         required: false
         default: 'production'
-  pull_request:
+  # Deliberately manual-only, same as production-chain-audit. Used to also
+  # run on every pull_request, which meant an email on every single PR
+  # regardless of relevance -- the verdict was the same unchanged FAIL
+  # (no successful grounded Gemini investigation exists yet) every time,
+  # since that's a fact about the system under audit, not about any given
+  # PR's own correctness. Run it by hand when the answer is actually
+  # wanted.
 
 permissions:
   contents: write   # to commit the audit report files back to this branch

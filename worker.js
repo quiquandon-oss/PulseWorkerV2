@@ -1641,31 +1641,37 @@ function isDuplicateCatalyst(candidate, existingCatalysts, toleranceMs = 6 * 60 
 }
 
 // =====================================================================
-// ---- Gemini Market Intelligence: LIVE implementation ----
-// Implements PR #2's approved design (learning/GEMINI_IMPLEMENTATION_PLAN.md,
-// .ai/GEMINI_MARKET_INTELLIGENCE.md). Wired into scheduled() below via its
-// own independent ctx.waitUntil, positioned after the six existing
-// predictThenSelect calls -- see the "Gemini investigation" waitUntil in
-// scheduled(). NEVER called from /predict, /link-predict, /eth-predict, or
-// any other synchronous request route: Gemini's latency and availability
-// must not affect prediction generation, full stop.
+// ---- Market Intelligence: Analyst Relay is now the ONLY investigation
+// mechanism ----
+// The automated grounded API investigation (investigateMarketEvent,
+// evaluateGeminiTriggers, a dedicated cron dispatch) was removed entirely
+// -- see the git history for the full root-cause story: Google Search
+// grounding requires a billing-enabled, funded Cloud project, and the
+// prepayment balance kept depleting (RESOURCE_EXHAUSTED), regardless of
+// how tightly the application-side budget was scoped. That's a cost this
+// project no longer pays. Candidate detection and the rich shared
+// investigation context are UNCHANGED and still real -- they just now
+// feed a human copy-pasting into the free Gemini consumer app
+// (/analyst-relay/prompt, /analyst-relay/submit) instead of a paid API
+// call this Worker makes itself.
 //
-// Flow (matches the reviewed architecture exactly):
-//   predictions already stored (by the six predictThenSelect calls, which
-//   already ran and already backfilled/resolved this cycle's due predictions
-//   as part of their own existing logic)
+// Flow:
+//   predictions already stored (by the six predictThenSelect calls)
 //     -> buildInvestigationCandidates (read-only, this cycle's fresh signals)
-//     -> rankInvestigationCandidates / selectWithinBudget (pure, PR #2)
-//     -> investigateMarketEvent per selected candidate
-//          -> callGeminiForMarketInvestigation (the only network call in this block)
+//     -> rankInvestigationCandidates / selectWithinBudget (pure)
+//     -> buildInvestigationContext (real multi-asset evidence, unchanged)
+//     -> GET /analyst-relay/prompt shows it to a human
+//     -> POST /analyst-relay/submit -> recordAnalystRelay
 //          -> validateGeminiInvestigationResponse / validateCatalystPayload (pure)
 //          -> isDuplicateCatalyst (pure)
-//          -> recordCatalyst (D1 write -- Gemini itself never touches D1)
-//          -> recordGeminiInvestigation (audit row, always written, success or failure)
+//          -> recordCatalyst (D1 write)
+//          -> analyst_relay_log (audit row, always written, success or failure)
+//
+// gemini_investigations (the old table) and its historical rows are left
+// alone -- real record of the API-grounding attempts that were made and
+// why they stopped. Nothing writes new rows to it anymore.
 // =====================================================================
 
-const GEMINI_INVESTIGATION_TIMEOUT_MS = 20000;
-const GEMINI_INVESTIGATION_MODEL = 'gemini-3.6-flash'; // same model as the existing daily-analysis calls
 
 // ---- Candidate generation (read-only D1 queries) ----
 // Builds one candidate per core asset from THIS cycle's freshly-resolved
@@ -1690,13 +1696,14 @@ const INVESTIGATION_WINDOW_MS = 3.5 * 3600 * 1000;
 
 // =====================================================================
 // ---- Shared investigation context builder ----
-// The ONE place that gathers factual evidence for an investigation.
-// Called identically by both the Gemini canary (investigateMarketEvent)
-// and the human Analyst Relay (getAnalystRelayCandidate) -- neither
-// consumer builds its own version of this, so they cannot silently drift
-// into receiving different facts. Each consumer formats the SAME context
-// differently for presentation (formatContextForGemini /
-// formatContextForAnalyst below), but never adds or omits factual content.
+// The ONE place that gathers factual evidence for an investigation. Used
+// by Analyst Relay (getAnalystRelayCandidate) -- kept as a genuinely
+// shared builder (not folded back into that function) because it used to
+// also serve the automated Gemini investigation, and keeping it separate
+// means that division of labor is trivial to restore if the cost picture
+// ever changes. formatContextForGemini/formatContextForAnalyst below
+// still format the SAME context two ways for presentation, but only one
+// consumer reads either of them now.
 //
 // Never fabricates a missing observation -- an asset with no resolved
 // prediction in the window is marked available:false, not silently
@@ -1945,10 +1952,11 @@ async function getGeminiInvestigationCounts(env, nowTs) {
 //
 // Buckets are FIXED UTC calendar day/hour windows (e.g. 'day:2026-08-21',
 // 'hour:2026-08-21T09'), not rolling windows -- deliberately different
-// from the investigation consumer's PRE-EXISTING rolling-24h COUNT(*)
-// check (still used by evaluateGeminiTriggers for ranking/candidate
-// selection, see below). Fixed buckets are what make the reservation
-// atomic with a single UPDATE ... WHERE ... RETURNING statement: SQLite/D1
+// from the old investigation consumer's rolling-24h COUNT(*) check
+// (getGeminiInvestigationCounts/remainingGeminiBudget below, kept only as
+// tested reference functions -- nothing live calls them anymore since the
+// automated investigation was removed). Fixed buckets are what make the
+// reservation atomic with a single UPDATE ... WHERE ... RETURNING statement: SQLite/D1
 // serializes writes to a given row, so two concurrent reservations against
 // the same bucket can never both read "under cap" and both proceed -- a
 // rolling-window COUNT-then-INSERT can't offer that guarantee without a
@@ -1967,36 +1975,11 @@ async function getGeminiInvestigationCounts(env, nowTs) {
 // at 1/hour so a burst of page loads can't consume a day's allowance in a
 // few minutes. Revisit once the real project quota is confirmed.
 const GEMINI_SHARED_QUOTA_CONFIG = {
-  investigation: { day: GEMINI_TRIGGER_CONFIG.MAX_GEMINI_INVESTIGATIONS_PER_DAY, hour: GEMINI_TRIGGER_CONFIG.MAX_GEMINI_INVESTIGATIONS_PER_HOUR },
   btc_narrative_cron: { day: 1, hour: 1 },
   btc_narrative_manual: { day: 3, hour: 1 },
   link_narrative_cron: { day: 1, hour: 1 },
   link_narrative_manual: { day: 3, hour: 1 },
 };
-
-// =====================================================================
-// ---- Temporary HOLD: freeze every non-Market-Intelligence Gemini
-// consumer while proving the V2 learning loop with one real grounded
-// investigation ----
-//
-// Deliberately a single flag, not deleted/redesigned code: flip back to
-// false to restore btc_narrative/link_narrative exactly as they were.
-// Checked at the very top of runGeminiDailyAnalysis/runLinkGeminiAnalysis,
-// BEFORE reserveGeminiQuotaSlot is ever called -- a held consumer makes
-// ZERO Gemini requests, reserves ZERO quota (not even a slot it would
-// immediately release), and is still fully observable: every held attempt
-// writes a real gemini_provider_calls row (quota_decision:'held',
-// response_status:'held_for_learning_focus') rather than silently
-// vanishing, so "how many times would this have fired" stays answerable
-// from the same table used for everything else. See
-// isGeminiConsumerOnHold() below for the one place this is read.
-const GEMINI_LEARNING_FOCUS_HOLD = true;
-
-// Pure. The only consumer this hold protects is 'investigation' -- every
-// other named lane (both narrative cron/manual variants) is held.
-function isGeminiConsumerOnHold(consumer) {
-  return GEMINI_LEARNING_FOCUS_HOLD && consumer !== 'investigation';
-}
 
 // Pure. UTC calendar-day key, e.g. 1787302854816 -> '2026-08-21'.
 function utcDayBucket(ts) {
@@ -2089,22 +2072,6 @@ async function reserveGeminiQuotaSlot(env, consumer, config, nowTs) {
   return { admitted: true, reason: null };
 }
 
-// Read-only peek at a consumer's current remaining budget, WITHOUT
-// reserving anything. Used by evaluateGeminiTriggers to decide how many of
-// this cycle's ranked candidates are even worth building a Gemini prompt
-// for -- the authoritative, race-safe check still happens via
-// reserveGeminiQuotaSlot immediately before each actual network call in
-// investigateMarketEvent. Missing rows (bucket never created yet) read as
-// the full configured cap, not zero.
-async function peekGeminiQuotaRemaining(env, consumer, config, nowTs) {
-  const { dayKey, hourKey } = buildQuotaBucketKeys(consumer, nowTs);
-  const dayRow = await env.DB.prepare('SELECT reserved, cap FROM gemini_quota_ledger WHERE bucket_key = ?').bind(dayKey).first();
-  const hourRow = await env.DB.prepare('SELECT reserved, cap FROM gemini_quota_ledger WHERE bucket_key = ?').bind(hourKey).first();
-  const dayRemaining = Math.max(0, config.day - (dayRow?.reserved ?? 0));
-  const hourRemaining = Math.max(0, config.hour - (hourRow?.reserved ?? 0));
-  return Math.min(dayRemaining, hourRemaining);
-}
-
 // ---- Cross-consumer observability (impure, D1). Never throws -- callers
 // wrap this the same defensive way recordGeminiInvestigation already is.
 // This is the table that answers "how many Gemini requests did the
@@ -2127,25 +2094,24 @@ async function recordGeminiProviderCall(env, { correlationId, consumer, asset, r
   ).run();
 }
 
-// ---- Shared low-level Gemini caller (impure, the only place any of the
-// three consumers actually calls fetch() against Google). Consolidates the
-// three previously-duplicated fetch blocks (investigation had a 20s
-// timeout + grounding; the two narrative calls had NEITHER a timeout NOR
-// consistent error classification) so all three now get the same
-// timeout and the same {ok, status, text, groundingMetadata, errorCategory}
-// shape. Classifies errors the same way investigateMarketEvent's catch
-// block already did, so that logic isn't duplicated at every call site. ----
+// ---- Shared low-level Gemini caller (impure, the only place either
+// narrative consumer calls fetch() against Google). Consolidates what were
+// originally two duplicated fetch blocks (no timeout, no consistent error
+// classification) into one {ok, status, text, errorCategory} shape.
+// Grounding (Google Search) support was removed entirely along with the
+// automated Market Intelligence investigation that used it -- see the
+// comment above INVESTIGATION_ASSETS for the full story. Nothing in this
+// codebase requests it anymore. ----
 const GEMINI_CALL_TIMEOUT_MS = 20000;
 
-async function callGeminiGenerateContent(env, { model, prompt, useGrounding = false }) {
+async function callGeminiGenerateContent(env, { model, prompt }) {
   if (!env.GEMINI_API_KEY) {
-    return { ok: false, status: null, text: null, groundingMetadata: { searchQueries: [], groundedSources: [] }, errorCategory: 'error', errorMessage: 'GEMINI_API_KEY not configured on this Worker' };
+    return { ok: false, status: null, text: null, errorCategory: 'error', errorMessage: 'GEMINI_API_KEY not configured on this Worker' };
   }
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), GEMINI_CALL_TIMEOUT_MS);
   try {
     const body = { contents: [{ parts: [{ text: prompt }] }] };
-    if (useGrounding) body.tools = [{ google_search: {} }];
     const res = await fetch(
       `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`,
       { method: 'POST', headers: { 'Content-Type': 'application/json', 'x-goog-api-key': env.GEMINI_API_KEY }, body: JSON.stringify(body), signal: controller.signal }
@@ -2157,74 +2123,40 @@ async function callGeminiGenerateContent(env, { model, prompt, useGrounding = fa
       // completely different fix). Previously hardcoded to a generic
       // string here, discarding exactly the detail that mattered.
       const errBody = await res.text().catch(() => '');
-      return { ok: false, status: 429, text: null, groundingMetadata: { searchQueries: [], groundedSources: [] }, errorCategory: 'rate_limited', errorMessage: `Gemini API 429: ${errBody.slice(0, 500)}` };
+      return { ok: false, status: 429, text: null, errorCategory: 'rate_limited', errorMessage: `Gemini API 429: ${errBody.slice(0, 500)}` };
     }
     if (!res.ok) {
       const errBody = await res.text();
-      return { ok: false, status: res.status, text: null, groundingMetadata: { searchQueries: [], groundedSources: [] }, errorCategory: 'error', errorMessage: `Gemini API returned ${res.status}: ${errBody.slice(0, 500)}` };
+      return { ok: false, status: res.status, text: null, errorCategory: 'error', errorMessage: `Gemini API returned ${res.status}: ${errBody.slice(0, 500)}` };
     }
     const data = await res.json();
     const text = data?.candidates?.[0]?.content?.parts?.map(p => p.text).join('') ?? '';
     if (!text) {
-      return { ok: false, status: res.status, text: null, groundingMetadata: { searchQueries: [], groundedSources: [] }, errorCategory: 'malformed_response', errorMessage: 'Empty or unexpected Gemini response shape' };
+      return { ok: false, status: res.status, text: null, errorCategory: 'malformed_response', errorMessage: 'Empty or unexpected Gemini response shape' };
     }
-    const groundingMetadata = extractGroundingMetadata(data);
-    return { ok: true, status: res.status, text, groundingMetadata, errorCategory: null, errorMessage: null };
+    return { ok: true, status: res.status, text, errorCategory: null, errorMessage: null };
   } catch (err) {
     const errorCategory = err.name === 'AbortError' ? 'timeout' : 'error';
-    return { ok: false, status: null, text: null, groundingMetadata: { searchQueries: [], groundedSources: [] }, errorCategory, errorMessage: String(err?.message || err).slice(0, 1000) };
+    return { ok: false, status: null, text: null, errorCategory, errorMessage: String(err?.message || err).slice(0, 1000) };
   } finally {
     clearTimeout(timeout);
   }
 }
 
 // Pure. Maps a runGeminiDailyAnalysis/runLinkGeminiAnalysis result status to
-// an honest HTTP status code -- per the root-cause audit's Phase 11, the
-// frontend (or anything reading this route directly) must be able to tell
-// "we chose not to call Gemini right now" (429, quota_deferred) apart from
-// "Gemini/the network genuinely failed" (502/504) apart from a real success
-// (200). Never collapses these into a single generic 500 the way the old
-// catch-all did.
+// an honest HTTP status code -- the frontend (or anything reading this
+// route directly) must be able to tell "we chose not to call Gemini right
+// now" (429, quota_deferred) apart from "Gemini/the network genuinely
+// failed" (502/504) apart from a real success (200). Never collapses these
+// into a single generic 500 the way the old catch-all did.
 function geminiStatusToHttpCode(status) {
   if (status === 'ok') return 200;
   if (status === 'quota_deferred' || status === 'rate_limited') return 429;
-  if (status === 'held_for_learning_focus') return 503;
   if (status === 'timeout') return 504;
   if (status === 'malformed_response' || status === 'error') return 502;
   return 500;
 }
 
-
-async function recordGeminiInvestigation(env, { investigationId, requestTs, triggerReasons, assets, modelIdentifier, responseStatus, sourceCount, validationStatus, errorMessage, catalystsWritten, groundingMetadata, context }) {
-  await env.DB.prepare(
-    `INSERT INTO gemini_investigations
-     (investigation_id, request_ts, trigger_reasons_json, assets_json, model_identifier, response_status, source_count, validation_status, error_message, catalysts_written, grounding_metadata_json, investigation_context_json, context_hash)
-     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`
-  ).bind(
-    investigationId, requestTs, JSON.stringify(triggerReasons ?? {}), JSON.stringify(assets ?? []),
-    modelIdentifier ?? null, responseStatus ?? null, sourceCount ?? 0, validationStatus ?? null,
-    errorMessage ?? null, catalystsWritten ?? 0, JSON.stringify(groundingMetadata ?? { searchQueries: [], groundedSources: [] }),
-    context ? JSON.stringify(context) : null, context?.contextHash ?? null
-  ).run();
-}
-
-// ---- The Gemini client (the only network call in this whole block) ----
-// Follows the same request pattern as the existing runGeminiDailyAnalysis/
-// runLinkGeminiAnalysis (env.GEMINI_API_KEY, x-goog-api-key header, same
-// model). Adds Google Search grounding (`tools: [{ google_search: {} }]`) --
-// UNLIKE the existing daily-analysis calls, which don't use grounding.
-// This is the one piece flagged in the plan doc as unverified against the
-// live API in this session (no network egress to
-// generativelanguage.googleapis.com from the sandbox this was written in) --
-// the request shape follows Google's documented grounding tool schema for
-// this model generation, but should be spot-checked against a real response
-// after deploy, per the final implementation report.
-//
-// buildGeminiInvestigationPrompt (single-asset, bare correlatedFailureAssetCount
-// integer) was retired here -- superseded by buildInvestigationContext +
-// formatContextForGemini/formatContextForAnalyst above, which give Gemini
-// and the human Analyst Relay the same real multi-asset evidence instead of
-// a summary neither could independently verify.
 
 // Pure. PR #2 review, BLOCKER 3: never invents a value. timestamp_source is
 // 'gemini_reported' whenever a first_public_timestamp was actually provided
@@ -2243,36 +2175,6 @@ function deriveTimestampProvenance(firstPublicTimestamp, reportedConfidence) {
   const ALLOWED = ['HIGH', 'MEDIUM', 'LOW', 'UNKNOWN'];
   const timestampConfidence = ALLOWED.includes(reportedConfidence) ? reportedConfidence : 'UNKNOWN';
   return { timestampSource: 'gemini_reported', timestampConfidence };
-}
-
-// Pure. Normalizes Gemini's raw groundingMetadata into the shape this
-// system stores/uses -- deliberately NOT the raw internal Gemini response
-// shape (per PR #2 review, BLOCKER 2: "Do NOT expose raw internal Gemini
-// response unnecessarily"). Handles groundingMetadata being entirely absent
-// (older/non-grounded responses, or a response that genuinely found nothing
-// to ground) by returning empty arrays rather than throwing or returning
-// null/undefined -- callers can always destructure the result safely.
-function extractGroundingMetadata(geminiApiResponseJson) {
-  const gm = geminiApiResponseJson?.candidates?.[0]?.groundingMetadata;
-  if (!gm) return { searchQueries: [], groundedSources: [] };
-  const searchQueries = Array.isArray(gm.webSearchQueries) ? gm.webSearchQueries : [];
-  const groundedSources = Array.isArray(gm.groundingChunks)
-    ? gm.groundingChunks
-        .map(chunk => ({ url: chunk.web?.uri ?? null, title: chunk.web?.title ?? null }))
-        .filter(source => source.url != null)
-    : [];
-  return { searchQueries, groundedSources };
-}
-
-// Pure. Per PR #2 review, BLOCKER 2: "the system must retain whether the
-// source was actually present in Google grounding metadata" -- a catalyst's
-// reported source_url may or may not actually correspond to a URL Google's
-// grounding step surfaced. This is an exact-match check on purpose: a URL
-// Gemini wrote from its own knowledge (not from a grounded search result)
-// should NOT be marked as grounded just because it looks plausible.
-function isSourceGrounded(sourceUrl, groundingMetadata) {
-  if (!sourceUrl || !groundingMetadata?.groundedSources?.length) return false;
-  return groundingMetadata.groundedSources.some(source => source.url === sourceUrl);
 }
 
 // Pure. Strips markdown code fences if Gemini wraps its JSON despite
@@ -2326,153 +2228,27 @@ function validateCatalystSources(sources) {
 // audit row, never propagated. Callers (evaluateGeminiTriggers) rely on
 // this never throwing so one candidate's failure can't stop the others in
 // the same cycle. ----
-async function investigateMarketEvent(env, candidate) {
-  const investigationId = `MI-${Date.now()}-${candidate.id}`;
-  const requestTs = Date.now();
-  let responseStatus = 'error', sourceCount = 0, validationStatus = 'not_attempted', errorMessage = null, catalystsWritten = 0;
-  let groundingMetadata = { searchQueries: [], groundedSources: [] };
-
-  // Built up front, before the quota check -- read-only, cheap, and worth
-  // recording even for a quota_deferred attempt (shows what WOULD have
-  // been investigated). This is the SAME builder the Analyst Relay path
-  // uses -- see buildInvestigationContext's own comment for why that
-  // matters.
-  const context = await buildInvestigationContext(env, candidate, requestTs);
-
-  // Authoritative, race-safe gate -- the shared ledger, not the rolling-
-  // window peek evaluateGeminiTriggers already did to decide which
-  // candidates were even worth reaching this function. Two isolates racing
-  // for the same last slot: only one reservation call below can succeed.
-  const quotaConfig = GEMINI_SHARED_QUOTA_CONFIG.investigation;
-  const reservation = await reserveGeminiQuotaSlot(env, 'investigation', quotaConfig, requestTs);
-
-  if (!reservation.admitted) {
-    responseStatus = 'quota_deferred';
-    errorMessage = reservation.reason;
-    await recordGeminiProviderCall(env, {
-      correlationId: investigationId, consumer: 'investigation', asset: candidate.assets?.join(','),
-      requestTs, model: GEMINI_INVESTIGATION_MODEL, quotaDecision: reservation.reason === 'daily_limit_reached' ? 'deferred_daily' : 'deferred_hourly',
-      httpStatus: null, responseStatus: 'quota_deferred', errorCategory: null,
-    }).catch(auditErr => console.error('Failed to write gemini_provider_calls row:', auditErr));
-    await recordGeminiInvestigation(env, {
-      investigationId, requestTs, triggerReasons: candidate.signals, assets: candidate.assets,
-      modelIdentifier: GEMINI_INVESTIGATION_MODEL, responseStatus, sourceCount, validationStatus, errorMessage, catalystsWritten,
-      groundingMetadata, context,
-    }).catch(auditErr => console.error('Failed to write gemini_investigations audit row:', auditErr));
-    return;
-  }
-
-  const geminiResult = await callGeminiGenerateContent(env, { model: GEMINI_INVESTIGATION_MODEL, prompt: formatContextForGemini(context), useGrounding: true });
-  groundingMetadata = geminiResult.groundingMetadata;
-
-  if (!geminiResult.ok) {
-    responseStatus = geminiResult.errorCategory; // 'timeout' | 'rate_limited' | 'malformed_response' | 'error'
-    errorMessage = geminiResult.errorMessage;
-  } else {
-    try {
-      const parsed = parseGeminiInvestigationResponse(geminiResult.text);
-      const structureCheck = validateGeminiInvestigationResponse(parsed);
-
-      if (!structureCheck.valid) {
-        responseStatus = 'invalid_response';
-        validationStatus = 'failed';
-        errorMessage = structureCheck.errors.join('; ');
-      } else if (!parsed.catalysts || parsed.catalysts.length === 0) {
-        // A valid, well-formed "we found nothing credible" response -- per
-        // .ai/MARKET_CATALYST.md, this is a legitimate outcome, not a failure.
-        responseStatus = 'no_catalyst_found';
-        validationStatus = 'ok';
-      } else {
-        responseStatus = 'ok';
-        validationStatus = 'ok';
-        sourceCount = parsed.catalysts.reduce((s, c) => s + (c.sources?.length || 0), 0);
-
-        const existing = await fetchCatalystsForPeriod(env, requestTs - 24 * 3600 * 1000, requestTs + 1);
-        for (const catalyst of parsed.catalysts) {
-          const affectedAssets = Array.isArray(catalyst.assets) && catalyst.assets.length ? catalyst.assets : candidate.assets;
-          for (const asset of affectedAssets) {
-            const eventTimestamp = catalyst.event_timestamp ? Date.parse(catalyst.event_timestamp) : null;
-            const firstPublicTimestamp = catalyst.first_public_timestamp ? Date.parse(catalyst.first_public_timestamp) : null;
-            const payload = {
-              coin: asset,
-              category: catalyst.category,
-              marketClassification: parsed.market_classification,
-              sourceUrl: catalyst.sources?.[0]?.url,
-              eventTimestamp: Number.isFinite(eventTimestamp) ? eventTimestamp : null,
-              // Never substituted with discoveryTimestamp when absent -- stays
-              // null all the way through to the D1 row. See
-              // deriveTimestampProvenance and the dedicated regression test.
-              firstPublicTimestamp: Number.isFinite(firstPublicTimestamp) ? firstPublicTimestamp : null,
-              discoveryTimestamp: requestTs,
-            };
-            const payloadCheck = validateCatalystPayload(payload);
-            if (!payloadCheck.valid) continue; // skip silently-invalid entries, don't write, don't throw
-
-            const dedupeCandidate = { coin: asset, category: catalyst.category, ts: payload.eventTimestamp ?? requestTs };
-            if (isDuplicateCatalyst(dedupeCandidate, existing)) continue;
-
-            const { timestampSource, timestampConfidence } = deriveTimestampProvenance(payload.firstPublicTimestamp, catalyst.first_public_timestamp_confidence);
-
-            await recordCatalyst(env, {
-              coin: asset,
-              ts: payload.eventTimestamp ?? requestTs,
-              category: catalyst.category,
-              direction: catalyst.direction ?? null,
-              marketClassification: parsed.market_classification ?? null,
-              sourceUrl: payload.sourceUrl ?? null,
-              discoveryTimestamp: requestTs,
-              firstPublicTimestamp: payload.firstPublicTimestamp,
-              confidence: catalyst.confidence ?? null,
-              investigationId,
-              sourceGrounded: isSourceGrounded(payload.sourceUrl, groundingMetadata),
-              timestampSource,
-              timestampConfidence,
-            });
-            catalystsWritten++;
-          }
-        }
-      }
-    } catch (err) {
-      // Only parseGeminiInvestigationResponse/validation can throw here --
-      // the network call itself is already handled via geminiResult.ok above.
-      responseStatus = err instanceof SyntaxError ? 'malformed_response' : 'error';
-      errorMessage = String(err?.message || err).slice(0, 1000);
-    }
-  }
-
-  await recordGeminiProviderCall(env, {
-    correlationId: investigationId, consumer: 'investigation', asset: candidate.assets?.join(','),
-    requestTs, model: GEMINI_INVESTIGATION_MODEL, quotaDecision: 'admitted',
-    httpStatus: geminiResult.status, responseStatus, errorCategory: geminiResult.ok ? null : geminiResult.errorCategory,
-  }).catch(auditErr => console.error('Failed to write gemini_provider_calls row:', auditErr));
-
-  await recordGeminiInvestigation(env, {
-    investigationId, requestTs, triggerReasons: candidate.signals, assets: candidate.assets,
-    modelIdentifier: GEMINI_INVESTIGATION_MODEL, responseStatus, sourceCount, validationStatus, errorMessage, catalystsWritten,
-    groundingMetadata, context,
-  }).catch(auditErr => console.error('Failed to write gemini_investigations audit row:', auditErr));
-}
-
-// =====================================================================
-// ---- Analyst Relay: human-in-the-loop alternative to the automated
-// Market Intelligence investigation, for when the API path is
-// unavailable/rate-limited. Deliberately NOT a substitute the rest of the
-// system can mistake for a real API call:
+// ---- Analyst Relay: the investigation mechanism. ----
+// Was originally built as a fallback for when the paid grounded API path
+// was rate-limited; the automated investigateMarketEvent/
+// evaluateGeminiTriggers it was a fallback FOR has since been removed
+// entirely (Google Search grounding requires a funded, billing-enabled
+// Cloud project -- a recurring cost this project stopped paying). This is
+// now the only investigation mechanism, not a fallback for anything.
 //
 // - Writes to its own table (analyst_relay_log) only -- NEVER to
-//   gemini_investigations or gemini_provider_calls. The production-chain-
-//   audit tool's evaluateGemini()/evaluateProviderCall() only ever read
-//   those two tables, so an Analyst Relay submission can structurally
-//   never be counted as proof the automated pipeline succeeded.
-// - Uses a distinct ID prefix (AR- vs MI-) on the catalysts it writes to
+//   gemini_investigations. That table and its historical rows are left
+//   alone as a record of the grounded-API attempts that were made, but
+//   nothing writes new rows to it anymore.
+// - Uses a distinct ID prefix (AR-) on the catalysts it writes to
 //   coin_catalyst_log, so real catalyst data stays usable by the rest of
 //   the app (tiles, other reads) while remaining traceable to its source.
 // - sourceGrounded is unconditionally false -- a pasted chat response has
 //   no verifiable {searchQueries, groundedSources} the way a real API
-//   response does, regardless of what the model may actually have done.
+//   response would, regardless of what the model may actually have done.
 // - Never touches reserveGeminiQuotaSlot / GEMINI_SHARED_QUOTA_CONFIG --
-//   this is a fully separate, unbudgeted path, since nothing about it
-//   consumes the API quota Gemini itself enforces.
+//   this path was never budgeted, since it was never the thing that could
+//   run up a bill.
 // =====================================================================
 
 // Read-only. Surfaces the same candidate the automated investigation would
@@ -2578,46 +2354,6 @@ async function recordAnalystRelay(env, { candidateId, assets, promptRequestedTs,
   return { ok: true, relayId, validationStatus, errorMessage, catalystsWritten, contextHash: context?.contextHash ?? null };
 }
 
-
-// Never throws -- the caller's .catch() is defense in depth, not the
-// primary mechanism (investigateMarketEvent already never throws). ----
-async function evaluateGeminiTriggers(env) {
-  const nowTs = Date.now();
-  const candidates = await buildInvestigationCandidates(env, nowTs);
-  if (candidates.length === 0) return { candidatesEvaluated: 0, investigationsRun: 0 };
-
-  const ranked = rankInvestigationCandidates(candidates);
-  // Soft pre-filter only, to avoid building a Gemini prompt for candidates
-  // that are clearly over budget -- NOT the authoritative gate. The real
-  // reservation (and the only place that can actually reject a candidate)
-  // is reserveGeminiQuotaSlot inside investigateMarketEvent, immediately
-  // before the network call.
-  const budget = await peekGeminiQuotaRemaining(env, 'investigation', GEMINI_SHARED_QUOTA_CONFIG.investigation, nowTs);
-  const { selected } = selectWithinBudget(ranked, budget);
-
-  for (const candidate of selected) {
-    await investigateMarketEvent(env, candidate);
-  }
-  return { candidatesEvaluated: candidates.length, investigationsRun: selected.length };
-}
-
-// ---- The ordering fix from PR #2 review, BLOCKER 1. Takes the cycle's
-// already-started prediction/resolution task promises (each already wrapping
-// its own .catch(), so none of them reject -- but Promise.allSettled is used
-// anyway, not Promise.all, so this is correct even if a future edit removes
-// one of those inner .catch() calls and a task genuinely rejects) and
-// GUARANTEES geminiEvaluationFn does not start until every one of them has
-// settled, successfully or not. This is the entire fix: previously
-// scheduled() fired the six prediction tasks and evaluateGeminiTriggers as
-// separate, independent ctx.waitUntil calls with no ordering relationship
-// between them. Extracted as its own named function (rather than left
-// inline in scheduled()) specifically so the ordering guarantee itself is
-// unit-testable without needing to exercise the real prediction pipeline --
-// see tests/gemini-planning.test.js's "scheduled ordering" suite.
-async function runPredictionCycleThenGemini(predictionTasks, geminiEvaluationFn) {
-  await Promise.allSettled(predictionTasks);
-  await geminiEvaluationFn();
-}
 
 // ---- D1 orchestration: gathers rows, never mutates anything ----
 async function fetchResolvedRows(env, table, { coin, horizonHours, sinceResolvedTs, probColumn = 'p_up', calibratedColumn = 'calibrated_p_up' } = {}) {
@@ -3180,14 +2916,6 @@ async function runGeminiDailyAnalysis(env, trigger = 'cron') {
   const correlationId = `GA-${requestTs}-BTC-${trigger}`;
   const model = 'gemini-3.6-flash';
 
-  if (isGeminiConsumerOnHold(consumer)) {
-    await recordGeminiProviderCall(env, {
-      correlationId, consumer, asset: 'BTC', requestTs, model,
-      quotaDecision: 'held', httpStatus: null, responseStatus: 'held_for_learning_focus', errorCategory: null,
-    }).catch(auditErr => console.error('Failed to write gemini_provider_calls row:', auditErr));
-    return { ok: false, status: 'held_for_learning_focus', reason: 'GEMINI_LEARNING_FOCUS_HOLD is active', correlationId };
-  }
-
   const reservation = await reserveGeminiQuotaSlot(env, consumer, GEMINI_SHARED_QUOTA_CONFIG[consumer], requestTs);
   if (!reservation.admitted) {
     await recordGeminiProviderCall(env, {
@@ -3244,7 +2972,7 @@ SYNTHESIS: 2-3 sentences tying it together.
 After all sections, on its own final line with nothing else on that line, output exactly this (valid JSON, one line, nothing after it):
 ANALYSIS_JSON: {"bias_short":"bullish|neutral|bearish","bias_medium":"bullish|neutral|bearish","bias_long":"bullish|neutral|bearish","support_pct_below":<number, % below current price>,"resistance_pct_above":<number, % above current price>,"macro_risk":"low|medium|high","geopolitical_risk":"low|medium|high","macro_score":<number from -1.0 (very restrictive/bearish macro backdrop) to 1.0 (very supportive/bullish)>,"liquidity_bias":<number from -1.0 (tightening, liquidity draining from risk assets) to 1.0 (loosening, liquidity flowing into risk assets)>,"cross_asset_stress":<number from 0.0 (calm, gold/bonds/oil moving normally) to 1.0 (high dislocation/stress across those markets)>}`;
 
-  const geminiResult = await callGeminiGenerateContent(env, { model, prompt, useGrounding: false });
+  const geminiResult = await callGeminiGenerateContent(env, { model, prompt });
 
   if (!geminiResult.ok) {
     await recordGeminiProviderCall(env, {
@@ -4283,14 +4011,6 @@ async function runLinkGeminiAnalysis(env, trigger = 'cron') {
   const correlationId = `GA-${requestTs}-LINK-${trigger}`;
   const model = 'gemini-3.6-flash';
 
-  if (isGeminiConsumerOnHold(consumer)) {
-    await recordGeminiProviderCall(env, {
-      correlationId, consumer, asset: 'LINK', requestTs, model,
-      quotaDecision: 'held', httpStatus: null, responseStatus: 'held_for_learning_focus', errorCategory: null,
-    }).catch(auditErr => console.error('Failed to write gemini_provider_calls row:', auditErr));
-    return { ok: false, status: 'held_for_learning_focus', reason: 'GEMINI_LEARNING_FOCUS_HOLD is active', correlationId };
-  }
-
   const reservation = await reserveGeminiQuotaSlot(env, consumer, GEMINI_SHARED_QUOTA_CONFIG[consumer], requestTs);
   if (!reservation.admitted) {
     await recordGeminiProviderCall(env, {
@@ -4321,7 +4041,7 @@ SYNTHESIS: 1-2 sentences tying it together.
 After all sections, on its own final line, output exactly this (valid JSON, nothing after it):
 LINK_JSON: {"bias_short":"bullish|neutral|bearish","bias_medium":"bullish|neutral|bearish","support_pct_below":<number>,"resistance_pct_above":<number>}`;
 
-  const geminiResult = await callGeminiGenerateContent(env, { model, prompt, useGrounding: false });
+  const geminiResult = await callGeminiGenerateContent(env, { model, prompt });
 
   if (!geminiResult.ok) {
     await recordGeminiProviderCall(env, {
@@ -4964,16 +4684,14 @@ export default {
         await selectBestVariant(env, coin, horizon).catch(err => console.error(`Selection ${coin}/${horizon}h failed:`, err));
       };
 
-      // PR #2 review, BLOCKER 1: previously each of these six tasks and
-      // evaluateGeminiTriggers were separate, independent ctx.waitUntil
-      // calls -- source-code ordering doesn't guarantee execution ordering
-      // between independent waitUntil'd promises, so Gemini's candidate
-      // evaluation could genuinely run before this cycle's predictions had
-      // finished resolving. Fixed via runPredictionCycleThenGemini: all six
-      // tasks still run concurrently WITH EACH OTHER (unchanged), but Gemini
-      // evaluation is only started after every one of them has settled --
-      // see that function for the ordering guarantee and its regression
-      // test. A single ctx.waitUntil now covers the whole cycle.
+      // The six prediction/selection tasks still run concurrently with each
+      // other (unchanged). The ordering wrapper that used to sequence a
+      // Gemini evaluation after all six had settled was removed along with
+      // that evaluation step -- see the comment above the Analyst Relay
+      // section for why. Promise.allSettled (not Promise.all) kept
+      // deliberately: each task already wraps its own .catch(), so none of
+      // these reject, but this stays correct even if a future edit removes
+      // one of those inner .catch() calls and a task genuinely rejects.
       const predictionTasks = [
         predictThenSelect(predictAndLog, 'BTC', 24).catch(err => console.error('BTC 24h predict-and-log failed:', err)),
         predictThenSelect(predictAndLog, 'BTC', 12).catch(err => console.error('BTC 12h predict-and-log failed:', err)),
@@ -4982,10 +4700,7 @@ export default {
         predictThenSelect(ethPredictAndLog, 'ETH', 24).catch(err => console.error('ETH 24h predict-and-log failed:', err)),
         predictThenSelect(ethPredictAndLog, 'ETH', 12).catch(err => console.error('ETH 12h predict-and-log failed:', err)),
       ];
-      ctx.waitUntil(runPredictionCycleThenGemini(
-        predictionTasks,
-        () => evaluateGeminiTriggers(env).catch(err => console.error('Gemini trigger evaluation failed:', err))
-      ));
+      ctx.waitUntil(Promise.allSettled(predictionTasks));
     }
   },
 };

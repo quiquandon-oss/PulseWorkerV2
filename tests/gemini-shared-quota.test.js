@@ -264,36 +264,11 @@ describe('Shared Gemini quota gate — reserveGeminiQuotaSlot atomicity', () => 
   });
 });
 
-describe('Shared Gemini quota gate — peekGeminiQuotaRemaining (non-mutating)', () => {
-  let scope;
-  beforeAll(() => {
-    scope = evalInScope(extractFunctions('peekGeminiQuotaRemaining', 'buildQuotaBucketKeys', 'utcDayBucket', 'utcHourBucket'));
-  });
-
-  const ts = Date.parse('2026-08-21T09:00:00Z').valueOf();
-
-  it('reads the full configured cap when no bucket row exists yet (never crashes, never reads as zero)', async () => {
-    const { db } = makeLedgerDb();
-    const remaining = await scope.peekGeminiQuotaRemaining({ DB: db }, 'investigation', { day: 1, hour: 1 }, ts);
-    expect(remaining).toBe(1);
-  });
-
-  it('reflects the smaller of day/hour remaining, and does not itself reserve anything', async () => {
-    const { db, buckets } = makeLedgerDb();
-    const { dayKey, hourKey } = scope.buildQuotaBucketKeys('investigation', ts);
-    seedBucket(buckets, dayKey, 5, 4); // 1 remaining today
-    seedBucket(buckets, hourKey, 5, 0); // 5 remaining this hour
-    const remaining = await scope.peekGeminiQuotaRemaining({ DB: db }, 'investigation', { day: 5, hour: 5 }, ts);
-    expect(remaining).toBe(1); // bound by the day bucket
-    expect(buckets.get(dayKey).reserved).toBe(4); // unchanged -- peek never mutates
-  });
-});
-
 describe('Shared Gemini quota gate — callGeminiGenerateContent error classification', () => {
   let scope;
   let restoreFetch;
   beforeAll(() => {
-    scope = evalInScope(extractFunctions('callGeminiGenerateContent', 'extractGroundingMetadata') + '\n' + extractConstants('GEMINI_CALL_TIMEOUT_MS'));
+    scope = evalInScope(extractFunctions('callGeminiGenerateContent') + '\n' + extractConstants('GEMINI_CALL_TIMEOUT_MS'));
   });
   afterEach(() => { if (restoreFetch) { restoreFetch(); restoreFetch = null; } });
 
@@ -339,7 +314,7 @@ describe('Shared Gemini quota gate — callGeminiGenerateContent error classific
     // scope where that constant is substituted with a tiny value so the
     // abort fires almost immediately.
     const quickScope = evalInScope(
-      extractFunctions('callGeminiGenerateContent', 'extractGroundingMetadata').replace('GEMINI_CALL_TIMEOUT_MS', '10')
+      extractFunctions('callGeminiGenerateContent').replace('GEMINI_CALL_TIMEOUT_MS', '10')
     );
     const result = await quickScope.callGeminiGenerateContent({ GEMINI_API_KEY: 'k' }, { model: 'gemini-3.6-flash', prompt: 'p' });
     expect(result.ok).toBe(false);
@@ -362,16 +337,25 @@ describe('Shared Gemini quota gate — callGeminiGenerateContent error classific
     expect(result.errorCategory).toBe('malformed_response');
   });
 
-  it('a genuine success returns ok:true with the text and grounding metadata', async () => {
+  it('a genuine success returns ok:true with the text -- no grounding metadata in the shape at all anymore, removed along with the automated investigation that used it', async () => {
     mockFetch(async () => ({
       ok: true, status: 200,
-      json: async () => ({ candidates: [{ content: { parts: [{ text: 'hello' }] }, groundingMetadata: { webSearchQueries: ['q'], groundingChunks: [{ web: { uri: 'https://example.com', title: 't' } }] } }] }),
+      json: async () => ({ candidates: [{ content: { parts: [{ text: 'hello' }] } }] }),
     }));
-    const result = await scope.callGeminiGenerateContent({ GEMINI_API_KEY: 'k' }, { model: 'gemini-3.6-flash', prompt: 'p', useGrounding: true });
+    const result = await scope.callGeminiGenerateContent({ GEMINI_API_KEY: 'k' }, { model: 'gemini-3.6-flash', prompt: 'p' });
     expect(result.ok).toBe(true);
     expect(result.text).toBe('hello');
-    expect(result.groundingMetadata.searchQueries).toEqual(['q']);
-    expect(result.groundingMetadata.groundedSources).toEqual([{ url: 'https://example.com', title: 't' }]);
+    expect(result.groundingMetadata).toBeUndefined();
+  });
+
+  it('regression: the request body sent to Google never includes a tools/grounding field, even if a caller tried to pass useGrounding', async () => {
+    let capturedBody = null;
+    mockFetch(async (url, opts) => {
+      capturedBody = JSON.parse(opts.body);
+      return { ok: true, status: 200, json: async () => ({ candidates: [{ content: { parts: [{ text: 'hello' }] } }] }) };
+    });
+    await scope.callGeminiGenerateContent({ GEMINI_API_KEY: 'k' }, { model: 'gemini-3.6-flash', prompt: 'p', useGrounding: true });
+    expect(capturedBody.tools).toBeUndefined();
   });
 });
 
@@ -385,49 +369,12 @@ describe('Shared Gemini quota gate — geminiStatusToHttpCode', () => {
     expect(scope.geminiStatusToHttpCode('rate_limited')).toBe(429);
   });
   it('maps timeout to 504', () => { expect(scope.geminiStatusToHttpCode('timeout')).toBe(504); });
-  it('maps held_for_learning_focus to 503 -- distinct from quota_deferred/429, since this is a deliberate temporary hold, not a budget or provider limit', () => {
-    expect(scope.geminiStatusToHttpCode('held_for_learning_focus')).toBe(503);
-  });
   it('maps malformed_response and error to 502', () => {
     expect(scope.geminiStatusToHttpCode('malformed_response')).toBe(502);
     expect(scope.geminiStatusToHttpCode('error')).toBe(502);
   });
   it('falls back to 500 for an unrecognized status, rather than silently returning 200', () => {
     expect(scope.geminiStatusToHttpCode('something_new')).toBe(500);
-  });
-});
-
-describe('GEMINI_LEARNING_FOCUS_HOLD — Market Intelligence is structurally untouched', () => {
-  // Not a behavioral test of investigateMarketEvent's logic (already
-  // covered extensively in gemini-planning.test.js, unchanged by this PR)
-  // -- this proves the thing the "freeze non-learning consumers" task
-  // explicitly required: investigateMarketEvent contains ZERO references
-  // to the hold mechanism at all, so there is nothing in it that could
-  // even conditionally skip its own quota reservation or fetch call. The
-  // hold is entirely absent from Market Intelligence's code path, not
-  // merely configured to evaluate false for it.
-  it('investigateMarketEvent source contains no reference to the hold mechanism', () => {
-    const src = extractFunctions('investigateMarketEvent');
-    expect(src).not.toMatch(/isGeminiConsumerOnHold/);
-    expect(src).not.toMatch(/GEMINI_LEARNING_FOCUS_HOLD/);
-    expect(src).not.toMatch(/held_for_learning_focus/);
-  });
-
-  it('evaluateGeminiTriggers (which calls investigateMarketEvent) also contains no reference to the hold mechanism', () => {
-    const src = extractFunctions('evaluateGeminiTriggers');
-    expect(src).not.toMatch(/isGeminiConsumerOnHold/);
-    expect(src).not.toMatch(/GEMINI_LEARNING_FOCUS_HOLD/);
-  });
-
-  it('reserveGeminiQuotaSlot itself is untouched by the hold -- the investigation consumer can still reserve quota exactly as before', async () => {
-    const scope = evalInScope(extractFunctions('reserveGeminiQuotaSlot', 'buildQuotaBucketKeys', 'utcDayBucket', 'utcHourBucket'));
-    const { db, buckets } = makeLedgerDb();
-    const ts = Date.parse('2026-08-24T00:00:00Z').valueOf();
-    const { dayKey, hourKey } = scope.buildQuotaBucketKeys('investigation', ts);
-    seedBucket(buckets, dayKey, 1, 0);
-    seedBucket(buckets, hourKey, 1, 0);
-    const result = await scope.reserveGeminiQuotaSlot({ DB: db }, 'investigation', { day: 1, hour: 1 }, ts);
-    expect(result.admitted).toBe(true);
   });
 });
 
@@ -482,96 +429,50 @@ function mockFetchGlobal(impl) {
 
 describe('runGeminiDailyAnalysis — shared quota gate + non-throwing contract', () => {
   let scope;
-  let holdOffScope; // GEMINI_LEARNING_FOCUS_HOLD forced false -- proves the underlying
-                     // quota/network logic these pre-existing tests describe is fully
-                     // intact and unchanged, i.e. this really is a clean, reversible
-                     // gate rather than a rewrite of the original behavior.
   let restoreFetch;
   beforeAll(() => {
-    const fnSrc = extractFunctions(
-      'runGeminiDailyAnalysis', 'callGeminiGenerateContent', 'extractGroundingMetadata',
+    scope = evalInScope(extractFunctions(
+      'runGeminiDailyAnalysis', 'callGeminiGenerateContent',
       'reserveGeminiQuotaSlot', 'buildQuotaBucketKeys', 'utcDayBucket', 'utcHourBucket',
-      'recordGeminiProviderCall', 'normalizeBias', 'normalizeRisk', 'isGeminiConsumerOnHold'
-    );
-    const constSrc = extractConstants('GEMINI_CALL_TIMEOUT_MS', 'GEMINI_TRIGGER_CONFIG', 'GEMINI_SHARED_QUOTA_CONFIG', 'ANALYSIS_SECTIONS', 'GEMINI_LEARNING_FOCUS_HOLD');
-    scope = evalInScope(fnSrc + '\n\n' + constSrc);
-    holdOffScope = evalInScope(fnSrc + '\n\n' + constSrc.replace('GEMINI_LEARNING_FOCUS_HOLD = true', 'GEMINI_LEARNING_FOCUS_HOLD = false'));
+      'recordGeminiProviderCall', 'normalizeBias', 'normalizeRisk'
+    ) + '\n\n' + extractConstants('GEMINI_CALL_TIMEOUT_MS', 'GEMINI_SHARED_QUOTA_CONFIG', 'ANALYSIS_SECTIONS'));
   });
   afterEach(() => { if (restoreFetch) { restoreFetch(); restoreFetch = null; } });
 
-  it('regression: while GEMINI_LEARNING_FOCUS_HOLD is active, BTC narrative makes ZERO fetch calls and reserves ZERO quota, for both cron and manual', async () => {
-    let fetchCalled = false;
-    restoreFetch = mockFetchGlobal(async () => { fetchCalled = true; return { ok: true, status: 200, json: async () => ({}) }; });
-    // quotaAdmitted:true on purpose -- proves the hold short-circuits
-    // BEFORE the reservation call is ever reached, not merely that a
-    // denied reservation happens to look the same from the outside.
-    const { db: cronDb, inserts: cronInserts } = makeNarrativeFakeDb({ quotaAdmitted: true });
-    const cronResult = await scope.runGeminiDailyAnalysis({ DB: cronDb, GEMINI_API_KEY: 'k' }, 'cron');
-    const { db: manualDb, inserts: manualInserts } = makeNarrativeFakeDb({ quotaAdmitted: true });
-    const manualResult = await scope.runGeminiDailyAnalysis({ DB: manualDb, GEMINI_API_KEY: 'k' }, 'manual');
-
-    expect(fetchCalled).toBe(false);
-    for (const result of [cronResult, manualResult]) {
-      expect(result.ok).toBe(false);
-      expect(result.status).toBe('held_for_learning_focus');
-    }
-    // No reservation UPDATE/INSERT against gemini_quota_ledger was ever
-    // attempted -- only the honest gemini_provider_calls audit row exists.
-    for (const inserts of [cronInserts, manualInserts]) {
-      expect(inserts.some(i => i.table === 'gemini_quota_ledger')).toBe(false);
-      expect(inserts.filter(i => i.table === 'gemini_provider_calls')).toHaveLength(1);
-    }
-  });
-
-  it('a held attempt is still honestly logged to gemini_provider_calls with quota_decision:held', async () => {
-    const { db, inserts } = makeNarrativeFakeDb({ quotaAdmitted: true });
-    await scope.runGeminiDailyAnalysis({ DB: db, GEMINI_API_KEY: 'k' }, 'cron');
-    const logged = inserts.find(i => i.table === 'gemini_provider_calls');
-    expect(logged).toBeDefined();
-    expect(logged.args).toContain('held');
-    expect(logged.args).toContain('held_for_learning_focus');
-  });
-
-  it('isGeminiConsumerOnHold: every btc_narrative lane is held, investigation is never held', () => {
-    expect(scope.isGeminiConsumerOnHold('btc_narrative_cron')).toBe(true);
-    expect(scope.isGeminiConsumerOnHold('btc_narrative_manual')).toBe(true);
-    expect(scope.isGeminiConsumerOnHold('investigation')).toBe(false);
-  });
-
-  it('when the quota is deferred, returns ok:false/status:quota_deferred WITHOUT ever calling fetch, and does not throw (hold off)', async () => {
+  it('when the quota is deferred, returns ok:false/status:quota_deferred WITHOUT ever calling fetch, and does not throw', async () => {
     let fetchCalled = false;
     restoreFetch = mockFetchGlobal(async () => { fetchCalled = true; return { ok: true, status: 200, json: async () => ({}) }; });
     const { db } = makeNarrativeFakeDb({ quotaAdmitted: false });
-    const result = await holdOffScope.runGeminiDailyAnalysis({ DB: db, GEMINI_API_KEY: 'k' }, 'manual');
+    const result = await scope.runGeminiDailyAnalysis({ DB: db, GEMINI_API_KEY: 'k' }, 'manual');
     expect(fetchCalled).toBe(false);
     expect(result.ok).toBe(false);
     expect(result.status).toBe('quota_deferred');
     expect(result.correlationId).toMatch(/^GA-\d+-BTC-manual$/);
   });
 
-  it('when admitted and Gemini returns 429, returns ok:false/status:rate_limited without throwing (hold off)', async () => {
+  it('when admitted and Gemini returns 429, returns ok:false/status:rate_limited without throwing', async () => {
     restoreFetch = mockFetchGlobal(async () => ({ ok: false, status: 429, text: async () => 'nope' }));
     const { db } = makeNarrativeFakeDb({ quotaAdmitted: true });
-    const result = await holdOffScope.runGeminiDailyAnalysis({ DB: db, GEMINI_API_KEY: 'k' }, 'cron');
+    const result = await scope.runGeminiDailyAnalysis({ DB: db, GEMINI_API_KEY: 'k' }, 'cron');
     expect(result.ok).toBe(false);
     expect(result.status).toBe('rate_limited');
     expect(result.correlationId).toMatch(/^GA-\d+-BTC-cron$/);
   });
 
-  it('happy path: writes gemini_daily_analysis and gemini_provider_calls, returns ok:true (hold off)', async () => {
+  it('happy path: writes gemini_daily_analysis and gemini_provider_calls, returns ok:true', async () => {
     restoreFetch = mockFetchGlobal(async () => ({
       ok: true, status: 200,
       json: async () => ({ candidates: [{ content: { parts: [{ text: 'SYNTHESIS: fine.\nANALYSIS_JSON: {"bias_short":"bullish"}' }] } }] }),
     }));
     const { db, inserts } = makeNarrativeFakeDb({ quotaAdmitted: true });
-    const result = await holdOffScope.runGeminiDailyAnalysis({ DB: db, GEMINI_API_KEY: 'k' }, 'cron');
+    const result = await scope.runGeminiDailyAnalysis({ DB: db, GEMINI_API_KEY: 'k' }, 'cron');
     expect(result.ok).toBe(true);
     expect(result.status).toBe('ok');
     expect(inserts.some(i => i.table === 'gemini_daily_analysis')).toBe(true);
     expect(inserts.some(i => i.table === 'gemini_provider_calls')).toBe(true);
   });
 
-  it('cron and manual triggers use separate quota lanes (different consumer names, so one can never exhaust the other) (hold off)', async () => {
+  it('cron and manual triggers use separate quota lanes (different consumer names, so one can never exhaust the other)', async () => {
     restoreFetch = mockFetchGlobal(async () => ({ ok: false, status: 429, text: async () => 'nope' }));
     const { db: cronDb } = makeNarrativeFakeDb({ quotaAdmitted: true });
     const { db: manualDb } = makeNarrativeFakeDb({ quotaAdmitted: true });
@@ -581,8 +482,8 @@ describe('runGeminiDailyAnalysis — shared quota gate + non-throwing contract',
     // trigger, which is the observable half of "separate lanes" at the
     // function-call level (the ledger-level separation is covered by the
     // buildQuotaBucketKeys namespacing test above).
-    const cronResult = await holdOffScope.runGeminiDailyAnalysis({ DB: cronDb, GEMINI_API_KEY: 'k' }, 'cron');
-    const manualResult = await holdOffScope.runGeminiDailyAnalysis({ DB: manualDb, GEMINI_API_KEY: 'k' }, 'manual');
+    const cronResult = await scope.runGeminiDailyAnalysis({ DB: cronDb, GEMINI_API_KEY: 'k' }, 'cron');
+    const manualResult = await scope.runGeminiDailyAnalysis({ DB: manualDb, GEMINI_API_KEY: 'k' }, 'manual');
     expect(cronResult.correlationId).toContain('-cron');
     expect(manualResult.correlationId).toContain('-manual');
   });
@@ -590,56 +491,34 @@ describe('runGeminiDailyAnalysis — shared quota gate + non-throwing contract',
 
 describe('runLinkGeminiAnalysis — shared quota gate + non-throwing contract', () => {
   let scope;
-  let holdOffScope;
   let restoreFetch;
   beforeAll(() => {
-    const fnSrc = extractFunctions(
-      'runLinkGeminiAnalysis', 'callGeminiGenerateContent', 'extractGroundingMetadata',
+    scope = evalInScope(extractFunctions(
+      'runLinkGeminiAnalysis', 'callGeminiGenerateContent',
       'reserveGeminiQuotaSlot', 'buildQuotaBucketKeys', 'utcDayBucket', 'utcHourBucket',
-      'recordGeminiProviderCall', 'normalizeBias', 'isGeminiConsumerOnHold'
-    );
-    const constSrc = extractConstants('GEMINI_CALL_TIMEOUT_MS', 'GEMINI_TRIGGER_CONFIG', 'GEMINI_SHARED_QUOTA_CONFIG', 'GEMINI_LEARNING_FOCUS_HOLD');
-    scope = evalInScope(fnSrc + '\n\n' + constSrc);
-    holdOffScope = evalInScope(fnSrc + '\n\n' + constSrc.replace('GEMINI_LEARNING_FOCUS_HOLD = true', 'GEMINI_LEARNING_FOCUS_HOLD = false'));
+      'recordGeminiProviderCall', 'normalizeBias'
+    ) + '\n\n' + extractConstants('GEMINI_CALL_TIMEOUT_MS', 'GEMINI_SHARED_QUOTA_CONFIG'));
   });
   afterEach(() => { if (restoreFetch) { restoreFetch(); restoreFetch = null; } });
 
-  it('regression: while GEMINI_LEARNING_FOCUS_HOLD is active, LINK analysis makes ZERO fetch calls and reserves ZERO quota', async () => {
-    let fetchCalled = false;
-    restoreFetch = mockFetchGlobal(async () => { fetchCalled = true; return { ok: true, status: 200, json: async () => ({}) }; });
-    const { db, inserts } = makeNarrativeFakeDb({ quotaAdmitted: true });
-    const result = await scope.runLinkGeminiAnalysis({ DB: db, GEMINI_API_KEY: 'k' }, 'cron');
-    expect(fetchCalled).toBe(false);
-    expect(result.ok).toBe(false);
-    expect(result.status).toBe('held_for_learning_focus');
-    expect(inserts.some(i => i.table === 'gemini_quota_ledger')).toBe(false);
-    expect(inserts.filter(i => i.table === 'gemini_provider_calls')).toHaveLength(1);
-  });
-
-  it('isGeminiConsumerOnHold: every link_narrative lane is held, investigation is never held', () => {
-    expect(scope.isGeminiConsumerOnHold('link_narrative_cron')).toBe(true);
-    expect(scope.isGeminiConsumerOnHold('link_narrative_manual')).toBe(true);
-    expect(scope.isGeminiConsumerOnHold('investigation')).toBe(false);
-  });
-
-  it('when the quota is deferred, returns ok:false/status:quota_deferred WITHOUT ever calling fetch (hold off)', async () => {
+  it('when the quota is deferred, returns ok:false/status:quota_deferred WITHOUT ever calling fetch', async () => {
     let fetchCalled = false;
     restoreFetch = mockFetchGlobal(async () => { fetchCalled = true; return { ok: true, status: 200, json: async () => ({}) }; });
     const { db } = makeNarrativeFakeDb({ quotaAdmitted: false });
-    const result = await holdOffScope.runLinkGeminiAnalysis({ DB: db, GEMINI_API_KEY: 'k' }, 'manual');
+    const result = await scope.runLinkGeminiAnalysis({ DB: db, GEMINI_API_KEY: 'k' }, 'manual');
     expect(fetchCalled).toBe(false);
     expect(result.ok).toBe(false);
     expect(result.status).toBe('quota_deferred');
     expect(result.correlationId).toMatch(/^GA-\d+-LINK-manual$/);
   });
 
-  it('happy path: writes link_gemini_analysis and gemini_provider_calls, returns ok:true (hold off)', async () => {
+  it('happy path: writes link_gemini_analysis and gemini_provider_calls, returns ok:true', async () => {
     restoreFetch = mockFetchGlobal(async () => ({
       ok: true, status: 200,
       json: async () => ({ candidates: [{ content: { parts: [{ text: 'SYNTHESIS: fine.\nLINK_JSON: {"bias_short":"bullish"}' }] } }] }),
     }));
     const { db, inserts } = makeNarrativeFakeDb({ quotaAdmitted: true });
-    const result = await holdOffScope.runLinkGeminiAnalysis({ DB: db, GEMINI_API_KEY: 'k' }, 'cron');
+    const result = await scope.runLinkGeminiAnalysis({ DB: db, GEMINI_API_KEY: 'k' }, 'cron');
     expect(result.ok).toBe(true);
     expect(inserts.some(i => i.table === 'link_gemini_analysis')).toBe(true);
     expect(inserts.some(i => i.table === 'gemini_provider_calls')).toBe(true);

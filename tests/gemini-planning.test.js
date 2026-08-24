@@ -529,14 +529,14 @@ describe('Gemini live — investigateMarketEvent (mocked fetch + D1)', () => {
 
   beforeAll(() => {
     const src = extractFunctions(
-      'investigateMarketEvent', 'callGeminiGenerateContent', 'buildGeminiInvestigationPrompt',
+      'investigateMarketEvent', 'callGeminiGenerateContent', 'buildInvestigationContext', 'computeContextHash', 'formatContextForGemini',
       'parseGeminiInvestigationResponse', 'validateGeminiInvestigationResponse', 'validateCatalystSources',
       'validateCatalystPayload', 'isDuplicateCatalyst', 'fetchCatalystsForPeriod', 'recordCatalyst', 'recordGeminiInvestigation',
       'extractGroundingMetadata', 'isSourceGrounded', 'deriveTimestampProvenance',
       'reserveGeminiQuotaSlot', 'buildQuotaBucketKeys', 'utcDayBucket', 'utcHourBucket', 'recordGeminiProviderCall'
     ) + '\n\n' + extractConstants(
       'ALLOWED_MARKET_CLASSIFICATIONS', 'ALLOWED_CATALYST_CATEGORIES',
-      'GEMINI_INVESTIGATION_TIMEOUT_MS', 'GEMINI_INVESTIGATION_MODEL', 'GEMINI_CALL_TIMEOUT_MS', 'GEMINI_TRIGGER_CONFIG', 'GEMINI_SHARED_QUOTA_CONFIG'
+      'GEMINI_INVESTIGATION_TIMEOUT_MS', 'GEMINI_INVESTIGATION_MODEL', 'GEMINI_CALL_TIMEOUT_MS', 'GEMINI_TRIGGER_CONFIG', 'GEMINI_SHARED_QUOTA_CONFIG', 'INVESTIGATION_ASSETS', 'INVESTIGATION_WINDOW_MS'
     );
     scope = evalInScope(src);
   });
@@ -823,14 +823,14 @@ describe('Gemini live — investigateMarketEvent (mocked fetch + D1) — groundi
 
   beforeAll(() => {
     const src = extractFunctions(
-      'investigateMarketEvent', 'callGeminiGenerateContent', 'buildGeminiInvestigationPrompt',
+      'investigateMarketEvent', 'callGeminiGenerateContent', 'buildInvestigationContext', 'computeContextHash', 'formatContextForGemini',
       'parseGeminiInvestigationResponse', 'validateGeminiInvestigationResponse', 'validateCatalystSources',
       'validateCatalystPayload', 'isDuplicateCatalyst', 'fetchCatalystsForPeriod', 'recordCatalyst', 'recordGeminiInvestigation',
       'extractGroundingMetadata', 'isSourceGrounded', 'deriveTimestampProvenance',
       'reserveGeminiQuotaSlot', 'buildQuotaBucketKeys', 'utcDayBucket', 'utcHourBucket', 'recordGeminiProviderCall'
     ) + '\n\n' + extractConstants(
       'ALLOWED_MARKET_CLASSIFICATIONS', 'ALLOWED_CATALYST_CATEGORIES',
-      'GEMINI_INVESTIGATION_TIMEOUT_MS', 'GEMINI_INVESTIGATION_MODEL', 'GEMINI_CALL_TIMEOUT_MS', 'GEMINI_TRIGGER_CONFIG', 'GEMINI_SHARED_QUOTA_CONFIG'
+      'GEMINI_INVESTIGATION_TIMEOUT_MS', 'GEMINI_INVESTIGATION_MODEL', 'GEMINI_CALL_TIMEOUT_MS', 'GEMINI_TRIGGER_CONFIG', 'GEMINI_SHARED_QUOTA_CONFIG', 'INVESTIGATION_ASSETS', 'INVESTIGATION_WINDOW_MS'
     );
     scope = evalInScope(src);
   });
@@ -1104,33 +1104,43 @@ describe('Analyst Relay — getAnalystRelayCandidate (mocked candidate-building)
   beforeAll(() => {
     // Mocks buildInvestigationCandidates the same way the
     // evaluateGeminiTriggers tests above do -- isolates this function's own
-    // logic (ranking + threshold + prompt-building) from D1/network.
+    // logic (ranking + threshold + context-building) from D1/network.
+    // buildInvestigationContext's own D1 reads are NOT mocked here -- a
+    // fake DB (makeFakeDb, defined above) is passed in per test instead,
+    // since getAnalystRelayCandidate must now build the same shared
+    // context investigateMarketEvent does.
     const mocks = `async function buildInvestigationCandidates(env) { return env.__mockCandidates; }`;
     const src = mocks + '\n\n' + extractFunctions(
       'rankInvestigationCandidates', 'computeInvestigationPriority', 'selectWithinBudget',
-      'buildGeminiInvestigationPrompt', 'getAnalystRelayCandidate'
-    ) + '\n\n' + extractConstants('INVESTIGATION_PRIORITY_WEIGHTS', 'INVESTIGATION_PRIORITY_THRESHOLD');
+      'buildInvestigationContext', 'computeContextHash', 'formatContextForGemini', 'formatContextForAnalyst',
+      'getAnalystRelayCandidate'
+    ) + '\n\n' + extractConstants('INVESTIGATION_PRIORITY_WEIGHTS', 'INVESTIGATION_PRIORITY_THRESHOLD', 'INVESTIGATION_ASSETS', 'INVESTIGATION_WINDOW_MS');
     scope = evalInScope(src);
   });
 
   it('hasCandidate:false when there is nothing to evaluate', async () => {
-    const result = await scope.getAnalystRelayCandidate({ __mockCandidates: [] });
+    const { db } = makeFakeDb();
+    const result = await scope.getAnalystRelayCandidate({ __mockCandidates: [], DB: db });
     expect(result).toEqual({ ok: true, hasCandidate: false });
   });
 
   it('hasCandidate:false when candidates exist but none clear the priority threshold', async () => {
+    const { db } = makeFakeDb();
     const result = await scope.getAnalystRelayCandidate({
       __mockCandidates: [{ id: 'BTC', assets: ['BTC'], signals: { priceMovePct: 0.2, wasWrong: false, confidence: 0.9 } }],
+      DB: db,
     });
     expect(result.hasCandidate).toBe(false);
   });
 
-  it('returns the top-ranked candidate and a real prompt when one clears the bar -- the same bar the automated investigation uses', async () => {
+  it('returns the top-ranked candidate, a real prompt, factual summary, and a context hash when one clears the bar', async () => {
+    const { db } = makeFakeDb();
     const env = {
       __mockCandidates: [{
         id: 'BTC', assets: ['BTC'],
         signals: { priceMovePct: 12, wasWrong: true, confidence: 0.9, correlatedFailureAssetCount: 3, isVolatilityAnomaly: true, isRegimeChange: true },
       }],
+      DB: db,
     };
     const result = await scope.getAnalystRelayCandidate(env);
     expect(result.hasCandidate).toBe(true);
@@ -1138,12 +1148,17 @@ describe('Analyst Relay — getAnalystRelayCandidate (mocked candidate-building)
     expect(result.assets).toEqual(['BTC']);
     expect(typeof result.prompt).toBe('string');
     expect(result.prompt).toContain('BTC');
+    expect(typeof result.factualSummary).toBe('string');
+    expect(typeof result.contextHash).toBe('string');
+    expect(result.contextHash.length).toBe(64); // SHA-256 hex
     expect(typeof result.promptRequestedTs).toBe('number');
+    expect(result.context).toBeTruthy(); // full context round-tripped for recordAnalystRelay to persist verbatim
   });
 
   it('picks only ONE candidate even when multiple clear the bar -- one prompt slot at a time', async () => {
+    const { db } = makeFakeDb();
     const strong = { signals: { priceMovePct: 12, wasWrong: true, confidence: 0.9, correlatedFailureAssetCount: 3, isVolatilityAnomaly: true, isRegimeChange: true } };
-    const env = { __mockCandidates: [{ id: 'BTC', assets: ['BTC'], ...strong }, { id: 'LINK', assets: ['LINK'], ...strong }] };
+    const env = { __mockCandidates: [{ id: 'BTC', assets: ['BTC'], ...strong }, { id: 'LINK', assets: ['LINK'], ...strong }], DB: db };
     const result = await scope.getAnalystRelayCandidate(env);
     expect(result.hasCandidate).toBe(true);
     expect(['BTC', 'LINK']).toContain(result.candidateId); // exactly one, whichever ranks higher
@@ -1235,5 +1250,188 @@ describe('Analyst Relay — recordAnalystRelay (mocked D1) — reuses the real p
     const relayInsert = inserts.find(i => i.table === 'analyst_relay_log');
     const storedText = relayInsert.args.find(a => typeof a === 'string' && a.length > 100);
     expect(storedText.length).toBeLessThanOrEqual(20000);
+  });
+});
+
+// ---------------------------------------------------------------------
+// A dedicated fake DB for buildInvestigationContext -- returns REAL
+// multi-row, multi-asset data (unlike makeFakeDb above, which defaults to
+// empty results) so these tests can prove cross-asset observations
+// actually flow through, not just that the code doesn't crash on empty
+// data. Routes by table/data-table name appearing in the SQL text.
+function makeContextFakeDb({ btc = [], eth = [], link = [], prices = {} } = {}) {
+  const tableToRows = { predictions: btc, eth_predictions: eth, link_predictions: link };
+  const dataTableToPrices = { btc_data: prices.BTC, eth_data: prices.ETH, link_data: prices.LINK };
+  function statementFor(sql) {
+    return {
+      async all() {
+        for (const [table, rows] of Object.entries(tableToRows)) {
+          if (sql.includes(`FROM ${table} `)) return { results: rows };
+        }
+        return { results: [] };
+      },
+      async first() {
+        for (const [dataTable, p] of Object.entries(dataTableToPrices)) {
+          if (sql.includes(`FROM ${dataTable} `)) {
+            if (!p) return null;
+            return sql.includes('ASC') ? { price: p.oldest } : { price: p.newest };
+          }
+        }
+        return null;
+      },
+    };
+  }
+  return {
+    prepare(sql) {
+      // Real D1 prepared statements support .first()/.all() directly (no
+      // params) as well as after .bind(...) -- the "newest price" query
+      // here has no parameters at all, so both paths are exercised.
+      return { ...statementFor(sql), bind: () => statementFor(sql) };
+    },
+  };
+}
+
+describe('Shared investigation context — buildInvestigationContext / formatContextForGemini / formatContextForAnalyst', () => {
+  let scope;
+
+  beforeAll(() => {
+    scope = evalInScope(extractFunctions(
+      'buildInvestigationContext', 'computeContextHash', 'formatContextForGemini', 'formatContextForAnalyst'
+    ) + '\n\n' + extractConstants('INVESTIGATION_ASSETS', 'INVESTIGATION_WINDOW_MS'));
+  });
+
+  // The exact BTC/ETH/LINK numbers from the build spec's own worked
+  // example (100%/66.7%/73.3% confidence, all predicted UP, all actually
+  // went DOWN, -1.70%/-3.83%/-5.48%).
+  const nowTs = Date.parse('2026-08-24T00:00:00Z').valueOf();
+  const resolvedTs = nowTs - 60000;
+  const btcRow = { ts: nowTs - 3600000, resolved_ts: resolvedTs, p_up: 1.0, calibrated_p_up: null, realized_up: 0, is_regime_anomaly: 1 };
+  const ethRow = { ts: nowTs - 3600000, resolved_ts: resolvedTs, p_up: 0.667, calibrated_p_up: null, realized_up: 0, is_regime_anomaly: 0 };
+  const linkRow = { ts: nowTs - 3600000, resolved_ts: resolvedTs, p_up: 0.733, calibrated_p_up: null, realized_up: 0, is_regime_anomaly: 0 };
+  const fullPrices = {
+    BTC: { oldest: 100000, newest: 98300 },   // -1.70%
+    ETH: { oldest: 3000, newest: 2885.1 },    // -3.83%
+    LINK: { oldest: 11, newest: 10.3972 },    // -5.48%
+  };
+
+  it('A. normal single-asset candidate: primary asset correctly identified, others reported per real (here: absent) data -- never fabricated', async () => {
+    const db = makeContextFakeDb({ btc: [btcRow] }); // only BTC has data
+    const context = await scope.buildInvestigationContext({ DB: db }, { id: 'BTC', assets: ['BTC'] }, nowTs);
+    expect(context.primaryAsset).toBe('BTC');
+    expect(context.observations.BTC.available).toBe(true);
+    expect(context.observations.ETH).toEqual({ available: false });
+    expect(context.observations.LINK).toEqual({ available: false });
+    expect(context.correlatedFailureAssetCount).toBe(1); // only BTC has data to be wrong about
+  });
+
+  it('B. cross-asset anomaly: actual BTC/ETH/LINK observations are present, not a bare correlatedFailureAssetCount integer', async () => {
+    const db = makeContextFakeDb({ btc: [btcRow], eth: [ethRow], link: [linkRow], prices: fullPrices });
+    const context = await scope.buildInvestigationContext({ DB: db }, { id: 'BTC', assets: ['BTC'] }, nowTs);
+
+    expect(context.observations.BTC).toMatchObject({ available: true, predictedDirection: 'UP', confidencePct: 100, actualDirection: 'DOWN', wasWrong: true, isRegimeAnomaly: true });
+    expect(context.observations.BTC.actualMovePct).toBeCloseTo(-1.70, 1);
+    expect(context.observations.ETH).toMatchObject({ available: true, predictedDirection: 'UP', confidencePct: 66.7, actualDirection: 'DOWN', wasWrong: true });
+    expect(context.observations.ETH.actualMovePct).toBeCloseTo(-3.83, 1);
+    expect(context.observations.LINK).toMatchObject({ available: true, predictedDirection: 'UP', confidencePct: 73.3, actualDirection: 'DOWN', wasWrong: true });
+    expect(context.observations.LINK.actualMovePct).toBeCloseTo(-5.48, 1);
+
+    expect(context.correlatedFailureAssetCount).toBe(3);
+    expect(context.correlatedFailureAssets.sort()).toEqual(['BTC', 'ETH', 'LINK']);
+  });
+
+  it('C. historical context: real recent cycles only, bounded to the existing 5-row/3.5h window -- not a new/arbitrary window', async () => {
+    const olderRow = { ts: nowTs - 7200000, resolved_ts: resolvedTs - 3600000, p_up: 0.6, calibrated_p_up: null, realized_up: 1, is_regime_anomaly: 0 };
+    const db = makeContextFakeDb({ btc: [btcRow, olderRow], prices: fullPrices });
+    const context = await scope.buildInvestigationContext({ DB: db }, { id: 'BTC', assets: ['BTC'] }, nowTs);
+    expect(context.windowMs).toBe(scope.INVESTIGATION_WINDOW_MS); // literally the same constant, not a new value
+    expect(context.observations.BTC.recentCycles).toHaveLength(2);
+    expect(context.observations.BTC.recentCycles[0].wasWrong).toBe(true);  // btcRow
+    expect(context.observations.BTC.recentCycles[1].wasWrong).toBe(false); // olderRow -- predicted UP(0.6), actual UP -- correct
+  });
+
+  it('D. missing observation: explicitly available:false, never a fabricated/guessed value', async () => {
+    const db = makeContextFakeDb({ btc: [btcRow] }); // ETH/LINK have zero rows
+    const context = await scope.buildInvestigationContext({ DB: db }, { id: 'BTC', assets: ['BTC'] }, nowTs);
+    expect(context.observations.ETH).toEqual({ available: false });
+    expect(context.observations.LINK).toEqual({ available: false });
+    // Not present in correlatedFailureAssets either -- absence of data is
+    // not silently treated as "wrong".
+    expect(context.correlatedFailureAssets).not.toContain('ETH');
+    expect(context.correlatedFailureAssets).not.toContain('LINK');
+  });
+
+  it('E. Gemini and Analyst Relay receive identical factual context -- same context object feeds both formatters, same facts appear in both outputs', async () => {
+    const db = makeContextFakeDb({ btc: [btcRow], eth: [ethRow], link: [linkRow], prices: fullPrices });
+    const context = await scope.buildInvestigationContext({ DB: db }, { id: 'BTC', assets: ['BTC'] }, nowTs);
+
+    const geminiText = scope.formatContextForGemini(context);
+    const analystOutput = scope.formatContextForAnalyst(context);
+
+    // Every real number appears in BOTH outputs -- the facts are identical.
+    for (const needle of ['ETH', 'LINK', '-1.7', '-3.83', '-5.48', '100%', '66.7%', '73.3%']) {
+      expect(geminiText).toContain(needle);
+      expect(analystOutput.factualSummary).toContain(needle);
+      expect(analystOutput.prompt).toContain(needle);
+    }
+  });
+
+  it('F. different presentation is allowed: the human factual summary is NOT byte-identical to the Gemini prompt, despite sharing all facts', async () => {
+    const db = makeContextFakeDb({ btc: [btcRow], eth: [ethRow], link: [linkRow], prices: fullPrices });
+    const context = await scope.buildInvestigationContext({ DB: db }, { id: 'BTC', assets: ['BTC'] }, nowTs);
+    const geminiText = scope.formatContextForGemini(context);
+    const factualSummary = scope.formatContextForAnalyst(context).factualSummary;
+    expect(factualSummary).not.toBe(geminiText); // genuinely different presentation
+    expect(factualSummary.length).toBeLessThan(geminiText.length); // the human summary is the short version, not the full instruction+schema text
+  });
+
+  it('same underlying context produces the same hash regardless of which formatter reads it -- proves the hash is about the facts, not the presentation', async () => {
+    const db = makeContextFakeDb({ btc: [btcRow], eth: [ethRow], link: [linkRow], prices: fullPrices });
+    const context = await scope.buildInvestigationContext({ DB: db }, { id: 'BTC', assets: ['BTC'] }, nowTs);
+    // Formatting doesn't mutate the context or its hash.
+    scope.formatContextForGemini(context);
+    scope.formatContextForAnalyst(context);
+    const recomputed = await scope.computeContextHash(context);
+    expect(context.contextHash).toBe(recomputed);
+    expect(context.contextHash).toMatch(/^[0-9a-f]{64}$/);
+  });
+
+  it('two builds of byte-identical underlying data hash the same, even seconds apart -- generatedTs is deliberately excluded from the hash', async () => {
+    const db1 = makeContextFakeDb({ btc: [btcRow], eth: [ethRow], link: [linkRow], prices: fullPrices });
+    const db2 = makeContextFakeDb({ btc: [btcRow], eth: [ethRow], link: [linkRow], prices: fullPrices });
+    const contextA = await scope.buildInvestigationContext({ DB: db1 }, { id: 'BTC', assets: ['BTC'] }, nowTs);
+    const contextB = await scope.buildInvestigationContext({ DB: db2 }, { id: 'BTC', assets: ['BTC'] }, nowTs + 5000); // different generatedTs
+    expect(contextA.contextHash).toBe(contextB.contextHash);
+  });
+
+  it('different underlying data produces a different hash', async () => {
+    const dbWrong = makeContextFakeDb({ btc: [btcRow], prices: fullPrices });
+    const dbFull = makeContextFakeDb({ btc: [btcRow], eth: [ethRow], link: [linkRow], prices: fullPrices });
+    const contextWrong = await scope.buildInvestigationContext({ DB: dbWrong }, { id: 'BTC', assets: ['BTC'] }, nowTs);
+    const contextFull = await scope.buildInvestigationContext({ DB: dbFull }, { id: 'BTC', assets: ['BTC'] }, nowTs);
+    expect(contextWrong.contextHash).not.toBe(contextFull.contextHash);
+  });
+});
+
+describe('Shared investigation context — G/H/I/J regression: nothing about budget, threshold, correlation IDs, or grounding changed', () => {
+  it('G. investigation budget is still exactly 1/day + 1/hour, unchanged', () => {
+    const scope = evalInScope(extractConstants('GEMINI_TRIGGER_CONFIG'));
+    expect(scope.GEMINI_TRIGGER_CONFIG.MAX_GEMINI_INVESTIGATIONS_PER_DAY).toBe(1);
+    expect(scope.GEMINI_TRIGGER_CONFIG.MAX_GEMINI_INVESTIGATIONS_PER_HOUR).toBe(1);
+  });
+
+  it('H. priority threshold is still exactly 4, unchanged', () => {
+    const scope = evalInScope(extractConstants('INVESTIGATION_PRIORITY_THRESHOLD'));
+    expect(scope.INVESTIGATION_PRIORITY_THRESHOLD).toBe(4);
+  });
+
+  it('I. correlation ID prefixes are preserved: MI- for the automated investigation, AR- for Analyst Relay', () => {
+    const src = extractFunctions('investigateMarketEvent', 'recordAnalystRelay');
+    expect(src).toMatch(/`MI-\$\{Date\.now\(\)\}-\$\{candidate\.id\}`/);
+    expect(src).toMatch(/`AR-\$\{Date\.now\(\)\}-\$\{candidateId\}`/);
+  });
+
+  it('J. Gemini grounding requirement (useGrounding: true) is still present in investigateMarketEvent -- the shared context refactor never touched this flag', () => {
+    const src = extractFunctions('investigateMarketEvent');
+    expect(src).toMatch(/useGrounding:\s*true/);
   });
 });

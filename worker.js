@@ -1643,20 +1643,192 @@ const GEMINI_INVESTIGATION_MODEL = 'gemini-3.6-flash'; // same model as the exis
 // predictions (a ~3.5h trailing window -- slightly wider than one 3-hourly
 // cron tick so a resolution that lands just before/after this invocation
 // still gets picked up next cycle rather than silently skipped).
-async function buildInvestigationCandidates(env, nowTs) {
-  const WINDOW_MS = 3.5 * 3600 * 1000;
-  const ASSETS = [
-    { coin: 'BTC', table: 'predictions', dataTable: 'btc_data', priceCol: 'btc_price' },
-    { coin: 'LINK', table: 'link_predictions', dataTable: 'link_data', priceCol: 'link_price' },
-    { coin: 'ETH', table: 'eth_predictions', dataTable: 'eth_data', priceCol: 'eth_price' },
-  ];
+// Module-level, shared between buildInvestigationCandidates and the new
+// buildInvestigationContext below -- was previously a local const inside
+// buildInvestigationCandidates only, duplicated here would have meant two
+// asset lists to keep in sync.
+const INVESTIGATION_ASSETS = [
+  { coin: 'BTC', table: 'predictions', dataTable: 'btc_data', priceCol: 'btc_price' },
+  { coin: 'LINK', table: 'link_predictions', dataTable: 'link_data', priceCol: 'link_price' },
+  { coin: 'ETH', table: 'eth_predictions', dataTable: 'eth_data', priceCol: 'eth_price' },
+];
+// 3.5h trailing, last 5 resolved cycles per asset -- the SAME window
+// buildInvestigationCandidates already queried before this change (just
+// discarded down to a single recentFailureCount integer). Deliberately not
+// a new/larger window -- per the build spec, prefer existing resolved
+// cycles over introducing something arbitrary.
+const INVESTIGATION_WINDOW_MS = 3.5 * 3600 * 1000;
 
+// =====================================================================
+// ---- Shared investigation context builder ----
+// The ONE place that gathers factual evidence for an investigation.
+// Called identically by both the Gemini canary (investigateMarketEvent)
+// and the human Analyst Relay (getAnalystRelayCandidate) -- neither
+// consumer builds its own version of this, so they cannot silently drift
+// into receiving different facts. Each consumer formats the SAME context
+// differently for presentation (formatContextForGemini /
+// formatContextForAnalyst below), but never adds or omits factual content.
+//
+// Never fabricates a missing observation -- an asset with no resolved
+// prediction in the window is marked available:false, not silently
+// dropped or guessed.
+// =====================================================================
+async function buildInvestigationContext(env, candidate, nowTs) {
+  const observations = {};
+
+  for (const a of INVESTIGATION_ASSETS) {
+    const { results } = await env.DB.prepare(
+      `SELECT ts, resolved_ts, p_up, calibrated_p_up, realized_up, is_regime_anomaly
+       FROM ${a.table} WHERE resolved_ts IS NOT NULL AND resolved_ts >= ? ORDER BY resolved_ts DESC LIMIT 5`
+    ).bind(nowTs - INVESTIGATION_WINDOW_MS).all();
+
+    if (!results.length) {
+      observations[a.coin] = { available: false };
+      continue;
+    }
+
+    const oldest = await env.DB.prepare(
+      `SELECT ${a.priceCol} as price FROM ${a.dataTable} WHERE ts >= ? ORDER BY ts ASC LIMIT 1`
+    ).bind(nowTs - INVESTIGATION_WINDOW_MS).first();
+    const newest = await env.DB.prepare(
+      `SELECT ${a.priceCol} as price FROM ${a.dataTable} ORDER BY ts DESC LIMIT 1`
+    ).first();
+    const actualMovePct = (oldest?.price && newest?.price) ? ((newest.price - oldest.price) / oldest.price) * 100 : null;
+
+    const toCycle = (row) => {
+      const p = row.calibrated_p_up ?? row.p_up;
+      return {
+        predictedDirection: p >= 0.5 ? 'UP' : 'DOWN',
+        confidencePct: Math.round(Math.max(p, 1 - p) * 1000) / 10,
+        actualDirection: row.realized_up === 1 ? 'UP' : 'DOWN',
+        wasWrong: (p >= 0.5 ? 1 : 0) !== row.realized_up,
+        isRegimeAnomaly: !!row.is_regime_anomaly,
+        resolvedTs: row.resolved_ts,
+      };
+    };
+
+    const latestCycle = toCycle(results[0]);
+    observations[a.coin] = {
+      available: true,
+      ...latestCycle,
+      actualMovePct, // trailing-window aggregate price delta, null if price data unavailable
+      recentCycles: results.map(toCycle), // bounded to the same LIMIT 5 above, oldest-to-newest not required -- consumers sort if needed
+    };
+  }
+
+  const correlatedFailureAssets = INVESTIGATION_ASSETS
+    .map(a => a.coin)
+    .filter(coin => observations[coin].available && observations[coin].wasWrong);
+
+  const context = {
+    candidateId: candidate.id,
+    primaryAsset: candidate.assets[0],
+    generatedTs: nowTs,
+    windowMs: INVESTIGATION_WINDOW_MS,
+    windowLabel: '3.5h trailing, last 5 resolved cycles per asset',
+    observations, // always all three assets, available:false where no data exists -- never fabricated
+    correlatedFailureAssetCount: correlatedFailureAssets.length,
+    correlatedFailureAssets, // the actual list, not just a count
+  };
+  context.contextHash = await computeContextHash(context);
+  return context;
+}
+
+// Pure-ish (crypto.subtle is available in the Workers runtime, no network,
+// no secrets touched). SHA-256 over a canonical (sorted-key) JSON
+// serialization of the DETERMINISTIC factual fields only -- deliberately
+// excludes generatedTs, so two builds of the identical underlying D1 state
+// hash the same even if built moments apart, and comparing hashes across a
+// Gemini investigation and a later Analyst Relay submission is meaningful
+// evidence they saw the same facts, not just that they ran at different
+// times.
+async function computeContextHash(context) {
+  const canonical = {
+    candidateId: context.candidateId,
+    primaryAsset: context.primaryAsset,
+    windowMs: context.windowMs,
+    observations: context.observations,
+    correlatedFailureAssetCount: context.correlatedFailureAssetCount,
+    correlatedFailureAssets: context.correlatedFailureAssets,
+  };
+  const json = JSON.stringify(canonical, Object.keys(canonical).sort());
+  const bytes = new TextEncoder().encode(json);
+  const digest = await crypto.subtle.digest('SHA-256', bytes);
+  return [...new Uint8Array(digest)].map(b => b.toString(16).padStart(2, '0')).join('');
+}
+
+// Pure. Formats the shared context for Gemini's grounded-search
+// instruction. Same underlying observations as formatContextForAnalyst
+// below -- only the framing instruction differs, never the facts.
+function formatContextForGemini(context) {
+  const lines = [];
+  for (const coin of ['BTC', 'ETH', 'LINK']) {
+    const o = context.observations[coin];
+    if (!o.available) { lines.push(`${coin}: no resolved prediction in this window`); continue; }
+    lines.push(`${coin}: predicted ${o.predictedDirection} (confidence ${o.confidencePct}%), actual ${o.actualDirection}${o.actualMovePct != null ? ` (${o.actualMovePct.toFixed(2)}% move)` : ''}, ${o.wasWrong ? 'WRONG' : 'correct'}${o.isRegimeAnomaly ? ', regime anomaly flagged' : ''}`);
+  }
+  const historyLines = [];
+  for (const coin of ['BTC', 'ETH', 'LINK']) {
+    const o = context.observations[coin];
+    if (!o.available || o.recentCycles.length <= 1) continue;
+    historyLines.push(`${coin} recent cycles: ` + o.recentCycles.map(c => `${c.predictedDirection}/${c.actualDirection}${c.wasWrong ? '(wrong)' : ''}`).join(', '));
+  }
+
+  return `You are a market intelligence analyst investigating a specific crypto market event. Use web search to find real, current, verifiable sources -- do not rely on general knowledge alone for this task.
+
+EVENT CONTEXT (already computed by CryptoPulse, not your job to re-derive):
+Primary asset under investigation: ${context.primaryAsset}
+Window: ${context.windowLabel}
+
+Cross-asset observations this cycle:
+${lines.join('\n')}
+
+Correlated failures: ${context.correlatedFailureAssetCount} asset(s) wrong this cycle${context.correlatedFailureAssetCount ? ` (${context.correlatedFailureAssets.join(', ')})` : ''}.
+${historyLines.length ? '\nRecent history:\n' + historyLines.join('\n') : ''}
+
+TASK: Investigate what likely caused this price movement, considering both the primary asset and whether the cross-asset pattern above suggests a market-wide event rather than an asset-specific one. Search for real news, announcements, or events from credible sources (official announcements, regulatory sources, established financial/crypto news outlets) published around this time window.
+
+RULES:
+- Only report a catalyst if you find credible, verifiable evidence. If you cannot find a credible catalyst, return an empty catalysts array -- do not invent one.
+- Never fabricate a source URL, publisher name, or timestamp. If a timestamp cannot be verified, omit that field (do not guess).
+- For each catalyst, report event_timestamp (when it happened) and first_public_timestamp (when credible public information became available) as SEPARATE fields if you can establish them -- they are often different.
+- Report first_public_timestamp_confidence as exactly one of HIGH, MEDIUM, LOW, or UNKNOWN, reflecting how confident you are in the first_public_timestamp value specifically (not your confidence in the catalyst overall). If first_public_timestamp is null, this must be UNKNOWN.
+- Category must be exactly one of: MACRO, FED_RATES, INFLATION, EMPLOYMENT, USD, ETF_FLOWS, REGULATION, EXCHANGE, STABLECOIN, LIQUIDATION, LEVERAGE, TECHNICAL, ON_CHAIN, GEOPOLITICAL, SECURITY, PROTOCOL, OTHER.
+- market_classification must be exactly one of: MARKET_WIDE, SECTOR_SPECIFIC, ASSET_SPECIFIC, NO_CLEAR_CATALYST.
+
+Respond with ONLY valid JSON, no other text, in exactly this shape:
+{"investigation_id":"","assets":${JSON.stringify([context.primaryAsset])},"market_classification":"","catalysts":[{"category":"","event_timestamp":null,"first_public_timestamp":null,"first_public_timestamp_confidence":"HIGH|MEDIUM|LOW|UNKNOWN","direction":"","confidence":"HIGH|MEDIUM|LOW","description":"","assets":[],"sources":[{"title":"","publisher":"","url":"","published_at":null}]}]}`;
+}
+
+// Pure. Same factual content as formatContextForGemini -- section headers
+// differ (human-readable "Review this evidence" vs Gemini's grounded-
+// search instruction) but every observation, every number, is identical.
+// Returns structured pieces (not one flat string) so the frontend can
+// render FACTUAL DATA and the copy-paste prompt as visually separate
+// blocks, per the build spec's explicit UI requirement.
+function formatContextForAnalyst(context) {
+  const factualLines = [];
+  for (const coin of ['BTC', 'ETH', 'LINK']) {
+    const o = context.observations[coin];
+    if (!o.available) { factualLines.push(`${coin}: no resolved prediction in this window`); continue; }
+    factualLines.push(`${coin}: predicted ${o.predictedDirection} (${o.confidencePct}% confidence) -> actual ${o.actualDirection}${o.actualMovePct != null ? ` (${o.actualMovePct.toFixed(2)}%)` : ''} -- ${o.wasWrong ? 'WRONG' : 'correct'}${o.isRegimeAnomaly ? ' [regime anomaly]' : ''}`);
+  }
+  const factualSummary = `Primary asset: ${context.primaryAsset}\nWindow: ${context.windowLabel}\n\n${factualLines.join('\n')}\n\nCorrelated failures: ${context.correlatedFailureAssetCount} asset(s)${context.correlatedFailureAssetCount ? ` (${context.correlatedFailureAssets.join(', ')})` : ''}`;
+
+  return {
+    factualSummary, // for the UI's separate "FACTUAL DATA" block
+    prompt: formatContextForGemini(context), // same underlying facts, Gemini's own instruction framing -- still what gets copy-pasted, since the human is relaying TO Gemini
+  };
+}
+
+
+async function buildInvestigationCandidates(env, nowTs) {
   const resolvedByAsset = {};
-  for (const a of ASSETS) {
+  for (const a of INVESTIGATION_ASSETS) {
     const { results } = await env.DB.prepare(
       `SELECT ts, p_up, calibrated_p_up, realized_up, is_regime_anomaly
        FROM ${a.table} WHERE resolved_ts IS NOT NULL AND resolved_ts >= ? ORDER BY resolved_ts DESC LIMIT 5`
-    ).bind(nowTs - WINDOW_MS).all();
+    ).bind(nowTs - INVESTIGATION_WINDOW_MS).all();
     resolvedByAsset[a.coin] = results;
   }
 
@@ -1664,10 +1836,10 @@ async function buildInvestigationCandidates(env, nowTs) {
     const p = row.calibrated_p_up ?? row.p_up;
     return (p >= 0.5 ? 1 : 0) !== row.realized_up;
   };
-  const failedAssetCount = ASSETS.filter(a => resolvedByAsset[a.coin].some(wasAssetWrong)).length;
+  const failedAssetCount = INVESTIGATION_ASSETS.filter(a => resolvedByAsset[a.coin].some(wasAssetWrong)).length;
 
   const candidates = [];
-  for (const a of ASSETS) {
+  for (const a of INVESTIGATION_ASSETS) {
     const rows = resolvedByAsset[a.coin];
     if (!rows.length) continue; // nothing resolved this window for this asset -- no candidate, not an error
     const latest = rows[0];
@@ -1677,7 +1849,7 @@ async function buildInvestigationCandidates(env, nowTs) {
 
     const oldest = await env.DB.prepare(
       `SELECT ${a.priceCol} as price FROM ${a.dataTable} WHERE ts >= ? ORDER BY ts ASC LIMIT 1`
-    ).bind(nowTs - WINDOW_MS).first();
+    ).bind(nowTs - INVESTIGATION_WINDOW_MS).first();
     const newest = await env.DB.prepare(
       `SELECT ${a.priceCol} as price FROM ${a.dataTable} ORDER BY ts DESC LIMIT 1`
     ).first();
@@ -1988,15 +2160,16 @@ function geminiStatusToHttpCode(status) {
 }
 
 
-async function recordGeminiInvestigation(env, { investigationId, requestTs, triggerReasons, assets, modelIdentifier, responseStatus, sourceCount, validationStatus, errorMessage, catalystsWritten, groundingMetadata }) {
+async function recordGeminiInvestigation(env, { investigationId, requestTs, triggerReasons, assets, modelIdentifier, responseStatus, sourceCount, validationStatus, errorMessage, catalystsWritten, groundingMetadata, context }) {
   await env.DB.prepare(
     `INSERT INTO gemini_investigations
-     (investigation_id, request_ts, trigger_reasons_json, assets_json, model_identifier, response_status, source_count, validation_status, error_message, catalysts_written, grounding_metadata_json)
-     VALUES (?,?,?,?,?,?,?,?,?,?,?)`
+     (investigation_id, request_ts, trigger_reasons_json, assets_json, model_identifier, response_status, source_count, validation_status, error_message, catalysts_written, grounding_metadata_json, investigation_context_json, context_hash)
+     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`
   ).bind(
     investigationId, requestTs, JSON.stringify(triggerReasons ?? {}), JSON.stringify(assets ?? []),
     modelIdentifier ?? null, responseStatus ?? null, sourceCount ?? 0, validationStatus ?? null,
-    errorMessage ?? null, catalystsWritten ?? 0, JSON.stringify(groundingMetadata ?? { searchQueries: [], groundedSources: [] })
+    errorMessage ?? null, catalystsWritten ?? 0, JSON.stringify(groundingMetadata ?? { searchQueries: [], groundedSources: [] }),
+    context ? JSON.stringify(context) : null, context?.contextHash ?? null
   ).run();
 }
 
@@ -2011,30 +2184,12 @@ async function recordGeminiInvestigation(env, { investigationId, requestTs, trig
 // the request shape follows Google's documented grounding tool schema for
 // this model generation, but should be spot-checked against a real response
 // after deploy, per the final implementation report.
-function buildGeminiInvestigationPrompt(candidate) {
-  const { assets, signals } = candidate;
-  return `You are a market intelligence analyst investigating a specific crypto market event. Use web search to find real, current, verifiable sources -- do not rely on general knowledge alone for this task.
-
-EVENT CONTEXT (already computed by CryptoPulse, not your job to re-derive):
-Assets involved: ${assets.join(', ')}
-Approximate price move (trailing ~3.5h window): ${signals.priceMovePct?.toFixed(2)}%
-Prediction outcome: ${signals.wasWrong ? "the model's prediction was WRONG" : "the model's prediction was correct"}
-Model confidence at prediction time: ${(signals.confidence * 100).toFixed(0)}%
-Correlated asset failures this cycle: ${signals.correlatedFailureAssetCount}
-
-TASK: Investigate what likely caused this price movement. Search for real news, announcements, or events from credible sources (official announcements, regulatory sources, established financial/crypto news outlets) published around this time window.
-
-RULES:
-- Only report a catalyst if you find credible, verifiable evidence. If you cannot find a credible catalyst, return an empty catalysts array -- do not invent one.
-- Never fabricate a source URL, publisher name, or timestamp. If a timestamp cannot be verified, omit that field (do not guess).
-- For each catalyst, report event_timestamp (when it happened) and first_public_timestamp (when credible public information became available) as SEPARATE fields if you can establish them -- they are often different.
-- Report first_public_timestamp_confidence as exactly one of HIGH, MEDIUM, LOW, or UNKNOWN, reflecting how confident you are in the first_public_timestamp value specifically (not your confidence in the catalyst overall). If first_public_timestamp is null, this must be UNKNOWN.
-- Category must be exactly one of: MACRO, FED_RATES, INFLATION, EMPLOYMENT, USD, ETF_FLOWS, REGULATION, EXCHANGE, STABLECOIN, LIQUIDATION, LEVERAGE, TECHNICAL, ON_CHAIN, GEOPOLITICAL, SECURITY, PROTOCOL, OTHER.
-- market_classification must be exactly one of: MARKET_WIDE, SECTOR_SPECIFIC, ASSET_SPECIFIC, NO_CLEAR_CATALYST.
-
-Respond with ONLY valid JSON, no other text, in exactly this shape:
-{"investigation_id":"","assets":${JSON.stringify(assets)},"market_classification":"","catalysts":[{"category":"","event_timestamp":null,"first_public_timestamp":null,"first_public_timestamp_confidence":"HIGH|MEDIUM|LOW|UNKNOWN","direction":"","confidence":"HIGH|MEDIUM|LOW","description":"","assets":[],"sources":[{"title":"","publisher":"","url":"","published_at":null}]}]}`;
-}
+//
+// buildGeminiInvestigationPrompt (single-asset, bare correlatedFailureAssetCount
+// integer) was retired here -- superseded by buildInvestigationContext +
+// formatContextForGemini/formatContextForAnalyst above, which give Gemini
+// and the human Analyst Relay the same real multi-asset evidence instead of
+// a summary neither could independently verify.
 
 // Pure. PR #2 review, BLOCKER 3: never invents a value. timestamp_source is
 // 'gemini_reported' whenever a first_public_timestamp was actually provided
@@ -2142,6 +2297,13 @@ async function investigateMarketEvent(env, candidate) {
   let responseStatus = 'error', sourceCount = 0, validationStatus = 'not_attempted', errorMessage = null, catalystsWritten = 0;
   let groundingMetadata = { searchQueries: [], groundedSources: [] };
 
+  // Built up front, before the quota check -- read-only, cheap, and worth
+  // recording even for a quota_deferred attempt (shows what WOULD have
+  // been investigated). This is the SAME builder the Analyst Relay path
+  // uses -- see buildInvestigationContext's own comment for why that
+  // matters.
+  const context = await buildInvestigationContext(env, candidate, requestTs);
+
   // Authoritative, race-safe gate -- the shared ledger, not the rolling-
   // window peek evaluateGeminiTriggers already did to decide which
   // candidates were even worth reaching this function. Two isolates racing
@@ -2160,12 +2322,12 @@ async function investigateMarketEvent(env, candidate) {
     await recordGeminiInvestigation(env, {
       investigationId, requestTs, triggerReasons: candidate.signals, assets: candidate.assets,
       modelIdentifier: GEMINI_INVESTIGATION_MODEL, responseStatus, sourceCount, validationStatus, errorMessage, catalystsWritten,
-      groundingMetadata,
+      groundingMetadata, context,
     }).catch(auditErr => console.error('Failed to write gemini_investigations audit row:', auditErr));
     return;
   }
 
-  const geminiResult = await callGeminiGenerateContent(env, { model: GEMINI_INVESTIGATION_MODEL, prompt: buildGeminiInvestigationPrompt(candidate), useGrounding: true });
+  const geminiResult = await callGeminiGenerateContent(env, { model: GEMINI_INVESTIGATION_MODEL, prompt: formatContextForGemini(context), useGrounding: true });
   groundingMetadata = geminiResult.groundingMetadata;
 
   if (!geminiResult.ok) {
@@ -2252,7 +2414,7 @@ async function investigateMarketEvent(env, candidate) {
   await recordGeminiInvestigation(env, {
     investigationId, requestTs, triggerReasons: candidate.signals, assets: candidate.assets,
     modelIdentifier: GEMINI_INVESTIGATION_MODEL, responseStatus, sourceCount, validationStatus, errorMessage, catalystsWritten,
-    groundingMetadata,
+    groundingMetadata, context,
   }).catch(auditErr => console.error('Failed to write gemini_investigations audit row:', auditErr));
 }
 
@@ -2293,11 +2455,18 @@ async function getAnalystRelayCandidate(env) {
   const { selected } = selectWithinBudget(ranked, 1);
   if (selected.length === 0) return { ok: true, hasCandidate: false };
   const candidate = selected[0];
+  // Same shared builder investigateMarketEvent uses -- see
+  // buildInvestigationContext's own comment for why that's the point.
+  const context = await buildInvestigationContext(env, candidate, nowTs);
+  const { factualSummary, prompt } = formatContextForAnalyst(context);
   return {
     ok: true, hasCandidate: true,
     candidateId: candidate.id, assets: candidate.assets,
     promptRequestedTs: nowTs,
-    prompt: buildGeminiInvestigationPrompt(candidate),
+    factualSummary, // for the UI's separate FACTUAL DATA block
+    prompt, // the copy-paste text -- same underlying facts as Gemini receives
+    contextHash: context.contextHash,
+    context, // full structured context, so recordAnalystRelay can persist exactly what was shown
   };
 }
 
@@ -2305,7 +2474,7 @@ async function getAnalystRelayCandidate(env) {
 // same parse/validate/catalyst-write pipeline investigateMarketEvent uses
 // for a real API response -- no separate parsing logic to maintain or
 // drift out of sync.
-async function recordAnalystRelay(env, { candidateId, assets, promptRequestedTs, rawResponseText }) {
+async function recordAnalystRelay(env, { candidateId, assets, promptRequestedTs, rawResponseText, context }) {
   const relayId = `AR-${Date.now()}-${candidateId}`;
   const submittedTs = Date.now();
   let validationStatus = 'error', errorMessage = null, catalystsWritten = 0, parsed = null;
@@ -2362,15 +2531,16 @@ async function recordAnalystRelay(env, { candidateId, assets, promptRequestedTs,
 
   await env.DB.prepare(
     `INSERT INTO analyst_relay_log
-     (relay_id, candidate_id, assets_json, prompt_requested_ts, submitted_ts, raw_response_text, parsed_json, validation_status, error_message, catalysts_written, source)
-     VALUES (?,?,?,?,?,?,?,?,?,?,?)`
+     (relay_id, candidate_id, assets_json, prompt_requested_ts, submitted_ts, raw_response_text, parsed_json, validation_status, error_message, catalysts_written, source, context_json, context_hash)
+     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`
   ).bind(
     relayId, candidateId ?? null, JSON.stringify(assets || []), promptRequestedTs ?? null, submittedTs,
     String(rawResponseText || '').slice(0, 20000), parsed ? JSON.stringify(parsed) : null,
-    validationStatus, errorMessage, catalystsWritten, 'human_relay'
+    validationStatus, errorMessage, catalystsWritten, 'human_relay',
+    context ? JSON.stringify(context) : null, context?.contextHash ?? null
   ).run();
 
-  return { ok: true, relayId, validationStatus, errorMessage, catalystsWritten };
+  return { ok: true, relayId, validationStatus, errorMessage, catalystsWritten, contextHash: context?.contextHash ?? null };
 }
 
 
@@ -4514,6 +4684,11 @@ export default {
           assets: Array.isArray(body.assets) ? body.assets : [],
           promptRequestedTs: Number.isFinite(body.promptRequestedTs) ? body.promptRequestedTs : null,
           rawResponseText: body.rawResponseText,
+          // Round-tripped from what GET /analyst-relay/prompt returned --
+          // records exactly the evidence the human actually saw, rather
+          // than a freshly-rebuilt context that could have drifted if D1
+          // state changed between fetching the prompt and submitting.
+          context: (body.context && typeof body.context === 'object') ? body.context : null,
         });
         return new Response(JSON.stringify(result), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
       } catch (err) {

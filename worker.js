@@ -928,14 +928,15 @@ async function selectBestVariant(env, coin, horizonHours) {
     : `No variant's local edge cleared the significance bar (needed >${(decision.requiredMargin * 100).toFixed(1)}pts above 50%, best was ${decision.winner.variant} at +${((decision.winner.lca - 0.5) * 100).toFixed(1)}pts on n=${decision.winner.n_matched}) -- defaulting to Original k-NN.`;
 
   const ts = Date.now();
+  const scoresJson = JSON.stringify(scores.map(s => ({ variant: s.variant, p_up: Number(s.p_up.toFixed(3)), lca: Number(s.lca.toFixed(3)), n_matched: s.n_matched })));
   await env.DB.prepare(
-    `INSERT INTO selection_decisions (ts, coin, horizon_hours, chosen_variant, chosen_p_up, lca_score, comparison_count, corrected_alpha, cleared_gate, k_sel, neighborhood_json, reason, prediction_ts)
-     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`
+    `INSERT INTO selection_decisions (ts, coin, horizon_hours, chosen_variant, chosen_p_up, lca_score, comparison_count, corrected_alpha, cleared_gate, k_sel, neighborhood_json, reason, prediction_ts, scores_json)
+     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
   ).bind(
     ts, coin, horizonHours, decision.chosen, chosenScore ? chosenScore.p_up : null, decision.winner.lca, decision.m,
     0.05 / decision.m, decision.clearedGate ? 1 : 0, kSel,
     JSON.stringify(neighborhood.map(n => ({ ts: n.ts, dist: Number(n.dist.toFixed(3)) }))),
-    reason, latestCore.ts
+    reason, latestCore.ts, scoresJson
   ).run();
 
   return {
@@ -944,6 +945,34 @@ async function selectBestVariant(env, coin, horizonHours) {
     cleared_gate: decision.clearedGate, comparison_count: decision.m, k_sel: kSel,
     scores: scores.map(s => ({ variant: s.variant, p_up: Number(s.p_up.toFixed(3)), lca: Number(s.lca.toFixed(3)), n_matched: s.n_matched })),
     reason,
+  };
+}
+
+// Read-only. Serves the frontend's display route (GET /select-variant)
+// WITHOUT recomputing anything -- was previously calling selectBestVariant
+// directly, which meant every single page view re-ran the full live k-NN
+// computation AND wrote a fresh row to selection_decisions, indistinguishable
+// from a real prediction-triggered selection. selectBestVariant itself is
+// unchanged and still called directly (compute + write) immediately after a
+// new prediction from /predict, /link-predict, /eth-predict -- that write is
+// legitimate and necessary there. This function only reads what's already
+// there.
+async function getLatestSelection(env, coin, horizonHours) {
+  const row = await env.DB.prepare(
+    `SELECT * FROM selection_decisions WHERE coin=? AND horizon_hours=? ORDER BY ts DESC LIMIT 1`
+  ).bind(coin, horizonHours).first();
+
+  if (!row) {
+    return { ok: true, status: 'no_selection_yet', chosen_variant: 'original', cleared_gate: false, reason: 'No selection has been computed yet for this coin/horizon -- one will be written the next time a real prediction runs.' };
+  }
+
+  let scores = [];
+  try { scores = row.scores_json ? JSON.parse(row.scores_json) : []; } catch { /* older row predates scores_json -- empty, not fabricated */ }
+
+  return {
+    ok: true, status: 'ok', coin: row.coin, horizon_hours: row.horizon_hours, chosen_variant: row.chosen_variant,
+    chosen_p_up: row.chosen_p_up, cleared_gate: !!row.cleared_gate, comparison_count: row.comparison_count, k_sel: row.k_sel,
+    scores, reason: row.reason, ts: row.ts,
   };
 }
 
@@ -4462,7 +4491,9 @@ export default {
       try {
         const coin = ['BTC', 'LINK', 'ETH'].includes(url.searchParams.get('coin')) ? url.searchParams.get('coin') : 'BTC';
         const horizon = [12, 24].includes(parseInt(url.searchParams.get('horizon'), 10)) ? parseInt(url.searchParams.get('horizon'), 10) : 24;
-        const result = await selectBestVariant(env, coin, horizon);
+        // Read-only -- does NOT call selectBestVariant (that stays reserved
+        // for real prediction-triggered compute+write, from /predict et al).
+        const result = await getLatestSelection(env, coin, horizon);
         return new Response(JSON.stringify(result), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
       } catch (err) {
         return new Response(JSON.stringify({ ok: false, error: String(err) }), { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });

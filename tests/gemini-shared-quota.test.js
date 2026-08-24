@@ -311,6 +311,14 @@ describe('Shared Gemini quota gate — callGeminiGenerateContent error classific
     expect(result.errorCategory).toBe('rate_limited');
   });
 
+  it('regression: the real 429 response body is captured, not discarded behind a generic string -- confirmed via V1 that different 429 causes (plain rate limiting vs RESOURCE_EXHAUSTED/depleted prepayment credits) need different fixes', async () => {
+    const realGoogleBody = JSON.stringify({ error: { code: 429, message: 'Your prepayment credits are depleted. Please go to AI Studio at https://ai.studio/projects to manage your project and billing.', status: 'RESOURCE_EXHAUSTED' } });
+    mockFetch(async () => ({ ok: false, status: 429, text: async () => realGoogleBody }));
+    const result = await scope.callGeminiGenerateContent({ GEMINI_API_KEY: 'k' }, { model: 'gemini-3.6-flash', prompt: 'p' });
+    expect(result.errorMessage).toContain('RESOURCE_EXHAUSTED');
+    expect(result.errorMessage).toContain('prepayment credits are depleted');
+  });
+
   it('classifies a provider 500 as a generic error, distinct from rate_limited', async () => {
     mockFetch(async () => ({ ok: false, status: 500, text: async () => 'internal error body' }));
     const result = await scope.callGeminiGenerateContent({ GEMINI_API_KEY: 'k' }, { model: 'gemini-3.6-flash', prompt: 'p' });

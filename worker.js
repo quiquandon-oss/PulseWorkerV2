@@ -2122,7 +2122,13 @@ async function callGeminiGenerateContent(env, { model, prompt, useGrounding = fa
       { method: 'POST', headers: { 'Content-Type': 'application/json', 'x-goog-api-key': env.GEMINI_API_KEY }, body: JSON.stringify(body), signal: controller.signal }
     );
     if (res.status === 429) {
-      return { ok: false, status: 429, text: null, groundingMetadata: { searchQueries: [], groundedSources: [] }, errorCategory: 'rate_limited', errorMessage: 'Gemini API rate limited' };
+      // Read the real body -- confirmed via V1's PulseWorker investigation
+      // that a bare 429 can mean genuinely different things ("rate limited"
+      // vs "RESOURCE_EXHAUSTED: prepayment credits depleted", which needs a
+      // completely different fix). Previously hardcoded to a generic
+      // string here, discarding exactly the detail that mattered.
+      const errBody = await res.text().catch(() => '');
+      return { ok: false, status: 429, text: null, groundingMetadata: { searchQueries: [], groundedSources: [] }, errorCategory: 'rate_limited', errorMessage: `Gemini API 429: ${errBody.slice(0, 500)}` };
     }
     if (!res.ok) {
       const errBody = await res.text();

@@ -116,75 +116,152 @@ export function evaluatePrediction({ row, deployedSha }) {
   return { status: pass ? STATUS.PASS : STATUS.FAIL, id: row.id, timestamp: row.ts, git_commit_sha: row.git_commit_sha ?? null, model_version: row.model_version ?? null, evidence };
 }
 
-// ---- Gemini investigation (section 11 + 17) ----
-// allInvestigations: rows ordered newest-first. A row only counts as
-// "real" per the task's explicit exclusion list (no tests/fixtures/dry
-// runs/mocked/failed) if response_status === 'ok'.
-export function evaluateGemini({ allInvestigations }) {
-  if (!allInvestigations || allInvestigations.length === 0) {
-    return { status: STATUS.NOT_VERIFIED, investigation_id: null, response_status: null, timestamp: null, evidence: ['no Gemini investigation attempts found at all -- no trigger has fired yet, not an application failure'] };
+// ---- Analyst Relay response (section 11 + 17, redesigned) ----
+// Replaces the old evaluateGemini, which looked for a successful automated
+// MI- investigation via the paid grounded API -- that path was removed
+// entirely (see PulseWorkerV2 commit "remove automated grounded API
+// investigation"; Analyst Relay, human-relayed, is now the sole
+// investigation mechanism). This looks for a real AR- entry instead.
+//
+// "Provider HTTP 200" and "non-empty valid Gemini response" (the two
+// criteria explicitly kept as required evidence) don't map onto Analyst
+// Relay literally -- there is no HTTP call this application makes to
+// Gemini to have returned 200, since a human relays the response via
+// Gemini's own consumer app. The faithful equivalents used here:
+//   - "provider 200" -> a real analyst_relay_log row exists with
+//     submitted_ts populated. recordAnalystRelay ALWAYS writes this row,
+//     success or failure (confirmed directly in its source) -- so a
+//     missing row means the submission endpoint itself never completed,
+//     the closest analog to a failed provider call.
+//   - "non-empty valid Gemini response" -> raw_response_text is non-empty
+//     AND validation_status reflects the pasted text actually being
+//     Gemini's real structured output, not garbage. validation_status
+//     'ok' or 'no_catalyst_found' both mean the JSON parsed and validated
+//     successfully (no_catalyst_found is a legitimate clean outcome --
+//     Gemini genuinely found nothing, not a parsing failure).
+//     'malformed_response' / 'invalid_response' / 'error' all mean the
+//     submission itself failed one way or another.
+export function evaluateAnalystRelay({ allRelayEntries }) {
+  if (!allRelayEntries || allRelayEntries.length === 0) {
+    return { status: STATUS.NOT_VERIFIED, investigation_id: null, validation_status: null, timestamp: null, evidence: ['no Analyst Relay submissions found at all -- no relay has been submitted yet, not an application failure'] };
   }
-  const successful = allInvestigations.find((r) => r.response_status === 'ok');
+  const clean = (r) => r.submitted_ts != null && !!r.raw_response_text && (r.validation_status === 'ok' || r.validation_status === 'no_catalyst_found');
+  const successful = allRelayEntries.find(clean);
   if (!successful) {
-    const latest = allInvestigations[0];
+    const latest = allRelayEntries[0];
     return {
       status: STATUS.FAIL,
-      investigation_id: latest.investigation_id,
-      response_status: latest.response_status,
-      timestamp: latest.request_ts,
+      investigation_id: latest.relay_id,
+      validation_status: latest.validation_status,
+      timestamp: latest.submitted_ts,
       evidence: [
-        `${allInvestigations.length} attempt(s) found, none with response_status='ok'`,
-        `latest attempt: ${latest.investigation_id} -> ${latest.response_status}`,
+        `${allRelayEntries.length} submission(s) found, none cleanly processed`,
+        `latest: ${latest.relay_id} -> validation_status=${latest.validation_status}${latest.raw_response_text ? '' : ' (raw_response_text empty)'}`,
       ],
     };
   }
   return {
     status: STATUS.PASS,
-    investigation_id: successful.investigation_id,
-    response_status: successful.response_status,
-    timestamp: successful.request_ts,
-    evidence: [`${successful.investigation_id} succeeded at ${successful.request_ts}`],
+    investigation_id: successful.relay_id,
+    validation_status: successful.validation_status,
+    timestamp: successful.submitted_ts,
+    evidence: [
+      `${successful.relay_id} processed cleanly at ${successful.submitted_ts}`,
+      `validation_status=${successful.validation_status}`,
+      `raw_response_text_length=${(successful.raw_response_text || '').length}`,
+    ],
   };
 }
 
-// ---- Provider call (section 12) ----
-export function evaluateProviderCall({ providerCallRow }) {
-  if (!providerCallRow) {
-    return { status: STATUS.NOT_VERIFIED, http_status: null, provider: null, model: null, timestamp: null, evidence: ['no matching gemini_provider_calls row found for this investigation'] };
+// ---- Relay submission receipt (section 12, redesigned) ----
+// The "provider HTTP 200" half of the requirement, evaluated as its own
+// section for parity with the original structure. Genuinely redundant
+// with part of evaluateAnalystRelay above by necessity (there's no
+// separate provider-level table for a human-relayed response the way
+// gemini_provider_calls existed for the API path) -- kept as a distinct
+// section anyway per the explicit instruction to keep this as required
+// evidence in its own right, not silently folded away.
+export function evaluateRelaySubmission({ relayRow }) {
+  if (!relayRow) {
+    return { status: STATUS.NOT_VERIFIED, relay_id: null, submitted_ts: null, response_length: null, evidence: ['no matching analyst_relay_log row found for this submission'] };
   }
-  const pass = providerCallRow.http_status === 200;
+  const hasSubmission = relayRow.submitted_ts != null;
+  const hasResponse = !!relayRow.raw_response_text && relayRow.raw_response_text.length > 0;
+  const pass = hasSubmission && hasResponse;
   return {
     status: pass ? STATUS.PASS : STATUS.FAIL,
-    http_status: providerCallRow.http_status,
-    provider: providerCallRow.provider,
-    model: providerCallRow.model,
-    timestamp: providerCallRow.request_ts,
-    evidence: [`quota_decision=${providerCallRow.quota_decision}`, `response_status=${providerCallRow.response_status}`, `http_status=${providerCallRow.http_status}`],
+    relay_id: relayRow.relay_id,
+    submitted_ts: relayRow.submitted_ts,
+    response_length: relayRow.raw_response_text ? relayRow.raw_response_text.length : 0,
+    evidence: [`submitted_ts=${relayRow.submitted_ts ?? 'missing'}`, `raw_response_text_length=${relayRow.raw_response_text ? relayRow.raw_response_text.length : 0}`],
   };
 }
 
-// ---- Grounding (section 13, hard requirement) ----
-export function evaluateGrounding({ groundingMetadataJson }) {
-  if (groundingMetadataJson == null) {
-    return { status: STATUS.NOT_VERIFIED, search_queries: [], grounded_sources: [], source_count: 0, evidence: ['no grounding_metadata_json available'] };
+// ---- Shared investigation-context hash integrity (new) ----
+// Independently recomputes computeContextHash's exact algorithm (copied
+// deliberately, same reasoning as redactSecrets above -- this audit's
+// verification shouldn't silently depend on worker.js's implementation
+// staying unchanged) over the STORED context_json, and checks it matches
+// the STORED context_hash. This is a genuine integrity check, not just a
+// presence check -- it would catch a corrupted or hand-edited context_json
+// that a naive "does context_hash exist" check would miss entirely.
+async function computeContextHashIndependently(context) {
+  const canonical = {
+    candidateId: context.candidateId,
+    primaryAsset: context.primaryAsset,
+    windowMs: context.windowMs,
+    observations: context.observations,
+    correlatedFailureAssetCount: context.correlatedFailureAssetCount,
+    correlatedFailureAssets: context.correlatedFailureAssets,
+  };
+  const json = JSON.stringify(canonical, Object.keys(canonical).sort());
+  const bytes = new TextEncoder().encode(json);
+  const digest = await crypto.subtle.digest('SHA-256', bytes);
+  return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, '0')).join('');
+}
+
+export async function evaluateContextHashIntegrity({ contextJsonRaw, storedContextHash }) {
+  if (!contextJsonRaw || !storedContextHash) {
+    return { status: STATUS.NOT_VERIFIED, stored_hash: storedContextHash ?? null, recomputed_hash: null, evidence: ['context_json or context_hash missing from the relay row'] };
   }
-  let parsed;
-  try { parsed = JSON.parse(groundingMetadataJson); } catch { parsed = null; }
-  if (!parsed || typeof parsed !== 'object') {
-    return { status: STATUS.FAIL, search_queries: [], grounded_sources: [], source_count: 0, evidence: ['grounding_metadata_json did not parse as an object'] };
+  let context;
+  try { context = JSON.parse(contextJsonRaw); } catch {
+    return { status: STATUS.FAIL, stored_hash: storedContextHash, recomputed_hash: null, evidence: ['context_json did not parse as JSON'] };
   }
-  const searchQueries = Array.isArray(parsed.searchQueries) ? parsed.searchQueries : [];
-  const groundedSources = Array.isArray(parsed.groundedSources) ? parsed.groundedSources : [];
-  // Explicitly rejects the empty-shell shapes named in the spec:
-  // {"searchQueries":[],"groundedSources":[]} and {} both fail here, since
-  // both produce searchQueries.length === 0 && groundedSources.length === 0.
-  const pass = searchQueries.length > 0 && groundedSources.length > 0;
+  const recomputed = await computeContextHashIndependently(context);
+  const pass = recomputed === storedContextHash;
   return {
     status: pass ? STATUS.PASS : STATUS.FAIL,
-    search_queries: searchQueries,
-    grounded_sources: groundedSources,
-    source_count: groundedSources.length,
-    evidence: [`search_queries.length=${searchQueries.length}`, `grounded_sources.length=${groundedSources.length}`],
+    stored_hash: storedContextHash,
+    recomputed_hash: recomputed,
+    evidence: [`stored_hash=${storedContextHash}`, `recomputed_hash=${recomputed}`, pass ? 'hashes match -- context_json is genuine and unaltered' : 'MISMATCH -- context_json does not hash to the stored context_hash'],
+  };
+}
+
+// ---- Analyst Relay factual-context parity (new) ----
+// Separate from hash integrity above: even a context_json that hashes
+// correctly could in principle be well-formed but factually empty (all
+// assets unavailable, no real observations). This checks the CONTENTS
+// look like genuine evidence, not a hollow/placeholder shape -- same
+// "never invent data" standard applied to the frontend's mock-marker
+// check, applied here to the shared investigation context specifically.
+export function evaluateFactualContextParity({ contextJsonRaw, primaryAsset }) {
+  if (!contextJsonRaw) {
+    return { status: STATUS.NOT_VERIFIED, primary_asset_available: null, assets_with_data: 0, evidence: ['no context_json available to check'] };
+  }
+  let context;
+  try { context = JSON.parse(contextJsonRaw); } catch {
+    return { status: STATUS.FAIL, primary_asset_available: null, assets_with_data: 0, evidence: ['context_json did not parse as JSON'] };
+  }
+  const observations = context.observations || {};
+  const assetsWithData = Object.entries(observations).filter(([, o]) => o && o.available === true).length;
+  const primaryAssetAvailable = primaryAsset ? !!(observations[primaryAsset] && observations[primaryAsset].available === true) : null;
+  const pass = assetsWithData > 0 && primaryAssetAvailable !== false;
+  return {
+    status: pass ? STATUS.PASS : STATUS.FAIL,
+    primary_asset_available: primaryAssetAvailable,
+    assets_with_data: assetsWithData,
+    evidence: [`assets_with_data=${assetsWithData}`, `primary_asset_available=${primaryAssetAvailable}`, assetsWithData > 0 ? 'at least one real asset observation present, not a hollow shape' : 'no asset observations available at all -- context is empty'],
   };
 }
 
@@ -216,22 +293,24 @@ export function evaluateLearningLoop({ selectionDecisionRow }) {
   };
 }
 
-// ---- Budget (section 16) ----
-// Reports the DEPLOYED configuration only -- never changes it, per
-// explicit instruction. required_daily/required_hourly are the task's
-// stated targets (5/24h, 1/hour), independent of what's actually deployed.
-export function evaluateBudget({ configuredDaily, configuredHourly, requiredDaily = 5, requiredHourly = 1 }) {
-  if (configuredDaily == null || configuredHourly == null) {
-    return { status: STATUS.NOT_VERIFIED, configured_daily: configuredDaily ?? null, configured_hourly: configuredHourly ?? null, required_daily: requiredDaily, required_hourly: requiredHourly, evidence: ['could not read configured budget from deployed source'] };
-  }
-  const matches = configuredDaily === requiredDaily && configuredHourly === requiredHourly;
+// ---- Relay budget (section 16, redesigned) ----
+// The old version compared MAX_GEMINI_INVESTIGATIONS_PER_DAY/HOUR against
+// a required 5/1 -- that config governed the automated grounded API path,
+// which no longer exists. Analyst Relay was deliberately built unbudgeted
+// from day one (never touches reserveGeminiQuotaSlot /
+// GEMINI_SHARED_QUOTA_CONFIG, confirmed directly in its own source
+// comment) since there's no metered API call to budget. Continuing to
+// check a now-irrelevant legacy number against a no-longer-applicable
+// requirement would be actively misleading, not merely stale -- this
+// reports the actual current design honestly instead. Per explicit
+// instruction, does not read or report on GEMINI_TRIGGER_CONFIG (the old
+// automated-path budget) at all; that value still exists in worker.js as
+// dead reference code and is out of scope here, not silently re-purposed.
+export function evaluateRelayBudget() {
   return {
-    status: matches ? STATUS.PASS : STATUS.FAIL,
-    configured_daily: configuredDaily,
-    configured_hourly: configuredHourly,
-    required_daily: requiredDaily,
-    required_hourly: requiredHourly,
-    evidence: [`configured=${configuredDaily}/day + ${configuredHourly}/hour`, `required=${requiredDaily}/day + ${requiredHourly}/hour`],
+    status: STATUS.PASS,
+    budgeted: false,
+    evidence: ['Analyst Relay is deliberately unbudgeted by design -- no metered API call exists for it to budget. This is the intended architecture, not a gap.'],
   };
 }
 
@@ -250,56 +329,54 @@ export function evaluateSafety({ productionWritesPerformed, secretsExposed }) {
 // Called only when the chain is NOT fully GREEN, to explain the single
 // most upstream reason why. Order matters -- checks the earliest failing
 // link first, since a downstream section can look FAIL/NOT_VERIFIED purely
-// as a consequence of an upstream one never having run.
-export function classifyFailure({ gemini, providerCall, grounding }) {
-  if (gemini.status === STATUS.NOT_VERIFIED) {
-    return { classification: 'NO_TRIGGER', evidence: gemini.evidence };
+// as a consequence of an upstream one never having run. grounding removed
+// entirely -- it can never exist again post-removal, so classifying
+// against it would be classifying against a permanently-absent thing.
+export function classifyFailure({ analystRelay, relaySubmission, contextHashIntegrity, factualContextParity }) {
+  if (analystRelay.status === STATUS.NOT_VERIFIED) {
+    return { classification: 'NO_TRIGGER', evidence: analystRelay.evidence };
   }
-  if (gemini.status === STATUS.FAIL) {
-    const rs = gemini.response_status;
-    if (rs === 'quota_deferred') return { classification: 'APPLICATION_BUDGET', evidence: gemini.evidence };
-    if (rs === 'rate_limited') return { classification: 'PROVIDER_RATE_LIMIT', evidence: gemini.evidence };
-    return { classification: 'UNKNOWN', evidence: gemini.evidence };
+  if (analystRelay.status === STATUS.FAIL) {
+    return { classification: 'RELAY_SUBMISSION_UNCLEAN', evidence: analystRelay.evidence };
   }
-  // gemini.status === PASS from here on
-  if (providerCall.status !== STATUS.PASS) {
-    return { classification: 'UNKNOWN', evidence: providerCall.evidence };
+  // analystRelay.status === PASS from here on
+  if (relaySubmission.status !== STATUS.PASS) {
+    return { classification: 'UNKNOWN', evidence: relaySubmission.evidence };
   }
-  if (grounding.status !== STATUS.PASS) {
-    return { classification: 'GROUNDING_FAILURE', evidence: grounding.evidence };
+  if (contextHashIntegrity.status !== STATUS.PASS) {
+    return { classification: 'CONTEXT_HASH_MISMATCH', evidence: contextHashIntegrity.evidence };
   }
-  return { classification: null, evidence: [] }; // nothing to classify -- gemini+provider+grounding all PASS
+  if (factualContextParity.status !== STATUS.PASS) {
+    return { classification: 'CONTEXT_FACTUAL_PARITY_FAILURE', evidence: factualContextParity.evidence };
+  }
+  return { classification: null, evidence: [] };
 }
 
 // Per-section: does a FAIL here represent a directly PROVEN defect
 // (RED-worthy), or an unproven/incomplete/externally-caused state
 // (YELLOW-worthy)? NOT_VERIFIED is never RED-worthy by itself -- it means
 // "nothing to check yet", not "checked and broken".
-function isRedWorthyFail(key, value, { gemini, providerCall }) {
+function isRedWorthyFail(key, value, { analystRelay, relaySubmission }) {
   if (value.status !== STATUS.FAIL) return false;
   switch (key) {
-    case 'gemini':
-      // rate_limited / quota_deferred / timeout / malformed_response are
-      // all "hasn't succeeded yet" states this audit deliberately does not
-      // treat as proven codebase defects (see classifyFailure).
+    case 'analyst_relay':
+      // A relay submission that didn't process cleanly (malformed paste,
+      // etc.) is a human-input issue this audit deliberately does not
+      // treat as a proven codebase defect.
       return false;
-    case 'grounding':
-      // Section 13: RED specifically when a real 200 came back ungrounded
-      // despite the application requesting grounding (which it always
-      // does for this call type) -- only meaningful once gemini AND the
-      // provider call are both confirmed PASS; otherwise there was no real
-      // 200 to have been ungrounded from.
-      return gemini.status === STATUS.PASS && providerCall.status === STATUS.PASS;
-    case 'provider_call':
-      // gemini row claims success but the provider_call ledger doesn't
-      // confirm http_status 200 -- a real internal inconsistency once
-      // gemini itself is confirmed PASS.
-      return gemini.status === STATUS.PASS;
+    case 'relay_submission':
+      // analyst_relay claims success but the submission-level check
+      // doesn't confirm it -- a real internal inconsistency once
+      // analyst_relay itself is confirmed PASS.
+      return analystRelay.status === STATUS.PASS;
+    case 'context_hash_integrity':
+    case 'factual_context_parity':
+      // Only meaningful (and only a proven defect) once there was a real
+      // successful relay submission for these to be checking.
+      return analystRelay.status === STATUS.PASS && relaySubmission.status === STATUS.PASS;
     case 'catalyst_ledger':
     case 'learning_loop':
-      // Only meaningful (and only a proven defect) once there was a real
-      // successful investigation for these to have consumed.
-      return gemini.status === STATUS.PASS;
+      return analystRelay.status === STATUS.PASS;
     default:
       // frontend, worker_to_d1, prediction -- any proven FAIL here (we
       // fetched real evidence and it was wrong) is a real defect.
@@ -307,16 +384,21 @@ function isRedWorthyFail(key, value, { gemini, providerCall }) {
   }
 }
 
-// ---- End-to-end verdict (section 19) ----
-// GREEN only if every one of the 9 listed links is proven. safety is
-// evaluated separately and is expected to always PASS by construction
-// (this audit never writes to production) -- included in the gate anyway
-// so a real safety violation would correctly block GREEN rather than be
-// silently ignored.
-export function computeEndToEnd({ frontend, workerToD1, prediction, gemini, providerCall, grounding, catalystLedger, learningLoop, safety }) {
+// ---- End-to-end verdict (section 19, redesigned) ----
+// GREEN only if every one of the 9 listed links is proven. grounding
+// removed from this gate entirely (it can never exist again); replaced
+// with contextHashIntegrity and factualContextParity, which are the new
+// integrity checks that actually apply to the current Analyst Relay
+// mechanism. safety is evaluated separately and is expected to always
+// PASS by construction (this audit never writes to production) --
+// included in the gate anyway so a real safety violation would correctly
+// block GREEN rather than be silently ignored.
+export function computeEndToEnd({ frontend, workerToD1, prediction, analystRelay, relaySubmission, contextHashIntegrity, factualContextParity, catalystLedger, learningLoop, safety }) {
   const required = {
-    frontend, worker_to_d1: workerToD1, prediction, gemini,
-    provider_call: providerCall, grounding, catalyst_ledger: catalystLedger, learning_loop: learningLoop, safety,
+    frontend, worker_to_d1: workerToD1, prediction, analyst_relay: analystRelay,
+    relay_submission: relaySubmission, context_hash_integrity: contextHashIntegrity,
+    factual_context_parity: factualContextParity, catalyst_ledger: catalystLedger,
+    learning_loop: learningLoop, safety,
   };
   const failing = Object.entries(required).filter(([, v]) => v.status !== STATUS.PASS);
 
@@ -330,12 +412,12 @@ export function computeEndToEnd({ frontend, workerToD1, prediction, gemini, prov
     return { status: 'RED', blocking_reason: 'Safety violation: ' + safety.evidence.join('; ') };
   }
 
-  const { classification, evidence } = classifyFailure({ gemini, providerCall, grounding });
+  const { classification, evidence } = classifyFailure({ analystRelay, relaySubmission, contextHashIntegrity, factualContextParity });
   const [firstFailingKey, firstFailingValue] = failing[0];
   const reasonPrefix = classification ? `[${classification}] ` : '';
   const reasonDetail = (evidence && evidence.length) ? evidence[0] : `${firstFailingKey} is ${firstFailingValue.status}`;
 
-  const anyRedWorthy = failing.some(([key, value]) => isRedWorthyFail(key, value, { gemini, providerCall }));
+  const anyRedWorthy = failing.some(([key, value]) => isRedWorthyFail(key, value, { analystRelay, relaySubmission }));
 
   return {
     status: anyRedWorthy ? 'RED' : 'YELLOW',

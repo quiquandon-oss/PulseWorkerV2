@@ -1,10 +1,43 @@
 import { describe, it, expect } from 'vitest';
 import {
   STATUS, section, redactSecrets, scanForLeakedSecrets,
-  evaluateFrontend, evaluateWorkerToD1, evaluatePrediction, evaluateGemini,
-  evaluateProviderCall, evaluateGrounding, evaluateCatalystLedger, evaluateLearningLoop,
-  evaluateBudget, evaluateSafety, classifyFailure, computeEndToEnd,
+  evaluateFrontend, evaluateWorkerToD1, evaluatePrediction, evaluateAnalystRelay,
+  evaluateRelaySubmission, evaluateContextHashIntegrity, evaluateFactualContextParity,
+  evaluateCatalystLedger, evaluateLearningLoop,
+  evaluateRelayBudget, evaluateSafety, classifyFailure, computeEndToEnd,
 } from './lib.js';
+
+// The exact real context shape formatContextForAnalyst/computeContextHash
+// (worker.js) produce -- used across the context-hash and factual-parity
+// tests below so they exercise the real canonical field set, not an
+// invented shape.
+function makeRealContext(overrides = {}) {
+  return {
+    candidateId: 'LINK',
+    primaryAsset: 'LINK',
+    windowMs: 12600000,
+    observations: {
+      BTC: { available: true, predictedDirection: 'UP', actualDirection: 'UP', confidencePct: 78.8, wasWrong: false, isRegimeAnomaly: true, recentCycles: [] },
+      ETH: { available: true, predictedDirection: 'UP', actualDirection: 'UP', confidencePct: 80, wasWrong: false, recentCycles: [] },
+      LINK: { available: true, predictedDirection: 'UP', actualDirection: 'DOWN', confidencePct: 72.7, wasWrong: true, recentCycles: [] },
+    },
+    correlatedFailureAssetCount: 1,
+    correlatedFailureAssets: ['LINK'],
+    ...overrides,
+  };
+}
+
+async function realContextHash(context) {
+  const canonical = {
+    candidateId: context.candidateId, primaryAsset: context.primaryAsset, windowMs: context.windowMs,
+    observations: context.observations, correlatedFailureAssetCount: context.correlatedFailureAssetCount,
+    correlatedFailureAssets: context.correlatedFailureAssets,
+  };
+  const json = JSON.stringify(canonical, Object.keys(canonical).sort());
+  const bytes = new TextEncoder().encode(json);
+  const digest = await crypto.subtle.digest('SHA-256', bytes);
+  return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, '0')).join('');
+}
 
 describe('section() — status validation', () => {
   it('accepts PASS/FAIL/NOT_VERIFIED', () => {
@@ -41,7 +74,7 @@ describe('scanForLeakedSecrets()', () => {
     expect(r.clean).toBe(false);
   });
   it('does not flag ordinary report text', () => {
-    const r = scanForLeakedSecrets('{"status":"PASS","evidence":["investigation_id=MI-123-BTC"]}');
+    const r = scanForLeakedSecrets('{"status":"PASS","evidence":["investigation_id=AR-123-LINK"]}');
     expect(r.clean).toBe(true);
   });
 });
@@ -57,7 +90,7 @@ describe('evaluateFrontend()', () => {
     const r = evaluateFrontend({ sourceText: src, commitSha: 'abc123', expectedWorkerUrl: 'https://pulseworker-v2.quiquandon.workers.dev' });
     expect(r.status).toBe('PASS');
     expect(r.worker_url_configured).toBe(true);
-    expect(r.live_http_verified).toBe(false); // always false -- this audit never makes a live frontend HTTP request
+    expect(r.live_http_verified).toBe(false);
   });
   it('FAILs when a mock marker is present, even if everything else looks right', () => {
     const src = `const WORKER_URL='https://pulseworker-v2.quiquandon.workers.dev'; /* MOCK_RESPONSE */ fetch(WORKER_URL+'/api/learning/daily'); fetch(WORKER_URL+'/predict');`;
@@ -106,68 +139,127 @@ describe('evaluatePrediction()', () => {
   });
 });
 
-describe('evaluateGemini() — real success only, per the "no tests/fixtures/dry runs/mocked/failed" exclusion', () => {
-  it('NOT_VERIFIED when there are zero investigation attempts at all (no trigger, not an app failure)', () => {
-    const r = evaluateGemini({ allInvestigations: [] });
+describe('evaluateAnalystRelay() — replaces the old automated-MI evaluateGemini entirely', () => {
+  it('NOT_VERIFIED when there are zero relay submissions at all (no relay yet, not an app failure)', () => {
+    const r = evaluateAnalystRelay({ allRelayEntries: [] });
     expect(r.status).toBe('NOT_VERIFIED');
   });
-  it('FAILs when attempts exist but none succeeded', () => {
-    const r = evaluateGemini({ allInvestigations: [
-      { investigation_id: 'MI-2-BTC', request_ts: 200, response_status: 'rate_limited' },
-      { investigation_id: 'MI-1-BTC', request_ts: 100, response_status: 'rate_limited' },
+  it('FAILs when submissions exist but none processed cleanly', () => {
+    const r = evaluateAnalystRelay({ allRelayEntries: [
+      { relay_id: 'AR-2-LINK', submitted_ts: 200, raw_response_text: 'garbage', validation_status: 'malformed_response' },
+      { relay_id: 'AR-1-LINK', submitted_ts: 100, raw_response_text: '', validation_status: 'error' },
     ] });
     expect(r.status).toBe('FAIL');
-    expect(r.response_status).toBe('rate_limited');
-    expect(r.investigation_id).toBe('MI-2-BTC'); // the latest one, for the failure evidence
+    expect(r.investigation_id).toBe('AR-2-LINK'); // latest, for the failure evidence
+  });
+  it('PASSes on validation_status=ok with non-empty raw_response_text', () => {
+    const r = evaluateAnalystRelay({ allRelayEntries: [
+      { relay_id: 'AR-2-LINK', submitted_ts: 200, raw_response_text: '{"catalysts":[]}', validation_status: 'ok' },
+    ] });
+    expect(r.status).toBe('PASS');
+    expect(r.investigation_id).toBe('AR-2-LINK');
+  });
+  it('PASSes on validation_status=no_catalyst_found -- a legitimate clean outcome, not a parsing failure', () => {
+    const r = evaluateAnalystRelay({ allRelayEntries: [
+      { relay_id: 'AR-1-LINK', submitted_ts: 100, raw_response_text: '{"catalysts":[]}', validation_status: 'no_catalyst_found' },
+    ] });
+    expect(r.status).toBe('PASS');
+  });
+  it('FAILs on validation_status=ok if raw_response_text is somehow empty -- non-empty is a required condition, not just clean validation', () => {
+    const r = evaluateAnalystRelay({ allRelayEntries: [
+      { relay_id: 'AR-1-LINK', submitted_ts: 100, raw_response_text: '', validation_status: 'ok' },
+    ] });
+    expect(r.status).toBe('FAIL');
   });
   it('PASSes and returns the successful row even when it is not the newest attempt', () => {
-    const r = evaluateGemini({ allInvestigations: [
-      { investigation_id: 'MI-2-BTC', request_ts: 200, response_status: 'rate_limited' },
-      { investigation_id: 'MI-1-BTC', request_ts: 100, response_status: 'ok' },
+    const r = evaluateAnalystRelay({ allRelayEntries: [
+      { relay_id: 'AR-2-LINK', submitted_ts: 200, raw_response_text: 'x', validation_status: 'malformed_response' },
+      { relay_id: 'AR-1-LINK', submitted_ts: 100, raw_response_text: '{"catalysts":[]}', validation_status: 'ok' },
     ] });
     expect(r.status).toBe('PASS');
-    expect(r.investigation_id).toBe('MI-1-BTC');
+    expect(r.investigation_id).toBe('AR-1-LINK');
   });
 });
 
-describe('evaluateProviderCall()', () => {
+describe('evaluateRelaySubmission() — the "provider 200" equivalent', () => {
   it('NOT_VERIFIED when no matching row was found', () => {
-    expect(evaluateProviderCall({ providerCallRow: null }).status).toBe('NOT_VERIFIED');
+    expect(evaluateRelaySubmission({ relayRow: null }).status).toBe('NOT_VERIFIED');
   });
-  it('FAILs on any non-200 http_status, even if response_status looks benign', () => {
-    const r = evaluateProviderCall({ providerCallRow: { http_status: 429, provider: 'google', model: 'gemini-3.6-flash', request_ts: 1, quota_decision: 'admitted', response_status: 'rate_limited' } });
+  it('FAILs when submitted_ts is missing, even if a response exists', () => {
+    const r = evaluateRelaySubmission({ relayRow: { relay_id: 'AR-1', submitted_ts: null, raw_response_text: '{"x":1}' } });
     expect(r.status).toBe('FAIL');
   });
-  it('PASSes only on exactly http_status 200', () => {
-    const r = evaluateProviderCall({ providerCallRow: { http_status: 200, provider: 'google', model: 'gemini-3.6-flash', request_ts: 1, quota_decision: 'admitted', response_status: 'ok' } });
+  it('FAILs when raw_response_text is empty, even if submitted_ts exists', () => {
+    const r = evaluateRelaySubmission({ relayRow: { relay_id: 'AR-1', submitted_ts: 100, raw_response_text: '' } });
+    expect(r.status).toBe('FAIL');
+  });
+  it('PASSes only with both submitted_ts AND a non-empty response present', () => {
+    const r = evaluateRelaySubmission({ relayRow: { relay_id: 'AR-1', submitted_ts: 100, raw_response_text: '{"catalysts":[]}' } });
     expect(r.status).toBe('PASS');
+    expect(r.response_length).toBe('{"catalysts":[]}'.length);
   });
 });
 
-describe('evaluateGrounding() — the hard requirement, rejects every empty-shell shape named in the spec', () => {
-  it('NOT_VERIFIED when no metadata is available at all', () => {
-    expect(evaluateGrounding({ groundingMetadataJson: null }).status).toBe('NOT_VERIFIED');
+describe('evaluateContextHashIntegrity() — independent recomputation, not just presence', () => {
+  it('NOT_VERIFIED when context_json or context_hash is missing', async () => {
+    expect((await evaluateContextHashIntegrity({ contextJsonRaw: null, storedContextHash: 'abc' })).status).toBe('NOT_VERIFIED');
+    expect((await evaluateContextHashIntegrity({ contextJsonRaw: '{}', storedContextHash: null })).status).toBe('NOT_VERIFIED');
   });
-  it('FAILs on the empty-arrays shape {"searchQueries":[],"groundedSources":[]}', () => {
-    const r = evaluateGrounding({ groundingMetadataJson: JSON.stringify({ searchQueries: [], groundedSources: [] }) });
+  it('FAILs on unparseable context_json rather than throwing', async () => {
+    const r = await evaluateContextHashIntegrity({ contextJsonRaw: 'not json', storedContextHash: 'abc' });
     expect(r.status).toBe('FAIL');
   });
-  it('FAILs on a bare empty object {}', () => {
-    const r = evaluateGrounding({ groundingMetadataJson: '{}' });
-    expect(r.status).toBe('FAIL');
-  });
-  it('FAILs on malformed JSON rather than throwing', () => {
-    const r = evaluateGrounding({ groundingMetadataJson: 'not json' });
-    expect(r.status).toBe('FAIL');
-  });
-  it('PASSes only with real, non-empty search queries AND grounded sources', () => {
-    const r = evaluateGrounding({ groundingMetadataJson: JSON.stringify({ searchQueries: ['BTC price today'], groundedSources: [{ url: 'https://example.com', title: 't' }] }) });
+  it('PASSes when the recomputed SHA-256 matches the stored hash exactly, using the real canonical field set', async () => {
+    const context = makeRealContext();
+    const realHash = await realContextHash(context);
+    const r = await evaluateContextHashIntegrity({ contextJsonRaw: JSON.stringify(context), storedContextHash: realHash });
     expect(r.status).toBe('PASS');
-    expect(r.source_count).toBe(1);
+    expect(r.recomputed_hash).toBe(realHash);
   });
-  it('FAILs when only one of the two arrays is populated', () => {
-    const r = evaluateGrounding({ groundingMetadataJson: JSON.stringify({ searchQueries: ['q'], groundedSources: [] }) });
+  it('FAILs when the stored hash does not match a fresh recomputation -- catches tampered or corrupted context_json', async () => {
+    const context = makeRealContext();
+    const r = await evaluateContextHashIntegrity({ contextJsonRaw: JSON.stringify(context), storedContextHash: 'deadbeef'.repeat(8) });
     expect(r.status).toBe('FAIL');
+    expect(r.evidence.some((e) => e.includes('MISMATCH'))).toBe(true);
+  });
+  it('FAILs when context_json was hand-edited after the hash was computed, even a single field', async () => {
+    const context = makeRealContext();
+    const realHash = await realContextHash(context);
+    const tampered = { ...context, correlatedFailureAssetCount: 999 }; // changed after hashing
+    const r = await evaluateContextHashIntegrity({ contextJsonRaw: JSON.stringify(tampered), storedContextHash: realHash });
+    expect(r.status).toBe('FAIL');
+  });
+});
+
+describe('evaluateFactualContextParity() — the context contains real evidence, not a hollow shape', () => {
+  it('NOT_VERIFIED when no context_json is available at all', () => {
+    expect(evaluateFactualContextParity({ contextJsonRaw: null, primaryAsset: 'LINK' }).status).toBe('NOT_VERIFIED');
+  });
+  it('FAILs on unparseable context_json rather than throwing', () => {
+    const r = evaluateFactualContextParity({ contextJsonRaw: 'not json', primaryAsset: 'LINK' });
+    expect(r.status).toBe('FAIL');
+  });
+  it('FAILs when every asset is unavailable -- a hollow context with no real evidence', () => {
+    const context = makeRealContext({ observations: {
+      BTC: { available: false }, ETH: { available: false }, LINK: { available: false },
+    } });
+    const r = evaluateFactualContextParity({ contextJsonRaw: JSON.stringify(context), primaryAsset: 'LINK' });
+    expect(r.status).toBe('FAIL');
+    expect(r.assets_with_data).toBe(0);
+  });
+  it('FAILs when the primary asset specifically is unavailable, even if other assets have data', () => {
+    const context = makeRealContext();
+    context.observations.LINK.available = false;
+    const r = evaluateFactualContextParity({ contextJsonRaw: JSON.stringify(context), primaryAsset: 'LINK' });
+    expect(r.status).toBe('FAIL');
+    expect(r.primary_asset_available).toBe(false);
+  });
+  it('PASSes with real, populated observations for the primary asset', () => {
+    const context = makeRealContext();
+    const r = evaluateFactualContextParity({ contextJsonRaw: JSON.stringify(context), primaryAsset: 'LINK' });
+    expect(r.status).toBe('PASS');
+    expect(r.assets_with_data).toBe(3);
+    expect(r.primary_asset_available).toBe(true);
   });
 });
 
@@ -176,11 +268,11 @@ describe('evaluateCatalystLedger() — table existing is not evidence', () => {
     expect(evaluateCatalystLedger({ investigationId: null, catalystRows: [] }).status).toBe('NOT_VERIFIED');
   });
   it('FAILs when the investigation succeeded but no catalyst rows reference it', () => {
-    const r = evaluateCatalystLedger({ investigationId: 'MI-1-BTC', catalystRows: [] });
+    const r = evaluateCatalystLedger({ investigationId: 'AR-1-LINK', catalystRows: [] });
     expect(r.status).toBe('FAIL');
   });
   it('PASSes with a real matching row', () => {
-    const r = evaluateCatalystLedger({ investigationId: 'MI-1-BTC', catalystRows: [{ id: 5, ts: 100, coin: 'BTC' }] });
+    const r = evaluateCatalystLedger({ investigationId: 'AR-1-LINK', catalystRows: [{ id: 5, ts: 100, coin: 'LINK' }] });
     expect(r.status).toBe('PASS');
     expect(r.record_id).toBe(5);
   });
@@ -200,19 +292,12 @@ describe('evaluateLearningLoop() — table existing is not evidence', () => {
   });
 });
 
-describe('evaluateBudget() — reports only, never changes anything', () => {
-  it('NOT_VERIFIED when config could not be read from source', () => {
-    expect(evaluateBudget({ configuredDaily: null, configuredHourly: null }).status).toBe('NOT_VERIFIED');
-  });
-  it('FAILs (as documented) when production is still the canary values 1/1 against a 5/1 requirement', () => {
-    const r = evaluateBudget({ configuredDaily: 1, configuredHourly: 1, requiredDaily: 5, requiredHourly: 1 });
-    expect(r.status).toBe('FAIL');
-    expect(r.configured_daily).toBe(1);
-    expect(r.required_daily).toBe(5);
-  });
-  it('PASSes when configured matches required exactly', () => {
-    const r = evaluateBudget({ configuredDaily: 5, configuredHourly: 1, requiredDaily: 5, requiredHourly: 1 });
+describe('evaluateRelayBudget() — Analyst Relay is unbudgeted by design, always an informational PASS', () => {
+  it('always PASSes and reports unbudgeted-by-design, never reads or compares against the old MAX_GEMINI_INVESTIGATIONS_PER_DAY config', () => {
+    const r = evaluateRelayBudget();
     expect(r.status).toBe('PASS');
+    expect(r.budgeted).toBe(false);
+    expect(r.evidence.join(' ')).toContain('unbudgeted by design');
   });
 });
 
@@ -228,73 +313,73 @@ describe('evaluateSafety()', () => {
   });
 });
 
-describe('classifyFailure()', () => {
-  const passGrounding = { status: 'PASS' };
-  const passProvider = { status: 'PASS' };
+describe('classifyFailure() — grounding removed entirely, new context-integrity classifications added', () => {
+  const pass = { status: 'PASS' };
 
-  it('classifies NO_TRIGGER when gemini itself is NOT_VERIFIED', () => {
-    const r = classifyFailure({ gemini: { status: 'NOT_VERIFIED', evidence: ['no attempts'] }, providerCall: {}, grounding: {} });
+  it('classifies NO_TRIGGER when analystRelay itself is NOT_VERIFIED', () => {
+    const r = classifyFailure({ analystRelay: { status: 'NOT_VERIFIED', evidence: ['no submissions'] }, relaySubmission: {}, contextHashIntegrity: {}, factualContextParity: {} });
     expect(r.classification).toBe('NO_TRIGGER');
   });
-  it('classifies PROVIDER_RATE_LIMIT when the failed gemini attempt was rate_limited', () => {
-    const r = classifyFailure({ gemini: { status: 'FAIL', response_status: 'rate_limited', evidence: [] }, providerCall: {}, grounding: {} });
-    expect(r.classification).toBe('PROVIDER_RATE_LIMIT');
+  it('classifies RELAY_SUBMISSION_UNCLEAN when analystRelay FAILed (not NOT_VERIFIED)', () => {
+    const r = classifyFailure({ analystRelay: { status: 'FAIL', evidence: ['malformed'] }, relaySubmission: {}, contextHashIntegrity: {}, factualContextParity: {} });
+    expect(r.classification).toBe('RELAY_SUBMISSION_UNCLEAN');
   });
-  it('classifies APPLICATION_BUDGET when the failed gemini attempt was quota_deferred', () => {
-    const r = classifyFailure({ gemini: { status: 'FAIL', response_status: 'quota_deferred', evidence: [] }, providerCall: {}, grounding: {} });
-    expect(r.classification).toBe('APPLICATION_BUDGET');
+  it('classifies CONTEXT_HASH_MISMATCH when analystRelay+relaySubmission PASS but the hash does not', () => {
+    const r = classifyFailure({ analystRelay: pass, relaySubmission: pass, contextHashIntegrity: { status: 'FAIL', evidence: ['mismatch'] }, factualContextParity: {} });
+    expect(r.classification).toBe('CONTEXT_HASH_MISMATCH');
   });
-  it('classifies GROUNDING_FAILURE when gemini+provider PASS but grounding does not', () => {
-    const r = classifyFailure({ gemini: { status: 'PASS' }, providerCall: passProvider, grounding: { status: 'FAIL', evidence: ['empty'] } });
-    expect(r.classification).toBe('GROUNDING_FAILURE');
+  it('classifies CONTEXT_FACTUAL_PARITY_FAILURE when everything upstream PASSes but the context is hollow', () => {
+    const r = classifyFailure({ analystRelay: pass, relaySubmission: pass, contextHashIntegrity: pass, factualContextParity: { status: 'FAIL', evidence: ['empty'] } });
+    expect(r.classification).toBe('CONTEXT_FACTUAL_PARITY_FAILURE');
   });
-  it('classifies nothing (null) when gemini+provider+grounding all PASS', () => {
-    const r = classifyFailure({ gemini: { status: 'PASS' }, providerCall: passProvider, grounding: passGrounding });
+  it('classifies nothing (null) when all four PASS', () => {
+    const r = classifyFailure({ analystRelay: pass, relaySubmission: pass, contextHashIntegrity: pass, factualContextParity: pass });
     expect(r.classification).toBeNull();
   });
 });
 
-describe('computeEndToEnd() — the final verdict', () => {
+describe('computeEndToEnd() — the final verdict, grounding removed from the gate', () => {
   const allPass = () => ({
     frontend: { status: 'PASS' }, workerToD1: { status: 'PASS' }, prediction: { status: 'PASS' },
-    gemini: { status: 'PASS' }, providerCall: { status: 'PASS' }, grounding: { status: 'PASS' },
+    analystRelay: { status: 'PASS' }, relaySubmission: { status: 'PASS' },
+    contextHashIntegrity: { status: 'PASS' }, factualContextParity: { status: 'PASS' },
     catalystLedger: { status: 'PASS' }, learningLoop: { status: 'PASS' }, safety: { status: 'PASS' },
   });
 
-  it('GREEN only when every one of the nine links is PASS', () => {
+  it('GREEN only when every one of the ten links is PASS', () => {
     expect(computeEndToEnd(allPass()).status).toBe('GREEN');
   });
 
-  it('YELLOW (not RED) when gemini has simply never fired (NOT_VERIFIED) -- absence of a trigger is not a defect', () => {
-    const input = { ...allPass(), gemini: { status: 'NOT_VERIFIED', evidence: ['no attempts'] } };
+  it('YELLOW (not RED) when analystRelay has simply never fired (NOT_VERIFIED) -- absence of a submission is not a defect', () => {
+    const input = { ...allPass(), analystRelay: { status: 'NOT_VERIFIED', evidence: ['no submissions'] } };
     const r = computeEndToEnd(input);
     expect(r.status).toBe('YELLOW');
     expect(r.blocking_reason).toContain('NO_TRIGGER');
   });
 
-  it('YELLOW (not RED) when the only failure is provider rate limiting -- not a codebase defect', () => {
-    const input = { ...allPass(), gemini: { status: 'FAIL', response_status: 'rate_limited', evidence: ['429'] } };
+  it('YELLOW when the only failure is an unclean relay submission -- a human-input issue, not a proven codebase defect', () => {
+    const input = { ...allPass(), analystRelay: { status: 'FAIL', evidence: ['malformed paste'] } };
     const r = computeEndToEnd(input);
     expect(r.status).toBe('YELLOW');
-    expect(r.blocking_reason).toContain('PROVIDER_RATE_LIMIT');
+    expect(r.blocking_reason).toContain('RELAY_SUBMISSION_UNCLEAN');
   });
 
-  it('YELLOW when the only failure is our own application budget deferring the call', () => {
-    const input = { ...allPass(), gemini: { status: 'FAIL', response_status: 'quota_deferred', evidence: ['daily_limit_reached'] } };
-    const r = computeEndToEnd(input);
-    expect(r.status).toBe('YELLOW');
-    expect(r.blocking_reason).toContain('APPLICATION_BUDGET');
-  });
-
-  it('RED when grounding metadata is empty despite a real 200 -- this application always requests grounding for this call, so an ungrounded success is a proven defect, per section 13', () => {
-    const input = { ...allPass(), grounding: { status: 'FAIL', evidence: ['empty'] } };
+  it('RED when context_hash_integrity fails despite a real successful relay submission -- a proven internal-consistency defect', () => {
+    const input = { ...allPass(), contextHashIntegrity: { status: 'FAIL', evidence: ['hash mismatch'] } };
     const r = computeEndToEnd(input);
     expect(r.status).toBe('RED');
-    expect(r.blocking_reason).toContain('GROUNDING_FAILURE');
+    expect(r.blocking_reason).toContain('CONTEXT_HASH_MISMATCH');
   });
 
-  it('RED when the learning loop PASSED gemini/grounding but the selection/catalyst persistence step demonstrably failed (a real, observed defect)', () => {
-    const input = { ...allPass(), catalystLedger: { status: 'FAIL', evidence: ['no matching row despite successful investigation'] } };
+  it('RED when factual_context_parity fails despite everything upstream PASSing -- a hollow context is a proven defect', () => {
+    const input = { ...allPass(), factualContextParity: { status: 'FAIL', evidence: ['no observations'] } };
+    const r = computeEndToEnd(input);
+    expect(r.status).toBe('RED');
+    expect(r.blocking_reason).toContain('CONTEXT_FACTUAL_PARITY_FAILURE');
+  });
+
+  it('RED when the learning loop PASSED analystRelay but the catalyst persistence step demonstrably failed (a real, observed defect)', () => {
+    const input = { ...allPass(), catalystLedger: { status: 'FAIL', evidence: ['no matching row despite successful relay'] } };
     const r = computeEndToEnd(input);
     expect(r.status).toBe('RED');
   });
@@ -304,5 +389,11 @@ describe('computeEndToEnd() — the final verdict', () => {
     const r = computeEndToEnd(input);
     expect(r.status).toBe('RED');
     expect(r.blocking_reason).toContain('Safety violation');
+  });
+
+  it('no reference to grounding anywhere in a GREEN result -- confirms it is not silently still required', () => {
+    const r = computeEndToEnd(allPass());
+    expect(JSON.stringify(r)).not.toContain('grounding');
+    expect(JSON.stringify(r)).not.toContain('GROUNDING');
   });
 });

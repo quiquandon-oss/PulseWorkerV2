@@ -8,14 +8,15 @@
 import { writeFileSync, existsSync, mkdirSync } from 'node:fs';
 import {
   STATUS, redactSecrets, scanForLeakedSecrets,
-  evaluateFrontend, evaluateWorkerToD1, evaluatePrediction, evaluateGemini,
-  evaluateProviderCall, evaluateGrounding, evaluateCatalystLedger, evaluateLearningLoop,
-  evaluateBudget, evaluateSafety, classifyFailure, computeEndToEnd,
+  evaluateFrontend, evaluateWorkerToD1, evaluatePrediction, evaluateAnalystRelay,
+  evaluateRelaySubmission, evaluateContextHashIntegrity, evaluateFactualContextParity,
+  evaluateCatalystLedger, evaluateLearningLoop,
+  evaluateRelayBudget, evaluateSafety, classifyFailure, computeEndToEnd,
 } from './lib.js';
 import { getMainHeadSha, getFileContentAtRef, getLatestSuccessfulDeploy } from './github-checks.js';
 import { getWorkerMetadata, getLatestDeployment } from '../canary-audit/cloudflare-checks.js';
 import {
-  getAllGeminiInvestigationsFull, getProviderCallByCorrelationId, getCatalystsForInvestigation,
+  getAllAnalystRelayEntries, getAnalystRelayByRelayId, getCatalystsForInvestigation,
   getLatestResolvedPrediction, getSelectionDecisionAfter, checkD1Reachable,
 } from './d1-checks.js';
 
@@ -24,16 +25,6 @@ function logProgress(marker) {
     mkdirSync('artifacts/production-chain-audit', { recursive: true });
     writeFileSync('artifacts/production-chain-audit/PROGRESS.log', `${new Date().toISOString()} ${marker}\n`, { flag: 'a' });
   } catch { /* best-effort */ }
-}
-
-function extractBudgetFromSource(workerSource) {
-  if (!workerSource) return { daily: null, hourly: null };
-  const dailyMatch = workerSource.match(/MAX_GEMINI_INVESTIGATIONS_PER_DAY:\s*(\d+)/);
-  const hourlyMatch = workerSource.match(/MAX_GEMINI_INVESTIGATIONS_PER_HOUR:\s*(\d+)/);
-  return {
-    daily: dailyMatch ? Number(dailyMatch[1]) : null,
-    hourly: hourlyMatch ? Number(hourlyMatch[1]) : null,
-  };
 }
 
 function extractDbBindingFromSource(wranglerSource) {
@@ -61,7 +52,8 @@ async function main() {
   const timestamp = now.toISOString();
 
   const report = {
-    audit_version: '1.0',
+    audit_version: '2.0',
+    audit_scope_note: 'Approved scope update: Google Search grounding removed as a blocking criterion (the automated grounded API investigation it applied to was removed from production entirely). This audit now verifies the actual Analyst Relay response returned by the application -- provider receipt + non-empty valid response, investigation_id, D1 persistence, shared investigation-context hash integrity, Analyst Relay factual-context parity, and downstream learning/selection.',
     audit_timestamp: timestamp,
     repository: `${workerOwner}/${workerRepo}`,
     frontend_repository: `${frontendOwner}/${frontendRepo}`,
@@ -69,12 +61,13 @@ async function main() {
     frontend: {},
     worker_to_d1: {},
     prediction: {},
-    gemini: {},
-    provider_call: {},
-    grounding: {},
+    analyst_relay: {},
+    relay_submission: {},
+    context_hash_integrity: {},
+    factual_context_parity: {},
     catalyst_ledger: {},
     learning_loop: {},
-    budget: {},
+    relay_budget: {},
     safety: {},
     end_to_end: {},
   };
@@ -92,10 +85,6 @@ async function main() {
   report.production = {
     worker_url: workerUrl,
     worker_sha: deployedSha,
-    // Cloudflare's gradual-deployments API doesn't always return a stable
-    // "the one deployment ID currently live" for a plain (non-gradual)
-    // deploy -- per section 7's explicit instruction, this is null with an
-    // explanation rather than invented, unless the API actually returned one.
     deployment_id: cfDeployment ? cfDeployment.id : null,
     worker_version: workerMeta ? workerMeta.etag : null,
     deployment_timestamp: latestDeploy ? latestDeploy.created_at : (cfDeployment ? cfDeployment.created_on : null),
@@ -106,10 +95,10 @@ async function main() {
       : 'CLOUDFLARE_API_TOKEN not available to this run -- deployment_id could not be queried at all.';
   }
 
-  // ---- 2. Worker source (for budget/DB-binding extraction) ----
+  // ---- 2. Worker source (for D1-binding extraction only -- budget
+  // extraction removed, Analyst Relay is unbudgeted by design) ----
   const shaForSourceFetch = deployedSha || (mainHead && mainHead.sha);
   logProgress('fetching worker.js and wrangler.toml source at ref ' + shaForSourceFetch);
-  const workerSource = shaForSourceFetch ? await getFileContentAtRef(workerOwner, workerRepo, 'worker.js', shaForSourceFetch, githubToken) : null;
   const wranglerSource = shaForSourceFetch ? await getFileContentAtRef(workerOwner, workerRepo, 'wrangler.toml', shaForSourceFetch, githubToken) : null;
 
   // ---- 3. Frontend ----
@@ -130,66 +119,75 @@ async function main() {
   const predictionRow = predictionResult.ok ? predictionResult.row : null;
   report.prediction = evaluatePrediction({ row: predictionRow, deployedSha });
 
-  // ---- 6. Gemini investigation (real success only, per section 11) ----
-  logProgress('fetching Gemini investigations');
-  const investigationsResult = await getAllGeminiInvestigationsFull(cfAccountId, expectedDatabaseId, cfToken);
-  const allInvestigations = investigationsResult.ok ? investigationsResult.rows : [];
-  report.gemini = evaluateGemini({ allInvestigations });
+  // ---- 6. Analyst Relay response (replaces the old automated-Gemini
+  // section entirely -- see evaluateAnalystRelay's own comment) ----
+  logProgress('fetching Analyst Relay submissions');
+  const relayEntriesResult = await getAllAnalystRelayEntries(cfAccountId, expectedDatabaseId, cfToken);
+  const allRelayEntries = relayEntriesResult.ok ? relayEntriesResult.rows : [];
+  report.analyst_relay = evaluateAnalystRelay({ allRelayEntries });
 
-  // ---- 7. Provider call ----
-  let providerCallRow = null;
-  if (report.gemini.status === STATUS.PASS) {
-    logProgress('fetching provider call for successful investigation ' + report.gemini.investigation_id);
-    const r = await getProviderCallByCorrelationId(cfAccountId, expectedDatabaseId, cfToken, report.gemini.investigation_id);
-    providerCallRow = r.ok ? r.row : null;
+  // ---- 7. Relay submission receipt ("provider 200" equivalent) ----
+  let successfulRelayRow = null;
+  if (report.analyst_relay.status === STATUS.PASS) {
+    logProgress('fetching relay row for ' + report.analyst_relay.investigation_id);
+    const r = await getAnalystRelayByRelayId(cfAccountId, expectedDatabaseId, cfToken, report.analyst_relay.investigation_id);
+    successfulRelayRow = r.ok ? r.row : null;
   }
-  report.provider_call = evaluateProviderCall({ providerCallRow });
+  report.relay_submission = evaluateRelaySubmission({ relayRow: successfulRelayRow });
 
-  // ---- 8. Grounding ----
-  const successfulInvestigation = allInvestigations.find((r) => r.investigation_id === report.gemini.investigation_id);
-  report.grounding = evaluateGrounding({ groundingMetadataJson: successfulInvestigation ? successfulInvestigation.grounding_metadata_json : null });
+  // ---- 8. Shared investigation-context hash integrity ----
+  report.context_hash_integrity = await evaluateContextHashIntegrity({
+    contextJsonRaw: successfulRelayRow ? successfulRelayRow.context_json : null,
+    storedContextHash: successfulRelayRow ? successfulRelayRow.context_hash : null,
+  });
 
-  // ---- 9. Catalyst ledger ----
+  // ---- 9. Analyst Relay factual-context parity ----
+  let relayPrimaryAsset = null;
+  if (successfulRelayRow) {
+    try { relayPrimaryAsset = (JSON.parse(successfulRelayRow.assets_json || '[]'))[0] || null; } catch { /* leave null */ }
+  }
+  report.factual_context_parity = evaluateFactualContextParity({
+    contextJsonRaw: successfulRelayRow ? successfulRelayRow.context_json : null,
+    primaryAsset: relayPrimaryAsset,
+  });
+
+  // ---- 10. Catalyst ledger ----
   let catalystRows = [];
-  if (report.gemini.status === STATUS.PASS) {
-    logProgress('fetching catalyst ledger rows for ' + report.gemini.investigation_id);
-    const r = await getCatalystsForInvestigation(cfAccountId, expectedDatabaseId, cfToken, report.gemini.investigation_id);
+  if (report.analyst_relay.status === STATUS.PASS) {
+    logProgress('fetching catalyst ledger rows for ' + report.analyst_relay.investigation_id);
+    const r = await getCatalystsForInvestigation(cfAccountId, expectedDatabaseId, cfToken, report.analyst_relay.investigation_id);
     catalystRows = r.ok ? r.rows : [];
   }
-  report.catalyst_ledger = evaluateCatalystLedger({ investigationId: report.gemini.status === STATUS.PASS ? report.gemini.investigation_id : null, catalystRows });
+  report.catalyst_ledger = evaluateCatalystLedger({ investigationId: report.analyst_relay.status === STATUS.PASS ? report.analyst_relay.investigation_id : null, catalystRows });
 
-  // ---- 10. Learning loop ----
+  // ---- 11. Learning loop ----
   let selectionDecisionRow = null;
-  if (report.gemini.status === STATUS.PASS && successfulInvestigation) {
-    logProgress('fetching selection_decisions after the investigation');
-    let assets = [];
-    try { assets = JSON.parse(successfulInvestigation.assets_json || '[]'); } catch { /* leave empty */ }
-    const coin = assets[0] || null;
-    if (coin) {
-      const r = await getSelectionDecisionAfter(cfAccountId, expectedDatabaseId, cfToken, coin, successfulInvestigation.request_ts);
-      selectionDecisionRow = r.ok ? r.row : null;
-    }
+  if (report.analyst_relay.status === STATUS.PASS && relayPrimaryAsset) {
+    logProgress('fetching selection_decisions after the relay submission');
+    const r = await getSelectionDecisionAfter(cfAccountId, expectedDatabaseId, cfToken, relayPrimaryAsset, report.analyst_relay.timestamp);
+    selectionDecisionRow = r.ok ? r.row : null;
   }
   report.learning_loop = evaluateLearningLoop({ selectionDecisionRow });
 
-  // ---- 11. Budget ----
-  logProgress('extracting budget config from source');
-  const { daily: configuredDaily, hourly: configuredHourly } = extractBudgetFromSource(workerSource);
-  report.budget = evaluateBudget({ configuredDaily, configuredHourly, requiredDaily: 5, requiredHourly: 1 });
+  // ---- 12. Relay budget (Analyst Relay is unbudgeted by design -- see
+  // evaluateRelayBudget's own comment for why this is no longer a
+  // configuration comparison) ----
+  report.relay_budget = evaluateRelayBudget();
 
-  // ---- 12. Safety ----
+  // ---- 13. Safety ----
   report.safety = evaluateSafety({ productionWritesPerformed, secretsExposed: false }); // secretsExposed finalized after the leak scan below
 
-  // ---- 13. End-to-end ----
+  // ---- 14. End-to-end ----
   const endToEndBase = computeEndToEnd({
     frontend: report.frontend, workerToD1: report.worker_to_d1, prediction: report.prediction,
-    gemini: report.gemini, providerCall: report.provider_call, grounding: report.grounding,
+    analystRelay: report.analyst_relay, relaySubmission: report.relay_submission,
+    contextHashIntegrity: report.context_hash_integrity, factualContextParity: report.factual_context_parity,
     catalystLedger: report.catalyst_ledger, learningLoop: report.learning_loop, safety: report.safety,
   });
   report.end_to_end = {
     status: endToEndBase.status,
     blocking_reason: endToEndBase.blocking_reason,
-    chain: ['prediction', 'gemini', 'provider_200', 'grounding', 'd1_persistence', 'learning', 'selection'],
+    chain: ['prediction', 'analyst_relay', 'relay_submission', 'context_hash_integrity', 'factual_context_parity', 'd1_persistence', 'learning', 'selection'],
   };
 
   // ---- Redact + leak-scan the fully assembled report before writing it anywhere ----

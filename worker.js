@@ -2776,6 +2776,131 @@ async function getVariantCalibrationSummary(env, coin, horizonHours, variant) {
   };
 }
 
+// =====================================================================
+// ---- Regime-directional research report ----
+// READ-ONLY instrumentation. No writes, no effect on selectBestVariant,
+// runPrediction, or any production behavior whatsoever -- a research tool,
+// not a model input. Exists to let the regime-anomaly-directional-split
+// audit (is_regime_anomaly conflating bullish/bearish conditions) be
+// re-checked periodically as more independent episodes accumulate,
+// without re-deriving the analysis by hand each time. The original
+// ad-hoc version of this exact analysis found the hypothesis
+// INCONCLUSIVE on ~3 real episodes over 24 days -- recommendation was to
+// accumulate more data (weeks, not days) before any OOS test, let alone
+// a production change. This function is that accumulation mechanism.
+// =====================================================================
+
+// Pure. Same bucket definitions used throughout the audit: normal (not
+// anomalous), or anomalous split by trend_strength's sign at the moment
+// the anomaly was flagged. trend_strength can be null for older rows
+// (the column was added partway through this system's history) --
+// those get their own bucket rather than being silently dropped or
+// miscategorized.
+function classifyRegimeBucket(isRegimeAnomaly, trendStrength) {
+  if (isRegimeAnomaly !== 1) return 'normal';
+  if (trendStrength == null) return 'no_trend_data';
+  if (trendStrength > 0) return 'anomaly_pos_trend';
+  if (trendStrength < 0) return 'anomaly_neg_trend';
+  return 'anomaly_zero_trend';
+}
+
+async function computeRegimeDirectionalReport(env, coin, horizonHours) {
+  const table = coreTableForCoin(coin);
+  const { results: rows } = await env.DB.prepare(
+    `SELECT ts, p_up, realized_up, is_regime_anomaly, trend_strength FROM ${table} WHERE resolved_ts IS NOT NULL AND horizon_hours=? ORDER BY ts ASC`
+  ).bind(horizonHours).all();
+
+  // ---- Prediction-level bucket table -- same shape as the ad-hoc audit
+  // SQL, so results are directly comparable to that report. ----
+  const buckets = {};
+  for (const r of rows) {
+    const b = classifyRegimeBucket(r.is_regime_anomaly, r.trend_strength);
+    if (!buckets[b]) buckets[b] = { n: 0, correct: 0, up: 0 };
+    buckets[b].n++;
+    if ((r.p_up >= 0.5) === (r.realized_up === 1)) buckets[b].correct++;
+    if (r.realized_up === 1) buckets[b].up++;
+  }
+  const bucketSummary = {};
+  for (const [name, s] of Object.entries(buckets)) {
+    bucketSummary[name] = {
+      n: s.n,
+      original_accuracy: Number((100 * s.correct / s.n).toFixed(1)),
+      pct_actually_up: Number((100 * s.up / s.n).toFixed(1)),
+      always_up_baseline_accuracy: Number((100 * s.up / s.n).toFixed(1)),
+      always_down_baseline_accuracy: Number((100 * (s.n - s.up) / s.n).toFixed(1)),
+    };
+  }
+
+  // ---- Challenger comparison -- BTC/LINK only. Challenger does not run
+  // for ETH (ethPredictAndLog never calls runChallengerPrediction, same
+  // fact already confirmed and handled in /challenger-calibration). ----
+  let challengerBucketSummary = null;
+  if (coin === 'BTC' || coin === 'LINK') {
+    const { results: chRows } = await env.DB.prepare(
+      `SELECT p_up_flat, p_up_tilted, realized_up, is_regime_anomaly, trend_strength FROM challenger_predictions WHERE coin=? AND horizon_hours=? AND realized_up IS NOT NULL`
+    ).bind(coin, horizonHours).all();
+    const chBuckets = {};
+    for (const r of chRows) {
+      const b = classifyRegimeBucket(r.is_regime_anomaly, r.trend_strength);
+      if (!chBuckets[b]) chBuckets[b] = { n: 0, correctFlat: 0, correctTilted: 0 };
+      chBuckets[b].n++;
+      if ((r.p_up_flat >= 0.5) === (r.realized_up === 1)) chBuckets[b].correctFlat++;
+      if ((r.p_up_tilted >= 0.5) === (r.realized_up === 1)) chBuckets[b].correctTilted++;
+    }
+    challengerBucketSummary = {};
+    for (const [name, s] of Object.entries(chBuckets)) {
+      challengerBucketSummary[name] = {
+        n: s.n,
+        challenger_flat_accuracy: Number((100 * s.correctFlat / s.n).toFixed(1)),
+        challenger_tilted_accuracy: Number((100 * s.correctTilted / s.n).toFixed(1)),
+      };
+    }
+  }
+
+  // ---- Episode detection: day-level majority-vote bucket, then group
+  // consecutive days sharing the same bucket into one episode. The whole
+  // point -- 345 anomaly-flagged predictions in the original audit were
+  // ~3 real episodes, not 345 independent observations, and treating
+  // them as independent would manufacture false statistical confidence. ----
+  const dayBuckets = {};
+  for (const r of rows) {
+    const date = new Date(r.ts).toISOString().slice(0, 10);
+    const b = classifyRegimeBucket(r.is_regime_anomaly, r.trend_strength);
+    if (!dayBuckets[date]) dayBuckets[date] = {};
+    dayBuckets[date][b] = (dayBuckets[date][b] || 0) + 1;
+  }
+  const sortedDates = Object.keys(dayBuckets).sort();
+  const dayBucketSeq = sortedDates.map(date => {
+    const counts = dayBuckets[date];
+    const dominant = Object.entries(counts).sort((a, b) => b[1] - a[1])[0][0];
+    return { date, bucket: dominant };
+  });
+  const episodes = [];
+  for (const { date, bucket } of dayBucketSeq) {
+    const last = episodes[episodes.length - 1];
+    if (last && last.bucket === bucket) {
+      last.end_date = date;
+      last.n_days++;
+    } else {
+      episodes.push({ bucket, start_date: date, end_date: date, n_days: 1 });
+    }
+  }
+  const episodeCountByBucket = {};
+  for (const ep of episodes) {
+    episodeCountByBucket[ep.bucket] = (episodeCountByBucket[ep.bucket] || 0) + 1;
+  }
+
+  return {
+    ok: true, coin, horizon_hours: horizonHours, generated_at: Date.now(),
+    raw_prediction_count: rows.length,
+    bucket_summary: bucketSummary,
+    challenger_bucket_summary: challengerBucketSummary,
+    episode_count_by_bucket: episodeCountByBucket,
+    episodes,
+    note: 'Read-only research report -- does not feed into any prediction, selection, or calibration logic. See the regime-anomaly-directional-split audit for full methodology. Episode counts, not raw prediction counts, are what matter for statistical significance here.',
+  };
+}
+
 // Calibration for the challenger: both variants (flat/tilted) against BOTH
 // naive-baseline (low bar — always guess the historically-more-common
 // direction) AND a real MA-crossover momentum strategy (higher bar — price
@@ -4459,6 +4584,21 @@ export default {
         const variant = url.searchParams.get('variant') || 'original';
         const result = await getVariantCalibrationSummary(env, coin, horizon, variant);
         return new Response(JSON.stringify(result), { status: result.ok === false ? 400 : 200, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+      } catch (err) {
+        return new Response(JSON.stringify({ ok: false, error: String(err) }), { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+      }
+    }
+
+    // ---- GET /research/regime-directional?coin=&horizon= -- read-only
+    // instrumentation for the regime-anomaly-directional-split audit. No
+    // writes, no effect on any production logic. See
+    // computeRegimeDirectionalReport's own comment for full context. ----
+    if (url.pathname === '/research/regime-directional' && request.method === 'GET') {
+      try {
+        const coin = ['BTC', 'LINK', 'ETH'].includes(url.searchParams.get('coin')) ? url.searchParams.get('coin') : 'BTC';
+        const horizon = [12, 24].includes(parseInt(url.searchParams.get('horizon'), 10)) ? parseInt(url.searchParams.get('horizon'), 10) : 24;
+        const report = await computeRegimeDirectionalReport(env, coin, horizon);
+        return new Response(JSON.stringify(report), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
       } catch (err) {
         return new Response(JSON.stringify({ ok: false, error: String(err) }), { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
       }

@@ -2722,6 +2722,60 @@ async function backfillChallengerPredictions(env) {
   return resolvedCount;
 }
 
+// =====================================================================
+// ---- Variant-aware calibration summary ----
+// Answers one specific question for whichever variant selectBestVariant
+// currently has chosen: "is this number trustworthy, and how much so" --
+// in ONE consistent shape regardless of which of the 6 possible variants
+// it is. Deliberately NOT reusing getCalibration's or
+// getChallengerCalibration's full output shapes below -- each has fields
+// specific to itself (driver_usage, ma_crossover_baseline, the
+// experimental sub-object) that don't generalize across all 6 variants.
+// This exists specifically to back the Dashboard tile, which needs to
+// show a trust indicator for whatever's currently headlined, not the
+// full diagnostic detail those richer functions provide elsewhere (Lab).
+// =====================================================================
+async function getVariantCalibrationSummary(env, coin, horizonHours, variant) {
+  const coreTable = coreTableForCoin(coin);
+  let rows;
+
+  if (variant === 'original' || variant === 'calibrated' || variant === 'experimental') {
+    const probField = variant === 'original' ? 'p_up' : variant === 'calibrated' ? 'calibrated_p_up' : 'p_up_experimental';
+    const { results } = await env.DB.prepare(
+      `SELECT ${probField} as p, realized_up FROM ${coreTable} WHERE horizon_hours=? AND realized_up IS NOT NULL AND ${probField} IS NOT NULL`
+    ).bind(horizonHours).all();
+    rows = results;
+  } else if (variant === 'challenger_flat' || variant === 'challenger_tilted' || variant === 'challenger_calibrated') {
+    const probField = variant === 'challenger_flat' ? 'p_up_flat' : variant === 'challenger_tilted' ? 'p_up_tilted' : 'calibrated_p_up_flat';
+    const { results } = await env.DB.prepare(
+      `SELECT ${probField} as p, realized_up FROM challenger_predictions WHERE coin=? AND horizon_hours=? AND realized_up IS NOT NULL AND ${probField} IS NOT NULL`
+    ).bind(coin, horizonHours).all();
+    rows = results;
+  } else {
+    return { ok: false, error: `unknown variant: ${variant}` };
+  }
+
+  const n = rows.length;
+  if (n === 0) return { ok: true, variant, n_resolved: 0, note: 'No resolved predictions for this variant yet.' };
+
+  const accuracy = rows.filter(r => (r.p >= 0.5) === (r.realized_up === 1)).length / n;
+  const brier = rows.reduce((s, r) => s + (r.p - r.realized_up) ** 2, 0) / n;
+  const upRate = rows.filter(r => r.realized_up === 1).length / n;
+  const bestNaiveBrier = Math.min(0.25, upRate * (1 - upRate));
+  const beatsNaiveBaseline = brier < bestNaiveBrier;
+
+  return {
+    ok: true, variant, n_resolved: n,
+    accuracy: Number(accuracy.toFixed(3)),
+    brier: Number(brier.toFixed(3)),
+    naive_baseline_brier: Number(bestNaiveBrier.toFixed(3)),
+    beats_naive_baseline: beatsNaiveBaseline,
+    note: beatsNaiveBaseline
+      ? 'Currently beats the best naive baseline.'
+      : 'Does NOT beat the best naive baseline right now — a constant guess would have done as well or better.',
+  };
+}
+
 // Calibration for the challenger: both variants (flat/tilted) against BOTH
 // naive-baseline (low bar — always guess the historically-more-common
 // direction) AND a real MA-crossover momentum strategy (higher bar — price
@@ -4373,10 +4427,38 @@ export default {
     // ---- GET /challenger-calibration?coin=BTC|LINK&horizon=12|24 ----
     if (url.pathname === '/challenger-calibration' && request.method === 'GET') {
       try {
-        const coin = url.searchParams.get('coin') === 'LINK' ? 'LINK' : 'BTC';
+        // Was `=== 'LINK' ? 'LINK' : 'BTC'` -- silently served BTC's data
+        // for coin=ETH (or any other unrecognized value) instead of
+        // erroring. Challenger doesn't actually run for ETH (confirmed:
+        // ethPredictAndLog never calls runChallengerPrediction), so this
+        // was latent -- nothing currently requests coin=ETH here -- but
+        // real and worth fixing rather than leaving a silent-wrong-answer
+        // trap for whenever something does.
+        const coinParam = url.searchParams.get('coin');
+        if (coinParam === 'ETH') {
+          return new Response(JSON.stringify({ ok: false, error: 'Challenger does not run for ETH -- no calibration data exists for this coin.' }), { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+        }
+        const coin = coinParam === 'LINK' ? 'LINK' : 'BTC';
         const horizon = [12, 24].includes(parseInt(url.searchParams.get('horizon'), 10)) ? parseInt(url.searchParams.get('horizon'), 10) : 24;
         const result = await getChallengerCalibration(env, coin, horizon);
         return new Response(JSON.stringify(result), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+      } catch (err) {
+        return new Response(JSON.stringify({ ok: false, error: String(err) }), { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+      }
+    }
+
+    // ---- GET /variant-calibration?coin=BTC|LINK|ETH&horizon=12|24&variant=...
+    // -- backs the Dashboard tile's trust indicator for whichever variant
+    // selectBestVariant currently has chosen, in one consistent shape
+    // regardless of which of the 6 possible variants it is. See
+    // getVariantCalibrationSummary's own comment for the full reasoning. ----
+    if (url.pathname === '/variant-calibration' && request.method === 'GET') {
+      try {
+        const coin = ['BTC', 'LINK', 'ETH'].includes(url.searchParams.get('coin')) ? url.searchParams.get('coin') : 'BTC';
+        const horizon = [12, 24].includes(parseInt(url.searchParams.get('horizon'), 10)) ? parseInt(url.searchParams.get('horizon'), 10) : 24;
+        const variant = url.searchParams.get('variant') || 'original';
+        const result = await getVariantCalibrationSummary(env, coin, horizon, variant);
+        return new Response(JSON.stringify(result), { status: result.ok === false ? 400 : 200, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
       } catch (err) {
         return new Response(JSON.stringify({ ok: false, error: String(err) }), { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
       }

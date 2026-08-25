@@ -28,23 +28,25 @@ export async function runQuery(accountId, databaseId, token, sql, params = []) {
   }
 }
 
-// All investigations, newest first, full columns needed for the gemini +
-// grounding sections in one query (avoids a second round-trip to get
-// grounding_metadata_json for whichever row turns out to be the
-// successful one).
-export async function getAllGeminiInvestigationsFull(accountId, databaseId, token) {
+// All Analyst Relay submissions, newest first. Replaces
+// getAllGeminiInvestigationsFull (which read gemini_investigations, the
+// automated MI- table) -- that mechanism was removed entirely; Analyst
+// Relay (analyst_relay_log) is now the sole investigation path. Pulls
+// context_json/context_hash in the same query to avoid a second
+// round-trip for whichever row turns out to be the successful one.
+export async function getAllAnalystRelayEntries(accountId, databaseId, token) {
   const r = await runQuery(accountId, databaseId, token,
-    `SELECT id, investigation_id, request_ts, assets_json, response_status, catalysts_written, grounding_metadata_json
-     FROM gemini_investigations ORDER BY request_ts DESC`);
+    `SELECT id, relay_id, candidate_id, assets_json, submitted_ts, raw_response_text, validation_status, catalysts_written, context_json, context_hash
+     FROM analyst_relay_log ORDER BY submitted_ts DESC`);
   if (!r.ok) return r;
   return { ok: true, unavailable: false, rows: r.results };
 }
 
-export async function getProviderCallByCorrelationId(accountId, databaseId, token, correlationId) {
+export async function getAnalystRelayByRelayId(accountId, databaseId, token, relayId) {
   const r = await runQuery(accountId, databaseId, token,
-    `SELECT id, correlation_id, consumer, asset, request_ts, provider, model, quota_decision, http_status, response_status, error_category
-     FROM gemini_provider_calls WHERE correlation_id = ? ORDER BY created_ts DESC LIMIT 1`,
-    [correlationId]);
+    `SELECT id, relay_id, candidate_id, assets_json, submitted_ts, raw_response_text, validation_status, catalysts_written, context_json, context_hash
+     FROM analyst_relay_log WHERE relay_id = ? ORDER BY submitted_ts DESC LIMIT 1`,
+    [relayId]);
   if (!r.ok) return r;
   return { ok: true, unavailable: false, row: r.results[0] || null };
 }

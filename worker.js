@@ -2394,6 +2394,43 @@ const LEARNING_ASSETS = [
   { key: 'ETH', table: 'eth_predictions', coinFilter: false, probColumn: 'p_up', calibratedColumn: 'calibrated_p_up' },
 ];
 
+// =====================================================================
+// ---- Daily report caching ----
+// buildDailyReport (below) scans every resolved row across predictions/
+// link_predictions/eth_predictions/challenger_predictions -- ~3,000+ rows
+// and growing every cron cycle -- to compute calibration curves, regime
+// grouping, drift, confidence buckets. GET /api/learning/daily and
+// /api/learning/chatgpt were recomputing this FRESH on every single page
+// view, with no caching at all, unconditionally, even though the
+// underlying data only actually changes once per 3-hourly cron cycle.
+//
+// Only caches the all-time report (dateStr == null) -- the case the
+// frontend actually calls on every page load. A specific ?date= filter is
+// a rarer, smaller-scoped historical-browsing path and still computes
+// live; not worth the complexity of a per-date cache for something this
+// infrequent.
+//
+// Single-row table (id=1, enforced by a CHECK constraint) -- there's only
+// ever one "current" cached report, upserted via INSERT OR REPLACE.
+// =====================================================================
+async function getCachedDailyReport(env) {
+  const row = await env.DB.prepare('SELECT report_json, generated_ts FROM daily_report_cache WHERE id = 1').first();
+  if (!row) return null;
+  try {
+    return { report: JSON.parse(row.report_json), generatedTs: row.generated_ts };
+  } catch {
+    return null; // corrupt cache row (should never happen) -- treated as a miss, not a crash
+  }
+}
+
+async function refreshDailyReportCache(env) {
+  const report = await buildDailyReport(env, {});
+  await env.DB.prepare(
+    'INSERT INTO daily_report_cache (id, report_json, generated_ts) VALUES (1, ?, ?) ON CONFLICT(id) DO UPDATE SET report_json = excluded.report_json, generated_ts = excluded.generated_ts'
+  ).bind(JSON.stringify(report), Date.now()).run();
+  return report;
+}
+
 async function buildDailyReport(env, { dateStr } = {}) {
   const nowTs = Date.now();
   const DAY = 24 * 3600 * 1000;
@@ -4133,7 +4170,13 @@ export default {
     if (url.pathname === '/api/learning/daily' && request.method === 'GET') {
       try {
         const dateStr = url.searchParams.get('date') || null;
-        const report = await buildDailyReport(env, { dateStr });
+        let report;
+        if (dateStr) {
+          report = await buildDailyReport(env, { dateStr }); // rare, smaller-scoped historical path -- not cached
+        } else {
+          const cached = await getCachedDailyReport(env);
+          report = cached ? cached.report : await refreshDailyReportCache(env); // cache miss (e.g. first call ever) -- compute once and populate, rather than staying slow forever
+        }
         return new Response(JSON.stringify(report), {
           status: report.ok === false ? 400 : 200,
           headers: { ...corsHeaders, 'Content-Type': 'application/json' },
@@ -4152,7 +4195,13 @@ export default {
     if (url.pathname === '/api/learning/chatgpt' && request.method === 'GET') {
       try {
         const dateStr = url.searchParams.get('date') || null;
-        const report = await buildDailyReport(env, { dateStr });
+        let report;
+        if (dateStr) {
+          report = await buildDailyReport(env, { dateStr });
+        } else {
+          const cached = await getCachedDailyReport(env);
+          report = cached ? cached.report : await refreshDailyReportCache(env);
+        }
         if (report.ok === false) {
           return new Response(JSON.stringify(report), { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
         }
@@ -4700,7 +4749,9 @@ export default {
         predictThenSelect(ethPredictAndLog, 'ETH', 24).catch(err => console.error('ETH 24h predict-and-log failed:', err)),
         predictThenSelect(ethPredictAndLog, 'ETH', 12).catch(err => console.error('ETH 12h predict-and-log failed:', err)),
       ];
-      ctx.waitUntil(Promise.allSettled(predictionTasks));
+      ctx.waitUntil(Promise.allSettled(predictionTasks).then(
+        () => refreshDailyReportCache(env).catch(err => console.error('Daily report cache refresh failed:', err))
+      ));
     }
   },
 };

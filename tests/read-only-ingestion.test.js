@@ -51,32 +51,29 @@ describe('isRecentDataStale — the staleness check itself, real D1-shaped queri
 
 // predictAndLog's own dependencies (backfillPredictions, logBtcData,
 // runPrediction, etc.) are stubbed as call-tracking fakes rather than
-// exercised for real -- this test suite is specifically about
-// predictAndLog's OWN orchestration/gating logic (did it call the right
-// things with the right persist/allowWrite values), not a re-verification
-// of k-NN correctness, which is completely unchanged and already covered
-// by the rest of the suite. evalInScope's extraGlobals injection makes
-// this possible: predictAndLog's extracted source references these names
-// exactly as it would in the real file, resolved here as stub parameters
-// instead of the real functions.
-describe('predictAndLog — orchestration and write-gating logic', () => {
-  function makeStubs({ stale }) {
-    const calls = { logBtcData: 0, runPredictionPersist: [], runChallengerPersist: [], isRecentDataStaleCalled: 0, claimStaleRefreshCalled: 0 };
+// exercised for real -- this suite is specifically about predictAndLog's
+// OWN orchestration/gating logic, not a re-verification of k-NN
+// correctness or the conditional-SQL mechanism itself (covered for real
+// in staleness-fallback-concurrency.test.js).
+describe('predictAndLog — orchestration and write-authorization logic', () => {
+  function makeStubs({ stale, claimTokenResult = 'fake-token-123' }) {
+    const calls = { logBtcData: [], runPredictionArgs: [], runChallengerArgs: [], isRecentDataStaleCalled: 0, claimStaleRefreshCalled: 0, backfillChallengerCalledBeforeClaim: false };
+    let claimResolved = false;
     return {
       calls,
       stubs: {
         backfillPredictions: async () => 0,
         backfillGeminiBiasShort: async () => 0,
-        backfillChallengerPredictions: async () => 0,
-        logBtcData: async () => { calls.logBtcData++; },
+        backfillChallengerPredictions: async () => { calls.backfillChallengerCalledBeforeClaim = !claimResolved; return 0; },
+        logBtcData: async (env, claimToken) => { calls.logBtcData.push(claimToken); },
         isRecentDataStale: async () => { calls.isRecentDataStaleCalled++; return stale; },
-        claimStaleRefresh: async () => { calls.claimStaleRefreshCalled++; return true; }, // single caller, always wins -- concurrency itself is covered separately
+        claimStaleRefresh: async () => { calls.claimStaleRefreshCalled++; claimResolved = true; return claimTokenResult; },
         runPrediction: async (env, horizon, opts) => {
-          calls.runPredictionPersist.push(opts ? opts.persist : undefined);
+          calls.runPredictionArgs.push(opts);
           return { ok: true, status: 'ok', btc_price_now: 100, persisted: opts ? opts.persist : undefined };
         },
         runChallengerPrediction: async (env, args, opts) => {
-          calls.runChallengerPersist.push(opts ? opts.persist : undefined);
+          calls.runChallengerArgs.push(opts);
           return { ok: true, status: 'ok', persisted: opts ? opts.persist : undefined };
         },
       },
@@ -85,75 +82,74 @@ describe('predictAndLog — orchestration and write-gating logic', () => {
 
   let source;
   beforeAll(() => {
-    source = extractFunctions('predictAndLog', 'resolveShouldWrite');
+    source = extractFunctions('predictAndLog', 'resolveWriteAuthorization');
   });
 
-  it('1. CRON (allowWrite:true) always writes -- logBtcData called, both persist flags true, isRecentDataStale never even queried (short-circuit)', async () => {
-    const { calls, stubs } = makeStubs({ stale: false }); // stale:false on purpose -- proves the OR short-circuits before ever checking
+  it('1. CRON (allowWrite:true) always writes with claimToken:null -- logBtcData called with null, isRecentDataStale never queried (short-circuit)', async () => {
+    const { calls, stubs } = makeStubs({ stale: false }); // stale:false on purpose -- proves the short-circuit happens before ever checking
     const scope = evalInScope(source, stubs);
     await scope.predictAndLog({ DB: {} }, 24, { allowWrite: true });
-    expect(calls.logBtcData).toBe(1);
+    expect(calls.logBtcData).toEqual([null]);
     expect(calls.isRecentDataStaleCalled).toBe(0);
-    expect(calls.runPredictionPersist).toEqual([true]);
-    expect(calls.runChallengerPersist).toEqual([true]);
+    expect(calls.runPredictionArgs).toEqual([{ persist: true, claimToken: null }]);
+    expect(calls.runChallengerArgs).toEqual([{ persist: true, claimToken: null }]);
   });
 
-  it('2. LIVE traffic with FRESH data (allowWrite:false, not stale) creates NO new rows at all -- logBtcData not called, both persist flags false', async () => {
+  it('2. LIVE traffic with FRESH data (allowWrite:false, not stale) creates NO new rows -- logBtcData not called, persist:false everywhere', async () => {
     const { calls, stubs } = makeStubs({ stale: false });
     const scope = evalInScope(source, stubs);
     await scope.predictAndLog({ DB: {} }, 24, { allowWrite: false });
-    expect(calls.logBtcData).toBe(0);
+    expect(calls.logBtcData).toEqual([]);
     expect(calls.isRecentDataStaleCalled).toBe(1);
-    expect(calls.runPredictionPersist).toEqual([false]);
-    expect(calls.runChallengerPersist).toEqual([false]);
+    expect(calls.claimStaleRefreshCalled).toBe(0); // never even attempts a claim when not stale
+    expect(calls.runPredictionArgs).toEqual([{ persist: false, claimToken: null }]);
+    expect(calls.runChallengerArgs).toEqual([{ persist: false, claimToken: null }]);
   });
 
-  it('2b. LIVE traffic with the allowWrite option omitted entirely (matching the real /predict route\'s actual call site) defaults to the same read-only behavior', async () => {
+  it('2b. LIVE traffic with allowWrite omitted entirely (matching the real /predict route) defaults to the same read-only behavior', async () => {
     const { calls, stubs } = makeStubs({ stale: false });
     const scope = evalInScope(source, stubs);
-    await scope.predictAndLog({ DB: {} }, 24); // no third argument at all
-    expect(calls.logBtcData).toBe(0);
-    expect(calls.runPredictionPersist).toEqual([false]);
+    await scope.predictAndLog({ DB: {} }, 24);
+    expect(calls.logBtcData).toEqual([]);
+    expect(calls.runPredictionArgs).toEqual([{ persist: false, claimToken: null }]);
   });
 
-  it('3. STALENESS FALLBACK: live traffic (allowWrite:false) with genuinely stale data writes once, same as cron would', async () => {
-    const { calls, stubs } = makeStubs({ stale: true });
+  it('3. STALENESS FALLBACK: live traffic with genuinely stale data writes using the real claim token, not a boolean', async () => {
+    const { calls, stubs } = makeStubs({ stale: true, claimTokenResult: 'token-abc' });
     const scope = evalInScope(source, stubs);
     await scope.predictAndLog({ DB: {} }, 24, { allowWrite: false });
-    expect(calls.logBtcData).toBe(1);
-    expect(calls.isRecentDataStaleCalled).toBe(1);
-    expect(calls.claimStaleRefreshCalled).toBe(1); // the atomic claim was actually attempted, not just the staleness read
-    expect(calls.runPredictionPersist).toEqual([true]);
-    expect(calls.runChallengerPersist).toEqual([true]);
+    expect(calls.logBtcData).toEqual(['token-abc']);
+    expect(calls.claimStaleRefreshCalled).toBe(1);
+    expect(calls.runPredictionArgs).toEqual([{ persist: true, claimToken: 'token-abc' }]);
+    expect(calls.runChallengerArgs).toEqual([{ persist: true, claimToken: 'token-abc' }]);
   });
 
-  it('3b. staleness fallback correctly does NOT write when the atomic claim is lost (another concurrent caller already won it)', async () => {
-    const { calls, stubs } = makeStubs({ stale: true });
-    stubs.claimStaleRefresh = async () => { calls.claimStaleRefreshCalled = (calls.claimStaleRefreshCalled || 0) + 1; return false; }; // lost the claim
+  it('3b. claim lost (claimStaleRefresh returns null) -- correctly does not write, persist:false, claimToken:null passed through', async () => {
+    const { calls, stubs } = makeStubs({ stale: true, claimTokenResult: null });
     const scope = evalInScope(source, stubs);
     await scope.predictAndLog({ DB: {} }, 24, { allowWrite: false });
-    expect(calls.logBtcData).toBe(0); // data WAS stale, but this caller lost the claim -- must not write
-    expect(calls.runPredictionPersist).toEqual([false]);
+    expect(calls.logBtcData).toEqual([]);
+    expect(calls.runPredictionArgs).toEqual([{ persist: false, claimToken: null }]);
   });
 
-  it('claimStaleRefresh is never even called when data is fresh -- the common case stays a single cheap read, no claim-table writes', async () => {
-    const { calls, stubs } = makeStubs({ stale: false });
-    const scope = evalInScope(source, stubs);
-    await scope.predictAndLog({ DB: {} }, 24, { allowWrite: false });
-    expect(calls.claimStaleRefreshCalled).toBe(0);
-  });
-
-  it('4. NO DUPLICATES: across 5 consecutive live calls with fresh data, zero writes ever happen -- confirms repeated page views cannot each create a new row', async () => {
+  it('4. NO DUPLICATES: across 5 consecutive live calls with fresh data, zero writes ever happen', async () => {
     const { calls, stubs } = makeStubs({ stale: false });
     const scope = evalInScope(source, stubs);
     for (let i = 0; i < 5; i++) {
       await scope.predictAndLog({ DB: {} }, 24, { allowWrite: false });
     }
-    expect(calls.logBtcData).toBe(0);
-    expect(calls.runPredictionPersist).toEqual([false, false, false, false, false]);
+    expect(calls.logBtcData).toEqual([]);
+    expect(calls.runPredictionArgs.every((a) => a.persist === false)).toBe(true);
   });
 
-  it('resolution (backfillPredictions/backfillGeminiBiasShort) still runs on every call regardless of allowWrite -- resolving existing rows is not "creating new training data"', async () => {
+  it('backfillChallengerPredictions now runs BEFORE the claim is resolved, not after -- shrinks the unprotected window per the design fix', async () => {
+    const { calls, stubs } = makeStubs({ stale: true });
+    const scope = evalInScope(source, stubs);
+    await scope.predictAndLog({ DB: {} }, 24, { allowWrite: false });
+    expect(calls.backfillChallengerCalledBeforeClaim).toBe(true);
+  });
+
+  it('resolution steps still run on every call regardless of allowWrite -- resolving existing rows is not "creating new training data"', async () => {
     let backfillCalls = 0, geminiBackfillCalls = 0;
     const { stubs } = makeStubs({ stale: false });
     stubs.backfillPredictions = async () => { backfillCalls++; return 2; };
@@ -166,7 +162,7 @@ describe('predictAndLog — orchestration and write-gating logic', () => {
     expect(result.gemini_bias_backfilled_this_call).toBe(1);
   });
 
-  it('a Challenger failure never breaks the core prediction response, same resilience contract as before this change', async () => {
+  it('a Challenger failure never breaks the core prediction response, same resilience contract as before', async () => {
     const { stubs } = makeStubs({ stale: false });
     stubs.runChallengerPrediction = async () => { throw new Error('challenger boom'); };
     const scope = evalInScope(source, stubs);
@@ -177,16 +173,26 @@ describe('predictAndLog — orchestration and write-gating logic', () => {
   });
 });
 
-describe('regression: runPrediction/runLinkPrediction/runEthPrediction/runChallengerPrediction all accept and honor a persist option', () => {
-  it('all four functions have persist = true as their default (safe backward-compatible default for any other caller)', () => {
+describe('regression: runPrediction/runLinkPrediction/runEthPrediction/runChallengerPrediction all accept persist AND claimToken', () => {
+  it('all four functions default to persist:true, claimToken:null (safe, backward-compatible for any other caller)', () => {
     for (const name of ['runPrediction', 'runLinkPrediction', 'runEthPrediction']) {
       const src = extractFunctions(name);
-      expect(src).toMatch(/\{ persist = true \} = \{\}/);
-      expect(src).toMatch(/if \(persist\) \{/);
+      expect(src).toMatch(/\{ persist = true, claimToken = null \} = \{\}/);
+      expect(src).toMatch(/if \(claimToken === null\) \{/);
     }
     const challengerSrc = extractFunctions('runChallengerPrediction');
-    expect(challengerSrc).toMatch(/\{ persist = true \} = \{\}/);
-    expect(challengerSrc).toMatch(/if \(persist\) \{/);
+    expect(challengerSrc).toMatch(/\{ persist = true, claimToken = null \} = \{\}/);
+    expect(challengerSrc).toMatch(/if \(claimToken === null\) \{/);
+  });
+
+  it('each function\'s conditional (token-authorized) SQL shape is INSERT ... SELECT ... FROM stale_refresh_claim WHERE coin = ... AND claim_token = ..., not a plain VALUES insert', () => {
+    for (const [name, coin] of [['runPrediction', "'BTC'"], ['runLinkPrediction', "'LINK'"], ['runEthPrediction', "'ETH'"]]) {
+      const src = extractFunctions(name);
+      expect(src).toMatch(/FROM stale_refresh_claim WHERE coin = /);
+      expect(src).toContain('AND claim_token = ?');
+    }
+    const challengerSrc = extractFunctions('runChallengerPrediction');
+    expect(challengerSrc).toMatch(/FROM stale_refresh_claim WHERE coin = \? AND claim_token = \?/);
   });
 
   it('when not persisted, each function still returns prediction_id/id: null rather than throwing on a missing insert result', () => {

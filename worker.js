@@ -270,7 +270,128 @@ function computeConditionalCalibration(todayFeatures, historicalRows, weights, k
   return { p_up: empiricalUpRate, n_neighbors: neighbors.length };
 }
 
-async function runPrediction(env, horizonHours = 24) {
+// =====================================================================
+// ---- Read-only live traffic (data-fix only, no model/selection logic
+// touched) ----
+// Root cause traced and confirmed: GET /predict, /link-predict,
+// /eth-predict each unconditionally wrote a fresh row to btc_data/
+// link_data/eth_data (via logXData) AND a fresh row to predictions/
+// link_predictions/eth_predictions/challenger_predictions (via each
+// runXPrediction's own INSERT), on every single page view -- in addition
+// to the cron already doing the same thing once per horizon per 3h
+// cycle. Confirmed empirically: ~21-35% of rows in these tables are
+// exact-value duplicates, and ~43% of real k-NN neighbor slots in a
+// sampled dry-run were exact duplicates of another neighbor, materially
+// distorting n_matched and the LCA gate's effective evidence count (see
+// the temporal-dependence and LCA-gate audits).
+//
+// Fix: the cron is now the only path that unconditionally writes. Live
+// routes default to persist:false -- they still COMPUTE a live,
+// accurate prediction every time (reading whatever btc_data/predictions
+// state currently exists, same as before), they just don't ALSO persist
+// that computation as a new row. The one exception is the staleness
+// fallback below: if the cron has genuinely stalled (no fresh row in
+// over 6h, double the normal ~3h cadence), a live call is allowed to
+// write once, so predictions don't silently serve stale data forever
+// just because nobody visits the page during an outage.
+//
+// Nothing about the k-NN distance, feature weights, LCA gate,
+// MIN_MATCHED, or selection thresholds is touched anywhere in this
+// section -- this only ever gates WHETHER a row gets written, never HOW
+// a prediction or selection is computed.
+// =====================================================================
+async function isRecentDataStale(env, table, maxAgeMs = 6 * 60 * 60 * 1000) {
+  // table is only ever called with a hardcoded literal from within this
+  // file (btc_data/link_data/eth_data), never user input -- same
+  // accepted pattern already used elsewhere in this codebase for
+  // table-name interpolation (see coreTableForCoin's callers).
+  const row = await env.DB.prepare(`SELECT MAX(ts) as latest FROM ${table}`).first();
+  if (!row || row.latest == null) return true;
+  return (Date.now() - row.latest) > maxAgeMs;
+}
+
+// ---- Atomic claim for the staleness fallback (fencing-token design) ----
+// Confirmed by audit (concurrency test against this exact PR branch):
+// isRecentDataStale + a plain conditional write is a check-then-act race
+// -- two or more concurrent live requests arriving during a genuine cron
+// stall would each independently see stale data and each write their own
+// fallback snapshot, reproducing the very duplicate-row bug this whole
+// change was built to fix, just gated behind a rarer trigger.
+//
+// First fix (this branch's earlier commits) used a plain boolean claim,
+// idempotent-insert-then-conditional-UPDATE, same pattern
+// reserveGeminiQuotaSlot already uses. A second, deeper audit found that
+// boolean alone wasn't enough: predictAndLog can spend well over 60s in
+// its own unbounded, backlog-sized backfill loops (backfillPredictions,
+// backfillChallengerPredictions, backfillGeminiBiasShort all do one
+// sequential D1 round-trip per pending row, no cap) BEFORE the actual
+// write happens -- and confirmed via Cloudflare's own documentation that
+// there is no platform wall-clock ceiling on an HTTP-triggered Worker
+// while the client stays connected. A caller could hold a boolean
+// "shouldWrite = true" decided minutes earlier, long after another
+// caller has legitimately reclaimed the window.
+//
+// Fix: claimStaleRefresh now returns a unique fencing token instead of a
+// boolean, and every actual INSERT this token authorizes is itself
+// conditioned on that token still being the current one in
+// stale_refresh_claim, via INSERT ... SELECT ... FROM stale_refresh_claim
+// WHERE coin = ? AND claim_token = ? in place of a plain INSERT ...
+// VALUES. This makes the check and the write the SAME atomic statement --
+// there is no longer any gap, of any duration, between "am I still
+// allowed to write" and "write", because the permission check IS the
+// write's own WHERE clause, evaluated by D1 at the moment the statement
+// executes, not by application code at some earlier moment. A caller
+// whose token has since been superseded doesn't get told no and then
+// choose not to write -- its INSERT structurally inserts zero rows,
+// proven directly (see staleness-fallback-concurrency.test.js).
+//
+// claimWindowMs (60s) is now only a LIVENESS mechanism -- how long a
+// caller gets to hold the claim before another is allowed to try again
+// if the first one stalls or crashes outright -- not a correctness
+// mechanism. Even if this window is too short or too long, at most one
+// writer can ever succeed; a too-short window only risks the fallback
+// firing more times than strictly necessary during a very slow backfill,
+// never a duplicate write.
+async function claimStaleRefresh(env, coin, nowTs, claimWindowMs = 60 * 1000) {
+  await env.DB.prepare(
+    `INSERT INTO stale_refresh_claim (coin, claimed_ts, claim_token) VALUES (?, 0, NULL) ON CONFLICT(coin) DO NOTHING`
+  ).bind(coin).run();
+
+  const token = crypto.randomUUID();
+  const result = await env.DB.prepare(
+    `UPDATE stale_refresh_claim SET claimed_ts = ?, claim_token = ?
+     WHERE coin = ? AND claimed_ts <= ? RETURNING coin`
+  ).bind(nowTs, token, coin, nowTs - claimWindowMs).all();
+
+  return result.results.length > 0 ? token : null;
+}
+
+// ---- Resolves whether/how a caller may write ----
+// Returns { persist, claimToken }. Three shapes:
+//   allowWrite:true (cron)         -> { persist: true,  claimToken: null }  (unconditional insert, unchanged from before any of this)
+//   live, data fresh               -> { persist: false, claimToken: null }  (no write at all)
+//   live, data stale, claim won    -> { persist: true,  claimToken: '<uuid>' } (conditional insert, authorized by this token)
+//   live, data stale, claim lost   -> { persist: false, claimToken: null }
+// Any error from isRecentDataStale or claimStaleRefresh (D1's own
+// documented concurrency model is optimistic and may reject a losing
+// concurrent operation with a thrown error, not just a clean zero-rows
+// result) is treated identically to losing the claim -- safe by
+// construction rather than trying to distinguish conflict-errors from
+// genuine outages.
+async function resolveWriteAuthorization(env, table, coin, allowWrite) {
+  if (allowWrite) return { persist: true, claimToken: null };
+  try {
+    const stale = await isRecentDataStale(env, table);
+    if (!stale) return { persist: false, claimToken: null };
+    const claimToken = await claimStaleRefresh(env, coin, Date.now());
+    return { persist: claimToken !== null, claimToken };
+  } catch (err) {
+    console.error(`resolveWriteAuthorization(${coin}) failed, defaulting to read-only:`, err);
+    return { persist: false, claimToken: null };
+  }
+}
+
+async function runPrediction(env, horizonHours = 24, { persist = true, claimToken = null } = {}) {
   const lagMs = horizonHours * 60 * 60 * 1000;
   const tolMs = lagMs * 0.2;
 
@@ -461,22 +582,44 @@ async function runPrediction(env, horizonHours = 24) {
   const conditionalResult = computeConditionalCalibration(features, parsedCalibHistory, CONDITIONAL_CALIB_WEIGHTS, CONDITIONAL_CALIB_K, CONDITIONAL_CALIB_MIN_NEIGHBORS);
   const calibratedConditionalPUp = conditionalResult ? conditionalResult.p_up : null; // null, not a raw fallback -- distinct from calibrated_p_up's own fallback semantics, makes "not enough neighbors yet" visible rather than silently indistinguishable from a real score
 
-  const insert = await env.DB.prepare(
-    `INSERT INTO predictions
-     (ts, target_ts, btc_price_at_prediction, p_up, n_analogs, median_analog_return, return_p25, return_p75, features_json,
-      k_used, volatility_percentile, closest_analog_dist, is_regime_anomaly, p_up_experimental, median_return_experimental, horizon_hours,
-      trend_strength, calibrated_p_up, calibrated_conditional_p_up, model_version, git_commit_sha)
-     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
-  ).bind(
-    nowTs, nowTs + lagMs, today.btc_price, pUp, resolved.length, median, p25, p75, JSON.stringify(features),
-    kAdaptive, volPercentile, closestDist, isRegimeAnomaly ? 1 : 0, pUpExperimental, medianReturnExperimental, horizonHours,
-    trend, calibratedPUp, calibratedConditionalPUp, MODEL_VERSIONS.btc_core, currentGitSha(env)
-  ).run();
+  let insert = null;
+  if (persist) {
+    if (claimToken === null) {
+      insert = await env.DB.prepare(
+        `INSERT INTO predictions
+         (ts, target_ts, btc_price_at_prediction, p_up, n_analogs, median_analog_return, return_p25, return_p75, features_json,
+          k_used, volatility_percentile, closest_analog_dist, is_regime_anomaly, p_up_experimental, median_return_experimental, horizon_hours,
+          trend_strength, calibrated_p_up, calibrated_conditional_p_up, model_version, git_commit_sha)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
+      ).bind(
+        nowTs, nowTs + lagMs, today.btc_price, pUp, resolved.length, median, p25, p75, JSON.stringify(features),
+        kAdaptive, volPercentile, closestDist, isRegimeAnomaly ? 1 : 0, pUpExperimental, medianReturnExperimental, horizonHours,
+        trend, calibratedPUp, calibratedConditionalPUp, MODEL_VERSIONS.btc_core, currentGitSha(env)
+      ).run();
+    } else {
+      // Conditional insert -- see logBtcData's comment for the full
+      // reasoning. Authorized only if claimToken is still the current
+      // holder for BTC at the exact moment this statement executes.
+      insert = await env.DB.prepare(
+        `INSERT INTO predictions
+         (ts, target_ts, btc_price_at_prediction, p_up, n_analogs, median_analog_return, return_p25, return_p75, features_json,
+          k_used, volatility_percentile, closest_analog_dist, is_regime_anomaly, p_up_experimental, median_return_experimental, horizon_hours,
+          trend_strength, calibrated_p_up, calibrated_conditional_p_up, model_version, git_commit_sha)
+         SELECT ?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?
+         FROM stale_refresh_claim WHERE coin = 'BTC' AND claim_token = ?`
+      ).bind(
+        nowTs, nowTs + lagMs, today.btc_price, pUp, resolved.length, median, p25, p75, JSON.stringify(features),
+        kAdaptive, volPercentile, closestDist, isRegimeAnomaly ? 1 : 0, pUpExperimental, medianReturnExperimental, horizonHours,
+        trend, calibratedPUp, calibratedConditionalPUp, MODEL_VERSIONS.btc_core, currentGitSha(env), claimToken
+      ).run();
+    }
+  }
 
   return {
     ok: true,
     status: 'ok',
-    prediction_id: insert.meta.last_row_id,
+    prediction_id: insert ? insert.meta.last_row_id : null,
+    persisted: persist,
     ts: nowTs,
     horizon_hours: horizonHours,
     p_up: Number(pUp.toFixed(3)),
@@ -529,7 +672,7 @@ const ETH_FEATURE_KEYS = ['technical_score', 'eth_regime_mag'];
 const ETH_MIN_COMPLETE_ROWS = 30;
 const ETH_MIN_RESOLVED_ANALOGS = 5;
 
-async function runEthPrediction(env, horizonHours = 24) {
+async function runEthPrediction(env, horizonHours = 24, { persist = true, claimToken = null } = {}) {
   const lagMs = horizonHours * 60 * 60 * 1000;
   const tolMs = lagMs * 0.2;
 
@@ -645,20 +788,38 @@ async function runEthPrediction(env, horizonHours = 24) {
   const nowTs = Date.now();
   const features = Object.fromEntries(ETH_FEATURE_KEYS.map(k => [k, today[k]]));
 
-  const insert = await env.DB.prepare(
-    `INSERT INTO eth_predictions
-     (ts, target_ts, eth_price_at_prediction, p_up, n_analogs, median_analog_return, return_p25, return_p75, features_json,
-      k_used, volatility_percentile, closest_analog_dist, is_regime_anomaly, p_up_experimental, median_return_experimental, horizon_hours,
-      trend_strength, calibrated_p_up, model_version, git_commit_sha)
-     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
-  ).bind(
-    nowTs, nowTs + lagMs, today.eth_price, pUp, resolved.length, median, p25, p75, JSON.stringify(features),
-    kAdaptive, volPercentile, closestDist, isRegimeAnomaly ? 1 : 0, pUpExperimental, medianReturnExperimental, horizonHours,
-    trend, calibratedPUp, MODEL_VERSIONS.eth_core, currentGitSha(env)
-  ).run();
+  let insert = null;
+  if (persist) {
+    if (claimToken === null) {
+      insert = await env.DB.prepare(
+        `INSERT INTO eth_predictions
+         (ts, target_ts, eth_price_at_prediction, p_up, n_analogs, median_analog_return, return_p25, return_p75, features_json,
+          k_used, volatility_percentile, closest_analog_dist, is_regime_anomaly, p_up_experimental, median_return_experimental, horizon_hours,
+          trend_strength, calibrated_p_up, model_version, git_commit_sha)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
+      ).bind(
+        nowTs, nowTs + lagMs, today.eth_price, pUp, resolved.length, median, p25, p75, JSON.stringify(features),
+        kAdaptive, volPercentile, closestDist, isRegimeAnomaly ? 1 : 0, pUpExperimental, medianReturnExperimental, horizonHours,
+        trend, calibratedPUp, MODEL_VERSIONS.eth_core, currentGitSha(env)
+      ).run();
+    } else {
+      insert = await env.DB.prepare(
+        `INSERT INTO eth_predictions
+         (ts, target_ts, eth_price_at_prediction, p_up, n_analogs, median_analog_return, return_p25, return_p75, features_json,
+          k_used, volatility_percentile, closest_analog_dist, is_regime_anomaly, p_up_experimental, median_return_experimental, horizon_hours,
+          trend_strength, calibrated_p_up, model_version, git_commit_sha)
+         SELECT ?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?
+         FROM stale_refresh_claim WHERE coin = 'ETH' AND claim_token = ?`
+      ).bind(
+        nowTs, nowTs + lagMs, today.eth_price, pUp, resolved.length, median, p25, p75, JSON.stringify(features),
+        kAdaptive, volPercentile, closestDist, isRegimeAnomaly ? 1 : 0, pUpExperimental, medianReturnExperimental, horizonHours,
+        trend, calibratedPUp, MODEL_VERSIONS.eth_core, currentGitSha(env), claimToken
+      ).run();
+    }
+  }
 
   return {
-    ok: true, status: 'ok', prediction_id: insert.meta.last_row_id, ts: nowTs, horizon_hours: horizonHours,
+    ok: true, status: 'ok', prediction_id: insert ? insert.meta.last_row_id : null, persisted: persist, ts: nowTs, horizon_hours: horizonHours,
     p_up: Number(pUp.toFixed(3)), calibrated_p_up: Number(calibratedPUp.toFixed(3)), trend_strength: Number(trend.toFixed(3)),
     n_analogs: resolved.length, median_analog_return_pct: Number(median.toFixed(2)),
     return_range_pct: [Number(p25.toFixed(2)), Number(p75.toFixed(2))], eth_price_now: today.eth_price, features,
@@ -732,16 +893,17 @@ async function backfillEthPredictions(env) {
 // (backfillChallengerPredictions, getChallengerCalibration, and three
 // route handlers all had a real bug: coin === 'LINK' ? ... : 'BTC' would
 // have silently resolved ETH's data against BTC's price table).
-async function ethPredictAndLog(env, horizonHours = 24) {
-  await logEthData(env);
-  const resolvedCount = await backfillEthPredictions(env);
-  const result = await runEthPrediction(env, horizonHours);
+async function ethPredictAndLog(env, horizonHours = 24, { allowWrite = false } = {}) {
+  const resolvedCount = await backfillEthPredictions(env); // resolution is unconditional, same reasoning as predictAndLog
+  const challengerResolvedCount = await backfillChallengerPredictions(env); // moved ahead of the claim, same reasoning as predictAndLog
+  const { persist, claimToken } = await resolveWriteAuthorization(env, 'eth_data', 'ETH', allowWrite);
+  if (persist) await logEthData(env, claimToken);
+  const result = await runEthPrediction(env, horizonHours, { persist, claimToken });
   result.backfilled_this_call = resolvedCount;
   try {
-    const challengerResolvedCount = await backfillChallengerPredictions(env);
     const challengerResult = await runChallengerPrediction(env, {
       coin: 'ETH', horizonHours, priceTable: 'eth_data', priceCol: 'eth_price', priceNow: result.eth_price_now, coreResult: result,
-    });
+    }, { persist, claimToken });
     result.challenger = challengerResult;
     result.challenger_backfilled_this_call = challengerResolvedCount;
   } catch (e) {
@@ -2583,7 +2745,7 @@ function compactForChatGpt(report) {
 // Everything else here — trailing return, the Foufi driver tilt — is
 // fully separate logic that cannot affect the original model even if it
 // has a bug.
-async function runChallengerPrediction(env, { coin, horizonHours, priceTable, priceCol, priceNow, coreResult }) {
+async function runChallengerPrediction(env, { coin, horizonHours, priceTable, priceCol, priceNow, coreResult }, { persist = true, claimToken = null } = {}) {
   if (!coreResult || coreResult.status !== 'ok') {
     return { ok: true, status: 'skipped_core_not_ok' };
   }
@@ -2687,20 +2849,38 @@ async function runChallengerPrediction(env, { coin, horizonHours, priceTable, pr
   }
   pUpTilted = Math.max(0.05, Math.min(0.95, pUpTilted));
 
-  const insert = await env.DB.prepare(
-    `INSERT INTO challenger_predictions
-     (coin, ts, target_ts, horizon_hours, price_at_prediction, is_regime_anomaly, trailing_return_pct,
-      p_up_flat, p_up_tilted, driver_used, driver_agreement, foufi_digest_video_id, trend_strength, calibrated_p_up_flat,
-      model_version, git_commit_sha)
-     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
-  ).bind(
-    coin, nowTs, nowTs + lagMs, horizonHours, priceNow, isAnomalous ? 1 : 0, trailingReturnPct,
-    pUpFlat, pUpTilted, driverUsed, driverAgreement, foufiVideoId, coreResult.trend_strength ?? null,
-    Number(calibratedPUpFlat.toFixed(3)), MODEL_VERSIONS.challenger, currentGitSha(env)
-  ).run();
+  let insert = null;
+  if (persist) {
+    if (claimToken === null) {
+      insert = await env.DB.prepare(
+        `INSERT INTO challenger_predictions
+         (coin, ts, target_ts, horizon_hours, price_at_prediction, is_regime_anomaly, trailing_return_pct,
+          p_up_flat, p_up_tilted, driver_used, driver_agreement, foufi_digest_video_id, trend_strength, calibrated_p_up_flat,
+          model_version, git_commit_sha)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
+      ).bind(
+        coin, nowTs, nowTs + lagMs, horizonHours, priceNow, isAnomalous ? 1 : 0, trailingReturnPct,
+        pUpFlat, pUpTilted, driverUsed, driverAgreement, foufiVideoId, coreResult.trend_strength ?? null,
+        Number(calibratedPUpFlat.toFixed(3)), MODEL_VERSIONS.challenger, currentGitSha(env)
+      ).run();
+    } else {
+      insert = await env.DB.prepare(
+        `INSERT INTO challenger_predictions
+         (coin, ts, target_ts, horizon_hours, price_at_prediction, is_regime_anomaly, trailing_return_pct,
+          p_up_flat, p_up_tilted, driver_used, driver_agreement, foufi_digest_video_id, trend_strength, calibrated_p_up_flat,
+          model_version, git_commit_sha)
+         SELECT ?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?
+         FROM stale_refresh_claim WHERE coin = ? AND claim_token = ?`
+      ).bind(
+        coin, nowTs, nowTs + lagMs, horizonHours, priceNow, isAnomalous ? 1 : 0, trailingReturnPct,
+        pUpFlat, pUpTilted, driverUsed, driverAgreement, foufiVideoId, coreResult.trend_strength ?? null,
+        Number(calibratedPUpFlat.toFixed(3)), MODEL_VERSIONS.challenger, currentGitSha(env), coin, claimToken
+      ).run();
+    }
+  }
 
   return {
-    ok: true, status: 'ok', id: insert.meta.last_row_id, coin, horizon_hours: horizonHours,
+    ok: true, status: 'ok', id: insert ? insert.meta.last_row_id : null, persisted: persist, coin, horizon_hours: horizonHours,
     is_regime_anomaly: isAnomalous, trailing_return_pct: trailingReturnPct != null ? Number(trailingReturnPct.toFixed(2)) : null,
     p_up_flat: Number(pUpFlat.toFixed(3)), p_up_tilted: Number(pUpTilted.toFixed(3)),
     calibrated_p_up_flat: Number(calibratedPUpFlat.toFixed(3)),
@@ -3038,18 +3218,42 @@ async function getChallengerRecent(env, limit = 20) {
   return { ok: true, predictions: results };
 }
 
-async function predictAndLog(env, horizonHours = 24) {
-  await logBtcData(env);
+async function predictAndLog(env, horizonHours = 24, { allowWrite = false } = {}) {
+  // Resolving already-existing pending predictions is NOT "creating new
+  // training data" -- it fills in the real outcome on a row that already
+  // exists and is due, and doing this promptly regardless of trigger
+  // source was the whole point of building self-sufficient logging in
+  // the first place. Left unconditional on purpose.
+  //
+  // All three backfills, including Challenger's, now run BEFORE the
+  // claim is taken -- previously Challenger's ran after, meaning its own
+  // unbounded backlog-sized loop counted against the claim window without
+  // being visible to it at all. This alone doesn't guarantee correctness
+  // (the actual writes below still are what does that, via claimToken),
+  // but it shrinks how much of this function's total duration the claim
+  // needs to survive.
   const resolvedCount = await backfillPredictions(env);
   const geminiResolvedCount = await backfillGeminiBiasShort(env);
-  const result = await runPrediction(env, horizonHours);
+  const challengerResolvedCount = await backfillChallengerPredictions(env);
+
+  // allowWrite:true (cron) always writes unconditionally, matching prior
+  // behavior exactly -- claimToken stays null, every insert below uses
+  // its plain VALUES form. allowWrite:false (live, the default) writes
+  // only if the cron has genuinely stalled, and even then only under the
+  // authority of a fencing token that every actual insert independently
+  // re-checks against stale_refresh_claim at the moment it executes --
+  // not a boolean decided once, minutes earlier, that could go stale
+  // itself. See resolveWriteAuthorization's own comment for the full
+  // reasoning and claimStaleRefresh's for why a boolean alone wasn't enough.
+  const { persist, claimToken } = await resolveWriteAuthorization(env, 'btc_data', 'BTC', allowWrite);
+  if (persist) await logBtcData(env, claimToken);
+  const result = await runPrediction(env, horizonHours, { persist, claimToken });
   result.backfilled_this_call = resolvedCount;
   result.gemini_bias_backfilled_this_call = geminiResolvedCount;
   try {
-    const challengerResolvedCount = await backfillChallengerPredictions(env);
     const challengerResult = await runChallengerPrediction(env, {
       coin: 'BTC', horizonHours, priceTable: 'btc_data', priceCol: 'btc_price', priceNow: result.btc_price_now, coreResult: result,
-    });
+    }, { persist, claimToken });
     result.challenger = challengerResult;
     result.challenger_backfilled_this_call = challengerResolvedCount;
   } catch (e) {
@@ -3852,15 +4056,22 @@ async function getRegimeSplitHistory(env, limit = 50) {
   return { ok: true, runs: results };
 }
 
-async function logLinkData(env) {
+async function logLinkData(env, claimToken = null) {
   const snap = await fetchLinkSnapshot();
   const { results: recent } = await env.DB.prepare(
     'SELECT link_price FROM link_data ORDER BY ts DESC LIMIT 30'
   ).all();
   const technicalScore = computeSimpleTechnicalScore(recent.reverse().map(r => r.link_price));
-  await env.DB.prepare(
-    'INSERT INTO link_data (ts, link_price, technical_score, funding_adj) VALUES (?,?,?,?)'
-  ).bind(Date.now(), snap.price, technicalScore, snap.fundingAdj).run();
+  if (claimToken === null) {
+    await env.DB.prepare(
+      'INSERT INTO link_data (ts, link_price, technical_score, funding_adj) VALUES (?,?,?,?)'
+    ).bind(Date.now(), snap.price, technicalScore, snap.fundingAdj).run();
+  } else {
+    await env.DB.prepare(
+      `INSERT INTO link_data (ts, link_price, technical_score, funding_adj)
+       SELECT ?, ?, ?, ? FROM stale_refresh_claim WHERE coin = 'LINK' AND claim_token = ?`
+    ).bind(Date.now(), snap.price, technicalScore, snap.fundingAdj, claimToken).run();
+  }
   return { price: snap.price, technical_score: technicalScore, funding_adj: snap.fundingAdj };
 }
 
@@ -3871,29 +4082,49 @@ async function logLinkData(env) {
 // the client-triggered POST /history route, no server cron touches it) —
 // so without this, both making a fresh BTC prediction AND resolving old
 // ones against reality would silently stall whenever V1 goes unvisited.
-async function logBtcData(env) {
+async function logBtcData(env, claimToken = null) {
   const snap = await fetchBtcSnapshot();
   const { results: recent } = await env.DB.prepare(
     'SELECT btc_price FROM btc_data ORDER BY ts DESC LIMIT 30'
   ).all();
   const technicalScore = computeSimpleTechnicalScore(recent.reverse().map(r => r.btc_price));
-  await env.DB.prepare(
-    'INSERT INTO btc_data (ts, btc_price, technical_score) VALUES (?,?,?)'
-  ).bind(Date.now(), snap.price, technicalScore).run();
+  if (claimToken === null) {
+    await env.DB.prepare(
+      'INSERT INTO btc_data (ts, btc_price, technical_score) VALUES (?,?,?)'
+    ).bind(Date.now(), snap.price, technicalScore).run();
+  } else {
+    // Conditional insert -- authorized only if this token is still the
+    // current claim holder for BTC at the exact moment this statement
+    // executes. If another caller has since reclaimed (this caller's own
+    // upstream backfill work took long enough for that to happen), the
+    // SELECT matches zero rows and this insert is a structural no-op --
+    // not a separate check that could itself go stale before the write.
+    await env.DB.prepare(
+      `INSERT INTO btc_data (ts, btc_price, technical_score)
+       SELECT ?, ?, ? FROM stale_refresh_claim WHERE coin = 'BTC' AND claim_token = ?`
+    ).bind(Date.now(), snap.price, technicalScore, claimToken).run();
+  }
   return { price: snap.price, technical_score: technicalScore };
 }
 // Mirrors logBtcData exactly, same reasoning: without this, ETH predictions
 // could never resolve against reality between V1 page visits, same
 // dependency gap that would have silently stalled BTC/LINK too.
-async function logEthData(env) {
+async function logEthData(env, claimToken = null) {
   const snap = await fetchEthSnapshot();
   const { results: recent } = await env.DB.prepare(
     'SELECT eth_price FROM eth_data ORDER BY ts DESC LIMIT 30'
   ).all();
   const technicalScore = computeSimpleTechnicalScore(recent.reverse().map(r => r.eth_price));
-  await env.DB.prepare(
-    'INSERT INTO eth_data (ts, eth_price, technical_score) VALUES (?,?,?)'
-  ).bind(Date.now(), snap.price, technicalScore).run();
+  if (claimToken === null) {
+    await env.DB.prepare(
+      'INSERT INTO eth_data (ts, eth_price, technical_score) VALUES (?,?,?)'
+    ).bind(Date.now(), snap.price, technicalScore).run();
+  } else {
+    await env.DB.prepare(
+      `INSERT INTO eth_data (ts, eth_price, technical_score)
+       SELECT ?, ?, ? FROM stale_refresh_claim WHERE coin = 'ETH' AND claim_token = ?`
+    ).bind(Date.now(), snap.price, technicalScore, claimToken).run();
+  }
   return { price: snap.price, technical_score: technicalScore };
 }
 
@@ -3907,7 +4138,7 @@ const LINK_FEATURE_KEYS = ['technical_score', 'btc_regime_mag', 'sentiment_score
 const LINK_MIN_COMPLETE_ROWS = 30;
 const LINK_MIN_RESOLVED_ANALOGS = 5;
 
-async function runLinkPrediction(env, horizonHours = 24) {
+async function runLinkPrediction(env, horizonHours = 24, { persist = true, claimToken = null } = {}) {
   const lagMs = horizonHours * 60 * 60 * 1000;
   const tolMs = lagMs * 0.2;
   const { results: linkRows } = await env.DB.prepare(
@@ -4056,22 +4287,40 @@ async function runLinkPrediction(env, horizonHours = 24) {
   const nowTs = Date.now();
   const features = Object.fromEntries(LINK_FEATURE_KEYS.map(k => [k, today[k]]));
 
-  const insert = await env.DB.prepare(
-    `INSERT INTO link_predictions
-     (ts, target_ts, link_price_at_prediction, p_up, n_analogs, median_analog_return, return_p25, return_p75, features_json, horizon_hours,
-      k_used, volatility_percentile, closest_analog_dist, is_regime_anomaly, p_up_experimental, median_return_experimental,
-      trend_strength, calibrated_p_up, model_version, git_commit_sha)
-     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
-  ).bind(
-    nowTs, nowTs + lagMs, today.link_price, pUp, resolved.length, median, p25, p75, JSON.stringify(features), horizonHours,
-    kAdaptive, volPercentile, closestDist, isRegimeAnomaly ? 1 : 0, pUpExperimental, medianReturnExperimental,
-    trend, calibratedPUp, MODEL_VERSIONS.link_core, currentGitSha(env)
-  ).run();
+  let insert = null;
+  if (persist) {
+    if (claimToken === null) {
+      insert = await env.DB.prepare(
+        `INSERT INTO link_predictions
+         (ts, target_ts, link_price_at_prediction, p_up, n_analogs, median_analog_return, return_p25, return_p75, features_json, horizon_hours,
+          k_used, volatility_percentile, closest_analog_dist, is_regime_anomaly, p_up_experimental, median_return_experimental,
+          trend_strength, calibrated_p_up, model_version, git_commit_sha)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
+      ).bind(
+        nowTs, nowTs + lagMs, today.link_price, pUp, resolved.length, median, p25, p75, JSON.stringify(features), horizonHours,
+        kAdaptive, volPercentile, closestDist, isRegimeAnomaly ? 1 : 0, pUpExperimental, medianReturnExperimental,
+        trend, calibratedPUp, MODEL_VERSIONS.link_core, currentGitSha(env)
+      ).run();
+    } else {
+      insert = await env.DB.prepare(
+        `INSERT INTO link_predictions
+         (ts, target_ts, link_price_at_prediction, p_up, n_analogs, median_analog_return, return_p25, return_p75, features_json, horizon_hours,
+          k_used, volatility_percentile, closest_analog_dist, is_regime_anomaly, p_up_experimental, median_return_experimental,
+          trend_strength, calibrated_p_up, model_version, git_commit_sha)
+         SELECT ?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?
+         FROM stale_refresh_claim WHERE coin = 'LINK' AND claim_token = ?`
+      ).bind(
+        nowTs, nowTs + lagMs, today.link_price, pUp, resolved.length, median, p25, p75, JSON.stringify(features), horizonHours,
+        kAdaptive, volPercentile, closestDist, isRegimeAnomaly ? 1 : 0, pUpExperimental, medianReturnExperimental,
+        trend, calibratedPUp, MODEL_VERSIONS.link_core, currentGitSha(env), claimToken
+      ).run();
+    }
+  }
 
   const nImputedInNeighbors = neighbors.filter(n => n.row.context_imputed).length;
 
   return {
-    ok: true, status: 'ok', prediction_id: insert.meta.last_row_id, ts: nowTs, horizon_hours: horizonHours,
+    ok: true, status: 'ok', prediction_id: insert ? insert.meta.last_row_id : null, persisted: persist, ts: nowTs, horizon_hours: horizonHours,
     p_up: Number(pUp.toFixed(3)), calibrated_p_up: Number(calibratedPUp.toFixed(3)), trend_strength: Number(trend.toFixed(3)),
     n_analogs: resolved.length,
     median_analog_return_pct: Number(median.toFixed(2)),
@@ -4111,16 +4360,17 @@ async function backfillLinkPredictions(env) {
   return resolvedCount;
 }
 
-async function linkPredictAndLog(env, horizonHours = 24) {
-  await logLinkData(env);
-  const resolvedCount = await backfillLinkPredictions(env);
-  const result = await runLinkPrediction(env, horizonHours);
+async function linkPredictAndLog(env, horizonHours = 24, { allowWrite = false } = {}) {
+  const resolvedCount = await backfillLinkPredictions(env); // resolution is unconditional, same reasoning as predictAndLog
+  const challengerResolvedCount = await backfillChallengerPredictions(env); // moved ahead of the claim, same reasoning as predictAndLog
+  const { persist, claimToken } = await resolveWriteAuthorization(env, 'link_data', 'LINK', allowWrite);
+  if (persist) await logLinkData(env, claimToken);
+  const result = await runLinkPrediction(env, horizonHours, { persist, claimToken });
   result.backfilled_this_call = resolvedCount;
   try {
-    const challengerResolvedCount = await backfillChallengerPredictions(env);
     const challengerResult = await runChallengerPrediction(env, {
       coin: 'LINK', horizonHours, priceTable: 'link_data', priceCol: 'link_price', priceNow: result.link_price_now, coreResult: result,
-    });
+    }, { persist, claimToken });
     result.challenger = challengerResult;
     result.challenger_backfilled_this_call = challengerResolvedCount;
   } catch (e) {
@@ -4949,7 +5199,7 @@ export default {
       // horizon pairs still run concurrently with each other, just not with
       // themselves.
       const predictThenSelect = async (predictFn, coin, horizon) => {
-        await predictFn(env, horizon);
+        await predictFn(env, horizon, { allowWrite: true });
         await selectBestVariant(env, coin, horizon).catch(err => console.error(`Selection ${coin}/${horizon}h failed:`, err));
       };
 

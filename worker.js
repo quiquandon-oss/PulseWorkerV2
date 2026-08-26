@@ -310,6 +310,44 @@ async function isRecentDataStale(env, table, maxAgeMs = 6 * 60 * 60 * 1000) {
   return (Date.now() - row.latest) > maxAgeMs;
 }
 
+// ---- Atomic claim for the staleness fallback ----
+// Confirmed by audit (concurrency test against this exact PR branch):
+// isRecentDataStale + a plain conditional write is a check-then-act race
+// -- two or more concurrent live requests arriving during a genuine cron
+// stall would each independently see stale data and each write their own
+// fallback snapshot, reproducing the very duplicate-row bug this whole
+// change was built to fix, just gated behind a rarer trigger.
+//
+// Fix follows the exact pattern reserveGeminiQuotaSlot already uses for
+// the same underlying problem (only one concurrent caller may proceed):
+// idempotent row creation (ON CONFLICT DO NOTHING -- a race here is
+// harmless, the row's exact initial value doesn't matter, only that it
+// exists), then a single conditional UPDATE whose WHERE clause only
+// matches for whichever caller's write actually lands first at the
+// database. D1/SQLite serializes writes to the same row, so at most one
+// concurrent caller's UPDATE can ever see claimed_ts still outside the
+// window -- every other caller's WHERE clause fails to match, RETURNING
+// gives them zero rows, and they correctly do not write.
+//
+// claimWindowMs (60s) only needs to safely outlast one fallback write's
+// own duration, not the 6h staleness threshold itself -- it prevents two
+// requests arriving milliseconds apart from both winning, not requests
+// arriving minutes apart (by then the fallback write already landed,
+// isRecentDataStale will correctly see fresh data, and this function
+// won't even be called again for that window).
+async function claimStaleRefresh(env, coin, nowTs, claimWindowMs = 60 * 1000) {
+  await env.DB.prepare(
+    `INSERT INTO stale_refresh_claim (coin, claimed_ts) VALUES (?, 0) ON CONFLICT(coin) DO NOTHING`
+  ).bind(coin).run();
+
+  const result = await env.DB.prepare(
+    `UPDATE stale_refresh_claim SET claimed_ts = ?
+     WHERE coin = ? AND claimed_ts <= ? RETURNING coin`
+  ).bind(nowTs, coin, nowTs - claimWindowMs).all();
+
+  return result.results.length > 0;
+}
+
 async function runPrediction(env, horizonHours = 24, { persist = true } = {}) {
   const lagMs = horizonHours * 60 * 60 * 1000;
   const tolMs = lagMs * 0.2;
@@ -781,7 +819,7 @@ async function backfillEthPredictions(env) {
 // have silently resolved ETH's data against BTC's price table).
 async function ethPredictAndLog(env, horizonHours = 24, { allowWrite = false } = {}) {
   const resolvedCount = await backfillEthPredictions(env); // resolution is unconditional, same reasoning as predictAndLog
-  const shouldWrite = allowWrite || await isRecentDataStale(env, 'eth_data');
+  const shouldWrite = allowWrite || (await isRecentDataStale(env, 'eth_data') && await claimStaleRefresh(env, 'ETH', Date.now()));
   if (shouldWrite) await logEthData(env);
   const result = await runEthPrediction(env, horizonHours, { persist: shouldWrite });
   result.backfilled_this_call = resolvedCount;
@@ -3104,7 +3142,7 @@ async function predictAndLog(env, horizonHours = 24, { allowWrite = false } = {}
   // has genuinely stalled (see isRecentDataStale's own comment for why
   // 6h). This is the entire fix: a live page view no longer creates a new
   // btc_data/predictions row just because someone looked at the page.
-  const shouldWrite = allowWrite || await isRecentDataStale(env, 'btc_data');
+  const shouldWrite = allowWrite || (await isRecentDataStale(env, 'btc_data') && await claimStaleRefresh(env, 'BTC', Date.now()));
   if (shouldWrite) await logBtcData(env);
   const result = await runPrediction(env, horizonHours, { persist: shouldWrite });
   result.backfilled_this_call = resolvedCount;
@@ -4180,7 +4218,7 @@ async function backfillLinkPredictions(env) {
 
 async function linkPredictAndLog(env, horizonHours = 24, { allowWrite = false } = {}) {
   const resolvedCount = await backfillLinkPredictions(env); // resolution is unconditional, same reasoning as predictAndLog
-  const shouldWrite = allowWrite || await isRecentDataStale(env, 'link_data');
+  const shouldWrite = allowWrite || (await isRecentDataStale(env, 'link_data') && await claimStaleRefresh(env, 'LINK', Date.now()));
   if (shouldWrite) await logLinkData(env);
   const result = await runLinkPrediction(env, horizonHours, { persist: shouldWrite });
   result.backfilled_this_call = resolvedCount;

@@ -61,7 +61,7 @@ describe('isRecentDataStale — the staleness check itself, real D1-shaped queri
 // instead of the real functions.
 describe('predictAndLog — orchestration and write-gating logic', () => {
   function makeStubs({ stale }) {
-    const calls = { logBtcData: 0, runPredictionPersist: [], runChallengerPersist: [], isRecentDataStaleCalled: 0 };
+    const calls = { logBtcData: 0, runPredictionPersist: [], runChallengerPersist: [], isRecentDataStaleCalled: 0, claimStaleRefreshCalled: 0 };
     return {
       calls,
       stubs: {
@@ -70,6 +70,7 @@ describe('predictAndLog — orchestration and write-gating logic', () => {
         backfillChallengerPredictions: async () => 0,
         logBtcData: async () => { calls.logBtcData++; },
         isRecentDataStale: async () => { calls.isRecentDataStaleCalled++; return stale; },
+        claimStaleRefresh: async () => { calls.claimStaleRefreshCalled++; return true; }, // single caller, always wins -- concurrency itself is covered separately
         runPrediction: async (env, horizon, opts) => {
           calls.runPredictionPersist.push(opts ? opts.persist : undefined);
           return { ok: true, status: 'ok', btc_price_now: 100, persisted: opts ? opts.persist : undefined };
@@ -121,8 +122,25 @@ describe('predictAndLog — orchestration and write-gating logic', () => {
     await scope.predictAndLog({ DB: {} }, 24, { allowWrite: false });
     expect(calls.logBtcData).toBe(1);
     expect(calls.isRecentDataStaleCalled).toBe(1);
+    expect(calls.claimStaleRefreshCalled).toBe(1); // the atomic claim was actually attempted, not just the staleness read
     expect(calls.runPredictionPersist).toEqual([true]);
     expect(calls.runChallengerPersist).toEqual([true]);
+  });
+
+  it('3b. staleness fallback correctly does NOT write when the atomic claim is lost (another concurrent caller already won it)', async () => {
+    const { calls, stubs } = makeStubs({ stale: true });
+    stubs.claimStaleRefresh = async () => { calls.claimStaleRefreshCalled = (calls.claimStaleRefreshCalled || 0) + 1; return false; }; // lost the claim
+    const scope = evalInScope(source, stubs);
+    await scope.predictAndLog({ DB: {} }, 24, { allowWrite: false });
+    expect(calls.logBtcData).toBe(0); // data WAS stale, but this caller lost the claim -- must not write
+    expect(calls.runPredictionPersist).toEqual([false]);
+  });
+
+  it('claimStaleRefresh is never even called when data is fresh -- the common case stays a single cheap read, no claim-table writes', async () => {
+    const { calls, stubs } = makeStubs({ stale: false });
+    const scope = evalInScope(source, stubs);
+    await scope.predictAndLog({ DB: {} }, 24, { allowWrite: false });
+    expect(calls.claimStaleRefreshCalled).toBe(0);
   });
 
   it('4. NO DUPLICATES: across 5 consecutive live calls with fresh data, zero writes ever happen -- confirms repeated page views cannot each create a new row', async () => {

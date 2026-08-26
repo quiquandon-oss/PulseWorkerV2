@@ -348,6 +348,38 @@ async function claimStaleRefresh(env, coin, nowTs, claimWindowMs = 60 * 1000) {
   return result.results.length > 0;
 }
 
+// ---- Defensive wrapper around the staleness+claim decision ----
+// Per independent audit: Cloudflare's own documented D1 architecture
+// describes its concurrency model as optimistic -- "if two Workers
+// execute conflicting operations simultaneously, one succeeds and the
+// other may fail with a conflict error." claimStaleRefresh's UPDATE...
+// WHERE...RETURNING was written assuming a losing concurrent caller
+// always gets a clean "zero rows matched" result; D1 may instead reject
+// it with a thrown error under real contention. Either way the core
+// safety property holds (at most one caller's write can ever succeed --
+// that's what the WHERE clause enforces regardless of how D1 signals
+// the loss), but an uncaught exception here would surface as a hard
+// failure for that one request instead of the graceful read-only
+// fallback every other losing caller gets. Treats any error identically
+// to losing the claim: default to shouldWrite = false, safe by
+// construction, rather than trying to distinguish conflict-errors from
+// genuine outages.
+//
+// allowWrite:true (cron) returns immediately, before isRecentDataStale
+// or claimStaleRefresh are ever called -- unaffected by any of this,
+// same as before.
+async function resolveShouldWrite(env, table, coin, allowWrite) {
+  if (allowWrite) return true;
+  try {
+    const stale = await isRecentDataStale(env, table);
+    if (!stale) return false;
+    return await claimStaleRefresh(env, coin, Date.now());
+  } catch (err) {
+    console.error(`resolveShouldWrite(${coin}) failed, defaulting to read-only:`, err);
+    return false;
+  }
+}
+
 async function runPrediction(env, horizonHours = 24, { persist = true } = {}) {
   const lagMs = horizonHours * 60 * 60 * 1000;
   const tolMs = lagMs * 0.2;
@@ -819,7 +851,7 @@ async function backfillEthPredictions(env) {
 // have silently resolved ETH's data against BTC's price table).
 async function ethPredictAndLog(env, horizonHours = 24, { allowWrite = false } = {}) {
   const resolvedCount = await backfillEthPredictions(env); // resolution is unconditional, same reasoning as predictAndLog
-  const shouldWrite = allowWrite || (await isRecentDataStale(env, 'eth_data') && await claimStaleRefresh(env, 'ETH', Date.now()));
+  const shouldWrite = await resolveShouldWrite(env, 'eth_data', 'ETH', allowWrite);
   if (shouldWrite) await logEthData(env);
   const result = await runEthPrediction(env, horizonHours, { persist: shouldWrite });
   result.backfilled_this_call = resolvedCount;
@@ -3142,7 +3174,7 @@ async function predictAndLog(env, horizonHours = 24, { allowWrite = false } = {}
   // has genuinely stalled (see isRecentDataStale's own comment for why
   // 6h). This is the entire fix: a live page view no longer creates a new
   // btc_data/predictions row just because someone looked at the page.
-  const shouldWrite = allowWrite || (await isRecentDataStale(env, 'btc_data') && await claimStaleRefresh(env, 'BTC', Date.now()));
+  const shouldWrite = await resolveShouldWrite(env, 'btc_data', 'BTC', allowWrite);
   if (shouldWrite) await logBtcData(env);
   const result = await runPrediction(env, horizonHours, { persist: shouldWrite });
   result.backfilled_this_call = resolvedCount;
@@ -4218,7 +4250,7 @@ async function backfillLinkPredictions(env) {
 
 async function linkPredictAndLog(env, horizonHours = 24, { allowWrite = false } = {}) {
   const resolvedCount = await backfillLinkPredictions(env); // resolution is unconditional, same reasoning as predictAndLog
-  const shouldWrite = allowWrite || (await isRecentDataStale(env, 'link_data') && await claimStaleRefresh(env, 'LINK', Date.now()));
+  const shouldWrite = await resolveShouldWrite(env, 'link_data', 'LINK', allowWrite);
   if (shouldWrite) await logLinkData(env);
   const result = await runLinkPrediction(env, horizonHours, { persist: shouldWrite });
   result.backfilled_this_call = resolvedCount;

@@ -85,7 +85,7 @@ describe('predictAndLog — orchestration and write-gating logic', () => {
 
   let source;
   beforeAll(() => {
-    source = extractFunctions('predictAndLog');
+    source = extractFunctions('predictAndLog', 'resolveShouldWrite');
   });
 
   it('1. CRON (allowWrite:true) always writes -- logBtcData called, both persist flags true, isRecentDataStale never even queried (short-circuit)', async () => {

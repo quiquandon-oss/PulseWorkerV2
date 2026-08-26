@@ -86,7 +86,7 @@ function makeRealisticFakeDb({ staleTables = ['btc_data', 'link_data', 'eth_data
 
 describe('FIX VERIFICATION: staleness fallback is now atomic across concurrent requests', () => {
   let source;
-  const source_ = extractFunctions('predictAndLog', 'linkPredictAndLog', 'ethPredictAndLog', 'isRecentDataStale', 'claimStaleRefresh');
+  const source_ = extractFunctions('predictAndLog', 'linkPredictAndLog', 'ethPredictAndLog', 'isRecentDataStale', 'claimStaleRefresh', 'resolveShouldWrite');
   source = source_;
 
   function makeScope() {
@@ -201,5 +201,64 @@ describe('FIX VERIFICATION: staleness fallback is now atomic across concurrent r
     // predictAndLog's OWN queries (staleness/claim) would trip the throw.
     await expect(scope.predictAndLog({ DB: throwingDb }, 24, { allowWrite: true })).resolves.toMatchObject({ ok: true });
     expect(state.logBtcData).toBe(1);
+  });
+
+  // ---- Per independent audit before merge: two real gaps found and
+  // closed here. (1) D1's own documented concurrency model is optimistic
+  // and may reject a losing concurrent write with a thrown conflict
+  // error rather than always cleanly returning zero matched rows --
+  // resolveShouldWrite must treat that identically to losing the claim,
+  // not let it surface as an uncaught request failure. (2) the
+  // claim-succeeds-but-the-actual-write-fails recovery path had no test
+  // in this PR at all (only verified in a separate scratch audit) --
+  // added here for real. ----
+  it('AUDIT FIX: a D1 error during claimStaleRefresh itself (not just losing the claim) is treated the same as losing it -- shouldWrite becomes false, no exception propagates', async () => {
+    const { db } = makeRealisticFakeDb();
+    const throwingClaimDb = {
+      prepare(sql) {
+        if (sql.includes('stale_refresh_claim')) {
+          throw new Error('simulated D1 conflict error during the claim attempt itself');
+        }
+        return db.prepare(sql);
+      },
+    };
+    const { scope, state } = makeScope();
+    const result = await scope.predictAndLog({ DB: throwingClaimDb }, 24, { allowWrite: false });
+    expect(result.ok).toBe(true); // the request itself still succeeds
+    expect(state.logBtcData).toBe(0); // but it correctly did not write
+  });
+
+  it('AUDIT FIX: claim succeeds but the actual write then fails -- the claim is spent for the window, but a later request still recovers automatically', async () => {
+    const { db, claimState } = makeRealisticFakeDb();
+    let logAttempts = 0;
+    const stubs = {
+      backfillPredictions: async () => 0,
+      backfillGeminiBiasShort: async () => 0,
+      backfillChallengerPredictions: async () => 0,
+      logBtcData: async () => { logAttempts++; throw new Error('simulated transient write failure after a successful claim'); },
+      runPrediction: async () => ({ ok: true, status: 'ok', btc_price_now: 100 }),
+      runChallengerPrediction: async () => ({ ok: true, status: 'ok' }),
+    };
+    const scope = evalInScope(source, stubs);
+
+    // The write failure propagates -- this specific request genuinely
+    // fails (matching predictAndLog's existing, unchanged contract that
+    // a real logXData failure is a real failure, not silently swallowed).
+    await expect(scope.predictAndLog({ DB: db }, 24, { allowWrite: false })).rejects.toThrow('simulated transient write failure');
+    expect(logAttempts).toBe(1);
+    expect(claimState.get('BTC')).toBeGreaterThan(0); // the claim was recorded even though the write never landed
+
+    // A request within the 60s window does NOT get to retry the write --
+    // the claim is still "spent".
+    const stubs2 = { ...stubs, logBtcData: async () => { logAttempts++; } };
+    const scope2 = evalInScope(source, stubs2);
+    await scope2.predictAndLog({ DB: db }, 24, { allowWrite: false });
+    expect(logAttempts).toBe(1); // still 1 -- the second attempt correctly did not write, claim still held
+
+    // Once the window has genuinely passed, recovery is automatic.
+    claimState.set('BTC', Date.now() - 61 * 1000);
+    const scope3 = evalInScope(source, stubs2);
+    await scope3.predictAndLog({ DB: db }, 24, { allowWrite: false });
+    expect(logAttempts).toBe(2); // the write finally succeeds once the window has elapsed
   });
 });

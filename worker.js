@@ -723,18 +723,30 @@ async function backfillEthPredictions(env) {
   return resolvedCount;
 }
 
-// Deliberately does NOT include a Challenger call, unlike predictAndLog/
-// linkPredictAndLog. Same "prove before extending" principle already
-// applied everywhere else this session: ETH's core model has zero
-// resolved predictions yet — building a Challenger variant on top of a
-// model with no track record of its own would be extending something
-// before there's anything to extend. Revisit once ETH's own core model
-// has real resolved history.
+// Challenger added below, mirroring linkPredictAndLog exactly --
+// runChallengerPrediction was already fully coin-agnostic (confirmed by
+// inspection: it only ever reads generic fields off coreResult, never
+// anything BTC/LINK-specific), so no changes were needed to that function
+// itself, only to this call site and the coin-to-table mappings a few
+// other places incorrectly assumed only BTC/LINK would ever appear
+// (backfillChallengerPredictions, getChallengerCalibration, and three
+// route handlers all had a real bug: coin === 'LINK' ? ... : 'BTC' would
+// have silently resolved ETH's data against BTC's price table).
 async function ethPredictAndLog(env, horizonHours = 24) {
   await logEthData(env);
   const resolvedCount = await backfillEthPredictions(env);
   const result = await runEthPrediction(env, horizonHours);
   result.backfilled_this_call = resolvedCount;
+  try {
+    const challengerResolvedCount = await backfillChallengerPredictions(env);
+    const challengerResult = await runChallengerPrediction(env, {
+      coin: 'ETH', horizonHours, priceTable: 'eth_data', priceCol: 'eth_price', priceNow: result.eth_price_now, coreResult: result,
+    });
+    result.challenger = challengerResult;
+    result.challenger_backfilled_this_call = challengerResolvedCount;
+  } catch (e) {
+    result.challenger = { ok: false, error: String(e) };
+  }
   return result;
 }
 
@@ -756,9 +768,7 @@ async function ethPredictAndLog(env, horizonHours = 24) {
 // comparing many things and picking the best inflates the winner's apparent
 // edge even with zero real skill anywhere in the pool.
 
-// Registry: which variants exist for which coin. ETH deliberately has no
-// challenger entries -- none exist yet, consistent with ethPredictAndLog's
-// own "prove before extending" comment above.
+// Registry: which variants exist for which coin.
 const SELECTION_VARIANTS = {
   BTC: [
     { key: 'original', table: 'predictions', field: 'p_up', coinFilter: false },
@@ -780,6 +790,9 @@ const SELECTION_VARIANTS = {
     { key: 'original', table: 'eth_predictions', field: 'p_up', coinFilter: false },
     { key: 'experimental', table: 'eth_predictions', field: 'p_up_experimental', coinFilter: false },
     { key: 'calibrated', table: 'eth_predictions', field: 'calibrated_p_up', coinFilter: false },
+    { key: 'challenger_flat', table: 'challenger_predictions', field: 'p_up_flat', coinFilter: true },
+    { key: 'challenger_tilted', table: 'challenger_predictions', field: 'p_up_tilted', coinFilter: true },
+    { key: 'challenger_calibrated', table: 'challenger_predictions', field: 'calibrated_p_up_flat', coinFilter: true },
   ],
 };
 const SELECTION_MIN_HISTORY = 50; // matches Model Health's own recent/prior threshold, not a new number invented for this
@@ -2488,8 +2501,8 @@ async function buildDailyReport(env, { dateStr } = {}) {
     }
   }
 
-  // ---- Challenger vs Production comparison (BTC + LINK only -- ETH has no challenger yet) ----
-  for (const coin of ['BTC', 'LINK']) {
+  // ---- Challenger vs Production comparison (all three coins now that ETH has a challenger too) ----
+  for (const coin of ['BTC', 'LINK', 'ETH']) {
     const coreRows = perAsset[coin];
     const challengerRows = await fetchResolvedRows(env, 'challenger_predictions', { coin, probColumn: 'p_up_tilted', calibratedColumn: 'calibrated_p_up_flat' });
     const filteredChallenger = untilResolvedTs ? challengerRows.filter(r => r.resolved_ts >= sinceResolvedTs && r.resolved_ts < untilResolvedTs) : challengerRows;
@@ -2705,8 +2718,8 @@ async function backfillChallengerPredictions(env) {
   ).bind(nowTs).all();
   let resolvedCount = 0;
   for (const p of pending) {
-    const priceTable = p.coin === 'LINK' ? 'link_data' : 'btc_data';
-    const priceCol = p.coin === 'LINK' ? 'link_price' : 'btc_price';
+    const priceTable = p.coin === 'LINK' ? 'link_data' : p.coin === 'ETH' ? 'eth_data' : 'btc_data';
+    const priceCol = p.coin === 'LINK' ? 'link_price' : p.coin === 'ETH' ? 'eth_price' : 'btc_price';
     const tolMs = p.horizon_hours * 60 * 60 * 1000 * 0.2;
     const { results: rows } = await env.DB.prepare(
       `SELECT ts, ${priceCol} as price FROM ${priceTable} WHERE ts BETWEEN ? AND ? ORDER BY ABS(ts - ?) ASC LIMIT 1`
@@ -2914,8 +2927,8 @@ async function getChallengerCalibration(env, coin, horizonHours) {
   const n = rows.length;
   if (n < 5) return { ok: true, coin, horizon_hours: horizonHours, n_resolved: n, note: 'Not enough resolved challenger predictions yet — check back once more have accumulated.' };
 
-  const priceTable = coin === 'LINK' ? 'link_data' : 'btc_data';
-  const priceCol = coin === 'LINK' ? 'link_price' : 'btc_price';
+  const priceTable = coin === 'LINK' ? 'link_data' : coin === 'ETH' ? 'eth_data' : 'btc_data';
+  const priceCol = coin === 'LINK' ? 'link_price' : coin === 'ETH' ? 'eth_price' : 'btc_price';
   const { results: allPrices } = await env.DB.prepare(
     `SELECT ts, ${priceCol} as price FROM ${priceTable} ORDER BY ts ASC`
   ).all();
@@ -4549,21 +4562,11 @@ export default {
       }
     }
 
-    // ---- GET /challenger-calibration?coin=BTC|LINK&horizon=12|24 ----
+    // ---- GET /challenger-calibration?coin=BTC|LINK|ETH&horizon=12|24 ----
     if (url.pathname === '/challenger-calibration' && request.method === 'GET') {
       try {
-        // Was `=== 'LINK' ? 'LINK' : 'BTC'` -- silently served BTC's data
-        // for coin=ETH (or any other unrecognized value) instead of
-        // erroring. Challenger doesn't actually run for ETH (confirmed:
-        // ethPredictAndLog never calls runChallengerPrediction), so this
-        // was latent -- nothing currently requests coin=ETH here -- but
-        // real and worth fixing rather than leaving a silent-wrong-answer
-        // trap for whenever something does.
         const coinParam = url.searchParams.get('coin');
-        if (coinParam === 'ETH') {
-          return new Response(JSON.stringify({ ok: false, error: 'Challenger does not run for ETH -- no calibration data exists for this coin.' }), { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
-        }
-        const coin = coinParam === 'LINK' ? 'LINK' : 'BTC';
+        const coin = ['BTC', 'LINK', 'ETH'].includes(coinParam) ? coinParam : 'BTC';
         const horizon = [12, 24].includes(parseInt(url.searchParams.get('horizon'), 10)) ? parseInt(url.searchParams.get('horizon'), 10) : 24;
         const result = await getChallengerCalibration(env, coin, horizon);
         return new Response(JSON.stringify(result), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
@@ -4615,10 +4618,10 @@ export default {
       }
     }
 
-    // ---- GET /challenger-calibration-history?coin=BTC|LINK&horizon=12|24 ----
+    // ---- GET /challenger-calibration-history?coin=BTC|LINK|ETH&horizon=12|24 ----
     if (url.pathname === '/challenger-calibration-history' && request.method === 'GET') {
       try {
-        const coin = url.searchParams.get('coin') === 'LINK' ? 'LINK' : 'BTC';
+        const coin = ['BTC', 'LINK', 'ETH'].includes(url.searchParams.get('coin')) ? url.searchParams.get('coin') : 'BTC';
         const horizon = [12, 24].includes(parseInt(url.searchParams.get('horizon'), 10)) ? parseInt(url.searchParams.get('horizon'), 10) : 24;
         const result = await getChallengerCalibrationHistory(env, coin, horizon);
         return new Response(JSON.stringify(result), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
@@ -4651,7 +4654,7 @@ export default {
     // ---- GET /recalibrate-refresh — manual trigger, same logic the daily cron runs ----
     if (url.pathname === '/recalibrate-refresh' && request.method === 'GET') {
       try {
-        const coin = url.searchParams.get('coin') === 'LINK' ? 'LINK' : 'BTC';
+        const coin = ['BTC', 'LINK', 'ETH'].includes(url.searchParams.get('coin')) ? url.searchParams.get('coin') : 'BTC';
         const horizon = [12, 24].includes(parseInt(url.searchParams.get('horizon'), 10)) ? parseInt(url.searchParams.get('horizon'), 10) : 24;
         const result = await refreshCalibrationCurve(env, coin, horizon);
         return new Response(JSON.stringify(result), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
@@ -4666,7 +4669,7 @@ export default {
     // for the next 07:00 UTC daily cron tick.
     if (url.pathname === '/recalibrate-refresh-challenger' && request.method === 'GET') {
       try {
-        const coin = url.searchParams.get('coin') === 'LINK' ? 'LINK' : 'BTC';
+        const coin = ['BTC', 'LINK', 'ETH'].includes(url.searchParams.get('coin')) ? url.searchParams.get('coin') : 'BTC';
         const horizon = [12, 24].includes(parseInt(url.searchParams.get('horizon'), 10)) ? parseInt(url.searchParams.get('horizon'), 10) : 24;
         const result = await refreshChallengerCalibrationCurve(env, coin, horizon);
         return new Response(JSON.stringify(result), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
@@ -4678,7 +4681,7 @@ export default {
     // ---- GET /calibration-curve — inspect the current decile mapping ----
     if (url.pathname === '/calibration-curve' && request.method === 'GET') {
       try {
-        const coin = url.searchParams.get('coin') === 'LINK' ? 'LINK' : 'BTC';
+        const coin = ['BTC', 'LINK', 'ETH'].includes(url.searchParams.get('coin')) ? url.searchParams.get('coin') : 'BTC';
         const horizon = [12, 24].includes(parseInt(url.searchParams.get('horizon'), 10)) ? parseInt(url.searchParams.get('horizon'), 10) : 24;
         const curve = await getLatestCalibrationCurve(env, coin, horizon);
         return new Response(JSON.stringify({ ok: true, coin, horizon_hours: horizon, curve }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
@@ -4927,16 +4930,11 @@ export default {
       ctx.waitUntil(runLinkGeminiAnalysis(env, 'cron').catch(err => console.error('Daily LINK Gemini analysis failed:', err)));
       // Recalibration is cheap and only needs daily freshness — resolved
       // counts move by at most a handful of predictions per day.
-      for (const coin of ['BTC', 'LINK']) {
+      for (const coin of ['BTC', 'LINK', 'ETH']) {
         for (const h of [12, 24]) {
           ctx.waitUntil(refreshCalibrationCurve(env, coin, h).catch(err => console.error(`Calibration refresh ${coin}/${h}h failed:`, err)));
           ctx.waitUntil(refreshChallengerCalibrationCurve(env, coin, h).catch(err => console.error(`Challenger calibration refresh ${coin}/${h}h failed:`, err)));
         }
-      }
-      // ETH: core-model calibration only, no Challenger loop — see
-      // ethPredictAndLog's comment for why.
-      for (const h of [12, 24]) {
-        ctx.waitUntil(refreshCalibrationCurve(env, 'ETH', h).catch(err => console.error(`ETH calibration refresh ${h}h failed:`, err)));
       }
     } else {
       // Both horizons, both coins, every 3h tick. logBtcData/logLinkData and

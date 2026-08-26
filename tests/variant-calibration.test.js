@@ -98,11 +98,14 @@ describe('getVariantCalibrationSummary — challenger_flat/tilted/calibrated (ch
   });
 });
 
-describe('regression: /variant-calibration and the fixed /challenger-calibration ETH handling', () => {
-  it('the /challenger-calibration route now explicitly rejects coin=ETH instead of silently substituting BTC data', () => {
+describe('regression: ETH now has a real Challenger, /challenger-calibration accepts it', () => {
+  it('the /challenger-calibration route no longer rejects coin=ETH — it now runs the same query path as BTC/LINK', () => {
     const src = readFileSync(new URL('../worker.js', import.meta.url), 'utf8');
-    expect(src).toMatch(/coinParam === 'ETH'/);
-    expect(src).toMatch(/Challenger does not run for ETH/);
+    expect(src).not.toMatch(/Challenger does not run for ETH/);
+    // The route should route ETH through the same ['BTC','LINK','ETH'].includes(...) pattern as the sibling coin-scoped routes, not a bespoke rejection.
+    const routeMatch = src.match(/GET \/challenger-calibration\?coin=[^\n]*\n[\s\S]{0,400}/);
+    expect(routeMatch).not.toBeNull();
+    expect(routeMatch[0]).toMatch(/\['BTC', 'LINK', 'ETH'\]\.includes/);
   });
 
   it('/variant-calibration route exists and passes the variant query param through', () => {

@@ -1123,6 +1123,187 @@ async function selectBestVariant(env, coin, horizonHours) {
   };
 }
 
+// =====================================================================
+// ---- Learning Roadmap §3, Experiment 2: softened selection gate under
+// high anomaly (research-only, logged-only) ----
+//
+// Experiment 1 found that in high-anomaly regimes the core k-NN
+// systematically under-performs the always-up baseline (largest clean
+// sample: BTC 24h anomaly_trendpos_continuation, n=146/23 episodes,
+// 32.2% accuracy vs 67.8% always-up). This raised the question of
+// whether the Bonferroni significance gate is overly strict precisely
+// when the core model is weakest and a variant switch would matter most.
+//
+// This experiment does NOT touch selectBestVariant, decideSelection,
+// computeLcaScore, or any SELECTION_* constant in any way -- everything
+// below is a separate, self-contained, logged-only alternative decision
+// path. selectBestVariant's own source is not called, imported into, or
+// refactored by any of this; the eligibility/neighborhood/scoring steps
+// below are an INDEPENDENT re-implementation of the same four steps,
+// duplicated rather than shared, specifically so selectBestVariant
+// remains provably byte-identical and untouched -- the same "independent
+// copy over shared dependency" choice already established elsewhere in
+// this codebase when auditability matters more than avoiding
+// duplication (see computeContextHashIndependently's own precedent).
+//
+// Option A chosen (softened margin), per the roadmap's own preference
+// for clarity, over Option B (n_matched-only gate) -- not implementing
+// both.
+// =====================================================================
+
+// The single softening knob for this experiment. Applied as a
+// multiplier on TOP OF the existing Bonferroni-corrected required
+// margin (SELECTION_CRITICAL_Z is read, never modified) -- not a new
+// z-table, not a new alpha, just a documented scale-down of the same
+// bar selectBestVariant already computes. 0.5 halves the bar: a
+// reasonable INITIAL research parameter chosen for being easy to reason
+// about and directly answering "does halving the bar change the
+// outcome", not an empirically tuned or proven-optimal value -- same
+// epistemic stance already taken for Experiment 1's 6h gap threshold.
+// Entirely separate from every SELECTION_* production constant; never
+// read by selectBestVariant or decideSelection.
+const ANOMALY_GATE_MARGIN_FACTOR = 0.5;
+
+// Pure. NOT a wrapper around decideSelection -- a fully separate
+// function with the identical formula, scaled by marginFactor, so
+// decideSelection itself is never called, imported, or modified by this
+// experiment. This one function is the entire "softening" logic.
+function decideSelectionSoftened(scores, marginFactor) {
+  if (!scores.length) return { chosen: null, clearedGate: false, winner: null, requiredMargin: null, baseRequiredMargin: null };
+  const sorted = [...scores].sort((a, b) => b.lca - a.lca);
+  const winner = sorted[0];
+  const m = Math.min(6, Math.max(1, scores.length));
+  const z = SELECTION_CRITICAL_Z[m];
+  const baseRequiredMargin = z * Math.sqrt(0.25 / winner.n_matched);
+  const requiredMargin = baseRequiredMargin * marginFactor;
+  const clearedGate = (winner.lca - 0.5) > requiredMargin;
+  return { chosen: clearedGate ? winner.variant : 'original', clearedGate, winner, requiredMargin, baseRequiredMargin, m };
+}
+
+// Activates ONLY when the query prediction's is_regime_anomaly = 1 --
+// for every other cycle this returns immediately and writes nothing.
+// The absence of a row for a given ts/coin/horizon in
+// selection_decisions_anomaly is itself fully reconstructible without
+// any ambiguity: cross-reference that ts against the core table's own
+// is_regime_anomaly column (already stored independently of this
+// feature) to confirm it was 0.
+//
+// Never calls selectBestVariant and never writes to selection_decisions
+// -- calling selectBestVariant again from here would itself create a
+// second, redundant write to the PRODUCTION table on every cron cycle,
+// exactly the kind of duplicate-row pollution earlier fixes on this
+// branch were built to eliminate. This function's only write target is
+// the new, separate selection_decisions_anomaly table.
+//
+// Any failure here is caught by the caller and must never affect the
+// production predict/select cycle -- same resilience contract already
+// established for Challenger.
+async function logAnomalyGateExperiment(env, coin, horizonHours) {
+  const variantDefs = SELECTION_VARIANTS[coin];
+  if (!variantDefs) return { ok: false, error: 'unknown coin' };
+  const coreTable = coreTableForCoin(coin);
+
+  const latestCore = await env.DB.prepare(
+    `SELECT ts, features_json, is_regime_anomaly FROM ${coreTable} WHERE horizon_hours=? ORDER BY ts DESC LIMIT 1`
+  ).bind(horizonHours).first();
+  if (!latestCore || latestCore.is_regime_anomaly !== 1) {
+    return { ok: true, status: 'not_anomalous_skip', logged: false };
+  }
+  if (!latestCore.features_json) {
+    return { ok: true, status: 'no_query_features', logged: false };
+  }
+  let queryFeatures;
+  try { queryFeatures = JSON.parse(latestCore.features_json); } catch { return { ok: true, status: 'bad_features', logged: false }; }
+  const featureKeys = Object.keys(queryFeatures);
+
+  const eligible = [];
+  for (const v of variantDefs) {
+    const whereCoin = v.coinFilter ? `coin = '${coin}' AND ` : '';
+    const { results } = await env.DB.prepare(
+      `SELECT COUNT(*) as n FROM ${v.table} WHERE ${whereCoin}horizon_hours=? AND realized_up IS NOT NULL AND ${v.field} IS NOT NULL`
+    ).bind(horizonHours).all();
+    if (results[0].n >= SELECTION_MIN_HISTORY) eligible.push(v);
+  }
+  if (!eligible.length) {
+    return { ok: true, status: 'no_eligible_variants', logged: false };
+  }
+
+  const { results: coreHistory } = await env.DB.prepare(
+    `SELECT ts, features_json, realized_up FROM ${coreTable} WHERE horizon_hours=? AND realized_up IS NOT NULL AND features_json IS NOT NULL AND ts < ? ORDER BY ts DESC LIMIT 300`
+  ).bind(horizonHours, latestCore.ts).all();
+  if (coreHistory.length < 15) {
+    return { ok: true, status: 'insufficient_meta_history', logged: false };
+  }
+
+  const stats = {};
+  for (const k of featureKeys) {
+    const vals = [];
+    for (const r of coreHistory) { try { const f = JSON.parse(r.features_json); if (f[k] != null) vals.push(f[k]); } catch {} }
+    if (vals.length < 5) continue;
+    const mean = vals.reduce((a, b) => a + b, 0) / vals.length;
+    const std = Math.sqrt(vals.reduce((a, b) => a + (b - mean) ** 2, 0) / vals.length) || 1;
+    stats[k] = { mean, std };
+  }
+  const usableKeys = featureKeys.filter(k => stats[k]);
+
+  const distances = coreHistory.map(r => {
+    let feat;
+    try { feat = JSON.parse(r.features_json); } catch { return null; }
+    let d = 0;
+    for (const k of usableKeys) {
+      if (feat[k] == null || queryFeatures[k] == null) continue;
+      const z1 = (queryFeatures[k] - stats[k].mean) / stats[k].std;
+      const z2 = (feat[k] - stats[k].mean) / stats[k].std;
+      d += (z1 - z2) ** 2;
+    }
+    return { ts: r.ts, dist: Math.sqrt(d) };
+  }).filter(Boolean).sort((a, b) => a.dist - b.dist);
+
+  const kSel = Math.min(15, Math.max(7, Math.floor(distances.length / 10)));
+  const neighborhood = distances.slice(0, kSel);
+  const TOL_MS_META = 6 * 3600000;
+
+  const scores = [];
+  for (const v of eligible) {
+    const whereCoin = v.coinFilter ? `coin = '${coin}' AND ` : '';
+    const { results: variantRows } = await env.DB.prepare(
+      `SELECT ts, ${v.field} as p_up, realized_up FROM ${v.table} WHERE ${whereCoin}horizon_hours=? AND realized_up IS NOT NULL AND ${v.field} IS NOT NULL ORDER BY ts ASC`
+    ).bind(horizonHours).all();
+    if (!variantRows.length) continue;
+    const latestVariantRow = variantRows[variantRows.length - 1];
+    const todaysCallUp = latestVariantRow.p_up >= 0.5;
+    const scored = computeLcaScore(variantRows, neighborhood, todaysCallUp, TOL_MS_META);
+    if (scored) scores.push({ variant: v.key, p_up: latestVariantRow.p_up, ...scored });
+  }
+  if (!scores.length) {
+    return { ok: true, status: 'no_scorable_variants', logged: false };
+  }
+
+  const decision = decideSelectionSoftened(scores, ANOMALY_GATE_MARGIN_FACTOR);
+  const chosenScore = scores.find(s => s.variant === decision.chosen) || decision.winner;
+  const scoresJson = JSON.stringify(scores.map(s => ({ variant: s.variant, p_up: Number(s.p_up.toFixed(3)), lca: Number(s.lca.toFixed(3)), n_matched: s.n_matched })));
+  const reason = decision.clearedGate
+    ? `[SOFTENED x${ANOMALY_GATE_MARGIN_FACTOR}] ${decision.winner.variant} cleared the softened bar (needed >${(decision.requiredMargin * 100).toFixed(1)}pts, base bar was >${(decision.baseRequiredMargin * 100).toFixed(1)}pts) on n=${decision.winner.n_matched}.`
+    : `[SOFTENED x${ANOMALY_GATE_MARGIN_FACTOR}] No variant cleared even the softened bar (needed >${(decision.requiredMargin * 100).toFixed(1)}pts, base bar was >${(decision.baseRequiredMargin * 100).toFixed(1)}pts, best was ${decision.winner.variant} at +${((decision.winner.lca - 0.5) * 100).toFixed(1)}pts on n=${decision.winner.n_matched}).`;
+
+  const anomalyTs = Date.now();
+  await env.DB.prepare(
+    `INSERT INTO selection_decisions_anomaly
+     (ts, coin, horizon_hours, prediction_ts, is_regime_anomaly, margin_factor, chosen_variant_anomaly, chosen_p_up_anomaly, lca_score_anomaly, comparison_count_anomaly, base_required_margin, required_margin_anomaly, cleared_gate_anomaly, k_sel_anomaly, reason_anomaly, scores_json_anomaly)
+     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
+  ).bind(
+    anomalyTs, coin, horizonHours, latestCore.ts, 1, ANOMALY_GATE_MARGIN_FACTOR,
+    decision.chosen, chosenScore ? chosenScore.p_up : null, decision.winner.lca, decision.m,
+    decision.baseRequiredMargin, decision.requiredMargin, decision.clearedGate ? 1 : 0, kSel, reason, scoresJson
+  ).run();
+
+  return {
+    ok: true, status: 'logged', logged: true, coin, horizon_hours: horizonHours,
+    chosen_variant_anomaly: decision.chosen, cleared_gate_anomaly: decision.clearedGate,
+    margin_factor: ANOMALY_GATE_MARGIN_FACTOR, reason,
+  };
+}
+
 // Read-only. Serves the frontend's display route (GET /select-variant)
 // WITHOUT recomputing anything -- was previously calling selectBestVariant
 // directly, which meant every single page view re-ran the full live k-NN
@@ -5468,6 +5649,11 @@ export default {
       const predictThenSelect = async (predictFn, coin, horizon) => {
         await predictFn(env, horizon, { allowWrite: true });
         await selectBestVariant(env, coin, horizon).catch(err => console.error(`Selection ${coin}/${horizon}h failed:`, err));
+        // Learning Roadmap §3 Experiment 2 -- research-only, logged-only.
+        // Independently caught so a failure here can never affect the
+        // production selection call above, which has already completed
+        // by this point regardless of what happens next.
+        await logAnomalyGateExperiment(env, coin, horizon).catch(err => console.error(`Anomaly-gate experiment ${coin}/${horizon}h failed:`, err));
       };
 
       // The six prediction/selection tasks still run concurrently with each

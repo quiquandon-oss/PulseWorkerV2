@@ -1,0 +1,77 @@
+name: Export Learning Data
+
+# Daily refresh of data-exports/*.csv from production D1, so ChatGPT (or
+# anyone) can read current prediction/selection data straight from GitHub
+# instead of needing a manual export each time. Runs after the 07:00 UTC
+# daily cron so same-day analysis rows have a chance to be resolved first.
+on:
+  schedule:
+    - cron: '0 8 * * *'
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install wrangler
+        run: npm install -g wrangler
+
+      - name: Export BTC predictions
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          wrangler d1 execute sentiment-history --remote --json --command \
+            "SELECT id, ts, target_ts, btc_price_at_prediction, p_up, n_analogs, median_analog_return, return_p25, return_p75, k_used, volatility_percentile, closest_analog_dist, is_regime_anomaly, p_up_experimental, median_return_experimental, horizon_hours, trend_strength, calibrated_p_up, calibrated_conditional_p_up, model_version, git_commit_sha, realized_btc_price, realized_return, realized_up, resolved_ts FROM predictions ORDER BY ts ASC" \
+            > data-exports/raw/btc_predictions.json
+
+      - name: Export LINK predictions
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          wrangler d1 execute sentiment-history --remote --json --command \
+            "SELECT id, ts, target_ts, link_price_at_prediction, p_up, n_analogs, median_analog_return, return_p25, return_p75, horizon_hours, k_used, volatility_percentile, closest_analog_dist, is_regime_anomaly, p_up_experimental, median_return_experimental, trend_strength, calibrated_p_up, model_version, git_commit_sha, realized_link_price, realized_return, realized_up, resolved_ts FROM link_predictions ORDER BY ts ASC" \
+            > data-exports/raw/link_predictions.json
+
+      - name: Export ETH predictions
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          wrangler d1 execute sentiment-history --remote --json --command \
+            "SELECT id, ts, target_ts, eth_price_at_prediction, p_up, n_analogs, median_analog_return, return_p25, return_p75, features_json, k_used, volatility_percentile, closest_analog_dist, is_regime_anomaly, p_up_experimental, median_return_experimental, horizon_hours, trend_strength, calibrated_p_up, model_version, git_commit_sha, realized_eth_price, realized_return, realized_up, resolved_ts FROM eth_predictions ORDER BY ts ASC" \
+            > data-exports/raw/eth_predictions.json
+
+      - name: Export Challenger predictions
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          wrangler d1 execute sentiment-history --remote --json --command \
+            "SELECT id, coin, ts, target_ts, horizon_hours, price_at_prediction, is_regime_anomaly, trailing_return_pct, p_up_flat, p_up_tilted, driver_used, driver_agreement, calibrated_p_up_flat, model_version, git_commit_sha, realized_price, realized_return, realized_up, resolved_ts FROM challenger_predictions ORDER BY ts ASC" \
+            > data-exports/raw/challenger_predictions.json
+
+      - name: Export selection decisions
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          wrangler d1 execute sentiment-history --remote --json --command \
+            "SELECT id, ts, coin, horizon_hours, chosen_variant, chosen_p_up, lca_score, comparison_count, corrected_alpha, cleared_gate, k_sel, reason, prediction_ts, scores_json FROM selection_decisions ORDER BY ts ASC" \
+            > data-exports/raw/selection_decisions.json
+
+      - name: Convert to CSV and generate status
+        run: node data-exports/scripts/convert.js
+
+      - name: Commit and push if changed
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add data-exports/*.csv data-exports/STATUS.md
+          git diff --staged --quiet || git commit -m "chore(data-export): refresh learning-audit CSVs $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          git push

@@ -25,6 +25,31 @@ jobs:
       - name: Install wrangler
         run: npm install -g wrangler
 
+      # ---- TEMPORARY diagnostics (2026-08-27) ----
+      # The first live run of this workflow failed at the very first D1
+      # query step with only "exit code 1" visible via the GitHub API --
+      # the actual wrangler stderr lives on Azure blob storage, which this
+      # environment's own tooling can't reach. These three steps split
+      # "is wrangler authenticated at all" from "can it see D1" from "can
+      # it actually query this specific database" into separate steps, so
+      # step-level pass/fail (which IS visible via the API) narrows this
+      # down without needing raw log access. Remove once the real cause
+      # is confirmed and the fix is verified.
+      - name: DIAGNOSTIC - wrangler whoami
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: wrangler whoami
+
+      - name: DIAGNOSTIC - wrangler d1 list
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: wrangler d1 list
+
+      - name: DIAGNOSTIC - trivial D1 query
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: wrangler d1 execute sentiment-history --remote --json --command "SELECT 1 as ok"
+
       - name: Export BTC predictions
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}

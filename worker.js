@@ -3094,6 +3094,217 @@ async function computeRegimeDirectionalReport(env, coin, horizonHours) {
   };
 }
 
+// =====================================================================
+// ---- Anomaly-conditioned performance audit (Learning Roadmap §3,
+// Experiment 1) ----
+// Extends the regime-directional report above with a second split
+// dimension. That report only separates anomaly rows by trend_strength
+// sign; this adds trailing-return sign (has price actually moved over
+// the trailing window, independent of the MA-based trend_strength
+// signal) as a SECOND axis, giving a genuine two-way cross for anomaly
+// rows specifically -- normal (non-anomalous) rows are deliberately left
+// as a single, unsplit bucket, matching the experiment's stated scope
+// ("for anomaly rows, split by...").
+//
+// A completely separate function and route from computeRegimeDirectional
+// Report / /research/regime-directional -- neither of those is modified
+// by anything below. Read-only, deterministic, zero writes, zero
+// interaction with prediction/selection/calibration logic of any kind.
+// =====================================================================
+
+// Pure. Deterministic two-way bucket classification for anomaly rows.
+// Same null-handling philosophy as classifyRegimeBucket: missing data
+// gets its own explicit bucket rather than being silently dropped or
+// coerced into a default.
+function classifyAnomalyConditionedBucket(isRegimeAnomaly, trendStrength, trailingReturnPct) {
+  if (isRegimeAnomaly !== 1) return 'normal';
+  const trendPart = trendStrength == null ? 'trendnodata'
+    : trendStrength > 0 ? 'trendpos'
+    : trendStrength < 0 ? 'trendneg'
+    : 'trendzero';
+  const trailingPart = trailingReturnPct == null ? 'trailingnodata'
+    : trailingReturnPct > 0 ? 'continuation'
+    : trailingReturnPct < 0 ? 'dip'
+    : 'trailingflat';
+  return `anomaly_${trendPart}_${trailingPart}`;
+}
+
+// Pure. Causal trailing return, single pass over pre-sorted data, no
+// per-row D1 round trips (a naive per-prediction query here would be
+// exactly the unbounded-round-trip-count pattern already confirmed
+// elsewhere in this codebase to be a real production risk).
+//
+// Same window convention as runChallengerPrediction's own
+// trailingReturnPct field (trailing over the SAME duration as the
+// horizon being predicted -- 24h trailing informs a 24h-forward guess,
+// 12h informs 12h) -- independently re-derived here rather than joined
+// from challenger_predictions, since not every core prediction has a
+// corresponding challenger row (Challenger persists on its own
+// claim-token path and can be skipped independently of the core
+// prediction) and this needs to cover every resolved core prediction,
+// not just the subset with a challenger counterpart.
+//
+// priceRows and predictionRows MUST both already be sorted ascending by
+// ts -- this is what makes the single forward-only pointer walk valid
+// (O(n+m) total, never re-scans backward). For each prediction, finds
+// the LATEST price row with ts <= (prediction.ts - lagMs): strictly
+// backward-looking relative to the prediction's own timestamp, the same
+// causal guarantee already established for Challenger's own trailing
+// return. No row here is ever chosen using information from after the
+// prediction moment.
+function computeTrailingReturns(priceRows, predictionRows, lagMs) {
+  const out = new Map(); // prediction id -> trailingReturnPct (or null)
+  let priceIdx = 0;
+  for (const pred of predictionRows) {
+    const targetTs = pred.ts - lagMs;
+    while (priceIdx + 1 < priceRows.length && priceRows[priceIdx + 1].ts <= targetTs) {
+      priceIdx++;
+    }
+    const candidate = priceRows[priceIdx];
+    const trailingPrice = (candidate && candidate.ts <= targetTs) ? candidate.price : null;
+    const priceNow = pred.price_at_prediction;
+    const trailingReturnPct = (trailingPrice != null && trailingPrice !== 0 && priceNow != null)
+      ? (priceNow - trailingPrice) / trailingPrice * 100
+      : null;
+    out.set(pred.id, trailingReturnPct);
+  }
+  return out;
+}
+
+// Below this n OR this many independent episodes, a bucket is marked
+// insufficient_sample -- never silently reported as if it were a
+// reliable finding. MIN_SAMPLE_N=5 matches MIN_RESOLVED_ANALOGS's value
+// elsewhere in this file, chosen independently here for the identical
+// reasoning (below this, a rate is built on almost nothing), not
+// imported as a shared constant. MIN_EPISODES=3 matches the explicit
+// precedent set by the original regime-anomaly audit, which concluded
+// INCONCLUSIVE specifically because it had ~3 real episodes -- not
+// enough to distinguish a real pattern from one unusual stretch. Neither
+// number is a selection/production threshold; both are purely about
+// whether THIS REPORT should let a reader treat a bucket's numbers as
+// meaningful.
+const ANOMALY_AUDIT_MIN_SAMPLE_N = 5;
+const ANOMALY_AUDIT_MIN_EPISODES = 3;
+
+async function computeAnomalyConditionedReport(env, coin, horizonHours) {
+  const table = coreTableForCoin(coin);
+  const priceTable = coin === 'LINK' ? 'link_data' : coin === 'ETH' ? 'eth_data' : 'btc_data';
+  const priceCol = coin === 'LINK' ? 'link_price' : coin === 'ETH' ? 'eth_price' : 'btc_price';
+  const priceAtPredictionCol = coin === 'LINK' ? 'link_price_at_prediction' : coin === 'ETH' ? 'eth_price_at_prediction' : 'btc_price_at_prediction';
+  const lagMs = horizonHours * 60 * 60 * 1000;
+
+  const { results: rows } = await env.DB.prepare(
+    `SELECT id, ts, p_up, realized_up, is_regime_anomaly, trend_strength, ${priceAtPredictionCol} as price_at_prediction
+     FROM ${table} WHERE resolved_ts IS NOT NULL AND horizon_hours=? ORDER BY ts ASC`
+  ).bind(horizonHours).all();
+
+  const { results: priceRows } = await env.DB.prepare(
+    `SELECT ts, ${priceCol} as price FROM ${priceTable} ORDER BY ts ASC`
+  ).all();
+
+  const trailingReturnById = computeTrailingReturns(priceRows, rows, lagMs);
+  const bucketOf = (r) => classifyAnomalyConditionedBucket(r.is_regime_anomaly, r.trend_strength, trailingReturnById.get(r.id));
+
+  // ---- Episode detection FIRST (bucket_summary needs episode_count to
+  // compute insufficient_sample) -- same deterministic methodology as
+  // computeRegimeDirectionalReport: day-level majority-vote bucket, then
+  // group consecutive days sharing the same bucket into one episode.
+  // Explicit and fully deterministic -- no randomness, no wall-clock
+  // dependency beyond the data's own stored timestamps; the same input
+  // rows always produce the same episode boundaries. Applied here to the
+  // finer-grained trend+trailing bucket instead of the trend-only one. ----
+  const dayBuckets = {};
+  for (const r of rows) {
+    const date = new Date(r.ts).toISOString().slice(0, 10);
+    const b = bucketOf(r);
+    if (!dayBuckets[date]) dayBuckets[date] = {};
+    dayBuckets[date][b] = (dayBuckets[date][b] || 0) + 1;
+  }
+  const sortedDates = Object.keys(dayBuckets).sort();
+  const dayBucketSeq = sortedDates.map((date) => {
+    const counts = dayBuckets[date];
+    const dominant = Object.entries(counts).sort((a, b) => b[1] - a[1])[0][0];
+    return { date, bucket: dominant };
+  });
+  const episodes = [];
+  for (const { date, bucket } of dayBucketSeq) {
+    const last = episodes[episodes.length - 1];
+    if (last && last.bucket === bucket) {
+      last.end_date = date;
+      last.n_days++;
+    } else {
+      episodes.push({ bucket, start_date: date, end_date: date, n_days: 1 });
+    }
+  }
+  const episodeCountByBucket = {};
+  for (const ep of episodes) {
+    episodeCountByBucket[ep.bucket] = (episodeCountByBucket[ep.bucket] || 0) + 1;
+  }
+
+  // ---- Prediction-level bucket table ----
+  const buckets = {};
+  for (const r of rows) {
+    const b = bucketOf(r);
+    if (!buckets[b]) buckets[b] = { n: 0, correct: 0, up: 0, brierSum: 0 };
+    buckets[b].n++;
+    if ((r.p_up >= 0.5) === (r.realized_up === 1)) buckets[b].correct++;
+    if (r.realized_up === 1) buckets[b].up++;
+    buckets[b].brierSum += (r.p_up - r.realized_up) ** 2; // same Brier formula used throughout this file
+  }
+  const bucketSummary = {};
+  for (const [name, s] of Object.entries(buckets)) {
+    const episodeCount = episodeCountByBucket[name] || 0;
+    bucketSummary[name] = {
+      n: s.n,
+      episode_count: episodeCount,
+      directional_accuracy: Number((100 * s.correct / s.n).toFixed(1)),
+      brier_score: Number((s.brierSum / s.n).toFixed(4)),
+      always_up_baseline_accuracy: Number((100 * s.up / s.n).toFixed(1)),
+      always_down_baseline_accuracy: Number((100 * (s.n - s.up) / s.n).toFixed(1)),
+      insufficient_sample: s.n < ANOMALY_AUDIT_MIN_SAMPLE_N || episodeCount < ANOMALY_AUDIT_MIN_EPISODES,
+    };
+  }
+
+  return {
+    ok: true, coin, horizon_hours: horizonHours, generated_at: Date.now(),
+    raw_prediction_count: rows.length,
+    min_sample_n: ANOMALY_AUDIT_MIN_SAMPLE_N,
+    min_episodes: ANOMALY_AUDIT_MIN_EPISODES,
+    bucket_summary: bucketSummary,
+    episodes,
+    note: 'Read-only research report (Learning Roadmap §3 Experiment 1) -- does not feed into any prediction, selection, or calibration logic. insufficient_sample=true means do not treat that bucket\'s numbers as a finding, regardless of how confident the raw percentage looks.',
+  };
+}
+
+// Orchestrates computeAnomalyConditionedReport across all 3 coins x 2
+// horizons -- the "analyze BTC, ETH, LINK for 12h and 24h" scope in one
+// call, rather than requiring 6 separate requests. Still read-only,
+// still zero writes; each coin/horizon combination is fully independent
+// (a failure in one does not block the others, surfaced per-combination
+// rather than failing the whole audit).
+async function computeFullAnomalyConditionedAudit(env) {
+  const coins = ['BTC', 'ETH', 'LINK'];
+  const horizons = [12, 24];
+  const results = {};
+  for (const coin of coins) {
+    results[coin] = {};
+    for (const h of horizons) {
+      try {
+        results[coin][h] = await computeAnomalyConditionedReport(env, coin, h);
+      } catch (err) {
+        results[coin][h] = { ok: false, coin, horizon_hours: h, error: String(err) };
+      }
+    }
+  }
+  return {
+    ok: true, generated_at: Date.now(),
+    min_sample_n: ANOMALY_AUDIT_MIN_SAMPLE_N,
+    min_episodes: ANOMALY_AUDIT_MIN_EPISODES,
+    results,
+    note: 'Read-only research report (Learning Roadmap §3 Experiment 1) covering all 3 coins x 2 horizons -- does not feed into any prediction, selection, or calibration logic.',
+  };
+}
+
 // Calibration for the challenger: both variants (flat/tilted) against BOTH
 // naive-baseline (low bar — always guess the historically-more-common
 // direction) AND a real MA-crossover momentum strategy (higher bar — price
@@ -4852,6 +5063,32 @@ export default {
         const horizon = [12, 24].includes(parseInt(url.searchParams.get('horizon'), 10)) ? parseInt(url.searchParams.get('horizon'), 10) : 24;
         const report = await computeRegimeDirectionalReport(env, coin, horizon);
         return new Response(JSON.stringify(report), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+      } catch (err) {
+        return new Response(JSON.stringify({ ok: false, error: String(err) }), { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+      }
+    }
+
+    // ---- GET /research/anomaly-conditioned-audit?coin=&horizon= --
+    // Learning Roadmap §3 Experiment 1. Read-only, zero writes, no effect
+    // on any production/selection/calibration logic. A sibling of
+    // /research/regime-directional above, not a modification of it --
+    // that route and computeRegimeDirectionalReport are untouched.
+    // If both coin and horizon are given and valid, returns that single
+    // combination's report. Otherwise returns the full 3-coin x 2-horizon
+    // audit in one response. See computeAnomalyConditionedReport's own
+    // comment for full methodology. ----
+    if (url.pathname === '/research/anomaly-conditioned-audit' && request.method === 'GET') {
+      try {
+        const coinParam = url.searchParams.get('coin');
+        const horizonParam = parseInt(url.searchParams.get('horizon'), 10);
+        const hasValidCoin = ['BTC', 'LINK', 'ETH'].includes(coinParam);
+        const hasValidHorizon = [12, 24].includes(horizonParam);
+        if (hasValidCoin && hasValidHorizon) {
+          const report = await computeAnomalyConditionedReport(env, coinParam, horizonParam);
+          return new Response(JSON.stringify(report), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+        }
+        const fullAudit = await computeFullAnomalyConditionedAudit(env);
+        return new Response(JSON.stringify(fullAudit), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
       } catch (err) {
         return new Response(JSON.stringify({ ok: false, error: String(err) }), { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
       }

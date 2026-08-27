@@ -7,8 +7,11 @@
 // Cloudflare D1 MCP tool returns, handled defensively here in case either
 // wraps it slightly differently across versions.
 
-const fs = require('fs');
-const path = require('path');
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 const RAW_DIR = path.join(__dirname, '..', 'raw');
 const OUT_DIR = path.join(__dirname, '..');

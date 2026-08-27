@@ -3186,6 +3186,23 @@ function computeTrailingReturns(priceRows, predictionRows, lagMs) {
 const ANOMALY_AUDIT_MIN_SAMPLE_N = 5;
 const ANOMALY_AUDIT_MIN_EPISODES = 3;
 
+// Maximum gap, in ms, between two consecutive same-bucket cycles for them
+// to still count as the same episode. 6h = double the real ~3h cron
+// cadence (predictAndLog runs every 3h for every coin/horizon under
+// normal operation) -- tolerates a single missed cycle without
+// artificially fragmenting one genuine continuous stretch into several,
+// while still being far short of the multi-day gaps a real separate
+// occurrence would show.
+//
+// This is a reasonable INITIAL research parameter, not an empirically
+// derived or proven-optimal one -- no sensitivity analysis has been run
+// on it. The invariant that actually matters, and that this value is
+// chosen to satisfy: it must comfortably tolerate the normal 3h cadence
+// (including one missed cycle) while never bridging genuine multi-day
+// gaps. 6h clears that bar with margin on both sides; a future revision
+// with real sensitivity analysis behind it would not be surprising.
+const ANOMALY_AUDIT_MAX_GAP_MS = 6 * 60 * 60 * 1000;
+
 async function computeAnomalyConditionedReport(env, coin, horizonHours) {
   const table = coreTableForCoin(coin);
   const priceTable = coin === 'LINK' ? 'link_data' : coin === 'ETH' ? 'eth_data' : 'btc_data';
@@ -3206,35 +3223,48 @@ async function computeAnomalyConditionedReport(env, coin, horizonHours) {
   const bucketOf = (r) => classifyAnomalyConditionedBucket(r.is_regime_anomaly, r.trend_strength, trailingReturnById.get(r.id));
 
   // ---- Episode detection FIRST (bucket_summary needs episode_count to
-  // compute insufficient_sample) -- same deterministic methodology as
-  // computeRegimeDirectionalReport: day-level majority-vote bucket, then
-  // group consecutive days sharing the same bucket into one episode.
-  // Explicit and fully deterministic -- no randomness, no wall-clock
-  // dependency beyond the data's own stored timestamps; the same input
-  // rows always produce the same episode boundaries. Applied here to the
-  // finer-grained trend+trailing bucket instead of the trend-only one. ----
-  const dayBuckets = {};
-  for (const r of rows) {
-    const date = new Date(r.ts).toISOString().slice(0, 10);
-    const b = bucketOf(r);
-    if (!dayBuckets[date]) dayBuckets[date] = {};
-    dayBuckets[date][b] = (dayBuckets[date][b] || 0) + 1;
-  }
-  const sortedDates = Object.keys(dayBuckets).sort();
-  const dayBucketSeq = sortedDates.map((date) => {
-    const counts = dayBuckets[date];
-    const dominant = Object.entries(counts).sort((a, b) => b[1] - a[1])[0][0];
-    return { date, bucket: dominant };
-  });
+  // compute insufficient_sample) ----
+  //
+  // Cycle-level consecutive-run detection directly on the ts-ordered
+  // rows (already ORDER BY ts ASC from the query above) -- replaces an
+  // earlier day-level majority-vote design that had two confirmed
+  // defects, both rooted in the same reduction step:
+  //   1. Grouping only checked "same bucket as the previous entry",
+  //      never actual date/time adjacency -- two same-bucket
+  //      observations separated by a real multi-day data gap (e.g.
+  //      Aug 18 and Aug 25, nothing resolved in between) were merged
+  //      into one episode instead of counted as two separate ones.
+  //   2. Reducing each day to a single "dominant" bucket before episode
+  //      detection could attribute an entire day to a bucket that only
+  //      a minority of that day's actual cycles belonged to (confirmed
+  //      concretely: a day with 3 anomaly / 3 normal / 2 different-
+  //      anomaly cycles was attributed entirely to the 3-cycle bucket
+  //      on a tie, discarding the other 5 cycles from episode counting
+  //      entirely).
+  // Operating cycle-by-cycle instead of day-by-day removes the
+  // reduction step that caused both: two rows extend the same episode
+  // only if they share the same bucket AND the gap between them is
+  // <= ANOMALY_AUDIT_MAX_GAP_MS (see that constant's own comment for
+  // the exact threshold and its rationale). No day-level aggregation,
+  // no majority vote, no information discarded -- every resolved cycle
+  // is represented in exactly one episode. Fully deterministic: no
+  // randomness, no wall-clock dependency beyond the data's own stored
+  // timestamps, the same input rows always produce the same episodes.
   const episodes = [];
-  for (const { date, bucket } of dayBucketSeq) {
+  for (const r of rows) {
+    const b = bucketOf(r);
     const last = episodes[episodes.length - 1];
-    if (last && last.bucket === bucket) {
-      last.end_date = date;
-      last.n_days++;
+    const withinGap = last && (r.ts - last.end_ts) <= ANOMALY_AUDIT_MAX_GAP_MS;
+    if (last && last.bucket === b && withinGap) {
+      last.end_ts = r.ts;
+      last.n_cycles++;
     } else {
-      episodes.push({ bucket, start_date: date, end_date: date, n_days: 1 });
+      episodes.push({ bucket: b, start_ts: r.ts, end_ts: r.ts, n_cycles: 1 });
     }
+  }
+  for (const ep of episodes) {
+    ep.start_date = new Date(ep.start_ts).toISOString().slice(0, 10);
+    ep.end_date = new Date(ep.end_ts).toISOString().slice(0, 10);
   }
   const episodeCountByBucket = {};
   for (const ep of episodes) {

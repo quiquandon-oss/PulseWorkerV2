@@ -124,13 +124,8 @@ describe('computeAnomalyConditionedReport — deterministic episode grouping', (
     scope = evalInScope(extractFunctions(
       'computeAnomalyConditionedReport', 'classifyAnomalyConditionedBucket',
       'computeTrailingReturns', 'coreTableForCoin'
-    ) + '\n\n' + extractConstants('ANOMALY_AUDIT_MIN_SAMPLE_N', 'ANOMALY_AUDIT_MIN_EPISODES'));
+    ) + '\n\n' + extractConstants('ANOMALY_AUDIT_MIN_SAMPLE_N', 'ANOMALY_AUDIT_MIN_EPISODES', 'ANOMALY_AUDIT_MAX_GAP_MS'));
   });
-
-  function dayRow(dateStr, hourOffset, id, { anomaly, trend, price, priceAtPrediction, realizedUp }) {
-    const ts = new Date(dateStr).getTime() + hourOffset * 3600000;
-    return { ts, id, anomaly, trend, price, priceAtPrediction, realizedUp };
-  }
 
   function makeFakeDb({ predictionRows, priceRows }) {
     return {
@@ -153,13 +148,14 @@ describe('computeAnomalyConditionedReport — deterministic episode grouping', (
     };
   }
 
-  it('4 consecutive days in the SAME bucket collapse to exactly 1 episode, not 4 -- proves consecutive cycles are not independent evidence', async () => {
+  it('4 consecutive cycles within the gap threshold (3h cadence, matching real cron spacing) collapse to exactly 1 episode, not 4 -- proves closely-spaced consecutive cycles are not independent evidence', async () => {
     const priceRows = [{ ts: 0, price: 100 }];
+    const baseTs = new Date('2026-08-18').getTime();
     const predictionRows = [
-      dayRow('2026-08-18', 0, 1, { anomaly: 1, trend: 0.5, price: 100, priceAtPrediction: 110, realizedUp: 1 }),
-      dayRow('2026-08-19', 0, 2, { anomaly: 1, trend: 0.5, price: 100, priceAtPrediction: 111, realizedUp: 1 }),
-      dayRow('2026-08-20', 0, 3, { anomaly: 1, trend: 0.5, price: 100, priceAtPrediction: 112, realizedUp: 1 }),
-      dayRow('2026-08-21', 0, 4, { anomaly: 1, trend: 0.5, price: 100, priceAtPrediction: 113, realizedUp: 1 }),
+      { ts: baseTs, id: 1, anomaly: 1, trend: 0.5, priceAtPrediction: 110, realizedUp: 1 },
+      { ts: baseTs + 3 * 3600000, id: 2, anomaly: 1, trend: 0.5, priceAtPrediction: 111, realizedUp: 1 },
+      { ts: baseTs + 6 * 3600000, id: 3, anomaly: 1, trend: 0.5, priceAtPrediction: 112, realizedUp: 1 },
+      { ts: baseTs + 9 * 3600000, id: 4, anomaly: 1, trend: 0.5, priceAtPrediction: 113, realizedUp: 1 },
     ];
     const db = makeFakeDb({ predictionRows, priceRows });
     const report = await scope.computeAnomalyConditionedReport({ DB: db }, 'BTC', 24);
@@ -167,15 +163,36 @@ describe('computeAnomalyConditionedReport — deterministic episode grouping', (
     const bucketKey = 'anomaly_trendpos_continuation';
     expect(report.bucket_summary[bucketKey].episode_count).toBe(1);
     expect(report.episodes).toHaveLength(1);
-    expect(report.episodes[0].n_days).toBe(4);
+    expect(report.episodes[0].n_cycles).toBe(4);
+  });
+
+  it('REQUIRED REGRESSION (Aug-18/Aug-25 gap): two same-bucket observations separated by a real multi-day data gap are counted as two SEPARATE episodes, not merged into one', async () => {
+    // Exact scenario used to prove the original defect: Aug 18 and Aug 25,
+    // a genuine 7-day gap, nothing resolved in between. The old day-level
+    // design merged these into one episode (episode_count=1) because it
+    // only checked "same bucket as the previous entry", never actual
+    // date/time adjacency.
+    const priceRows = [{ ts: 0, price: 100 }];
+    const predictionRows = [
+      { ts: new Date('2026-08-18').getTime(), id: 1, anomaly: 1, trend: 0.5, priceAtPrediction: 105, realizedUp: 1 },
+      { ts: new Date('2026-08-25').getTime(), id: 2, anomaly: 1, trend: 0.5, priceAtPrediction: 106, realizedUp: 1 },
+    ];
+    const db = makeFakeDb({ predictionRows, priceRows });
+    const report = await scope.computeAnomalyConditionedReport({ DB: db }, 'BTC', 24);
+    const bucketKey = 'anomaly_trendpos_continuation';
+    expect(report.bucket_summary[bucketKey].n).toBe(2);
+    expect(report.bucket_summary[bucketKey].episode_count).toBe(2); // NOT 1 -- the fix
+    expect(report.episodes).toHaveLength(2);
+    expect(report.episodes[0].end_date).toBe('2026-08-18');
+    expect(report.episodes[1].start_date).toBe('2026-08-25');
   });
 
   it('a bucket change and reversion produces two SEPARATE episodes for the same bucket, not one merged episode', async () => {
     const priceRows = [{ ts: 0, price: 100 }];
     const predictionRows = [
-      dayRow('2026-08-01', 0, 1, { anomaly: 1, trend: 0.5, price: 100, priceAtPrediction: 105, realizedUp: 1 }),
-      dayRow('2026-08-02', 0, 2, { anomaly: 1, trend: -0.5, price: 100, priceAtPrediction: 95, realizedUp: 0 }),
-      dayRow('2026-08-03', 0, 3, { anomaly: 1, trend: 0.5, price: 100, priceAtPrediction: 106, realizedUp: 1 }),
+      { ts: new Date('2026-08-01').getTime(), id: 1, anomaly: 1, trend: 0.5, priceAtPrediction: 105, realizedUp: 1 },
+      { ts: new Date('2026-08-02').getTime(), id: 2, anomaly: 1, trend: -0.5, priceAtPrediction: 95, realizedUp: 0 },
+      { ts: new Date('2026-08-03').getTime(), id: 3, anomaly: 1, trend: 0.5, priceAtPrediction: 106, realizedUp: 1 },
     ];
     const db = makeFakeDb({ predictionRows, priceRows });
     const report = await scope.computeAnomalyConditionedReport({ DB: db }, 'BTC', 24);
@@ -188,8 +205,8 @@ describe('computeAnomalyConditionedReport — deterministic episode grouping', (
   it('running the same report twice against identical input produces byte-identical episode boundaries and bucket stats (excluding generated_at)', async () => {
     const priceRows = [{ ts: 0, price: 100 }];
     const predictionRows = [
-      dayRow('2026-08-01', 0, 1, { anomaly: 1, trend: 0.2, price: 100, priceAtPrediction: 102, realizedUp: 1 }),
-      dayRow('2026-08-02', 0, 2, { anomaly: 0, trend: null, price: 100, priceAtPrediction: 99, realizedUp: 0 }),
+      { ts: new Date('2026-08-01').getTime(), id: 1, anomaly: 1, trend: 0.2, priceAtPrediction: 102, realizedUp: 1 },
+      { ts: new Date('2026-08-02').getTime(), id: 2, anomaly: 0, trend: null, priceAtPrediction: 99, realizedUp: 0 },
     ];
     const db1 = makeFakeDb({ predictionRows, priceRows });
     const db2 = makeFakeDb({ predictionRows, priceRows });
@@ -199,18 +216,39 @@ describe('computeAnomalyConditionedReport — deterministic episode grouping', (
     expect(strip(r1)).toEqual(strip(r2));
   });
 
-  it('a day with a genuine mix of buckets across its own predictions is classified by majority vote, not by whichever row happened to be read first', async () => {
+  it('REQUIRED REGRESSION (mixed day): a day with a genuinely mixed population is no longer collapsed into one misleading dominant label -- every cycle is represented in the correct bucket', async () => {
+    // Exact scenario used to prove the second defect: 8 real cycles in
+    // one day -- 3x anomaly_trendpos_continuation, 3x normal, 2x
+    // anomaly_trendneg_dip. The old day-level majority-vote design
+    // attributed the ENTIRE day to anomaly_trendpos_continuation on a
+    // 3-way tie, discarding the other 5 cycles from episode counting
+    // entirely. Cycle-level detection has no reduction step to lose
+    // that information -- each cycle lands in its own real bucket.
     const priceRows = [{ ts: 0, price: 100 }];
+    const dayTs = new Date('2026-08-18').getTime();
     const predictionRows = [
-      dayRow('2026-08-10', 0, 1, { anomaly: 0, trend: null, price: 100, priceAtPrediction: 100, realizedUp: 1 }),
-      dayRow('2026-08-10', 3, 2, { anomaly: 1, trend: 0.4, price: 100, priceAtPrediction: 104, realizedUp: 1 }),
-      dayRow('2026-08-10', 6, 3, { anomaly: 1, trend: 0.4, price: 100, priceAtPrediction: 105, realizedUp: 1 }),
-      dayRow('2026-08-10', 9, 4, { anomaly: 1, trend: 0.4, price: 100, priceAtPrediction: 106, realizedUp: 1 }),
+      { ts: dayTs + 0, id: 1, anomaly: 1, trend: 0.5, priceAtPrediction: 105, realizedUp: 1 },
+      { ts: dayTs + 1, id: 2, anomaly: 1, trend: 0.5, priceAtPrediction: 106, realizedUp: 1 },
+      { ts: dayTs + 2, id: 3, anomaly: 1, trend: 0.5, priceAtPrediction: 107, realizedUp: 1 },
+      { ts: dayTs + 3, id: 4, anomaly: 0, trend: null, priceAtPrediction: 100, realizedUp: 0 },
+      { ts: dayTs + 4, id: 5, anomaly: 0, trend: null, priceAtPrediction: 100, realizedUp: 0 },
+      { ts: dayTs + 5, id: 6, anomaly: 0, trend: null, priceAtPrediction: 100, realizedUp: 1 },
+      { ts: dayTs + 6, id: 7, anomaly: 1, trend: -0.5, priceAtPrediction: 95, realizedUp: 0 },
+      { ts: dayTs + 7, id: 8, anomaly: 1, trend: -0.5, priceAtPrediction: 94, realizedUp: 0 },
     ];
     const db = makeFakeDb({ predictionRows, priceRows });
     const report = await scope.computeAnomalyConditionedReport({ DB: db }, 'BTC', 24);
-    expect(report.episodes).toHaveLength(1);
-    expect(report.episodes[0].bucket).toBe('anomaly_trendpos_continuation'); // 3 of 4 rows
+    // All 8 cycles are within the 6h gap threshold of each other, so
+    // consecutive same-bucket runs still merge -- but bucket CHANGES
+    // (anomaly_trendpos_continuation -> normal -> anomaly_trendneg_dip)
+    // correctly break into separate episodes, and every cycle is counted
+    // in its own real bucket rather than being absorbed into one label.
+    expect(report.bucket_summary['anomaly_trendpos_continuation'].n).toBe(3);
+    expect(report.bucket_summary['normal'].n).toBe(3);
+    expect(report.bucket_summary['anomaly_trendneg_dip'].n).toBe(2);
+    expect(report.episodes.map((e) => e.bucket)).toEqual([
+      'anomaly_trendpos_continuation', 'normal', 'anomaly_trendneg_dip',
+    ]);
   });
 });
 
@@ -220,7 +258,7 @@ describe('computeAnomalyConditionedReport — insufficient-sample handling', () 
     scope = evalInScope(extractFunctions(
       'computeAnomalyConditionedReport', 'classifyAnomalyConditionedBucket',
       'computeTrailingReturns', 'coreTableForCoin'
-    ) + '\n\n' + extractConstants('ANOMALY_AUDIT_MIN_SAMPLE_N', 'ANOMALY_AUDIT_MIN_EPISODES'));
+    ) + '\n\n' + extractConstants('ANOMALY_AUDIT_MIN_SAMPLE_N', 'ANOMALY_AUDIT_MIN_EPISODES', 'ANOMALY_AUDIT_MAX_GAP_MS'));
   });
 
   function makeFakeDb({ predictionRows, priceRows = [{ ts: 0, price: 100 }] }) {
@@ -297,7 +335,7 @@ describe('computeAnomalyConditionedReport — insufficient-sample handling', () 
 
 describe('computeFullAnomalyConditionedAudit and the route — 12h/24h and BTC/ETH/LINK separation', () => {
   it('computeFullAnomalyConditionedAudit calls computeAnomalyConditionedReport for exactly the 6 coin/horizon combinations, no more, no fewer', async () => {
-    const source = extractFunctions('computeFullAnomalyConditionedAudit') + '\n\n' + extractConstants('ANOMALY_AUDIT_MIN_SAMPLE_N', 'ANOMALY_AUDIT_MIN_EPISODES');
+    const source = extractFunctions('computeFullAnomalyConditionedAudit') + '\n\n' + extractConstants('ANOMALY_AUDIT_MIN_SAMPLE_N', 'ANOMALY_AUDIT_MIN_EPISODES', 'ANOMALY_AUDIT_MAX_GAP_MS');
     const calls = [];
     const scope = evalInScope(source, {
       computeAnomalyConditionedReport: async (env, coin, horizon) => {
@@ -313,7 +351,7 @@ describe('computeFullAnomalyConditionedAudit and the route — 12h/24h and BTC/E
   });
 
   it('a failure in one coin/horizon combination does not block or corrupt the others', async () => {
-    const source = extractFunctions('computeFullAnomalyConditionedAudit') + '\n\n' + extractConstants('ANOMALY_AUDIT_MIN_SAMPLE_N', 'ANOMALY_AUDIT_MIN_EPISODES');
+    const source = extractFunctions('computeFullAnomalyConditionedAudit') + '\n\n' + extractConstants('ANOMALY_AUDIT_MIN_SAMPLE_N', 'ANOMALY_AUDIT_MIN_EPISODES', 'ANOMALY_AUDIT_MAX_GAP_MS');
     const scope = evalInScope(source, {
       computeAnomalyConditionedReport: async (env, coin, horizon) => {
         if (coin === 'ETH' && horizon === 12) throw new Error('simulated failure for ETH/12h only');
@@ -366,5 +404,54 @@ describe('STRUCTURAL CHECK: production selection/core k-NN logic is completely u
   it('computeAnomalyConditionedReport only ever calls .all() on env.DB, never .run()', () => {
     const src = extractFunctions('computeAnomalyConditionedReport');
     expect(src).not.toContain('.run()');
+  });
+
+  it('DETERMINISM/READ-ONLY PROOF: the redesigned cycle-level report, run 3 times against the same realistic (gapped + mixed) dataset, produces byte-identical output every time, and the fake DB never receives a write call', async () => {
+    const source = extractFunctions(
+      'computeAnomalyConditionedReport', 'classifyAnomalyConditionedBucket',
+      'computeTrailingReturns', 'coreTableForCoin'
+    ) + '\n\n' + extractConstants('ANOMALY_AUDIT_MIN_SAMPLE_N', 'ANOMALY_AUDIT_MIN_EPISODES', 'ANOMALY_AUDIT_MAX_GAP_MS');
+    const scope = evalInScope(source);
+    const priceRows = [{ ts: 0, price: 100 }];
+    const dayTs = new Date('2026-08-18').getTime();
+    // Combines both regression scenarios in one dataset: a gap (Aug 18 vs
+    // Aug 25) AND a mixed-population stretch, real-world-shaped.
+    const predictionRows = [
+      { ts: dayTs, id: 1, anomaly: 1, trend: 0.5, priceAtPrediction: 105, realizedUp: 1 },
+      { ts: dayTs + 3600000, id: 2, anomaly: 0, trend: null, priceAtPrediction: 100, realizedUp: 0 },
+      { ts: new Date('2026-08-25').getTime(), id: 3, anomaly: 1, trend: 0.5, priceAtPrediction: 106, realizedUp: 1 },
+    ];
+    let writeAttempted = false;
+    const makeDb = () => ({
+      prepare(sql) {
+        return {
+          bind: (...args) => ({
+            all: async () => (/FROM (predictions|link_predictions|eth_predictions)/.test(sql)
+              ? { results: predictionRows.map((r) => ({
+                  id: r.id, ts: r.ts, p_up: r.realizedUp === 1 ? 0.7 : 0.3, realized_up: r.realizedUp,
+                  is_regime_anomaly: r.anomaly, trend_strength: r.trend, price_at_prediction: r.priceAtPrediction,
+                })) }
+              : { results: priceRows }),
+            run: async () => { writeAttempted = true; throw new Error('a read-only research report must never call .run()'); },
+          }),
+          all: async () => ({ results: priceRows }),
+          run: async () => { writeAttempted = true; throw new Error('a read-only research report must never call .run()'); },
+        };
+      },
+    });
+
+    const results = await Promise.all([
+      scope.computeAnomalyConditionedReport({ DB: makeDb() }, 'BTC', 24),
+      scope.computeAnomalyConditionedReport({ DB: makeDb() }, 'BTC', 24),
+      scope.computeAnomalyConditionedReport({ DB: makeDb() }, 'BTC', 24),
+    ]);
+    const strip = (r) => { const { generated_at, ...rest } = r; return rest; };
+    expect(strip(results[0])).toEqual(strip(results[1]));
+    expect(strip(results[1])).toEqual(strip(results[2]));
+    expect(writeAttempted).toBe(false);
+    // And confirms the fix is actually exercised in this same proof, not
+    // just determinism in the abstract: the gap correctly produces 2
+    // episodes for the bucket, not 1.
+    expect(results[0].bucket_summary['anomaly_trendpos_continuation'].episode_count).toBe(2);
   });
 });

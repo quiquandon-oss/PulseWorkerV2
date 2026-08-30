@@ -2,19 +2,15 @@ import { describe, it, expect, beforeAll } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { extractFunctions, extractConstants, evalInScope } from './helpers/extract.js';
 
-describe('SELECTION_VARIANTS.ETH now includes challenger entries, mirroring BTC/LINK', () => {
+describe('SELECTION_VARIANTS.ETH includes the 3 challenger entries, mirroring BTC/LINK -- 6 total, not 7', () => {
   let scope;
   beforeAll(() => {
     scope = evalInScope(extractConstants('SELECTION_VARIANTS'));
   });
 
-  it('ETH has all 7 variants now (was 6 pre-Experiment-3), not just the original 3', () => {
-    // Updated for Learning Roadmap §3 Experiment 3: challenger_momentum
-    // added to SELECTION_VARIANTS for all three coins, same shape as the
-    // other challenger_* entries. This test previously asserted 6; the
-    // 7th (challenger_momentum) is intentional, not a regression.
+  it('ETH has exactly 6 variants -- challenger_momentum is deliberately excluded from the production registry (Experiment 3 correction, see challenger-momentum-experiment.test.js)', () => {
     const keys = scope.SELECTION_VARIANTS.ETH.map((v) => v.key);
-    expect(keys).toEqual(['original', 'experimental', 'calibrated', 'challenger_flat', 'challenger_tilted', 'challenger_calibrated', 'challenger_momentum']);
+    expect(keys).toEqual(['original', 'experimental', 'calibrated', 'challenger_flat', 'challenger_tilted', 'challenger_calibrated']);
   });
 
   it('ETH\'s challenger entries point at challenger_predictions with coinFilter true, same as BTC/LINK', () => {
@@ -23,7 +19,7 @@ describe('SELECTION_VARIANTS.ETH now includes challenger entries, mirroring BTC/
       expect(entry.table).toBe('challenger_predictions');
       expect(entry.coinFilter).toBe(true);
     }
-    expect(ethChallengerEntries.map((v) => v.field)).toEqual(['p_up_flat', 'p_up_tilted', 'calibrated_p_up_flat', 'p_up_momentum']);
+    expect(ethChallengerEntries.map((v) => v.field)).toEqual(['p_up_flat', 'p_up_tilted', 'calibrated_p_up_flat']);
   });
 });
 

@@ -88,42 +88,36 @@ describe('MOMENTUM_TREND_THRESHOLD_V1 / MOMENTUM_BLEND_WEIGHT_V1 — documented,
   });
 });
 
-describe('SELECTION_VARIANTS — challenger_momentum added correctly for all 3 coins', () => {
+describe('CORRECTION (post-audit): SELECTION_VARIANTS reverted -- challenger_momentum deliberately excluded from the production pool', () => {
   let scope;
   beforeAll(() => {
     scope = evalInScope(extractConstants('SELECTION_VARIANTS'));
   });
 
-  it('challenger_momentum exists for BTC, LINK, and ETH with the exact same shape as the other challenger_* entries', () => {
+  it('challenger_momentum does NOT appear anywhere in SELECTION_VARIANTS for BTC, LINK, or ETH', () => {
     for (const coin of ['BTC', 'LINK', 'ETH']) {
       const entry = scope.SELECTION_VARIANTS[coin].find((v) => v.key === 'challenger_momentum');
-      expect(entry).toBeDefined();
-      expect(entry.table).toBe('challenger_predictions');
-      expect(entry.field).toBe('p_up_momentum');
-      expect(entry.coinFilter).toBe(true);
+      expect(entry).toBeUndefined();
     }
   });
 
-  it('every coin now has exactly 7 variants (was 6), and the new entry is additive at the end, not replacing anything', () => {
+  it('every coin has exactly the original 6 variants -- production pool size is unchanged by this PR', () => {
     for (const coin of ['BTC', 'LINK', 'ETH']) {
-      expect(scope.SELECTION_VARIANTS[coin]).toHaveLength(7);
+      expect(scope.SELECTION_VARIANTS[coin]).toHaveLength(6);
       const keys = scope.SELECTION_VARIANTS[coin].map((v) => v.key);
-      expect(keys).toContain('challenger_flat');
-      expect(keys).toContain('challenger_tilted');
-      expect(keys).toContain('challenger_calibrated');
-      expect(keys).toContain('challenger_momentum');
+      expect(keys).toEqual(['original', 'experimental', 'calibrated', 'challenger_flat', 'challenger_tilted', 'challenger_calibrated']);
     }
   });
 });
 
-describe('PROOF: challenger_momentum is subject to the exact same unmodified 50-resolved gate as every other variant', () => {
-  it('selectBestVariant\'s own eligibility loop excludes challenger_momentum when its count is below SELECTION_MIN_HISTORY, using the identical unmodified check', async () => {
+describe('PROOF: selectBestVariant can never see, score, or choose challenger_momentum', () => {
+  it('the eligibility loop never queries challenger_predictions.p_up_momentum at all -- it is simply not in the registry it iterates', async () => {
     const source = extractFunctions('selectBestVariant', 'decideSelection', 'computeLcaScore', 'coreTableForCoin') + '\n\n' +
       extractConstants('SELECTION_VARIANTS', 'SELECTION_MIN_HISTORY', 'SELECTION_MIN_MATCHED', 'SELECTION_CRITICAL_Z');
     const counts = {
       'predictions:p_up': 100, 'predictions:p_up_experimental': 100, 'predictions:calibrated_p_up': 100,
       'challenger_predictions:p_up_flat': 100, 'challenger_predictions:p_up_tilted': 100, 'challenger_predictions:calibrated_p_up_flat': 100,
-      'challenger_predictions:p_up_momentum': 3, // deliberately far below SELECTION_MIN_HISTORY=50
+      'challenger_predictions:p_up_momentum': 100, // even with plenty of history, it must never be looked at
     };
     const eligibleChecked = [];
     const db = {
@@ -146,17 +140,114 @@ describe('PROOF: challenger_momentum is subject to the exact same unmodified 50-
       },
     };
     const scope = evalInScope(source);
-    const result = await scope.selectBestVariant({ DB: db }, 'BTC', 24);
-    // The eligibility check ran for momentum (proving it's included in the
-    // loop at all -- confirming the new entry participates)...
-    expect(eligibleChecked).toContain('challenger_predictions:p_up_momentum');
-    // ...but with n=3 << 50, it must never reach the point of being
-    // chosen. Given no core prediction data exists in this fake DB
-    // either, this should short-circuit to a no-op/skip well before
-    // reaching any real decision -- the key proof is that the exact
-    // same COUNT >= SELECTION_MIN_HISTORY check applied to every other
-    // variant is what determines momentum's fate too, not a special case.
-    expect(result).toBeDefined();
+    await scope.selectBestVariant({ DB: db }, 'BTC', 24);
+    // The definitive proof: momentum's table/field pair is never even
+    // checked, because it was never in the registry selectBestVariant
+    // iterates -- it structurally cannot be chosen, not just "chosen
+    // rarely" or "gated out downstream".
+    expect(eligibleChecked).not.toContain('challenger_predictions:p_up_momentum');
+    expect(eligibleChecked).toHaveLength(6);
+  });
+
+  it('decideSelection\'s candidate pool can never contain challenger_momentum, since scores are only ever built from SELECTION_VARIANTS entries', () => {
+    const src = extractFunctions('selectBestVariant');
+    // The only place `scores.push` happens is inside the `for (const v of eligible)`
+    // loop, where `eligible` is filtered from `variantDefs = SELECTION_VARIANTS[coin]`.
+    // With momentum absent from that registry (proven above), it cannot enter
+    // `eligible`, `scores`, or therefore `decision.chosen`.
+    expect(src).toContain('const variantDefs = SELECTION_VARIANTS[coin];');
+    expect(src).not.toContain('MOMENTUM_EXPERIMENT_VARIANT');
+    expect(src).not.toContain("'challenger_momentum'");
+  });
+});
+
+describe('MOMENTUM_EXPERIMENT_VARIANT / logMomentumSelectionExperiment — parallel scoring, logged-only, decision-free', () => {
+  it('MOMENTUM_EXPERIMENT_VARIANT is a standalone constant, not a member of SELECTION_VARIANTS', () => {
+    const scope = evalInScope(extractConstants('MOMENTUM_EXPERIMENT_VARIANT', 'SELECTION_VARIANTS'));
+    expect(scope.MOMENTUM_EXPERIMENT_VARIANT).toEqual({ key: 'challenger_momentum', table: 'challenger_predictions', field: 'p_up_momentum', coinFilter: true });
+    for (const coin of ['BTC', 'LINK', 'ETH']) {
+      expect(scope.SELECTION_VARIANTS[coin]).not.toContainEqual(scope.MOMENTUM_EXPERIMENT_VARIANT);
+    }
+  });
+
+  it('logMomentumSelectionExperiment never calls selectBestVariant, decideSelection, decideSelectionSoftened, or logAnomalyGateExperiment', () => {
+    const src = extractFunctions('logMomentumSelectionExperiment');
+    expect(src).not.toContain('selectBestVariant(');
+    expect(src).not.toContain('decideSelection(');
+    expect(src).not.toContain('decideSelectionSoftened(');
+    expect(src).not.toContain('logAnomalyGateExperiment(');
+  });
+
+  it('logMomentumSelectionExperiment never writes to selection_decisions or selection_decisions_anomaly -- only reads the former, writes only to selection_decisions_momentum', () => {
+    const src = extractFunctions('logMomentumSelectionExperiment');
+    expect(src).not.toMatch(/INSERT INTO selection_decisions\s/);
+    expect(src).not.toContain('INSERT INTO selection_decisions_anomaly');
+    expect(src).toContain('INSERT INTO selection_decisions_momentum');
+    expect(src).toContain('SELECT chosen_variant, chosen_p_up, lca_score FROM selection_decisions');
+  });
+
+  it('computes a ranking, never a Bonferroni-gated verdict -- no SELECTION_CRITICAL_Z, ANOMALY_GATE_MARGIN_FACTOR, or "cleared_gate" concept inside it', () => {
+    const src = extractFunctions('logMomentumSelectionExperiment');
+    expect(src).not.toContain('SELECTION_CRITICAL_Z');
+    expect(src).not.toContain('ANOMALY_GATE_MARGIN_FACTOR');
+    expect(src).not.toContain('cleared_gate');
+    expect(src).not.toContain('requiredMargin');
+  });
+
+  it('behaviorally: scores all 7 (6 production + momentum), logs momentum\'s LCA/rank, and reads (not recomputes) the latest production decision for comparison', async () => {
+    const source = extractFunctions('logMomentumSelectionExperiment', 'computeLcaScore', 'coreTableForCoin', 'nearestRow') + '\n\n' +
+      extractConstants('SELECTION_VARIANTS', 'MOMENTUM_EXPERIMENT_VARIANT', 'SELECTION_MIN_HISTORY', 'SELECTION_MIN_MATCHED');
+    const scope = evalInScope(source);
+
+    const now = Date.now();
+    const history = Array.from({ length: 20 }, (_, i) => ({
+      ts: now - (20 - i) * 3600000, features_json: JSON.stringify({ f: i }), realized_up: i % 2,
+    }));
+    const variantRows = (pUp) => history.map(h => ({ ts: h.ts, p_up: pUp, realized_up: h.realized_up }));
+
+    let inserted = null;
+    const db = {
+      prepare(sql) {
+        return {
+          bind: (...args) => ({
+            first: async () => {
+              if (sql.includes('FROM predictions WHERE') && sql.includes('ORDER BY ts DESC LIMIT 1') && !sql.includes('selection_decisions')) {
+                return { ts: now, features_json: JSON.stringify({ f: 0 }) };
+              }
+              if (sql.includes('FROM selection_decisions WHERE')) {
+                return { chosen_variant: 'challenger_flat', chosen_p_up: 0.61, lca_score: 0.58 };
+              }
+              return null;
+            },
+            all: async () => {
+              if (sql.includes('SELECT COUNT(*) as n FROM')) return { results: [{ n: 100 }] };
+              if (sql.includes('FROM predictions WHERE') && sql.includes('LIMIT 300')) return { results: history };
+              if (sql.includes('SELECT ts, ')) return { results: variantRows(0.7) };
+              return { results: [] };
+            },
+            run: async () => { inserted = args; return {}; },
+          }),
+        };
+      },
+    };
+    // Capture bound args on the INSERT specifically.
+    const origPrepare = db.prepare.bind(db);
+    db.prepare = (sql) => {
+      const stmt = origPrepare(sql);
+      if (sql.includes('INSERT INTO selection_decisions_momentum')) {
+        const origBind = stmt.bind.bind(stmt);
+        stmt.bind = (...args) => { inserted = args; return origBind(...args); };
+      }
+      return stmt;
+    };
+
+    const result = await scope.logMomentumSelectionExperiment({ DB: db }, 'BTC', 24);
+    expect(result.ok).toBe(true);
+    if (result.logged) {
+      expect(result.total_scored).toBe(7);
+      expect(result.production_chosen_variant).toBe('challenger_flat');
+      expect(inserted).not.toBeNull();
+    }
   });
 });
 

@@ -989,7 +989,6 @@ const SELECTION_VARIANTS = {
     { key: 'challenger_flat', table: 'challenger_predictions', field: 'p_up_flat', coinFilter: true },
     { key: 'challenger_tilted', table: 'challenger_predictions', field: 'p_up_tilted', coinFilter: true },
     { key: 'challenger_calibrated', table: 'challenger_predictions', field: 'calibrated_p_up_flat', coinFilter: true },
-    { key: 'challenger_momentum', table: 'challenger_predictions', field: 'p_up_momentum', coinFilter: true },
   ],
   LINK: [
     { key: 'original', table: 'link_predictions', field: 'p_up', coinFilter: false },
@@ -998,7 +997,6 @@ const SELECTION_VARIANTS = {
     { key: 'challenger_flat', table: 'challenger_predictions', field: 'p_up_flat', coinFilter: true },
     { key: 'challenger_tilted', table: 'challenger_predictions', field: 'p_up_tilted', coinFilter: true },
     { key: 'challenger_calibrated', table: 'challenger_predictions', field: 'calibrated_p_up_flat', coinFilter: true },
-    { key: 'challenger_momentum', table: 'challenger_predictions', field: 'p_up_momentum', coinFilter: true },
   ],
   ETH: [
     { key: 'original', table: 'eth_predictions', field: 'p_up', coinFilter: false },
@@ -1007,7 +1005,6 @@ const SELECTION_VARIANTS = {
     { key: 'challenger_flat', table: 'challenger_predictions', field: 'p_up_flat', coinFilter: true },
     { key: 'challenger_tilted', table: 'challenger_predictions', field: 'p_up_tilted', coinFilter: true },
     { key: 'challenger_calibrated', table: 'challenger_predictions', field: 'calibrated_p_up_flat', coinFilter: true },
-    { key: 'challenger_momentum', table: 'challenger_predictions', field: 'p_up_momentum', coinFilter: true },
   ],
 };
 const SELECTION_MIN_HISTORY = 50; // matches Model Health's own recent/prior threshold, not a new number invented for this
@@ -1354,6 +1351,164 @@ async function logAnomalyGateExperiment(env, coin, horizonHours) {
     ok: true, status: 'logged', logged: true, coin, horizon_hours: horizonHours,
     chosen_variant_anomaly: decision.chosen, cleared_gate_anomaly: decision.clearedGate,
     margin_factor: ANOMALY_GATE_MARGIN_FACTOR, reason,
+  };
+}
+
+// =====================================================================
+// ---- Learning Roadmap §3, Experiment 3 correction: challenger_momentum
+// parallel scoring (research-only, logged-only, decision-free) ----
+//
+// Audit finding on the original PR #24: adding challenger_momentum
+// directly into SELECTION_VARIANTS made it a live production selection
+// candidate -- selectBestVariant() could actually choose it -- while
+// simultaneously leaving decideSelection's m = Math.min(6, ...) clamp
+// in place, which silently under-corrects the Bonferroni bar the moment
+// a 7th variant becomes eligible (the clamp reports "6 compared" even
+// when 7 really were). SELECTION_VARIANTS has been reverted to exactly
+// the original 6 entries per coin; challenger_momentum is deliberately
+// NOT in that registry, so selectBestVariant, decideSelection, and
+// Experiment 2's logAnomalyGateExperiment (which reads the same
+// registry) are all back to seeing only the 6 they were audited against.
+//
+// This function is the replacement: an independent, duplicated
+// re-implementation (same "independent copy over shared dependency"
+// precedent as Experiment 2) that scores challenger_momentum ALONGSIDE
+// the 6 production variants for comparison purposes only. It deliberately
+// does NOT compute a Bonferroni-gated chosen/cleared_gate verdict for the
+// 7-way comparison -- doing that correctly requires its own critical
+// z-value for m=7, and per the audit's own guidance, extending the
+// Bonferroni machinery to genuinely support 7+ variants belongs to a
+// future, separately audited experiment IF momentum is ever intentionally
+// promoted to selection-eligible. Bundling that silently into this fix
+// would repeat the exact mistake being corrected. Until then, this stays
+// strictly descriptive: where would momentum have ranked, next to what
+// production actually chose.
+// =====================================================================
+
+// Standalone -- deliberately NOT part of SELECTION_VARIANTS. Same shape
+// as the other challenger_* entries so it can reuse computeLcaScore
+// unmodified, but kept out of the shared registry so nothing that reads
+// SELECTION_VARIANTS (selectBestVariant, decideSelection,
+// logAnomalyGateExperiment) can ever see or select it.
+const MOMENTUM_EXPERIMENT_VARIANT = { key: 'challenger_momentum', table: 'challenger_predictions', field: 'p_up_momentum', coinFilter: true };
+
+// Never calls selectBestVariant or decideSelection, never writes to
+// selection_decisions or selection_decisions_anomaly -- its only write
+// target is the new, separate selection_decisions_momentum table. Any
+// failure here is caught by the caller and must never affect the
+// production predict/select cycle, same resilience contract as
+// Experiment 2.
+async function logMomentumSelectionExperiment(env, coin, horizonHours) {
+  const productionVariants = SELECTION_VARIANTS[coin];
+  if (!productionVariants) return { ok: false, error: 'unknown coin' };
+  const coreTable = coreTableForCoin(coin);
+  // The 6 production variants plus momentum, for THIS diagnostic only --
+  // a fresh array, never assigned back into SELECTION_VARIANTS.
+  const experimentVariants = [...productionVariants, MOMENTUM_EXPERIMENT_VARIANT];
+
+  const eligible = [];
+  for (const v of experimentVariants) {
+    const whereCoin = v.coinFilter ? `coin = '${coin}' AND ` : '';
+    const { results } = await env.DB.prepare(
+      `SELECT COUNT(*) as n FROM ${v.table} WHERE ${whereCoin}horizon_hours=? AND realized_up IS NOT NULL AND ${v.field} IS NOT NULL`
+    ).bind(horizonHours).all();
+    if (results[0].n >= SELECTION_MIN_HISTORY) eligible.push(v);
+  }
+  if (!eligible.find(v => v.key === 'challenger_momentum')) {
+    return { ok: true, status: 'momentum_not_eligible', logged: false };
+  }
+
+  const latestCore = await env.DB.prepare(
+    `SELECT ts, features_json FROM ${coreTable} WHERE horizon_hours=? ORDER BY ts DESC LIMIT 1`
+  ).bind(horizonHours).first();
+  if (!latestCore || !latestCore.features_json) {
+    return { ok: true, status: 'no_query_features', logged: false };
+  }
+  let queryFeatures;
+  try { queryFeatures = JSON.parse(latestCore.features_json); } catch { return { ok: true, status: 'bad_features', logged: false }; }
+  const featureKeys = Object.keys(queryFeatures);
+
+  const { results: coreHistory } = await env.DB.prepare(
+    `SELECT ts, features_json, realized_up FROM ${coreTable} WHERE horizon_hours=? AND realized_up IS NOT NULL AND features_json IS NOT NULL AND ts < ? ORDER BY ts DESC LIMIT 300`
+  ).bind(horizonHours, latestCore.ts).all();
+  if (coreHistory.length < 15) {
+    return { ok: true, status: 'insufficient_meta_history', logged: false };
+  }
+
+  const stats = {};
+  for (const k of featureKeys) {
+    const vals = [];
+    for (const r of coreHistory) { try { const f = JSON.parse(r.features_json); if (f[k] != null) vals.push(f[k]); } catch {} }
+    if (vals.length < 5) continue;
+    const mean = vals.reduce((a, b) => a + b, 0) / vals.length;
+    const std = Math.sqrt(vals.reduce((a, b) => a + (b - mean) ** 2, 0) / vals.length) || 1;
+    stats[k] = { mean, std };
+  }
+  const usableKeys = featureKeys.filter(k => stats[k]);
+
+  const distances = coreHistory.map(r => {
+    let feat;
+    try { feat = JSON.parse(r.features_json); } catch { return null; }
+    let d = 0;
+    for (const k of usableKeys) {
+      if (feat[k] == null || queryFeatures[k] == null) continue;
+      const z1 = (queryFeatures[k] - stats[k].mean) / stats[k].std;
+      const z2 = (feat[k] - stats[k].mean) / stats[k].std;
+      d += (z1 - z2) ** 2;
+    }
+    return { ts: r.ts, dist: Math.sqrt(d) };
+  }).filter(Boolean).sort((a, b) => a.dist - b.dist);
+
+  const kSel = Math.min(15, Math.max(7, Math.floor(distances.length / 10)));
+  const neighborhood = distances.slice(0, kSel);
+  const TOL_MS_META = 6 * 3600000;
+
+  // Step 4: LCA score per eligible variant, INCLUDING momentum -- this is
+  // the "scored in parallel" part. Reuses computeLcaScore unmodified.
+  const scores = [];
+  for (const v of eligible) {
+    const whereCoin = v.coinFilter ? `coin = '${coin}' AND ` : '';
+    const { results: variantRows } = await env.DB.prepare(
+      `SELECT ts, ${v.field} as p_up, realized_up FROM ${v.table} WHERE ${whereCoin}horizon_hours=? AND realized_up IS NOT NULL AND ${v.field} IS NOT NULL ORDER BY ts ASC`
+    ).bind(horizonHours).all();
+    if (!variantRows.length) continue;
+    const latestVariantRow = variantRows[variantRows.length - 1];
+    const todaysCallUp = latestVariantRow.p_up >= 0.5;
+    const scored = computeLcaScore(variantRows, neighborhood, todaysCallUp, TOL_MS_META);
+    if (scored) scores.push({ variant: v.key, p_up: latestVariantRow.p_up, ...scored });
+  }
+  const momentumScore = scores.find(s => s.variant === 'challenger_momentum');
+  if (!momentumScore) {
+    return { ok: true, status: 'momentum_not_scorable', logged: false };
+  }
+
+  // Descriptive ranking only -- no significance gate, no "chosen" verdict.
+  const ranked = [...scores].sort((a, b) => b.lca - a.lca);
+  const momentumRank = ranked.findIndex(s => s.variant === 'challenger_momentum') + 1;
+
+  // What production actually chose this same cycle, for side-by-side
+  // comparison -- read, never recomputed, so this can't drift from what
+  // selectBestVariant really decided.
+  const productionRow = await env.DB.prepare(
+    `SELECT chosen_variant, chosen_p_up, lca_score FROM selection_decisions WHERE coin=? AND horizon_hours=? ORDER BY ts DESC LIMIT 1`
+  ).bind(coin, horizonHours).first();
+
+  const scoresJson = JSON.stringify(scores.map(s => ({ variant: s.variant, p_up: Number(s.p_up.toFixed(3)), lca: Number(s.lca.toFixed(3)), n_matched: s.n_matched })));
+  const ts = Date.now();
+  await env.DB.prepare(
+    `INSERT INTO selection_decisions_momentum
+     (ts, coin, horizon_hours, prediction_ts, momentum_p_up, momentum_lca, momentum_n_matched, momentum_rank, total_scored, production_chosen_variant, production_chosen_p_up, production_chosen_lca, k_sel, scores_json)
+     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
+  ).bind(
+    ts, coin, horizonHours, latestCore.ts, momentumScore.p_up, momentumScore.lca, momentumScore.n_matched, momentumRank, scores.length,
+    productionRow ? productionRow.chosen_variant : null, productionRow ? productionRow.chosen_p_up : null, productionRow ? productionRow.lca_score : null,
+    kSel, scoresJson
+  ).run();
+
+  return {
+    ok: true, status: 'logged', logged: true, coin, horizon_hours: horizonHours,
+    momentum_lca: Number(momentumScore.lca.toFixed(3)), momentum_rank: momentumRank, total_scored: scores.length,
+    production_chosen_variant: productionRow ? productionRow.chosen_variant : null,
   };
 }
 
@@ -5722,6 +5877,11 @@ export default {
         // production selection call above, which has already completed
         // by this point regardless of what happens next.
         await logAnomalyGateExperiment(env, coin, horizon).catch(err => console.error(`Anomaly-gate experiment ${coin}/${horizon}h failed:`, err));
+        // Learning Roadmap §3 Experiment 3 correction -- research-only,
+        // logged-only, decision-free. Independently caught, same as
+        // Experiment 2 above; a failure here can never affect either of
+        // the two production/experiment calls that already completed.
+        await logMomentumSelectionExperiment(env, coin, horizon).catch(err => console.error(`Momentum experiment ${coin}/${horizon}h failed:`, err));
       };
 
       // The six prediction/selection tasks still run concurrently with each

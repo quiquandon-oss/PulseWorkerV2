@@ -126,6 +126,56 @@ function applyTrendGuardrail(pUp, trend) {
   return pUp;
 }
 
+// ---- Learning Roadmap §3, Experiment 3: trend-persistence/momentum
+// overlay (research-only, pure function, logged in parallel exactly like
+// flat/tilted/calibrated) ----
+// Complements flat's existing anomaly confidence-shrink with a small,
+// transparent blend toward pure trend continuation, but ONLY when BOTH
+// conditions hold: today is anomalous AND the trend is strong
+// (|trendStrength| > threshold). Outside that exact condition, this
+// returns pUpFlat completely unchanged -- no new default invented,
+// matching the existing flat/tilted fallback discipline precisely
+// ("otherwise fall back to the existing flat behaviour").
+//
+// The momentum signal is "pure trend-persistence": trendStrength (passed
+// in already-computed from runPrediction/runLinkPrediction/
+// runEthPrediction, reused here exactly as applyTrendGuardrail already
+// does above -- never recomputed) is linearly re-expressed as an implied
+// continuation probability: trendStrength=+1 (max uptrend) ->
+// momentumSignal=1.0, trendStrength=-1 (max downtrend) ->
+// momentumSignal=0.0, trendStrength=0 -> momentumSignal=0.5. Fully
+// reconstructible from trend_strength alone, no extra data dependency
+// beyond what's already logged on the same challenger_predictions row.
+//
+// applyTrendGuardrail (above) was considered for reuse here but does not
+// fit: it is a conditional dampener (pulls toward 0.5 only on
+// disagreement with the model's own lean), not a weighted blend toward a
+// documented target -- a genuinely different mechanism from what this
+// experiment calls for, so this new, explicit, separately-testable
+// function is used instead of repurposing it. The trendStrength
+// computation function (above) is not called here at all -- the caller
+// passes in the already-computed value.
+//
+// threshold=0.5 (MOMENTUM_TREND_THRESHOLD_V1) matches applyTrendGuardrail's
+// own existing definition of "strong trend" (trend > 0.5 / trend < -0.5)
+// -- reusing an already-established notion of "strong" in this codebase
+// rather than inventing a new, unrelated one. weight=0.20
+// (MOMENTUM_BLEND_WEIGHT_V1) is the midpoint of the roadmap's own
+// specified 0.15-0.25 range. Both are v1, chosen 2026-08-27, and are
+// reasonable INITIAL research parameters -- not empirically tuned or
+// proven optimal, same epistemic stance already taken for Experiment 1's
+// gap threshold and Experiment 2's margin factor.
+const MOMENTUM_TREND_THRESHOLD_V1 = 0.5;
+const MOMENTUM_BLEND_WEIGHT_V1 = 0.20;
+function computeMomentumBlend(isAnomalous, trendStrength, pUpFlat, threshold, weight) {
+  if (!isAnomalous || trendStrength == null || Math.abs(trendStrength) <= threshold) {
+    return { pUpMomentum: pUpFlat, momentumTriggered: false };
+  }
+  const momentumSignal = 0.5 + trendStrength / 2;
+  const blended = (1 - weight) * pUpFlat + weight * momentumSignal;
+  return { pUpMomentum: Math.max(0.05, Math.min(0.95, blended)), momentumTriggered: true };
+}
+
 // Decile-bucket empirical recalibration (hand-rolled — no isotonic
 // regression lib available in Workers). Rebuilt periodically from resolved
 // predictions; buckets under 10 samples are dropped as untrustworthy.
@@ -1301,6 +1351,164 @@ async function logAnomalyGateExperiment(env, coin, horizonHours) {
     ok: true, status: 'logged', logged: true, coin, horizon_hours: horizonHours,
     chosen_variant_anomaly: decision.chosen, cleared_gate_anomaly: decision.clearedGate,
     margin_factor: ANOMALY_GATE_MARGIN_FACTOR, reason,
+  };
+}
+
+// =====================================================================
+// ---- Learning Roadmap §3, Experiment 3 correction: challenger_momentum
+// parallel scoring (research-only, logged-only, decision-free) ----
+//
+// Audit finding on the original PR #24: adding challenger_momentum
+// directly into SELECTION_VARIANTS made it a live production selection
+// candidate -- selectBestVariant() could actually choose it -- while
+// simultaneously leaving decideSelection's m = Math.min(6, ...) clamp
+// in place, which silently under-corrects the Bonferroni bar the moment
+// a 7th variant becomes eligible (the clamp reports "6 compared" even
+// when 7 really were). SELECTION_VARIANTS has been reverted to exactly
+// the original 6 entries per coin; challenger_momentum is deliberately
+// NOT in that registry, so selectBestVariant, decideSelection, and
+// Experiment 2's logAnomalyGateExperiment (which reads the same
+// registry) are all back to seeing only the 6 they were audited against.
+//
+// This function is the replacement: an independent, duplicated
+// re-implementation (same "independent copy over shared dependency"
+// precedent as Experiment 2) that scores challenger_momentum ALONGSIDE
+// the 6 production variants for comparison purposes only. It deliberately
+// does NOT compute a Bonferroni-gated chosen/cleared_gate verdict for the
+// 7-way comparison -- doing that correctly requires its own critical
+// z-value for m=7, and per the audit's own guidance, extending the
+// Bonferroni machinery to genuinely support 7+ variants belongs to a
+// future, separately audited experiment IF momentum is ever intentionally
+// promoted to selection-eligible. Bundling that silently into this fix
+// would repeat the exact mistake being corrected. Until then, this stays
+// strictly descriptive: where would momentum have ranked, next to what
+// production actually chose.
+// =====================================================================
+
+// Standalone -- deliberately NOT part of SELECTION_VARIANTS. Same shape
+// as the other challenger_* entries so it can reuse computeLcaScore
+// unmodified, but kept out of the shared registry so nothing that reads
+// SELECTION_VARIANTS (selectBestVariant, decideSelection,
+// logAnomalyGateExperiment) can ever see or select it.
+const MOMENTUM_EXPERIMENT_VARIANT = { key: 'challenger_momentum', table: 'challenger_predictions', field: 'p_up_momentum', coinFilter: true };
+
+// Never calls selectBestVariant or decideSelection, never writes to
+// selection_decisions or selection_decisions_anomaly -- its only write
+// target is the new, separate selection_decisions_momentum table. Any
+// failure here is caught by the caller and must never affect the
+// production predict/select cycle, same resilience contract as
+// Experiment 2.
+async function logMomentumSelectionExperiment(env, coin, horizonHours) {
+  const productionVariants = SELECTION_VARIANTS[coin];
+  if (!productionVariants) return { ok: false, error: 'unknown coin' };
+  const coreTable = coreTableForCoin(coin);
+  // The 6 production variants plus momentum, for THIS diagnostic only --
+  // a fresh array, never assigned back into SELECTION_VARIANTS.
+  const experimentVariants = [...productionVariants, MOMENTUM_EXPERIMENT_VARIANT];
+
+  const eligible = [];
+  for (const v of experimentVariants) {
+    const whereCoin = v.coinFilter ? `coin = '${coin}' AND ` : '';
+    const { results } = await env.DB.prepare(
+      `SELECT COUNT(*) as n FROM ${v.table} WHERE ${whereCoin}horizon_hours=? AND realized_up IS NOT NULL AND ${v.field} IS NOT NULL`
+    ).bind(horizonHours).all();
+    if (results[0].n >= SELECTION_MIN_HISTORY) eligible.push(v);
+  }
+  if (!eligible.find(v => v.key === 'challenger_momentum')) {
+    return { ok: true, status: 'momentum_not_eligible', logged: false };
+  }
+
+  const latestCore = await env.DB.prepare(
+    `SELECT ts, features_json FROM ${coreTable} WHERE horizon_hours=? ORDER BY ts DESC LIMIT 1`
+  ).bind(horizonHours).first();
+  if (!latestCore || !latestCore.features_json) {
+    return { ok: true, status: 'no_query_features', logged: false };
+  }
+  let queryFeatures;
+  try { queryFeatures = JSON.parse(latestCore.features_json); } catch { return { ok: true, status: 'bad_features', logged: false }; }
+  const featureKeys = Object.keys(queryFeatures);
+
+  const { results: coreHistory } = await env.DB.prepare(
+    `SELECT ts, features_json, realized_up FROM ${coreTable} WHERE horizon_hours=? AND realized_up IS NOT NULL AND features_json IS NOT NULL AND ts < ? ORDER BY ts DESC LIMIT 300`
+  ).bind(horizonHours, latestCore.ts).all();
+  if (coreHistory.length < 15) {
+    return { ok: true, status: 'insufficient_meta_history', logged: false };
+  }
+
+  const stats = {};
+  for (const k of featureKeys) {
+    const vals = [];
+    for (const r of coreHistory) { try { const f = JSON.parse(r.features_json); if (f[k] != null) vals.push(f[k]); } catch {} }
+    if (vals.length < 5) continue;
+    const mean = vals.reduce((a, b) => a + b, 0) / vals.length;
+    const std = Math.sqrt(vals.reduce((a, b) => a + (b - mean) ** 2, 0) / vals.length) || 1;
+    stats[k] = { mean, std };
+  }
+  const usableKeys = featureKeys.filter(k => stats[k]);
+
+  const distances = coreHistory.map(r => {
+    let feat;
+    try { feat = JSON.parse(r.features_json); } catch { return null; }
+    let d = 0;
+    for (const k of usableKeys) {
+      if (feat[k] == null || queryFeatures[k] == null) continue;
+      const z1 = (queryFeatures[k] - stats[k].mean) / stats[k].std;
+      const z2 = (feat[k] - stats[k].mean) / stats[k].std;
+      d += (z1 - z2) ** 2;
+    }
+    return { ts: r.ts, dist: Math.sqrt(d) };
+  }).filter(Boolean).sort((a, b) => a.dist - b.dist);
+
+  const kSel = Math.min(15, Math.max(7, Math.floor(distances.length / 10)));
+  const neighborhood = distances.slice(0, kSel);
+  const TOL_MS_META = 6 * 3600000;
+
+  // Step 4: LCA score per eligible variant, INCLUDING momentum -- this is
+  // the "scored in parallel" part. Reuses computeLcaScore unmodified.
+  const scores = [];
+  for (const v of eligible) {
+    const whereCoin = v.coinFilter ? `coin = '${coin}' AND ` : '';
+    const { results: variantRows } = await env.DB.prepare(
+      `SELECT ts, ${v.field} as p_up, realized_up FROM ${v.table} WHERE ${whereCoin}horizon_hours=? AND realized_up IS NOT NULL AND ${v.field} IS NOT NULL ORDER BY ts ASC`
+    ).bind(horizonHours).all();
+    if (!variantRows.length) continue;
+    const latestVariantRow = variantRows[variantRows.length - 1];
+    const todaysCallUp = latestVariantRow.p_up >= 0.5;
+    const scored = computeLcaScore(variantRows, neighborhood, todaysCallUp, TOL_MS_META);
+    if (scored) scores.push({ variant: v.key, p_up: latestVariantRow.p_up, ...scored });
+  }
+  const momentumScore = scores.find(s => s.variant === 'challenger_momentum');
+  if (!momentumScore) {
+    return { ok: true, status: 'momentum_not_scorable', logged: false };
+  }
+
+  // Descriptive ranking only -- no significance gate, no "chosen" verdict.
+  const ranked = [...scores].sort((a, b) => b.lca - a.lca);
+  const momentumRank = ranked.findIndex(s => s.variant === 'challenger_momentum') + 1;
+
+  // What production actually chose this same cycle, for side-by-side
+  // comparison -- read, never recomputed, so this can't drift from what
+  // selectBestVariant really decided.
+  const productionRow = await env.DB.prepare(
+    `SELECT chosen_variant, chosen_p_up, lca_score FROM selection_decisions WHERE coin=? AND horizon_hours=? ORDER BY ts DESC LIMIT 1`
+  ).bind(coin, horizonHours).first();
+
+  const scoresJson = JSON.stringify(scores.map(s => ({ variant: s.variant, p_up: Number(s.p_up.toFixed(3)), lca: Number(s.lca.toFixed(3)), n_matched: s.n_matched })));
+  const ts = Date.now();
+  await env.DB.prepare(
+    `INSERT INTO selection_decisions_momentum
+     (ts, coin, horizon_hours, prediction_ts, momentum_p_up, momentum_lca, momentum_n_matched, momentum_rank, total_scored, production_chosen_variant, production_chosen_p_up, production_chosen_lca, k_sel, scores_json)
+     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
+  ).bind(
+    ts, coin, horizonHours, latestCore.ts, momentumScore.p_up, momentumScore.lca, momentumScore.n_matched, momentumRank, scores.length,
+    productionRow ? productionRow.chosen_variant : null, productionRow ? productionRow.chosen_p_up : null, productionRow ? productionRow.lca_score : null,
+    kSel, scoresJson
+  ).run();
+
+  return {
+    ok: true, status: 'logged', logged: true, coin, horizon_hours: horizonHours,
+    momentum_lca: Number(momentumScore.lca.toFixed(3)), momentum_rank: momentumRank, total_scored: scores.length,
+    production_chosen_variant: productionRow ? productionRow.chosen_variant : null,
   };
 }
 
@@ -3030,6 +3238,14 @@ async function runChallengerPrediction(env, { coin, horizonHours, priceTable, pr
   }
   pUpTilted = Math.max(0.05, Math.min(0.95, pUpTilted));
 
+  // Learning Roadmap §3, Experiment 3: trend-persistence/momentum
+  // overlay -- see computeMomentumBlend's own comment for full
+  // reasoning, threshold/weight documentation, and why
+  // applyTrendGuardrail wasn't reused for this specific mechanism.
+  const { pUpMomentum, momentumTriggered } = computeMomentumBlend(
+    isAnomalous, coreResult.trend_strength, pUpFlat, MOMENTUM_TREND_THRESHOLD_V1, MOMENTUM_BLEND_WEIGHT_V1
+  );
+
   let insert = null;
   if (persist) {
     if (claimToken === null) {
@@ -3037,25 +3253,31 @@ async function runChallengerPrediction(env, { coin, horizonHours, priceTable, pr
         `INSERT INTO challenger_predictions
          (coin, ts, target_ts, horizon_hours, price_at_prediction, is_regime_anomaly, trailing_return_pct,
           p_up_flat, p_up_tilted, driver_used, driver_agreement, foufi_digest_video_id, trend_strength, calibrated_p_up_flat,
+          p_up_momentum, momentum_triggered,
           model_version, git_commit_sha)
-         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
       ).bind(
         coin, nowTs, nowTs + lagMs, horizonHours, priceNow, isAnomalous ? 1 : 0, trailingReturnPct,
         pUpFlat, pUpTilted, driverUsed, driverAgreement, foufiVideoId, coreResult.trend_strength ?? null,
-        Number(calibratedPUpFlat.toFixed(3)), MODEL_VERSIONS.challenger, currentGitSha(env)
+        Number(calibratedPUpFlat.toFixed(3)),
+        Number(pUpMomentum.toFixed(3)), momentumTriggered ? 1 : 0,
+        MODEL_VERSIONS.challenger, currentGitSha(env)
       ).run();
     } else {
       insert = await env.DB.prepare(
         `INSERT INTO challenger_predictions
          (coin, ts, target_ts, horizon_hours, price_at_prediction, is_regime_anomaly, trailing_return_pct,
           p_up_flat, p_up_tilted, driver_used, driver_agreement, foufi_digest_video_id, trend_strength, calibrated_p_up_flat,
+          p_up_momentum, momentum_triggered,
           model_version, git_commit_sha)
-         SELECT ?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?
+         SELECT ?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?
          FROM stale_refresh_claim WHERE coin = ? AND claim_token = ?`
       ).bind(
         coin, nowTs, nowTs + lagMs, horizonHours, priceNow, isAnomalous ? 1 : 0, trailingReturnPct,
         pUpFlat, pUpTilted, driverUsed, driverAgreement, foufiVideoId, coreResult.trend_strength ?? null,
-        Number(calibratedPUpFlat.toFixed(3)), MODEL_VERSIONS.challenger, currentGitSha(env), coin, claimToken
+        Number(calibratedPUpFlat.toFixed(3)),
+        Number(pUpMomentum.toFixed(3)), momentumTriggered ? 1 : 0,
+        MODEL_VERSIONS.challenger, currentGitSha(env), coin, claimToken
       ).run();
     }
   }
@@ -3065,6 +3287,7 @@ async function runChallengerPrediction(env, { coin, horizonHours, priceTable, pr
     is_regime_anomaly: isAnomalous, trailing_return_pct: trailingReturnPct != null ? Number(trailingReturnPct.toFixed(2)) : null,
     p_up_flat: Number(pUpFlat.toFixed(3)), p_up_tilted: Number(pUpTilted.toFixed(3)),
     calibrated_p_up_flat: Number(calibratedPUpFlat.toFixed(3)),
+    p_up_momentum: Number(pUpMomentum.toFixed(3)), momentum_triggered: momentumTriggered,
     driver_used: driverUsed, driver_agreement: driverAgreement, trend_strength: coreResult.trend_strength ?? null,
   };
 }
@@ -5654,6 +5877,11 @@ export default {
         // production selection call above, which has already completed
         // by this point regardless of what happens next.
         await logAnomalyGateExperiment(env, coin, horizon).catch(err => console.error(`Anomaly-gate experiment ${coin}/${horizon}h failed:`, err));
+        // Learning Roadmap §3 Experiment 3 correction -- research-only,
+        // logged-only, decision-free. Independently caught, same as
+        // Experiment 2 above; a failure here can never affect either of
+        // the two production/experiment calls that already completed.
+        await logMomentumSelectionExperiment(env, coin, horizon).catch(err => console.error(`Momentum experiment ${coin}/${horizon}h failed:`, err));
       };
 
       // The six prediction/selection tasks still run concurrently with each

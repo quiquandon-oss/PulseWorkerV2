@@ -2,13 +2,13 @@ import { describe, it, expect, beforeAll } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { extractFunctions, extractConstants, evalInScope } from './helpers/extract.js';
 
-describe('SELECTION_VARIANTS.ETH now includes challenger entries, mirroring BTC/LINK', () => {
+describe('SELECTION_VARIANTS.ETH includes the 3 challenger entries, mirroring BTC/LINK -- 6 total, not 7', () => {
   let scope;
   beforeAll(() => {
     scope = evalInScope(extractConstants('SELECTION_VARIANTS'));
   });
 
-  it('ETH has all 6 variants now, not just the original 3', () => {
+  it('ETH has exactly 6 variants -- challenger_momentum is deliberately excluded from the production registry (Experiment 3 correction, see challenger-momentum-experiment.test.js)', () => {
     const keys = scope.SELECTION_VARIANTS.ETH.map((v) => v.key);
     expect(keys).toEqual(['original', 'experimental', 'calibrated', 'challenger_flat', 'challenger_tilted', 'challenger_calibrated']);
   });

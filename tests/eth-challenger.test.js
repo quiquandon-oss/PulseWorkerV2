@@ -8,9 +8,13 @@ describe('SELECTION_VARIANTS.ETH now includes challenger entries, mirroring BTC/
     scope = evalInScope(extractConstants('SELECTION_VARIANTS'));
   });
 
-  it('ETH has all 6 variants now, not just the original 3', () => {
+  it('ETH has all 7 variants now (was 6 pre-Experiment-3), not just the original 3', () => {
+    // Updated for Learning Roadmap §3 Experiment 3: challenger_momentum
+    // added to SELECTION_VARIANTS for all three coins, same shape as the
+    // other challenger_* entries. This test previously asserted 6; the
+    // 7th (challenger_momentum) is intentional, not a regression.
     const keys = scope.SELECTION_VARIANTS.ETH.map((v) => v.key);
-    expect(keys).toEqual(['original', 'experimental', 'calibrated', 'challenger_flat', 'challenger_tilted', 'challenger_calibrated']);
+    expect(keys).toEqual(['original', 'experimental', 'calibrated', 'challenger_flat', 'challenger_tilted', 'challenger_calibrated', 'challenger_momentum']);
   });
 
   it('ETH\'s challenger entries point at challenger_predictions with coinFilter true, same as BTC/LINK', () => {
@@ -19,7 +23,7 @@ describe('SELECTION_VARIANTS.ETH now includes challenger entries, mirroring BTC/
       expect(entry.table).toBe('challenger_predictions');
       expect(entry.coinFilter).toBe(true);
     }
-    expect(ethChallengerEntries.map((v) => v.field)).toEqual(['p_up_flat', 'p_up_tilted', 'calibrated_p_up_flat']);
+    expect(ethChallengerEntries.map((v) => v.field)).toEqual(['p_up_flat', 'p_up_tilted', 'calibrated_p_up_flat', 'p_up_momentum']);
   });
 });
 

@@ -126,6 +126,56 @@ function applyTrendGuardrail(pUp, trend) {
   return pUp;
 }
 
+// ---- Learning Roadmap §3, Experiment 3: trend-persistence/momentum
+// overlay (research-only, pure function, logged in parallel exactly like
+// flat/tilted/calibrated) ----
+// Complements flat's existing anomaly confidence-shrink with a small,
+// transparent blend toward pure trend continuation, but ONLY when BOTH
+// conditions hold: today is anomalous AND the trend is strong
+// (|trendStrength| > threshold). Outside that exact condition, this
+// returns pUpFlat completely unchanged -- no new default invented,
+// matching the existing flat/tilted fallback discipline precisely
+// ("otherwise fall back to the existing flat behaviour").
+//
+// The momentum signal is "pure trend-persistence": trendStrength (passed
+// in already-computed from runPrediction/runLinkPrediction/
+// runEthPrediction, reused here exactly as applyTrendGuardrail already
+// does above -- never recomputed) is linearly re-expressed as an implied
+// continuation probability: trendStrength=+1 (max uptrend) ->
+// momentumSignal=1.0, trendStrength=-1 (max downtrend) ->
+// momentumSignal=0.0, trendStrength=0 -> momentumSignal=0.5. Fully
+// reconstructible from trend_strength alone, no extra data dependency
+// beyond what's already logged on the same challenger_predictions row.
+//
+// applyTrendGuardrail (above) was considered for reuse here but does not
+// fit: it is a conditional dampener (pulls toward 0.5 only on
+// disagreement with the model's own lean), not a weighted blend toward a
+// documented target -- a genuinely different mechanism from what this
+// experiment calls for, so this new, explicit, separately-testable
+// function is used instead of repurposing it. The trendStrength
+// computation function (above) is not called here at all -- the caller
+// passes in the already-computed value.
+//
+// threshold=0.5 (MOMENTUM_TREND_THRESHOLD_V1) matches applyTrendGuardrail's
+// own existing definition of "strong trend" (trend > 0.5 / trend < -0.5)
+// -- reusing an already-established notion of "strong" in this codebase
+// rather than inventing a new, unrelated one. weight=0.20
+// (MOMENTUM_BLEND_WEIGHT_V1) is the midpoint of the roadmap's own
+// specified 0.15-0.25 range. Both are v1, chosen 2026-08-27, and are
+// reasonable INITIAL research parameters -- not empirically tuned or
+// proven optimal, same epistemic stance already taken for Experiment 1's
+// gap threshold and Experiment 2's margin factor.
+const MOMENTUM_TREND_THRESHOLD_V1 = 0.5;
+const MOMENTUM_BLEND_WEIGHT_V1 = 0.20;
+function computeMomentumBlend(isAnomalous, trendStrength, pUpFlat, threshold, weight) {
+  if (!isAnomalous || trendStrength == null || Math.abs(trendStrength) <= threshold) {
+    return { pUpMomentum: pUpFlat, momentumTriggered: false };
+  }
+  const momentumSignal = 0.5 + trendStrength / 2;
+  const blended = (1 - weight) * pUpFlat + weight * momentumSignal;
+  return { pUpMomentum: Math.max(0.05, Math.min(0.95, blended)), momentumTriggered: true };
+}
+
 // Decile-bucket empirical recalibration (hand-rolled — no isotonic
 // regression lib available in Workers). Rebuilt periodically from resolved
 // predictions; buckets under 10 samples are dropped as untrustworthy.
@@ -939,6 +989,7 @@ const SELECTION_VARIANTS = {
     { key: 'challenger_flat', table: 'challenger_predictions', field: 'p_up_flat', coinFilter: true },
     { key: 'challenger_tilted', table: 'challenger_predictions', field: 'p_up_tilted', coinFilter: true },
     { key: 'challenger_calibrated', table: 'challenger_predictions', field: 'calibrated_p_up_flat', coinFilter: true },
+    { key: 'challenger_momentum', table: 'challenger_predictions', field: 'p_up_momentum', coinFilter: true },
   ],
   LINK: [
     { key: 'original', table: 'link_predictions', field: 'p_up', coinFilter: false },
@@ -947,6 +998,7 @@ const SELECTION_VARIANTS = {
     { key: 'challenger_flat', table: 'challenger_predictions', field: 'p_up_flat', coinFilter: true },
     { key: 'challenger_tilted', table: 'challenger_predictions', field: 'p_up_tilted', coinFilter: true },
     { key: 'challenger_calibrated', table: 'challenger_predictions', field: 'calibrated_p_up_flat', coinFilter: true },
+    { key: 'challenger_momentum', table: 'challenger_predictions', field: 'p_up_momentum', coinFilter: true },
   ],
   ETH: [
     { key: 'original', table: 'eth_predictions', field: 'p_up', coinFilter: false },
@@ -955,6 +1007,7 @@ const SELECTION_VARIANTS = {
     { key: 'challenger_flat', table: 'challenger_predictions', field: 'p_up_flat', coinFilter: true },
     { key: 'challenger_tilted', table: 'challenger_predictions', field: 'p_up_tilted', coinFilter: true },
     { key: 'challenger_calibrated', table: 'challenger_predictions', field: 'calibrated_p_up_flat', coinFilter: true },
+    { key: 'challenger_momentum', table: 'challenger_predictions', field: 'p_up_momentum', coinFilter: true },
   ],
 };
 const SELECTION_MIN_HISTORY = 50; // matches Model Health's own recent/prior threshold, not a new number invented for this
@@ -3030,6 +3083,14 @@ async function runChallengerPrediction(env, { coin, horizonHours, priceTable, pr
   }
   pUpTilted = Math.max(0.05, Math.min(0.95, pUpTilted));
 
+  // Learning Roadmap §3, Experiment 3: trend-persistence/momentum
+  // overlay -- see computeMomentumBlend's own comment for full
+  // reasoning, threshold/weight documentation, and why
+  // applyTrendGuardrail wasn't reused for this specific mechanism.
+  const { pUpMomentum, momentumTriggered } = computeMomentumBlend(
+    isAnomalous, coreResult.trend_strength, pUpFlat, MOMENTUM_TREND_THRESHOLD_V1, MOMENTUM_BLEND_WEIGHT_V1
+  );
+
   let insert = null;
   if (persist) {
     if (claimToken === null) {
@@ -3037,25 +3098,31 @@ async function runChallengerPrediction(env, { coin, horizonHours, priceTable, pr
         `INSERT INTO challenger_predictions
          (coin, ts, target_ts, horizon_hours, price_at_prediction, is_regime_anomaly, trailing_return_pct,
           p_up_flat, p_up_tilted, driver_used, driver_agreement, foufi_digest_video_id, trend_strength, calibrated_p_up_flat,
+          p_up_momentum, momentum_triggered,
           model_version, git_commit_sha)
-         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
       ).bind(
         coin, nowTs, nowTs + lagMs, horizonHours, priceNow, isAnomalous ? 1 : 0, trailingReturnPct,
         pUpFlat, pUpTilted, driverUsed, driverAgreement, foufiVideoId, coreResult.trend_strength ?? null,
-        Number(calibratedPUpFlat.toFixed(3)), MODEL_VERSIONS.challenger, currentGitSha(env)
+        Number(calibratedPUpFlat.toFixed(3)),
+        Number(pUpMomentum.toFixed(3)), momentumTriggered ? 1 : 0,
+        MODEL_VERSIONS.challenger, currentGitSha(env)
       ).run();
     } else {
       insert = await env.DB.prepare(
         `INSERT INTO challenger_predictions
          (coin, ts, target_ts, horizon_hours, price_at_prediction, is_regime_anomaly, trailing_return_pct,
           p_up_flat, p_up_tilted, driver_used, driver_agreement, foufi_digest_video_id, trend_strength, calibrated_p_up_flat,
+          p_up_momentum, momentum_triggered,
           model_version, git_commit_sha)
-         SELECT ?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?
+         SELECT ?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?
          FROM stale_refresh_claim WHERE coin = ? AND claim_token = ?`
       ).bind(
         coin, nowTs, nowTs + lagMs, horizonHours, priceNow, isAnomalous ? 1 : 0, trailingReturnPct,
         pUpFlat, pUpTilted, driverUsed, driverAgreement, foufiVideoId, coreResult.trend_strength ?? null,
-        Number(calibratedPUpFlat.toFixed(3)), MODEL_VERSIONS.challenger, currentGitSha(env), coin, claimToken
+        Number(calibratedPUpFlat.toFixed(3)),
+        Number(pUpMomentum.toFixed(3)), momentumTriggered ? 1 : 0,
+        MODEL_VERSIONS.challenger, currentGitSha(env), coin, claimToken
       ).run();
     }
   }
@@ -3065,6 +3132,7 @@ async function runChallengerPrediction(env, { coin, horizonHours, priceTable, pr
     is_regime_anomaly: isAnomalous, trailing_return_pct: trailingReturnPct != null ? Number(trailingReturnPct.toFixed(2)) : null,
     p_up_flat: Number(pUpFlat.toFixed(3)), p_up_tilted: Number(pUpTilted.toFixed(3)),
     calibrated_p_up_flat: Number(calibratedPUpFlat.toFixed(3)),
+    p_up_momentum: Number(pUpMomentum.toFixed(3)), momentum_triggered: momentumTriggered,
     driver_used: driverUsed, driver_agreement: driverAgreement, trend_strength: coreResult.trend_strength ?? null,
   };
 }

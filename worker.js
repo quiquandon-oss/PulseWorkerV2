@@ -3739,6 +3739,227 @@ async function computeFullAnomalyConditionedAudit(env) {
   };
 }
 
+// =====================================================================
+// ---- Learning Roadmap §3, Experiment 2 read side: /research/anomaly-gate
+// (research-only, read-only) ----
+//
+// Experiment 2's write side (logAnomalyGateExperiment, decideSelectionSoftened,
+// selection_decisions_anomaly) already exists and is untouched by this
+// section -- this is purely a reader over that existing evidence, exactly
+// the "Owner: Claude (research endpoint)" pattern already established by
+// computeAnomalyConditionedReport/computeFullAnomalyConditionedAudit above
+// for Experiment 1. Never calls selectBestVariant, decideSelection,
+// computeLcaScore, or logAnomalyGateExperiment -- only .all() reads
+// against env.DB, no .run() anywhere in this section. Episode-detection
+// constants (ANOMALY_AUDIT_MIN_SAMPLE_N / MIN_EPISODES / MAX_GAP_MS) are
+// the SAME constants Experiment 1's report uses, referenced directly
+// rather than redefined, per the roadmap's own §5 requirement that the
+// episode definition be identical across all new reports.
+// =====================================================================
+
+// Pure. Given the anomaly-gate rows (already ordered by prediction_ts ASC)
+// for one coin/horizon, groups consecutive cycles into episodes using the
+// exact same adjacency rule as computeAnomalyConditionedReport's episode
+// detection above (same gap tolerance, same "no day-level reduction"
+// discipline) -- every selection_decisions_anomaly row is already
+// is_regime_anomaly=1 by construction (logAnomalyGateExperiment only ever
+// writes when the query row is anomalous), so unlike the Experiment 1
+// report there is no bucket to split on: an episode here is simply a run
+// of anomaly-gate cycles close enough in time to be the same underlying
+// market episode, not independent observations of it.
+function groupAnomalyGateEpisodes(rows) {
+  const episodes = [];
+  for (const r of rows) {
+    const last = episodes[episodes.length - 1];
+    const withinGap = last && (r.prediction_ts - last.end_ts) <= ANOMALY_AUDIT_MAX_GAP_MS;
+    if (last && withinGap) {
+      last.end_ts = r.prediction_ts;
+      last.n_cycles++;
+      if (r.resolved) last.n_resolved++;
+    } else {
+      episodes.push({ start_ts: r.prediction_ts, end_ts: r.prediction_ts, n_cycles: 1, n_resolved: r.resolved ? 1 : 0 });
+    }
+  }
+  return episodes;
+}
+
+// Pure. Given the fully-joined per-cycle rows and their episode grouping,
+// computes the aggregate comparison -- or explicitly marks it unavailable
+// rather than inventing a number from too little data. Never called on
+// anything but resolved rows for the accuracy/agreement computation itself;
+// insufficient_sample uses the SAME two thresholds as Experiment 1's
+// report (ANOMALY_AUDIT_MIN_SAMPLE_N / MIN_EPISODES), not new ones.
+function computeAnomalyGateAggregate(rows, episodes) {
+  const resolvedRows = rows.filter(r => r.resolved);
+  if (resolvedRows.length === 0) {
+    return {
+      available: false,
+      reason: 'no_resolved_observations',
+      note: 'No resolved (realized_up known) anomaly-gate observations yet for this coin/horizon -- accuracy and production-vs-alternative comparison cannot be computed. Raw rows are still returned above.',
+    };
+  }
+  const episodesWithResolved = episodes.filter(e => e.n_resolved > 0).length;
+  let prodCorrect = 0, prodComparable = 0;
+  let gateCorrect = 0, gateComparable = 0;
+  let agree = 0, agreeComparable = 0;
+  for (const r of resolvedRows) {
+    const actualUp = r.realized_up === 1;
+    if (r.anomaly_gate_chosen_p_up != null) {
+      gateComparable++;
+      if ((r.anomaly_gate_chosen_p_up >= 0.5) === actualUp) gateCorrect++;
+    }
+    if (r.production_chosen_p_up != null) {
+      prodComparable++;
+      if ((r.production_chosen_p_up >= 0.5) === actualUp) prodCorrect++;
+    }
+    if (r.decisions_agree != null) {
+      agreeComparable++;
+      if (r.decisions_agree) agree++;
+    }
+  }
+  const insufficientSample = resolvedRows.length < ANOMALY_AUDIT_MIN_SAMPLE_N || episodesWithResolved < ANOMALY_AUDIT_MIN_EPISODES;
+  return {
+    available: true,
+    n_observations: rows.length,
+    n_resolved: resolvedRows.length,
+    episode_count_total: episodes.length,
+    episode_count_with_resolved_data: episodesWithResolved,
+    min_sample_n: ANOMALY_AUDIT_MIN_SAMPLE_N,
+    min_episodes: ANOMALY_AUDIT_MIN_EPISODES,
+    insufficient_sample: insufficientSample,
+    production_accuracy: prodComparable ? Number((100 * prodCorrect / prodComparable).toFixed(1)) : null,
+    production_n: prodComparable,
+    anomaly_gate_accuracy: gateComparable ? Number((100 * gateCorrect / gateComparable).toFixed(1)) : null,
+    anomaly_gate_n: gateComparable,
+    agreement_rate: agreeComparable ? Number((100 * agree / agreeComparable).toFixed(1)) : null,
+    agreement_n: agreeComparable,
+    note: insufficientSample
+      ? 'insufficient_sample=true -- do not treat these accuracy/agreement numbers as a finding regardless of how the raw percentages look. Too few resolved observations and/or independent episodes (episode-level, not row-level, is the significance unit here per Learning Roadmap §3 Experiment 2 / §5).'
+      : 'Episode-level sample size requirement met. Still corroborate against /research/anomaly-conditioned-audit and requires ChatGPT audit before any promotion discussion -- this endpoint reports evidence, it does not itself constitute a promotion decision.',
+  };
+}
+
+// env.DB reads only -- never .run(), never selectBestVariant/decideSelection/
+// computeLcaScore/logAnomalyGateExperiment. Joins selection_decisions_anomaly
+// (the Experiment 2 log) against the production selection_decisions table
+// and the coin's own core prediction table, purely to expose the two
+// decisions and the eventual outcome side by side -- it does not recompute
+// or reinterpret either variant's stored numbers, it reads them as-is.
+async function computeAnomalyGateReport(env, coin, horizonHours) {
+  const coreTable = coreTableForCoin(coin);
+
+  const { results: anomalyRows } = await env.DB.prepare(
+    `SELECT ts, prediction_ts, is_regime_anomaly, margin_factor, chosen_variant_anomaly,
+            chosen_p_up_anomaly, lca_score_anomaly, comparison_count_anomaly,
+            base_required_margin, required_margin_anomaly, cleared_gate_anomaly,
+            k_sel_anomaly, reason_anomaly, scores_json_anomaly
+     FROM selection_decisions_anomaly WHERE coin=? AND horizon_hours=? ORDER BY prediction_ts ASC`
+  ).bind(coin, horizonHours).all();
+
+  if (!anomalyRows.length) {
+    return {
+      ok: true, coin, horizon_hours: horizonHours, generated_at: Date.now(),
+      raw_observation_count: 0, rows: [], episodes: [], aggregate: null,
+      note: 'No selection_decisions_anomaly rows yet for this coin/horizon -- the anomaly gate (Learning Roadmap §3 Experiment 2) has not logged a high-anomaly cycle here yet. This is not an error; there is simply nothing to audit until is_regime_anomaly=1 occurs for this coin/horizon.',
+    };
+  }
+
+  // Production's own decision for the SAME cycle, read from the untouched
+  // selection_decisions table -- joined in JS on (prediction_ts), never
+  // recomputed. If more than one production row exists for a given
+  // prediction_ts, the latest by its own ts wins (ORDER BY ts ASC below,
+  // Map overwrite keeps the last one).
+  const { results: prodRows } = await env.DB.prepare(
+    `SELECT ts, prediction_ts, chosen_variant, chosen_p_up, cleared_gate, comparison_count
+     FROM selection_decisions WHERE coin=? AND horizon_hours=? ORDER BY ts ASC`
+  ).bind(coin, horizonHours).all();
+  const prodByTs = new Map();
+  for (const r of prodRows) prodByTs.set(r.prediction_ts, r);
+
+  // Resolved outcome for the same cycle, read from the coin's own core
+  // prediction table -- same resolved_ts/realized_up columns Experiment 1's
+  // report already reads, joined here on ts=prediction_ts.
+  const { results: coreRows } = await env.DB.prepare(
+    `SELECT ts, realized_up, resolved_ts FROM ${coreTable} WHERE horizon_hours=?`
+  ).bind(horizonHours).all();
+  const coreByTs = new Map(coreRows.map(r => [r.ts, r]));
+
+  const rows = anomalyRows.map(r => {
+    let scores = [];
+    try { scores = JSON.parse(r.scores_json_anomaly || '[]'); } catch { scores = []; }
+    const winnerScore = scores.find(s => s.variant === r.chosen_variant_anomaly) || null;
+    const prod = prodByTs.get(r.prediction_ts) || null;
+    const core = coreByTs.get(r.prediction_ts) || null;
+    const resolved = !!(core && core.resolved_ts != null && core.realized_up != null);
+    return {
+      coin, horizon_hours: horizonHours,
+      prediction_ts: r.prediction_ts,
+      logged_ts: r.ts,
+      is_regime_anomaly: r.is_regime_anomaly,
+      production_chosen_variant: prod ? prod.chosen_variant : null,
+      production_chosen_p_up: prod ? prod.chosen_p_up : null,
+      production_cleared_gate: prod ? !!prod.cleared_gate : null,
+      production_comparison_count: prod ? prod.comparison_count : null,
+      production_decision_available: !!prod,
+      anomaly_gate_chosen_variant: r.chosen_variant_anomaly,
+      anomaly_gate_chosen_p_up: r.chosen_p_up_anomaly,
+      anomaly_gate_lca_score: r.lca_score_anomaly,
+      anomaly_gate_n_matched: winnerScore ? winnerScore.n_matched : null,
+      margin_factor: r.margin_factor,
+      base_required_margin: r.base_required_margin,
+      required_margin_anomaly: r.required_margin_anomaly,
+      cleared_gate_anomaly: !!r.cleared_gate_anomaly,
+      comparison_count_anomaly: r.comparison_count_anomaly,
+      k_sel_anomaly: r.k_sel_anomaly,
+      reason_anomaly: r.reason_anomaly,
+      scores_anomaly: scores,
+      decisions_agree: prod ? (prod.chosen_variant === r.chosen_variant_anomaly) : null,
+      resolved,
+      realized_up: resolved ? core.realized_up : null,
+      resolved_ts: core ? core.resolved_ts : null,
+    };
+  });
+
+  const episodes = groupAnomalyGateEpisodes(rows);
+  const aggregate = computeAnomalyGateAggregate(rows, episodes);
+
+  return {
+    ok: true, coin, horizon_hours: horizonHours, generated_at: Date.now(),
+    raw_observation_count: rows.length,
+    rows,
+    episodes,
+    aggregate,
+    note: 'Read-only research report (Learning Roadmap §3 Experiment 2) over selection_decisions_anomaly -- does not feed into any prediction, selection, or calibration logic, and never calls selectBestVariant, decideSelection, computeLcaScore, or logAnomalyGateExperiment. production_chosen_variant is the actual live decision that was served; anomaly_gate_chosen_variant is the logged-only alternative from the softened gate and never replaces it.',
+  };
+}
+
+// Orchestrates computeAnomalyGateReport across all 3 coins x 2 horizons,
+// same "one request instead of six" convenience as
+// computeFullAnomalyConditionedAudit above. Still read-only, still zero
+// writes; a failure in one coin/horizon does not block the others.
+async function computeFullAnomalyGateAudit(env) {
+  const coins = ['BTC', 'ETH', 'LINK'];
+  const horizons = [12, 24];
+  const results = {};
+  for (const coin of coins) {
+    results[coin] = {};
+    for (const h of horizons) {
+      try {
+        results[coin][h] = await computeAnomalyGateReport(env, coin, h);
+      } catch (err) {
+        results[coin][h] = { ok: false, coin, horizon_hours: h, error: String(err) };
+      }
+    }
+  }
+  return {
+    ok: true, generated_at: Date.now(),
+    min_sample_n: ANOMALY_AUDIT_MIN_SAMPLE_N,
+    min_episodes: ANOMALY_AUDIT_MIN_EPISODES,
+    results,
+    note: 'Read-only research report (Learning Roadmap §3 Experiment 2) covering all 3 coins x 2 horizons -- production_chosen_variant vs the logged-only anomaly-gate alternative from selection_decisions_anomaly. Does not feed into any prediction, selection, or calibration logic.',
+  };
+}
+
 // Calibration for the challenger: both variants (flat/tilted) against BOTH
 // naive-baseline (low bar — always guess the historically-more-common
 // direction) AND a real MA-crossover momentum strategy (higher bar — price
@@ -5522,6 +5743,32 @@ export default {
           return new Response(JSON.stringify(report), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
         }
         const fullAudit = await computeFullAnomalyConditionedAudit(env);
+        return new Response(JSON.stringify(fullAudit), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+      } catch (err) {
+        return new Response(JSON.stringify({ ok: false, error: String(err) }), { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+      }
+    }
+
+    // ---- GET /research/anomaly-gate?coin=&horizon= -- Learning Roadmap §3
+    // Experiment 2, read side. Read-only, zero writes, no effect on any
+    // production/selection/calibration logic; never calls selectBestVariant,
+    // decideSelection, or logAnomalyGateExperiment. A sibling of
+    // /research/anomaly-conditioned-audit above, not a modification of it.
+    // If both coin and horizon are given and valid, returns that single
+    // combination's report. Otherwise returns the full 3-coin x 2-horizon
+    // audit in one response -- no default coin/horizon is ever guessed.
+    // See computeAnomalyGateReport's own comment for full methodology. ----
+    if (url.pathname === '/research/anomaly-gate' && request.method === 'GET') {
+      try {
+        const coinParam = url.searchParams.get('coin');
+        const horizonParam = parseInt(url.searchParams.get('horizon'), 10);
+        const hasValidCoin = ['BTC', 'LINK', 'ETH'].includes(coinParam);
+        const hasValidHorizon = [12, 24].includes(horizonParam);
+        if (hasValidCoin && hasValidHorizon) {
+          const report = await computeAnomalyGateReport(env, coinParam, horizonParam);
+          return new Response(JSON.stringify(report), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+        }
+        const fullAudit = await computeFullAnomalyGateAudit(env);
         return new Response(JSON.stringify(fullAudit), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
       } catch (err) {
         return new Response(JSON.stringify({ ok: false, error: String(err) }), { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });

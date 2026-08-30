@@ -67,7 +67,7 @@ jobs:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
         run: |
           wrangler d1 execute sentiment-history --remote --json --command \
-            "SELECT id, coin, ts, target_ts, horizon_hours, price_at_prediction, is_regime_anomaly, trailing_return_pct, p_up_flat, p_up_tilted, driver_used, driver_agreement, calibrated_p_up_flat, model_version, git_commit_sha, realized_price, realized_return, realized_up, resolved_ts FROM challenger_predictions ORDER BY ts ASC" \
+            "SELECT id, coin, ts, target_ts, horizon_hours, price_at_prediction, is_regime_anomaly, trailing_return_pct, p_up_flat, p_up_tilted, driver_used, driver_agreement, calibrated_p_up_flat, p_up_momentum, momentum_triggered, model_version, git_commit_sha, realized_price, realized_return, realized_up, resolved_ts FROM challenger_predictions ORDER BY ts ASC" \
             > data-exports/raw/challenger_predictions.json
 
       - name: Export selection decisions
@@ -77,6 +77,21 @@ jobs:
           wrangler d1 execute sentiment-history --remote --json --command \
             "SELECT id, ts, coin, horizon_hours, chosen_variant, chosen_p_up, lca_score, comparison_count, corrected_alpha, cleared_gate, k_sel, reason, prediction_ts, scores_json FROM selection_decisions ORDER BY ts ASC" \
             > data-exports/raw/selection_decisions.json
+
+      # Learning Roadmap §3 Experiment 3's primary evidence store. Added
+      # after an audit found this table existed and was accumulating data
+      # but was never wired into the daily export -- ChatGPT (or anyone)
+      # could not actually score the momentum experiment from the exported
+      # dataset despite it running in production. Read-only, decision-free
+      # table (see logMomentumSelectionExperiment in worker.js); exporting
+      # it changes nothing about production behavior.
+      - name: Export Momentum selection experiment
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          wrangler d1 execute sentiment-history --remote --json --command \
+            "SELECT id, ts, coin, horizon_hours, prediction_ts, momentum_p_up, momentum_lca, momentum_n_matched, momentum_rank, total_scored, production_chosen_variant, production_chosen_p_up, production_chosen_lca, k_sel, scores_json FROM selection_decisions_momentum ORDER BY ts ASC" \
+            > data-exports/raw/selection_decisions_momentum.json
 
       - name: Convert to CSV and generate status
         run: node data-exports/scripts/convert.js

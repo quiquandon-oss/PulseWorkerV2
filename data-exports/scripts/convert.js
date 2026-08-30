@@ -22,6 +22,7 @@ const TABLES = [
   { raw: 'eth_predictions.json', csv: 'eth_predictions.csv', label: 'ETH predictions' },
   { raw: 'challenger_predictions.json', csv: 'challenger_predictions.csv', label: 'Challenger predictions (all coins)' },
   { raw: 'selection_decisions.json', csv: 'selection_decisions.csv', label: 'Selection decisions' },
+  { raw: 'selection_decisions_momentum.json', csv: 'selection_decisions_momentum.csv', label: 'Momentum experiment (Learning Roadmap §3 Experiment 3, logged-only)' },
 ];
 
 function extractRows(parsed) {

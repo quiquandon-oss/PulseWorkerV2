@@ -13,8 +13,9 @@ README describes the schema, not today's data.
 | `btc_predictions.csv` | BTC core k-NN model — every prediction ever made, both horizons |
 | `link_predictions.csv` | LINK core k-NN model — same shape |
 | `eth_predictions.csv` | ETH core k-NN model — same shape, newer coin, less history. Includes `features_json` (raw feature snapshot at prediction time) |
-| `challenger_predictions.csv` | Challenger model (flat + Foufi-tilted variants), all 3 coins together, distinguished by `coin` column |
+| `challenger_predictions.csv` | Challenger model (flat + Foufi-tilted + momentum variants), all 3 coins together, distinguished by `coin` column |
 | `selection_decisions.csv` | The meta-layer: which variant (original/experimental/calibrated/challenger_*) was actually chosen live for each coin/horizon/cycle, and why |
+| `selection_decisions_momentum.csv` | Learning Roadmap §3 Experiment 3's evidence store — `challenger_momentum` scored in parallel against the same neighborhood as the 6 production variants. Logged-only: momentum is NOT in `selection_decisions` and cannot be `chosen_variant` there |
 | `STATUS.md` | Auto-generated on every run: exact refresh timestamp, row counts, earliest/latest `ts` per file |
 
 ## Column notes (non-obvious ones)
@@ -35,6 +36,7 @@ README describes the schema, not today's data.
 - `p_up_flat`: Challenger's own k-NN estimate, no external tilt
 - `p_up_tilted`: adjusted by a Foufi-digest-derived directional tilt when a fresh digest exists (often falls back to flat — check `driver_used`/`driver_agreement`)
 - `calibrated_p_up_flat`: Challenger's own calibration curve applied to `p_up_flat`
+- `p_up_momentum` / `momentum_triggered`: Experiment 3's momentum-blend variant, active only when `is_regime_anomaly=1` and `|trend_strength| > 0.5`; falls back to `p_up_flat` unchanged otherwise (`momentum_triggered=0`). **Not one of the choosable variants in `selection_decisions`** — see `selection_decisions_momentum.csv` for how it actually scores
 
 **selection_decisions.csv — the interesting one for a cross-coin audit:**
 - `chosen_variant`: one of `original`, `experimental`, `calibrated`, `challenger_flat`, `challenger_tilted`, `challenger_calibrated` — whichever variant's Local Class Accuracy cleared the statistical significance gate; defaults to `original` if none did
@@ -43,6 +45,13 @@ README describes the schema, not today's data.
 - `corrected_alpha` / `cleared_gate`: the significance test outcome — `cleared_gate=0` means no variant beat the bar, `original` was used by default (this is normal/expected, not a failure)
 - `k_sel`: neighborhood size used for the LCA comparison itself (7-15) — separate from the core prediction's own `k_used`
 - `scores_json`: every eligible variant's own LCA score this cycle, not just the winner's — useful for seeing how close competing variants were
+
+**selection_decisions_momentum.csv — Experiment 3, logged-only, no production effect:**
+- Written by `logMomentumSelectionExperiment`, an independent re-implementation of the same eligibility/neighborhood/LCA-scoring steps `selectBestVariant` uses — never calls `selectBestVariant`/`decideSelection`, never writes to `selection_decisions`
+- `momentum_lca` / `momentum_n_matched`: `challenger_momentum`'s own LCA score this cycle, same neighborhood/tolerance as the production comparison
+- `momentum_rank`: where momentum ranked by LCA among all 7 scored variants (production 6 + momentum) — descriptive only, no significance gate is computed for the 7-way comparison
+- `production_chosen_variant` / `production_chosen_p_up` / `production_chosen_lca`: the actual `selection_decisions` row for the same coin/horizon/cycle, read (not recomputed) for side-by-side comparison
+- A row only exists when momentum itself has 50+ resolved predictions (`SELECTION_MIN_HISTORY`) — check `STATUS.md` row counts before assuming this table is populated yet
 
 ## Historical context (may be stale — cross-check dates against STATUS.md / `git_commit_sha` transitions in the data itself)
 

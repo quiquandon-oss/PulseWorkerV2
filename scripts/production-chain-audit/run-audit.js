@@ -158,7 +158,11 @@ async function main() {
     const r = await getCatalystsForInvestigation(cfAccountId, expectedDatabaseId, cfToken, report.analyst_relay.investigation_id);
     catalystRows = r.ok ? r.rows : [];
   }
-  report.catalyst_ledger = evaluateCatalystLedger({ investigationId: report.analyst_relay.status === STATUS.PASS ? report.analyst_relay.investigation_id : null, catalystRows });
+  report.catalyst_ledger = evaluateCatalystLedger({
+    investigationId: report.analyst_relay.status === STATUS.PASS ? report.analyst_relay.investigation_id : null,
+    catalystRows,
+    validationStatus: report.analyst_relay.status === STATUS.PASS ? report.analyst_relay.validation_status : null,
+  });
 
   // ---- 11. Learning loop ----
   let selectionDecisionRow = null;

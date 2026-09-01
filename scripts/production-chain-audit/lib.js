@@ -266,12 +266,56 @@ export function evaluateFactualContextParity({ contextJsonRaw, primaryAsset }) {
 }
 
 // ---- Catalyst / investigation ledger (section 14) ----
-export function evaluateCatalystLedger({ investigationId, catalystRows }) {
+// Verifies the correct invariant, which is conditional on what the
+// investigation actually found -- not a flat "rows must exist" rule.
+// Production behavior explicitly allows validation_status='no_catalyst_found'
+// as a legitimate, clean outcome (Gemini genuinely found nothing to log),
+// and the existing challenger/momentum-style tests elsewhere in this
+// codebase already expect catalystsWritten=0 to be a valid state for that
+// status. Requiring rows unconditionally, regardless of validation_status,
+// treated a correct "nothing to report" outcome as if it were a missing
+// write -- an audit-logic defect, not a production one (confirmed against
+// real production data: AR-1788163649576-LINK has validation_status=
+// no_catalyst_found and exactly 0 matching coin_catalyst_log rows, which
+// is the consistent, expected pairing).
+//
+//   validation_status='ok'              -> 1+ matching rows required; 0 = FAIL
+//   validation_status='no_catalyst_found' -> 0 matching rows required; 1+ = FAIL
+//                                            (inconsistent -- a catalyst got
+//                                            written despite the relay
+//                                            recording that none was found)
+//   anything else (malformed/invalid/error) -> does not reach this function
+//   at all in practice, since evaluateAnalystRelay's `clean()` filter only
+//   ever treats 'ok'/'no_catalyst_found' relays as PASS, and run-audit.js
+//   only calls this with a real investigationId when analyst_relay PASSed.
+//   Defensively treated the same as 'ok' (rows required) if it ever does
+//   arrive here with an unrecognized status, rather than silently passing.
+export function evaluateCatalystLedger({ investigationId, catalystRows, validationStatus }) {
   if (!investigationId) return { status: STATUS.NOT_VERIFIED, record_id: null, investigation_id: null, evidence: ['no successful investigation to trace into the catalyst ledger'] };
-  if (!catalystRows || catalystRows.length === 0) {
-    return { status: STATUS.FAIL, record_id: null, investigation_id: investigationId, evidence: [`no coin_catalyst_log rows found with investigation_id=${investigationId}`, 'table existing is not evidence of persistence -- a real matching row is required'] };
+  const rows = catalystRows || [];
+  const hasRows = rows.length > 0;
+
+  if (validationStatus === 'no_catalyst_found') {
+    if (hasRows) {
+      return {
+        status: STATUS.FAIL, record_id: rows[0].id, investigation_id: investigationId,
+        evidence: [
+          `validation_status=no_catalyst_found but ${rows.length} coin_catalyst_log row(s) exist with investigation_id=${investigationId}`,
+          'inconsistent -- a catalyst was persisted despite the relay recording that none was found',
+        ],
+      };
+    }
+    return {
+      status: STATUS.PASS, record_id: null, investigation_id: investigationId,
+      evidence: [`validation_status=no_catalyst_found and 0 coin_catalyst_log rows exist -- the expected, consistent pairing, not a failure`],
+    };
   }
-  const row = catalystRows[0];
+
+  // 'ok' (or any unrecognized status reaching here) -- rows required.
+  if (!hasRows) {
+    return { status: STATUS.FAIL, record_id: null, investigation_id: investigationId, evidence: [`validation_status=${validationStatus ?? 'unknown'} but no coin_catalyst_log rows found with investigation_id=${investigationId}`, 'table existing is not evidence of persistence -- a real matching row is required when a catalyst was reported found'] };
+  }
+  const row = rows[0];
   return { status: STATUS.PASS, record_id: row.id, investigation_id: investigationId, evidence: [`record_id=${row.id}`, `ts=${row.ts}`, `coin=${row.coin}`] };
 }
 

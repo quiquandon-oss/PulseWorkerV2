@@ -263,18 +263,40 @@ describe('evaluateFactualContextParity() — the context contains real evidence,
   });
 });
 
-describe('evaluateCatalystLedger() — table existing is not evidence', () => {
+describe('evaluateCatalystLedger() — invariant is conditional on validation_status, not a flat "rows required" rule', () => {
   it('NOT_VERIFIED with no investigation to trace', () => {
-    expect(evaluateCatalystLedger({ investigationId: null, catalystRows: [] }).status).toBe('NOT_VERIFIED');
+    expect(evaluateCatalystLedger({ investigationId: null, catalystRows: [], validationStatus: null }).status).toBe('NOT_VERIFIED');
   });
-  it('FAILs when the investigation succeeded but no catalyst rows reference it', () => {
-    const r = evaluateCatalystLedger({ investigationId: 'AR-1-LINK', catalystRows: [] });
+
+  describe('validation_status=ok', () => {
+    it('FAILs when the investigation found a catalyst but no matching row was persisted', () => {
+      const r = evaluateCatalystLedger({ investigationId: 'AR-1-LINK', catalystRows: [], validationStatus: 'ok' });
+      expect(r.status).toBe('FAIL');
+    });
+    it('PASSes with a real matching row', () => {
+      const r = evaluateCatalystLedger({ investigationId: 'AR-1-LINK', catalystRows: [{ id: 5, ts: 100, coin: 'LINK' }], validationStatus: 'ok' });
+      expect(r.status).toBe('PASS');
+      expect(r.record_id).toBe(5);
+    });
+  });
+
+  describe('validation_status=no_catalyst_found — zero rows is the correct, expected outcome', () => {
+    it('PASSes with zero matching rows (this is the real AR-1788163649576-LINK shape: no_catalyst_found + 0 rows)', () => {
+      const r = evaluateCatalystLedger({ investigationId: 'AR-1788163649576-LINK', catalystRows: [], validationStatus: 'no_catalyst_found' });
+      expect(r.status).toBe('PASS');
+      expect(r.record_id).toBeNull();
+      expect(r.evidence.join(' ')).toContain('no_catalyst_found');
+    });
+    it('FAILs (inconsistent) if a catalyst row exists anyway despite validation_status=no_catalyst_found', () => {
+      const r = evaluateCatalystLedger({ investigationId: 'AR-1-LINK', catalystRows: [{ id: 9, ts: 100, coin: 'LINK' }], validationStatus: 'no_catalyst_found' });
+      expect(r.status).toBe('FAIL');
+      expect(r.evidence.join(' ')).toMatch(/inconsistent/i);
+    });
+  });
+
+  it('an unrecognized/malformed validation_status defensively requires rows (same as ok), rather than silently passing -- this path is unreachable in practice per run-audit.js\'s gating, but must not silently pass if it ever is', () => {
+    const r = evaluateCatalystLedger({ investigationId: 'AR-1-LINK', catalystRows: [], validationStatus: 'malformed_response' });
     expect(r.status).toBe('FAIL');
-  });
-  it('PASSes with a real matching row', () => {
-    const r = evaluateCatalystLedger({ investigationId: 'AR-1-LINK', catalystRows: [{ id: 5, ts: 100, coin: 'LINK' }] });
-    expect(r.status).toBe('PASS');
-    expect(r.record_id).toBe(5);
   });
 });
 

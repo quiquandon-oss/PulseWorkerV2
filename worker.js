@@ -1052,6 +1052,83 @@ function decideSelection(scores) {
   return { chosen: clearedGate ? winner.variant : 'original', clearedGate, winner, requiredMargin, m };
 }
 
+// =====================================================================
+// ---- Subrequest-batching helpers, added to fix the Challenger cron
+// persistence stall (2026-09-01) ----
+//
+// Root cause: SELECTION_VARIANTS-driven eligibility/scoring loops
+// (selectBestVariant, logAnomalyGateExperiment, logMomentumSelectionExperiment)
+// each independently ran ONE D1 query per variant for eligibility and
+// another per ELIGIBLE variant for scoring. With 6 concurrent coin/horizon
+// chains per 3h cron tick, each running all three of these loops plus
+// core+challenger prediction generation, per-invocation D1 subrequest
+// volume had grown (via ETH's challenger addition, the fencing-token
+// backfill/claim overhead, and Experiments 1-3) to a point where the
+// heaviest chains (BTC, whose core model does extra conditional-
+// calibration work LINK/ETH don't) were failing to complete their
+// Challenger insert -- confirmed by direct reproduction: fed real
+// current production data, runChallengerPrediction itself never throws,
+// so the failure has to be resource pressure from everything running
+// alongside it in the same invocation, not a logic bug in that function.
+//
+// These two helpers collapse the N-queries-per-variant pattern into a
+// small constant number of queries, with IDENTICAL WHERE conditions --
+// same eligibility threshold, same resolved/non-null filtering, same
+// rows ultimately handed to computeLcaScore. This is a pure
+// round-trip-count reduction: given the same D1 contents, every caller
+// gets back the exact same counts and the exact same variantRows arrays
+// as the original per-variant loops. Verified side-by-side against the
+// original loop logic in tests/challenger-cron-stall-fix.test.js.
+// =====================================================================
+
+// Replaces "one COUNT(*) query per variant" with one query returning all
+// counts as named columns. Returns counts in the same order as `defs`.
+async function fetchEligibilityCounts(env, defs, coin, horizonHours) {
+  const parts = [];
+  const params = [];
+  defs.forEach((v, i) => {
+    const whereCoin = v.coinFilter ? `coin = ? AND ` : '';
+    parts.push(`(SELECT COUNT(*) FROM ${v.table} WHERE ${whereCoin}horizon_hours=? AND realized_up IS NOT NULL AND ${v.field} IS NOT NULL) as n${i}`);
+    if (v.coinFilter) params.push(coin);
+    params.push(horizonHours);
+  });
+  const row = await env.DB.prepare(`SELECT ${parts.join(', ')}`).bind(...params).first();
+  return defs.map((v, i) => row[`n${i}`]);
+}
+
+// Replaces "one SELECT ts/field/realized_up query per variant" with one
+// query per DISTINCT (table, coinFilter) pair among `defs` -- variants
+// sharing a table (e.g. the 3 challenger_* variants all read from
+// challenger_predictions) are fetched together, then split back out per
+// variant in JS by filtering on that variant's own field being non-null,
+// which is exactly what each variant's own WHERE clause did before.
+// Returns a Map keyed by variant `key` -> array of {ts, p_up, realized_up},
+// same shape and same rows the original per-variant query produced.
+async function fetchVariantRowsByTable(env, defs, coin, horizonHours) {
+  const groups = new Map(); // "table|coinFilter" -> variant defs sharing it
+  for (const v of defs) {
+    const groupKey = `${v.table}|${v.coinFilter ? 1 : 0}`;
+    if (!groups.has(groupKey)) groups.set(groupKey, []);
+    groups.get(groupKey).push(v);
+  }
+  const rowsByVariant = new Map();
+  for (const variantsInGroup of groups.values()) {
+    const { table, coinFilter } = variantsInGroup[0];
+    const whereCoin = coinFilter ? `coin = ? AND ` : '';
+    const fields = [...new Set(variantsInGroup.map(v => v.field))];
+    const params = coinFilter ? [coin, horizonHours] : [horizonHours];
+    const { results } = await env.DB.prepare(
+      `SELECT ts, ${fields.join(', ')}, realized_up FROM ${table} WHERE ${whereCoin}horizon_hours=? AND realized_up IS NOT NULL ORDER BY ts ASC`
+    ).bind(...params).all();
+    for (const v of variantsInGroup) {
+      rowsByVariant.set(v.key, results
+        .filter(r => r[v.field] != null)
+        .map(r => ({ ts: r.ts, p_up: r[v.field], realized_up: r.realized_up })));
+    }
+  }
+  return rowsByVariant;
+}
+
 async function selectBestVariant(env, coin, horizonHours) {
   const variantDefs = SELECTION_VARIANTS[coin];
   if (!variantDefs) return { ok: false, error: 'unknown coin' };
@@ -1059,15 +1136,11 @@ async function selectBestVariant(env, coin, horizonHours) {
 
   // Step 1: eligibility. A variant must have its OWN 50+ resolved
   // predictions before it's even considered -- same bar Model Health
-  // already uses, not a new one invented for this.
-  const eligible = [];
-  for (const v of variantDefs) {
-    const whereCoin = v.coinFilter ? `coin = '${coin}' AND ` : '';
-    const { results } = await env.DB.prepare(
-      `SELECT COUNT(*) as n FROM ${v.table} WHERE ${whereCoin}horizon_hours=? AND realized_up IS NOT NULL AND ${v.field} IS NOT NULL`
-    ).bind(horizonHours).all();
-    if (results[0].n >= SELECTION_MIN_HISTORY) eligible.push(v);
-  }
+  // already uses, not a new one invented for this. One combined query
+  // instead of one per variant -- see fetchEligibilityCounts's own
+  // comment for why.
+  const eligibilityCounts = await fetchEligibilityCounts(env, variantDefs, coin, horizonHours);
+  const eligible = variantDefs.filter((v, i) => eligibilityCounts[i] >= SELECTION_MIN_HISTORY);
   if (!eligible.length) {
     return { ok: true, status: 'no_eligible_variants', chosen_variant: 'original', cleared_gate: false, reason: `No variant has ${SELECTION_MIN_HISTORY}+ resolved predictions yet -- defaulting to Original k-NN.` };
   }
@@ -1126,13 +1199,13 @@ async function selectBestVariant(env, coin, horizonHours) {
   const neighborhood = distances.slice(0, kSel);
   const TOL_MS_META = 6 * 3600000; // 6h tolerance matching a variant's own prediction to a neighborhood timestamp
 
-  // Step 4: LCA score per eligible variant.
+  // Step 4: LCA score per eligible variant. One query per distinct table
+  // among the eligible variants instead of one per variant -- see
+  // fetchVariantRowsByTable's own comment for why.
+  const rowsByVariant = await fetchVariantRowsByTable(env, eligible, coin, horizonHours);
   const scores = [];
   for (const v of eligible) {
-    const whereCoin = v.coinFilter ? `coin = '${coin}' AND ` : '';
-    const { results: variantRows } = await env.DB.prepare(
-      `SELECT ts, ${v.field} as p_up, realized_up FROM ${v.table} WHERE ${whereCoin}horizon_hours=? AND realized_up IS NOT NULL AND ${v.field} IS NOT NULL ORDER BY ts ASC`
-    ).bind(horizonHours).all();
+    const variantRows = rowsByVariant.get(v.key) || [];
     if (!variantRows.length) continue;
     const latestVariantRow = variantRows[variantRows.length - 1];
     const todaysCallUp = latestVariantRow.p_up >= 0.5;
@@ -1266,14 +1339,8 @@ async function logAnomalyGateExperiment(env, coin, horizonHours) {
   try { queryFeatures = JSON.parse(latestCore.features_json); } catch { return { ok: true, status: 'bad_features', logged: false }; }
   const featureKeys = Object.keys(queryFeatures);
 
-  const eligible = [];
-  for (const v of variantDefs) {
-    const whereCoin = v.coinFilter ? `coin = '${coin}' AND ` : '';
-    const { results } = await env.DB.prepare(
-      `SELECT COUNT(*) as n FROM ${v.table} WHERE ${whereCoin}horizon_hours=? AND realized_up IS NOT NULL AND ${v.field} IS NOT NULL`
-    ).bind(horizonHours).all();
-    if (results[0].n >= SELECTION_MIN_HISTORY) eligible.push(v);
-  }
+  const eligibilityCounts = await fetchEligibilityCounts(env, variantDefs, coin, horizonHours);
+  const eligible = variantDefs.filter((v, i) => eligibilityCounts[i] >= SELECTION_MIN_HISTORY);
   if (!eligible.length) {
     return { ok: true, status: 'no_eligible_variants', logged: false };
   }
@@ -1313,12 +1380,10 @@ async function logAnomalyGateExperiment(env, coin, horizonHours) {
   const neighborhood = distances.slice(0, kSel);
   const TOL_MS_META = 6 * 3600000;
 
+  const rowsByVariant = await fetchVariantRowsByTable(env, eligible, coin, horizonHours);
   const scores = [];
   for (const v of eligible) {
-    const whereCoin = v.coinFilter ? `coin = '${coin}' AND ` : '';
-    const { results: variantRows } = await env.DB.prepare(
-      `SELECT ts, ${v.field} as p_up, realized_up FROM ${v.table} WHERE ${whereCoin}horizon_hours=? AND realized_up IS NOT NULL AND ${v.field} IS NOT NULL ORDER BY ts ASC`
-    ).bind(horizonHours).all();
+    const variantRows = rowsByVariant.get(v.key) || [];
     if (!variantRows.length) continue;
     const latestVariantRow = variantRows[variantRows.length - 1];
     const todaysCallUp = latestVariantRow.p_up >= 0.5;
@@ -1406,14 +1471,8 @@ async function logMomentumSelectionExperiment(env, coin, horizonHours) {
   // a fresh array, never assigned back into SELECTION_VARIANTS.
   const experimentVariants = [...productionVariants, MOMENTUM_EXPERIMENT_VARIANT];
 
-  const eligible = [];
-  for (const v of experimentVariants) {
-    const whereCoin = v.coinFilter ? `coin = '${coin}' AND ` : '';
-    const { results } = await env.DB.prepare(
-      `SELECT COUNT(*) as n FROM ${v.table} WHERE ${whereCoin}horizon_hours=? AND realized_up IS NOT NULL AND ${v.field} IS NOT NULL`
-    ).bind(horizonHours).all();
-    if (results[0].n >= SELECTION_MIN_HISTORY) eligible.push(v);
-  }
+  const eligibilityCounts = await fetchEligibilityCounts(env, experimentVariants, coin, horizonHours);
+  const eligible = experimentVariants.filter((v, i) => eligibilityCounts[i] >= SELECTION_MIN_HISTORY);
   if (!eligible.find(v => v.key === 'challenger_momentum')) {
     return { ok: true, status: 'momentum_not_eligible', logged: false };
   }
@@ -1465,12 +1524,10 @@ async function logMomentumSelectionExperiment(env, coin, horizonHours) {
 
   // Step 4: LCA score per eligible variant, INCLUDING momentum -- this is
   // the "scored in parallel" part. Reuses computeLcaScore unmodified.
+  const rowsByVariant = await fetchVariantRowsByTable(env, eligible, coin, horizonHours);
   const scores = [];
   for (const v of eligible) {
-    const whereCoin = v.coinFilter ? `coin = '${coin}' AND ` : '';
-    const { results: variantRows } = await env.DB.prepare(
-      `SELECT ts, ${v.field} as p_up, realized_up FROM ${v.table} WHERE ${whereCoin}horizon_hours=? AND realized_up IS NOT NULL AND ${v.field} IS NOT NULL ORDER BY ts ASC`
-    ).bind(horizonHours).all();
+    const variantRows = rowsByVariant.get(v.key) || [];
     if (!variantRows.length) continue;
     const latestVariantRow = variantRows[variantRows.length - 1];
     const todaysCallUp = latestVariantRow.p_up >= 0.5;
@@ -6102,6 +6159,26 @@ export default {
         for (const h of [12, 24]) {
           ctx.waitUntil(refreshCalibrationCurve(env, coin, h).catch(err => console.error(`Calibration refresh ${coin}/${h}h failed:`, err)));
           ctx.waitUntil(refreshChallengerCalibrationCurve(env, coin, h).catch(err => console.error(`Challenger calibration refresh ${coin}/${h}h failed:`, err)));
+          // Learning Roadmap §3 Experiments 2 and 3 -- research-only,
+          // logged-only, decision-free (never call selectBestVariant or
+          // decideSelection, never write to selection_decisions). Moved
+          // here from the 3h tick on 2026-09-01 as part of fixing the
+          // Challenger cron persistence stall: these two, plus
+          // selectBestVariant, each ran a full eligibility+neighborhood+
+          // scoring pass per coin/horizon on EVERY 3h tick, on top of
+          // core+Challenger prediction generation -- across 6 concurrent
+          // coin/horizon chains, that's what had grown large enough to
+          // start starving Challenger's own insert for the heaviest
+          // chains (BTC especially). Neither of these two feeds any
+          // production decision, so daily freshness is enough; moving
+          // them here removes 2 of those 3 passes from the contended 3h
+          // tick entirely, on top of the query-batching in
+          // fetchEligibilityCounts/fetchVariantRowsByTable below.
+          // Independently caught exactly as before -- a failure here has
+          // never been able to affect production selection and still
+          // can't.
+          ctx.waitUntil(logAnomalyGateExperiment(env, coin, h).catch(err => console.error(`Anomaly-gate experiment ${coin}/${h}h failed:`, err)));
+          ctx.waitUntil(logMomentumSelectionExperiment(env, coin, h).catch(err => console.error(`Momentum experiment ${coin}/${h}h failed:`, err)));
         }
       }
     } else {
@@ -6116,19 +6193,15 @@ export default {
       // that specific prediction exists, not race it. Different coin/
       // horizon pairs still run concurrently with each other, just not with
       // themselves.
+      //
+      // Experiments 2 and 3 (logAnomalyGateExperiment /
+      // logMomentumSelectionExperiment) no longer run here -- see the daily
+      // (0 7 * * *) branch above for why and where they moved. This branch
+      // now only runs what's actually production-timeliness-sensitive:
+      // core+Challenger prediction generation and the real selection call.
       const predictThenSelect = async (predictFn, coin, horizon) => {
         await predictFn(env, horizon, { allowWrite: true });
         await selectBestVariant(env, coin, horizon).catch(err => console.error(`Selection ${coin}/${horizon}h failed:`, err));
-        // Learning Roadmap §3 Experiment 2 -- research-only, logged-only.
-        // Independently caught so a failure here can never affect the
-        // production selection call above, which has already completed
-        // by this point regardless of what happens next.
-        await logAnomalyGateExperiment(env, coin, horizon).catch(err => console.error(`Anomaly-gate experiment ${coin}/${horizon}h failed:`, err));
-        // Learning Roadmap §3 Experiment 3 correction -- research-only,
-        // logged-only, decision-free. Independently caught, same as
-        // Experiment 2 above; a failure here can never affect either of
-        // the two production/experiment calls that already completed.
-        await logMomentumSelectionExperiment(env, coin, horizon).catch(err => console.error(`Momentum experiment ${coin}/${horizon}h failed:`, err));
       };
 
       // The six prediction/selection tasks still run concurrently with each

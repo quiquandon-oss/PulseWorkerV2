@@ -83,12 +83,18 @@ describe('refreshDailyReportCache — recomputes and upserts', () => {
 });
 
 describe('regression: the cron dispatch refreshes the cache after predictions settle', () => {
-  it('scheduled() calls refreshDailyReportCache, sequenced after Promise.allSettled(predictionTasks)', () => {
+  it('scheduled() calls refreshDailyReportCache, sequenced after runPredictionCronTick resolves', () => {
     // scheduled() is an object-method shorthand (`async scheduled(...) {`),
     // not `async function scheduled(...)` -- extractFunctions can't find
     // it, so this reads the raw source directly for this one structural check.
+    // Updated 2026-09-02: the old single Promise.allSettled(predictionTasks)
+    // across all 6 chains was replaced by runPredictionCronTick (3
+    // sequential batches of 2, to fix the LINK/ETH selection starvation --
+    // see that function's own comment). refreshDailyReportCache still runs
+    // once, after everything settles, exactly as before -- only what it's
+    // chained onto changed name/shape.
     const src = readFileSync(new URL('../worker.js', import.meta.url), 'utf8');
-    expect(src).toMatch(/Promise\.allSettled\(predictionTasks\)\.then\(/);
+    expect(src).toMatch(/runPredictionCronTick\(env\)\.then\(/);
     expect(src).toMatch(/refreshDailyReportCache\(env\)/);
   });
 });

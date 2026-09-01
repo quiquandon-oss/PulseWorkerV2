@@ -204,11 +204,15 @@ describe('regression: runPrediction/runLinkPrediction/runEthPrediction/runChalle
 });
 
 describe('regression: the cron dispatch explicitly passes allowWrite:true, the only place that does', () => {
-  it('predictThenSelect passes { allowWrite: true } to whichever predict function it calls', () => {
+  it('runCoinHorizonChain passes { allowWrite: true } to whichever predict function it calls', () => {
+    // Renamed from the old inline `predictThenSelect` closure to the
+    // top-level runCoinHorizonChain as part of the 2026-09-02 batched-
+    // sequential redesign (fixing the LINK/ETH selection starvation) --
+    // the allowWrite:true contract itself is unchanged.
     const src = readFileSync(new URL('../worker.js', import.meta.url), 'utf8');
-    const idx = src.indexOf('const predictThenSelect');
+    const idx = src.indexOf('async function runCoinHorizonChain');
     expect(idx).toBeGreaterThan(-1);
-    const nearby = src.slice(idx, idx + 300);
+    const nearby = src.slice(idx, idx + 600);
     expect(nearby).toContain('predictFn(env, horizon, { allowWrite: true })');
   });
 

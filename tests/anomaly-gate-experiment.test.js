@@ -56,6 +56,15 @@ describe('decideSelectionSoftened — pure function, correctness', () => {
 });
 
 describe('logAnomalyGateExperiment — activation gating and no production interference', () => {
+  // Table each field belongs to, matching the real SELECTION_VARIANTS
+  // registry -- the mock needs this to answer the batched per-table
+  // scoring query (fetchVariantRowsByTable) with a single combined row
+  // set per table, the same way the real query would.
+  const FIELD_TABLE = {
+    p_up: 'predictions', p_up_experimental: 'predictions', calibrated_p_up: 'predictions',
+    p_up_flat: 'challenger_predictions', p_up_tilted: 'challenger_predictions', calibrated_p_up_flat: 'challenger_predictions',
+  };
+
   function makeFakeDb({ coreRows, historyRows = [], variantCounts = {}, variantRowsByKey = {} }) {
     const writes = { selection_decisions: 0, selection_decisions_anomaly: 0 };
     return {
@@ -67,21 +76,47 @@ describe('logAnomalyGateExperiment — activation gating and no production inter
                 if (/FROM (predictions|link_predictions|eth_predictions) WHERE horizon_hours=\? ORDER BY ts DESC LIMIT 1/.test(sql)) {
                   return coreRows[0] || null;
                 }
+                // Batched eligibility query (fetchEligibilityCounts): one
+                // subquery per variant, aliased n0, n1, ... in registry
+                // order. Same semantics as the old per-variant COUNT
+                // loop this replaced, just answered in one call.
+                if (sql.startsWith('SELECT (SELECT COUNT(*)')) {
+                  const row = {};
+                  const re = /\(SELECT COUNT\(\*\) FROM (\w+) WHERE (?:coin = \? AND )?horizon_hours=\? AND realized_up IS NOT NULL AND (\w+) IS NOT NULL\) as (n\d+)/g;
+                  let m;
+                  while ((m = re.exec(sql))) {
+                    const [, table, field, alias] = m;
+                    row[alias] = variantCounts[`${table}:${field}`] ?? 0;
+                  }
+                  return row;
+                }
                 return null;
               },
               all: async () => {
-                if (sql.includes('SELECT COUNT(*) as n FROM')) {
-                  const tableMatch = sql.match(/FROM (\w+)/);
-                  const fieldMatch = sql.match(/AND (\w+) IS NOT NULL$/);
-                  const key = `${tableMatch[1]}:${fieldMatch[1]}`;
-                  return { results: [{ n: variantCounts[key] ?? 0 }] };
-                }
                 if (sql.includes('ts < ?') && sql.includes('ORDER BY ts DESC LIMIT 300')) {
                   return { results: historyRows };
                 }
-                if (/SELECT ts, \w+ as p_up, realized_up FROM/.test(sql)) {
-                  const fieldMatch = sql.match(/SELECT ts, (\w+) as p_up/);
-                  return { results: variantRowsByKey[fieldMatch[1]] || [] };
+                // Batched per-table scoring query (fetchVariantRowsByTable):
+                // one query per table among the eligible variants, selecting
+                // every field that table's variants need. Zips the
+                // per-field fixture arrays back together by index -- every
+                // caller in this file supplies same-length, same-order
+                // arrays per field, so this is a faithful reconstruction of
+                // what one real combined row set would look like.
+                for (const table of ['predictions', 'challenger_predictions']) {
+                  if (sql.includes(`FROM ${table} WHERE`) && sql.includes('realized_up IS NOT NULL ORDER BY ts ASC')) {
+                    const fieldsForTable = Object.keys(FIELD_TABLE).filter(f => FIELD_TABLE[f] === table);
+                    const base = fieldsForTable.map(f => variantRowsByKey[f]).find(arr => arr && arr.length) || [];
+                    const results = base.map((baseRow, i) => {
+                      const row = { ts: baseRow.ts, realized_up: baseRow.realized_up };
+                      for (const f of fieldsForTable) {
+                        const arr = variantRowsByKey[f];
+                        if (arr && arr[i]) row[f] = arr[i].p_up;
+                      }
+                      return row;
+                    });
+                    return { results };
+                  }
                 }
                 return { results: [] };
               },
@@ -101,7 +136,7 @@ describe('logAnomalyGateExperiment — activation gating and no production inter
   let source;
   beforeAll(() => {
     source = extractFunctions(
-      'logAnomalyGateExperiment', 'decideSelectionSoftened', 'computeLcaScore', 'coreTableForCoin', 'nearestRow'
+      'logAnomalyGateExperiment', 'decideSelectionSoftened', 'computeLcaScore', 'coreTableForCoin', 'nearestRow', 'fetchEligibilityCounts', 'fetchVariantRowsByTable'
     ) + '\n\n' + extractConstants(
       'SELECTION_VARIANTS', 'SELECTION_MIN_HISTORY', 'SELECTION_MIN_MATCHED', 'SELECTION_CRITICAL_Z', 'ANOMALY_GATE_MARGIN_FACTOR'
     );
@@ -174,16 +209,31 @@ describe('logAnomalyGateExperiment — activation gating and no production inter
 });
 
 describe('cron dispatch wiring', () => {
-  it('predictThenSelect calls logAnomalyGateExperiment independently-caught, after and separate from the untouched selectBestVariant call', () => {
+  it('the 3h tick no longer calls logAnomalyGateExperiment or logMomentumSelectionExperiment -- only the untouched selectBestVariant call remains on the hot path', () => {
     const src = readFileSync(new URL('../worker.js', import.meta.url), 'utf8');
     const idx = src.indexOf('const predictThenSelect');
     expect(idx).toBeGreaterThan(-1);
     const block = src.slice(idx, idx + 700);
     expect(block).toContain('await selectBestVariant(env, coin, horizon).catch(err => console.error(`Selection ${coin}/${horizon}h failed:`, err));');
-    expect(block).toContain('await logAnomalyGateExperiment(env, coin, horizon).catch(err => console.error(`Anomaly-gate experiment ${coin}/${horizon}h failed:`, err));');
     // selectBestVariant's own call line is character-for-character what
     // it was before this experiment existed -- not just "still present",
     // but unchanged in exact form.
+    expect(block).not.toContain('logAnomalyGateExperiment');
+    expect(block).not.toContain('logMomentumSelectionExperiment');
+  });
+
+  it('logAnomalyGateExperiment and logMomentumSelectionExperiment are instead called from the daily (0 7 * * *) cron branch, looped over all coins/horizons, independently caught exactly as before', () => {
+    const src = readFileSync(new URL('../worker.js', import.meta.url), 'utf8');
+    const dailyIdx = src.indexOf("event.cron === '0 7 * * *'");
+    const tickIdx = src.indexOf('const predictThenSelect');
+    expect(dailyIdx).toBeGreaterThan(-1);
+    expect(tickIdx).toBeGreaterThan(dailyIdx); // daily branch really does come first in the file
+    const dailyBlock = src.slice(dailyIdx, tickIdx);
+    expect(dailyBlock).toContain("ctx.waitUntil(logAnomalyGateExperiment(env, coin, h).catch(err => console.error(`Anomaly-gate experiment ${coin}/${h}h failed:`, err)));");
+    expect(dailyBlock).toContain("ctx.waitUntil(logMomentumSelectionExperiment(env, coin, h).catch(err => console.error(`Momentum experiment ${coin}/${h}h failed:`, err)));");
+    // Same coins/horizons loop the existing calibration refreshes already use.
+    expect(dailyBlock).toContain("for (const coin of ['BTC', 'LINK', 'ETH']) {");
+    expect(dailyBlock).toContain('for (const h of [12, 24]) {');
   });
 });
 

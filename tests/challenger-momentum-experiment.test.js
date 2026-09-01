@@ -112,7 +112,7 @@ describe('CORRECTION (post-audit): SELECTION_VARIANTS reverted -- challenger_mom
 
 describe('PROOF: selectBestVariant can never see, score, or choose challenger_momentum', () => {
   it('the eligibility loop never queries challenger_predictions.p_up_momentum at all -- it is simply not in the registry it iterates', async () => {
-    const source = extractFunctions('selectBestVariant', 'decideSelection', 'computeLcaScore', 'coreTableForCoin') + '\n\n' +
+    const source = extractFunctions('selectBestVariant', 'decideSelection', 'computeLcaScore', 'coreTableForCoin', 'fetchEligibilityCounts', 'fetchVariantRowsByTable') + '\n\n' +
       extractConstants('SELECTION_VARIANTS', 'SELECTION_MIN_HISTORY', 'SELECTION_MIN_MATCHED', 'SELECTION_CRITICAL_Z');
     const counts = {
       'predictions:p_up': 100, 'predictions:p_up_experimental': 100, 'predictions:calibrated_p_up': 100,
@@ -124,17 +124,26 @@ describe('PROOF: selectBestVariant can never see, score, or choose challenger_mo
       prepare(sql) {
         return {
           bind: (...args) => ({
-            first: async () => null,
-            all: async () => {
-              if (sql.includes('SELECT COUNT(*) as n FROM')) {
-                const table = sql.match(/FROM (\w+)/)[1];
-                const field = sql.match(/AND (\w+) IS NOT NULL$/)[1];
+            first: async () => {
+              // Batched eligibility query (fetchEligibilityCounts): one
+              // subquery per variant, named n0, n1, ... in the same order
+              // as the registry it was built from. Parse each subquery
+              // out to record which (table, field) pairs were actually
+              // checked -- same proof as before, just adapted to the
+              // batched query's shape instead of one call per variant.
+              const subqueryRe = /\(SELECT COUNT\(\*\) FROM (\w+) WHERE (?:coin = \? AND )?horizon_hours=\? AND realized_up IS NOT NULL AND (\w+) IS NOT NULL\) as (n\d+)/g;
+              const row = {};
+              let m;
+              while ((m = subqueryRe.exec(sql))) {
+                const [, table, field, alias] = m;
                 const key = `${table}:${field}`;
                 eligibleChecked.push(key);
-                return { results: [{ n: counts[key] ?? 0 }] };
+                row[alias] = counts[key] ?? 0;
               }
-              return { results: [] };
+              if (Object.keys(row).length) return row;
+              return null;
             },
+            all: async () => ({ results: [] }),
           }),
         };
       },
@@ -195,7 +204,7 @@ describe('MOMENTUM_EXPERIMENT_VARIANT / logMomentumSelectionExperiment — paral
   });
 
   it('behaviorally: scores all 7 (6 production + momentum), logs momentum\'s LCA/rank, and reads (not recomputes) the latest production decision for comparison', async () => {
-    const source = extractFunctions('logMomentumSelectionExperiment', 'computeLcaScore', 'coreTableForCoin', 'nearestRow') + '\n\n' +
+    const source = extractFunctions('logMomentumSelectionExperiment', 'computeLcaScore', 'coreTableForCoin', 'nearestRow', 'fetchEligibilityCounts', 'fetchVariantRowsByTable') + '\n\n' +
       extractConstants('SELECTION_VARIANTS', 'MOMENTUM_EXPERIMENT_VARIANT', 'SELECTION_MIN_HISTORY', 'SELECTION_MIN_MATCHED');
     const scope = evalInScope(source);
 
@@ -203,14 +212,19 @@ describe('MOMENTUM_EXPERIMENT_VARIANT / logMomentumSelectionExperiment — paral
     const history = Array.from({ length: 20 }, (_, i) => ({
       ts: now - (20 - i) * 3600000, features_json: JSON.stringify({ f: i }), realized_up: i % 2,
     }));
-    const variantRows = (pUp) => history.map(h => ({ ts: h.ts, p_up: pUp, realized_up: h.realized_up }));
-
     let inserted = null;
     const db = {
       prepare(sql) {
         return {
           bind: (...args) => ({
             first: async () => {
+              // Batched eligibility query (fetchEligibilityCounts) -- all
+              // 7 variants (6 production + momentum) eligible.
+              if (sql.startsWith('SELECT (SELECT COUNT(*)')) {
+                const row = {};
+                for (const m of sql.matchAll(/as (n\d+)/g)) row[m[1]] = 100;
+                return row;
+              }
               if (sql.includes('FROM predictions WHERE') && sql.includes('ORDER BY ts DESC LIMIT 1') && !sql.includes('selection_decisions')) {
                 return { ts: now, features_json: JSON.stringify({ f: 0 }) };
               }
@@ -220,9 +234,19 @@ describe('MOMENTUM_EXPERIMENT_VARIANT / logMomentumSelectionExperiment — paral
               return null;
             },
             all: async () => {
-              if (sql.includes('SELECT COUNT(*) as n FROM')) return { results: [{ n: 100 }] };
               if (sql.includes('FROM predictions WHERE') && sql.includes('LIMIT 300')) return { results: history };
-              if (sql.includes('SELECT ts, ')) return { results: variantRows(0.7) };
+              // Batched scoring query (fetchVariantRowsByTable) -- one
+              // query per (table, coinFilter) group. Return rows carrying
+              // EVERY field that group's variants read, matching what a
+              // real combined SELECT list would return, so each variant's
+              // own row.filter(r => r[v.field] != null) step in
+              // fetchVariantRowsByTable actually finds its field.
+              if (sql.includes('FROM predictions WHERE') && sql.includes('realized_up IS NOT NULL ORDER BY ts ASC')) {
+                return { results: history.map(h => ({ ts: h.ts, p_up: 0.7, p_up_experimental: 0.7, calibrated_p_up: 0.7, realized_up: h.realized_up })) };
+              }
+              if (sql.includes('FROM challenger_predictions WHERE') && sql.includes('realized_up IS NOT NULL ORDER BY ts ASC')) {
+                return { results: history.map(h => ({ ts: h.ts, p_up_flat: 0.7, p_up_tilted: 0.7, calibrated_p_up_flat: 0.7, p_up_momentum: 0.7, realized_up: h.realized_up })) };
+              }
               return { results: [] };
             },
             run: async () => { inserted = args; return {}; },

@@ -172,11 +172,11 @@ describe('REQUIRED AUDIT PROOF: a theft on one coin cannot affect the others', (
 });
 
 describe('REQUIRED AUDIT PROOF: cron writes remain unconditional and unchanged', () => {
-  it('predictThenSelect (the cron dispatch) still passes { allowWrite: true } -- unchanged by this redesign', () => {
+  it('runCoinHorizonChain (the cron dispatch, renamed 2026-09-02 from predictThenSelect as part of the batched-sequential redesign) still passes { allowWrite: true } -- unchanged by this redesign', () => {
     const src = readFileSync(new URL('../worker.js', import.meta.url), 'utf8');
-    const idx = src.indexOf('const predictThenSelect');
+    const idx = src.indexOf('async function runCoinHorizonChain');
     expect(idx).toBeGreaterThan(-1);
-    expect(src.slice(idx, idx + 300)).toContain('predictFn(env, horizon, { allowWrite: true })');
+    expect(src.slice(idx, idx + 600)).toContain('predictFn(env, horizon, { allowWrite: true })');
   });
 
   it('resolveWriteAuthorization returns claimToken:null unconditionally for allowWrite:true, before any D1 call', async () => {

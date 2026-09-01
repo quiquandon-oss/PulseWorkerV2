@@ -5491,6 +5491,131 @@ async function getLinkGeminiHistory(env, limit) {
   return { ok: true, analyses: results };
 }
 
+// =====================================================================
+// ---- Concurrency batching + observability, added to fix the LINK/ETH
+// selection starvation (2026-09-02) ----
+//
+// Investigation established: selectBestVariant's own logic is correct
+// (reproduced successfully end-to-end against real LINK production
+// data, produced a valid decision, threw nothing); no shared JS-level
+// mutable state, locks, or mutexes exist anywhere in this file; the
+// backfill-backlog-size theory is disproven by real data (BTC=0,
+// LINK=1-2, ETH=1 unresolved-but-due rows -- trivial and symmetric).
+// The leading (evidence-supported, not log-confirmed -- no Cloudflare
+// invocation telemetry is available to this investigation) explanation
+// is a shared, per-invocation Cloudflare resource -- most likely D1
+// subrequest count -- still being contended by all 6 coin/horizon
+// chains running fully concurrently in one scheduled() invocation, even
+// after PR #28's query-count reduction, with BTC (declared first in the
+// old single array) more often completing within budget than LINK/ETH
+// (declared later).
+//
+// Fix: run the 6 chains in 3 batches of 2 (each coin's own two
+// horizons), awaited SEQUENTIALLY -- each batch fully settles (via
+// Promise.allSettled) before the next batch starts, so at most 2 chains
+// ever compete for shared per-invocation budget at once instead of 6.
+// This changes ONLY scheduling/concurrency. Every call, argument, and
+// decision path is identical to before: same predictAndLog /
+// linkPredictAndLog / ethPredictAndLog / selectBestVariant calls, same
+// {allowWrite:true}, same order within each coin (24h then 12h). No
+// prediction math, no selectBestVariant logic, no eligibility or
+// significance thresholds, no D1 schema, and Challenger is not
+// disabled or bypassed -- runChallengerPrediction still runs exactly as
+// it does today, inside predictAndLog/linkPredictAndLog/ethPredictAndLog,
+// untouched.
+//
+// Observability is structured console.log/console.error, deliberately
+// NOT D1 -- so the instrumentation itself can never add to the resource
+// pressure it exists to help diagnose. Cloudflare Workers captures
+// console output natively (via `wrangler tail` or the dashboard's Logs
+// tab) with no extra subrequest cost. Three lines per chain (start,
+// prediction+Challenger result, selection result) -- roughly 18 lines
+// per 3h tick, ~144/day system-wide, not a high-volume logging system.
+// =====================================================================
+
+// One coin/horizon's full predict -> Challenger -> select sequence.
+// Behaviorally identical to the inline closure this replaces (same
+// predictFn call with the same arguments, same selectBestVariant call
+// immediately after) -- the only additions are the structured log lines
+// and catching selectBestVariant's own error here instead of via a
+// trailing .catch() at the call site (same effect, colocated with the
+// rest of this chain's logging). Never rejects -- a failure in either
+// phase is caught, logged, and swallowed here, same "isolate this
+// chain's failure" contract the old code had via its own .catch() calls.
+async function runCoinHorizonChain(env, predictFn, coin, horizon) {
+  const chainStart = Date.now();
+  console.log(JSON.stringify({ evt: 'chain_start', coin, horizon, ts: chainStart }));
+
+  let predictResult = null;
+  try {
+    predictResult = await predictFn(env, horizon, { allowWrite: true });
+    const challenger = predictResult && predictResult.challenger;
+    console.log(JSON.stringify({
+      evt: 'prediction_done', coin, horizon,
+      prediction_status: predictResult ? predictResult.status : null,
+      challenger_ok: challenger ? !!challenger.ok : null,
+      challenger_status: challenger ? (challenger.status || challenger.error || null) : null,
+      elapsed_ms: Date.now() - chainStart,
+    }));
+  } catch (e) {
+    console.error(JSON.stringify({
+      evt: 'prediction_failed', coin, horizon,
+      error_type: e && e.name, error_message: e && e.message,
+      elapsed_ms: Date.now() - chainStart,
+    }));
+    return; // matches the old code's isolation contract: this chain's
+    // failure must never propagate to its batch-mates or later batches.
+  }
+
+  const selectionStart = Date.now();
+  console.log(JSON.stringify({ evt: 'selection_start', coin, horizon, ts: selectionStart }));
+  try {
+    const selectionResult = await selectBestVariant(env, coin, horizon);
+    console.log(JSON.stringify({
+      evt: 'selection_done', coin, horizon,
+      selection_status: selectionResult ? selectionResult.status : null,
+      chosen_variant: selectionResult ? selectionResult.chosen_variant : null,
+      elapsed_ms: Date.now() - selectionStart, total_elapsed_ms: Date.now() - chainStart,
+    }));
+  } catch (e) {
+    console.error(JSON.stringify({
+      evt: 'selection_failed', coin, horizon,
+      error_type: e && e.name, error_message: e && e.message,
+      elapsed_ms: Date.now() - selectionStart, total_elapsed_ms: Date.now() - chainStart,
+    }));
+  }
+}
+
+// Runs one batch (a coin's two horizons) concurrently with each other,
+// fully settling before returning. Promise.allSettled kept for the same
+// defense-in-depth reason the old single 6-way dispatch used it:
+// runCoinHorizonChain never rejects by construction, but this stays
+// correct even if a future edit removes one of its internal try/catch
+// blocks and a chain genuinely rejects.
+async function runCoinBatch(env, chains) {
+  const tasks = chains.map(({ predictFn, coin, horizon }) => runCoinHorizonChain(env, predictFn, coin, horizon));
+  await Promise.allSettled(tasks);
+}
+
+// Full 3h-tick prediction cycle: 3 sequential batches -- BTC, then LINK,
+// then ETH (same coin order the old single 6-way array used), each
+// batch's 2 horizons concurrent with each other but never with another
+// coin's batch. This is the fix for the LINK/ETH selection starvation:
+// bounds peak per-invocation concurrent chains to 2 instead of 6.
+// Extracted as a named top-level function (rather than staying inline
+// in scheduled()) so it's independently testable and scheduled() stays
+// a thin dispatcher.
+async function runPredictionCronTick(env) {
+  const batches = [
+    [{ predictFn: predictAndLog, coin: 'BTC', horizon: 24 }, { predictFn: predictAndLog, coin: 'BTC', horizon: 12 }],
+    [{ predictFn: linkPredictAndLog, coin: 'LINK', horizon: 24 }, { predictFn: linkPredictAndLog, coin: 'LINK', horizon: 12 }],
+    [{ predictFn: ethPredictAndLog, coin: 'ETH', horizon: 24 }, { predictFn: ethPredictAndLog, coin: 'ETH', horizon: 12 }],
+  ];
+  for (const batch of batches) {
+    await runCoinBatch(env, batch);
+  }
+}
+
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
@@ -6173,7 +6298,8 @@ export default {
           // production decision, so daily freshness is enough; moving
           // them here removes 2 of those 3 passes from the contended 3h
           // tick entirely, on top of the query-batching in
-          // fetchEligibilityCounts/fetchVariantRowsByTable below.
+          // fetchEligibilityCounts/fetchVariantRowsByTable, and now the
+          // batched-sequential dispatch in runPredictionCronTick below.
           // Independently caught exactly as before -- a failure here has
           // never been able to affect production selection and still
           // can't.
@@ -6182,45 +6308,11 @@ export default {
         }
       }
     } else {
-      // Both horizons, both coins, every 3h tick. logBtcData/logLinkData and
-      // the backfill steps inside predictAndLog/linkPredictAndLog are
-      // horizon-agnostic and safely re-run each call (idempotent — just an
-      // extra D1 read at our tiny data scale, not worth avoiding).
-      //
-      // Each coin/horizon's predict-then-select is sequenced explicitly
-      // (await, not two independent waitUntil calls) — selectBestVariant
-      // reads the LATEST prediction's features_json, so it must run after
-      // that specific prediction exists, not race it. Different coin/
-      // horizon pairs still run concurrently with each other, just not with
-      // themselves.
-      //
-      // Experiments 2 and 3 (logAnomalyGateExperiment /
-      // logMomentumSelectionExperiment) no longer run here -- see the daily
-      // (0 7 * * *) branch above for why and where they moved. This branch
-      // now only runs what's actually production-timeliness-sensitive:
-      // core+Challenger prediction generation and the real selection call.
-      const predictThenSelect = async (predictFn, coin, horizon) => {
-        await predictFn(env, horizon, { allowWrite: true });
-        await selectBestVariant(env, coin, horizon).catch(err => console.error(`Selection ${coin}/${horizon}h failed:`, err));
-      };
-
-      // The six prediction/selection tasks still run concurrently with each
-      // other (unchanged). The ordering wrapper that used to sequence a
-      // Gemini evaluation after all six had settled was removed along with
-      // that evaluation step -- see the comment above the Analyst Relay
-      // section for why. Promise.allSettled (not Promise.all) kept
-      // deliberately: each task already wraps its own .catch(), so none of
-      // these reject, but this stays correct even if a future edit removes
-      // one of those inner .catch() calls and a task genuinely rejects.
-      const predictionTasks = [
-        predictThenSelect(predictAndLog, 'BTC', 24).catch(err => console.error('BTC 24h predict-and-log failed:', err)),
-        predictThenSelect(predictAndLog, 'BTC', 12).catch(err => console.error('BTC 12h predict-and-log failed:', err)),
-        predictThenSelect(linkPredictAndLog, 'LINK', 24).catch(err => console.error('LINK 24h predict-and-log failed:', err)),
-        predictThenSelect(linkPredictAndLog, 'LINK', 12).catch(err => console.error('LINK 12h predict-and-log failed:', err)),
-        predictThenSelect(ethPredictAndLog, 'ETH', 24).catch(err => console.error('ETH 24h predict-and-log failed:', err)),
-        predictThenSelect(ethPredictAndLog, 'ETH', 12).catch(err => console.error('ETH 12h predict-and-log failed:', err)),
-      ];
-      ctx.waitUntil(Promise.allSettled(predictionTasks).then(
+      // See runPredictionCronTick's own comment for the full 3h-tick
+      // dispatch design (batched-sequential, replacing the previous
+      // fully-concurrent 6-way dispatch to fix the LINK/ETH selection
+      // starvation -- see chat history 2026-09-02 for the investigation).
+      ctx.waitUntil(runPredictionCronTick(env).then(
         () => refreshDailyReportCache(env).catch(err => console.error('Daily report cache refresh failed:', err))
       ));
     }

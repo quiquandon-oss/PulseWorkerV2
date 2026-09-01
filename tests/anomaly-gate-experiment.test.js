@@ -209,26 +209,27 @@ describe('logAnomalyGateExperiment — activation gating and no production inter
 });
 
 describe('cron dispatch wiring', () => {
-  it('the 3h tick no longer calls logAnomalyGateExperiment or logMomentumSelectionExperiment -- only the untouched selectBestVariant call remains on the hot path', () => {
-    const src = readFileSync(new URL('../worker.js', import.meta.url), 'utf8');
-    const idx = src.indexOf('const predictThenSelect');
-    expect(idx).toBeGreaterThan(-1);
-    const block = src.slice(idx, idx + 700);
-    expect(block).toContain('await selectBestVariant(env, coin, horizon).catch(err => console.error(`Selection ${coin}/${horizon}h failed:`, err));');
-    // selectBestVariant's own call line is character-for-character what
-    // it was before this experiment existed -- not just "still present",
-    // but unchanged in exact form.
-    expect(block).not.toContain('logAnomalyGateExperiment');
-    expect(block).not.toContain('logMomentumSelectionExperiment');
+  it('the 3h tick (runCoinHorizonChain) no longer calls logAnomalyGateExperiment or logMomentumSelectionExperiment -- only the untouched selectBestVariant call remains on the hot path', () => {
+    // Renamed from the old inline `predictThenSelect` closure to the
+    // top-level runCoinHorizonChain as part of the 2026-09-02 batched-
+    // sequential redesign (fixing the LINK/ETH selection starvation).
+    const src = extractFunctions('runCoinHorizonChain');
+    expect(src).toContain('await selectBestVariant(env, coin, horizon)');
+    expect(src).not.toContain('logAnomalyGateExperiment');
+    expect(src).not.toContain('logMomentumSelectionExperiment');
   });
 
-  it('logAnomalyGateExperiment and logMomentumSelectionExperiment are instead called from the daily (0 7 * * *) cron branch, looped over all coins/horizons, independently caught exactly as before', () => {
+  it('logAnomalyGateExperiment and logMomentumSelectionExperiment are called from the daily (0 7 * * *) cron branch, looped over all coins/horizons, independently caught exactly as before', () => {
     const src = readFileSync(new URL('../worker.js', import.meta.url), 'utf8');
     const dailyIdx = src.indexOf("event.cron === '0 7 * * *'");
-    const tickIdx = src.indexOf('const predictThenSelect');
     expect(dailyIdx).toBeGreaterThan(-1);
-    expect(tickIdx).toBeGreaterThan(dailyIdx); // daily branch really does come first in the file
-    const dailyBlock = src.slice(dailyIdx, tickIdx);
+    // Bounded by the matching `} else {` that closes this if-branch,
+    // rather than by runCoinHorizonChain's position in the file -- that
+    // function is now defined earlier in the file (before export default),
+    // so it's no longer a valid "end of daily branch" marker.
+    const elseIdx = src.indexOf('} else {', dailyIdx);
+    expect(elseIdx).toBeGreaterThan(dailyIdx);
+    const dailyBlock = src.slice(dailyIdx, elseIdx);
     expect(dailyBlock).toContain("ctx.waitUntil(logAnomalyGateExperiment(env, coin, h).catch(err => console.error(`Anomaly-gate experiment ${coin}/${h}h failed:`, err)));");
     expect(dailyBlock).toContain("ctx.waitUntil(logMomentumSelectionExperiment(env, coin, h).catch(err => console.error(`Momentum experiment ${coin}/${h}h failed:`, err)));");
     // Same coins/horizons loop the existing calibration refreshes already use.

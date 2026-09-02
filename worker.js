@@ -5592,9 +5592,36 @@ async function runCoinHorizonChain(env, predictFn, coin, horizon) {
 // runCoinHorizonChain never rejects by construction, but this stays
 // correct even if a future edit removes one of its internal try/catch
 // blocks and a chain genuinely rejects.
+//
+// Diagnostic-only timing instrumentation added 2026-09-02, per the
+// forensic investigation into the observed BTC=complete / LINK=partial /
+// ETH=none pattern across sequential batches. Captures Promise.allSettled's
+// own return value (previously discarded) purely to log it -- the
+// Promise.allSettled call itself, its semantics, and runCoinHorizonChain
+// are all unchanged. One compact log line per batch (not per chain) --
+// coin is shared across the batch's chains, horizon/status/error are
+// per-chain within the single log line. This is read-only observability:
+// no timeout, no retry, no circuit breaker, no change to what runs or
+// how failures are handled -- purely measuring what already happens, to
+// convert the still-unproven "cumulative resource exhaustion across
+// sequential batches" hypothesis into evidence one way or the other.
 async function runCoinBatch(env, chains) {
+  const batchStart = Date.now();
   const tasks = chains.map(({ predictFn, coin, horizon }) => runCoinHorizonChain(env, predictFn, coin, horizon));
-  await Promise.allSettled(tasks);
+  const settled = await Promise.allSettled(tasks);
+  const batchEnd = Date.now();
+  console.log(JSON.stringify({
+    evt: 'batch_complete',
+    coin: chains.length ? chains[0].coin : null,
+    batch_start: batchStart,
+    batch_end: batchEnd,
+    elapsed_ms: batchEnd - batchStart,
+    chains: chains.map((c, i) => ({
+      horizon: c.horizon,
+      status: settled[i].status,
+      error: settled[i].status === 'rejected' ? String(settled[i].reason) : null,
+    })),
+  }));
 }
 
 // Full 3h-tick prediction cycle: 3 sequential batches -- BTC, then LINK,

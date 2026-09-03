@@ -1457,6 +1457,14 @@ async function logAnomalyGateExperiment(env, coin, horizonHours) {
 // logAnomalyGateExperiment) can ever see or select it.
 const MOMENTUM_EXPERIMENT_VARIANT = { key: 'challenger_momentum', table: 'challenger_predictions', field: 'p_up_momentum', coinFilter: true };
 
+// Scope change (2026-09-02): ETH removed from Experiment 3 specifically.
+// Production predictions, Challenger predictions, SELECTION_VARIANTS,
+// selection_decisions, normal learning/selection, and the production
+// cron are completely unaffected for ETH -- this constant only gates
+// entry into the research-only momentum comparison below. BTC and LINK
+// are unchanged.
+const MOMENTUM_EXPERIMENT_COINS = ['BTC', 'LINK'];
+
 // Never calls selectBestVariant or decideSelection, never writes to
 // selection_decisions or selection_decisions_anomaly -- its only write
 // target is the new, separate selection_decisions_momentum table. Any
@@ -1464,6 +1472,14 @@ const MOMENTUM_EXPERIMENT_VARIANT = { key: 'challenger_momentum', table: 'challe
 // production predict/select cycle, same resilience contract as
 // Experiment 2.
 async function logMomentumSelectionExperiment(env, coin, horizonHours) {
+  // Guard is the very first thing this function does -- ETH returns
+  // before any D1 query, computation, ranking, or write, for any
+  // horizon. This is the sole change implementing the Experiment 3
+  // scope reduction; nothing else in this function is touched.
+  if (!MOMENTUM_EXPERIMENT_COINS.includes(coin)) {
+    return { ok: true, status: 'coin_not_in_experiment', logged: false };
+  }
+
   const productionVariants = SELECTION_VARIANTS[coin];
   if (!productionVariants) return { ok: false, error: 'unknown coin' };
   const coreTable = coreTableForCoin(coin);

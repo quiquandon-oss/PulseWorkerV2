@@ -205,7 +205,7 @@ describe('MOMENTUM_EXPERIMENT_VARIANT / logMomentumSelectionExperiment — paral
 
   it('behaviorally: scores all 7 (6 production + momentum), logs momentum\'s LCA/rank, and reads (not recomputes) the latest production decision for comparison', async () => {
     const source = extractFunctions('logMomentumSelectionExperiment', 'computeLcaScore', 'coreTableForCoin', 'nearestRow', 'fetchEligibilityCounts', 'fetchVariantRowsByTable') + '\n\n' +
-      extractConstants('SELECTION_VARIANTS', 'MOMENTUM_EXPERIMENT_VARIANT', 'SELECTION_MIN_HISTORY', 'SELECTION_MIN_MATCHED');
+      extractConstants('SELECTION_VARIANTS', 'MOMENTUM_EXPERIMENT_VARIANT', 'MOMENTUM_EXPERIMENT_COINS', 'SELECTION_MIN_HISTORY', 'SELECTION_MIN_MATCHED');
     const scope = evalInScope(source);
 
     const now = Date.now();

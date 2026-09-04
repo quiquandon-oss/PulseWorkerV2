@@ -5078,6 +5078,22 @@ const LINK_MIN_COMPLETE_ROWS = 30;
 const LINK_MIN_RESOLVED_ANALOGS = 5;
 
 async function runLinkPrediction(env, horizonHours = 24, { persist = true, claimToken = null } = {}) {
+  // Diagnostic-only timing checkpoints, added 2026-09-04 per the
+  // execution-boundary investigation into LINK's core-prediction stall
+  // (production evidence established: LINK's price-log write succeeds
+  // regularly while link_predictions INSERT does not follow; code
+  // comparison against BTC's structurally-identical, currently-working
+  // runPrediction found no LINK-specific defect; a history-table-size
+  // correlation check came back negative, ruling out that specific
+  // CPU-cost theory). No payloads, no D1 writes, no behavior change --
+  // just a coin/horizon tag, a checkpoint name, and elapsed ms since
+  // this function started. Purpose: determine whether LINK's execution
+  // actually reaches this function at all, and if so, exactly how far
+  // it gets before whatever is happening happens.
+  const __coreStart = Date.now();
+  const __checkpoint = (name) => console.log(JSON.stringify({ evt: name, coin: 'LINK', horizon: horizonHours, elapsed_ms: Date.now() - __coreStart }));
+  __checkpoint('LINK_CORE_START');
+
   const lagMs = horizonHours * 60 * 60 * 1000;
   const tolMs = lagMs * 0.2;
   const { results: linkRows } = await env.DB.prepare(
@@ -5086,6 +5102,7 @@ async function runLinkPrediction(env, horizonHours = 24, { persist = true, claim
   if (linkRows.length < LINK_MIN_COMPLETE_ROWS) {
     return { ok: true, status: 'insufficient_data', n_available: linkRows.length, min_required: LINK_MIN_COMPLETE_ROWS };
   }
+  __checkpoint('LINK_DATA_READ_DONE');
 
   // Borrow BTC's regime_mag and the shared sentiment composite via
   // nearest-time join — these aren't coin-specific, no reason to duplicate
@@ -5102,6 +5119,7 @@ async function runLinkPrediction(env, horizonHours = 24, { persist = true, claim
   const { results: btcHistory } = await env.DB.prepare(
     'SELECT ts, score, regime_mag FROM history WHERE regime_mag IS NOT NULL ORDER BY ts ASC'
   ).all();
+  __checkpoint('LINK_HISTORY_READ_DONE');
   const rawRows = [];
   const realRegimeVals = [], realSentimentVals = [];
   for (const r of linkRows) {
@@ -5124,6 +5142,7 @@ async function runLinkPrediction(env, horizonHours = 24, { persist = true, claim
   if (complete.length < LINK_MIN_COMPLETE_ROWS) {
     return { ok: true, status: 'insufficient_data', n_available: complete.length, min_required: LINK_MIN_COMPLETE_ROWS };
   }
+  __checkpoint('LINK_FEATURE_BUILD_DONE');
 
   const stats = {};
   for (const k of LINK_FEATURE_KEYS) stats[k] = meanStd(complete.map(r => r[k]));
@@ -5158,6 +5177,7 @@ async function runLinkPrediction(env, horizonHours = 24, { persist = true, claim
   if (resolved.length < LINK_MIN_RESOLVED_ANALOGS) {
     return { ok: true, status: 'insufficient_resolved_analogs', n_neighbors: neighbors.length, n_resolved: resolved.length, min_required: LINK_MIN_RESOLVED_ANALOGS };
   }
+  __checkpoint('LINK_KNN_DONE');
 
   const returns = resolved.map(r => r.return_pct).sort((a, b) => a - b);
   const nUp = returns.filter(r => r > 0).length;
@@ -5218,10 +5238,12 @@ async function runLinkPrediction(env, horizonHours = 24, { persist = true, claim
   });
   const closestDistPercentile = percentileRank(closestDist, historicalClosestDists);
   const isRegimeAnomaly = closestDistPercentile != null && closestDistPercentile >= 0.9;
+  __checkpoint('LINK_ANOMALY_CHECK_DONE');
 
   const trend = trendStrength(complete, 'link_price');
   const curveRows = await getLatestCalibrationCurve(env, 'LINK', horizonHours);
   const calibratedPUp = applyCalibratedProbability(pUp, curveRows);
+  __checkpoint('LINK_CALIBRATION_DONE');
 
   const nowTs = Date.now();
   const features = Object.fromEntries(LINK_FEATURE_KEYS.map(k => [k, today[k]]));
@@ -5256,6 +5278,7 @@ async function runLinkPrediction(env, horizonHours = 24, { persist = true, claim
     }
   }
 
+  __checkpoint('LINK_CORE_INSERT_DONE');
   const nImputedInNeighbors = neighbors.filter(n => n.row.context_imputed).length;
 
   return {

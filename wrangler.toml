@@ -36,3 +36,26 @@ database_id = "f91ca980-b886-423a-bd6f-f3baea46d181"
 # "daily" means once a day rather than drifting).
 [triggers]
 crons = ["0 */3 * * *", "0 7 * * *"]
+
+# Codifies what was already turned on directly via the dashboard
+# (2026-09-05), so it doesn't silently get reset on the next deploy —
+# Cloudflare's own dashboard shows a warning to that effect whenever the
+# committed config doesn't match a dashboard-set observability config.
+# Confirmed against Cloudflare's current docs (accessed same day) that
+# this exact shape (enabled/head_sampling_rate/invocation_logs/persist
+# nested under both `logs` and `traces` individually) is the current
+# schema. Purely diagnostic/config -- available on Workers Free (unlike
+# Tail Workers, which need Paid/Enterprise and are NOT what this is).
+# Traces stay disabled, matching what's already set -- this only locks
+# in Logs, which is what PR #34's LINK_* checkpoints need to actually
+# persist anywhere queryable.
+[observability.logs]
+enabled = true
+head_sampling_rate = 1
+invocation_logs = true
+persist = true
+
+[observability.traces]
+enabled = false
+head_sampling_rate = 1
+persist = true

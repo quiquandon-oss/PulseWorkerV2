@@ -5644,6 +5644,41 @@ async function runCoinHorizonChain(env, predictFn, coin, horizon) {
 // how failures are handled -- purely measuring what already happens, to
 // convert the still-unproven "cumulative resource exhaustion across
 // sequential batches" hypothesis into evidence one way or the other.
+// Per-coin batch definitions -- extracted unchanged from the previous
+// runPredictionCronTick's own `batches` array. Same predictFn, same
+// coin string, same two horizons, same order within each coin. Nothing
+// about WHAT runs or HOW it runs (still both horizons of one coin
+// concurrently via runCoinBatch) has changed; only WHEN each one runs
+// changes now (see scheduled() below).
+const BTC_BATCH = [{ predictFn: predictAndLog, coin: 'BTC', horizon: 24 }, { predictFn: predictAndLog, coin: 'BTC', horizon: 12 }];
+const LINK_BATCH = [{ predictFn: linkPredictAndLog, coin: 'LINK', horizon: 24 }, { predictFn: linkPredictAndLog, coin: 'LINK', horizon: 12 }];
+const ETH_BATCH = [{ predictFn: ethPredictAndLog, coin: 'ETH', horizon: 24 }, { predictFn: ethPredictAndLog, coin: 'ETH', horizon: 12 }];
+
+// Coin-isolation fix (2026-09-05): replaces runPredictionCronTick, which
+// ran BTC's, LINK's, and ETH's batches sequentially inside ONE
+// scheduled() invocation. Direct Cloudflare production evidence (Workers
+// Logs, 2026-09-05 12:00 UTC tick) showed that invocation terminated
+// with outcome=exceededCpu after 2010ms CPU / 6401ms wall time -- the
+// account's CPU-time budget for a single invocation was exhausted before
+// later-dispatched coins (LINK, then ETH) could reliably complete,
+// regardless of how batches within that one invocation were sequenced
+// or concurrency-limited (PR #30 already bounded peak concurrency to 2;
+// that reduced but could not eliminate the shared-invocation CPU budget
+// itself). The only way to give each coin its own, independent CPU
+// budget on Workers Free (no [limits] cpu_ms override exists, and
+// raising one requires Workers Paid) is to make each coin its own
+// scheduled() invocation entirely. See wrangler.toml's `crons` array:
+// BTC keeps the original "0 */3 * * *" (minute 0), LINK is
+// "1 */3 * * *" (minute 1), ETH is "2 */3 * * *" (minute 2) -- same 3h
+// cadence for every coin, just staggered by one minute each so they can
+// never land in the same invocation.
+//
+// runCoinBatch and runCoinHorizonChain are completely unchanged --
+// same predict-then-select sequence, same Challenger call, same
+// PR #34 LINK_* checkpoints, same PR #31 batch_complete logging. Only
+// the dispatcher (scheduled(), below) changed: instead of looping over
+// all three batches in one call, each cron trigger now maps to exactly
+// one coin's batch.
 async function runCoinBatch(env, chains) {
   const batchStart = Date.now();
   const tasks = chains.map(({ predictFn, coin, horizon }) => runCoinHorizonChain(env, predictFn, coin, horizon));
@@ -5661,25 +5696,6 @@ async function runCoinBatch(env, chains) {
       error: settled[i].status === 'rejected' ? String(settled[i].reason) : null,
     })),
   }));
-}
-
-// Full 3h-tick prediction cycle: 3 sequential batches -- BTC, then LINK,
-// then ETH (same coin order the old single 6-way array used), each
-// batch's 2 horizons concurrent with each other but never with another
-// coin's batch. This is the fix for the LINK/ETH selection starvation:
-// bounds peak per-invocation concurrent chains to 2 instead of 6.
-// Extracted as a named top-level function (rather than staying inline
-// in scheduled()) so it's independently testable and scheduled() stays
-// a thin dispatcher.
-async function runPredictionCronTick(env) {
-  const batches = [
-    [{ predictFn: predictAndLog, coin: 'BTC', horizon: 24 }, { predictFn: predictAndLog, coin: 'BTC', horizon: 12 }],
-    [{ predictFn: linkPredictAndLog, coin: 'LINK', horizon: 24 }, { predictFn: linkPredictAndLog, coin: 'LINK', horizon: 12 }],
-    [{ predictFn: ethPredictAndLog, coin: 'ETH', horizon: 24 }, { predictFn: ethPredictAndLog, coin: 'ETH', horizon: 12 }],
-  ];
-  for (const batch of batches) {
-    await runCoinBatch(env, batch);
-  }
 }
 
 export default {
@@ -6364,23 +6380,34 @@ export default {
           // production decision, so daily freshness is enough; moving
           // them here removes 2 of those 3 passes from the contended 3h
           // tick entirely, on top of the query-batching in
-          // fetchEligibilityCounts/fetchVariantRowsByTable, and now the
-          // batched-sequential dispatch in runPredictionCronTick below.
-          // Independently caught exactly as before -- a failure here has
-          // never been able to affect production selection and still
-          // can't.
+          // fetchEligibilityCounts/fetchVariantRowsByTable, and now each
+          // coin's own isolated 3h invocation (see BTC_BATCH/LINK_BATCH/
+          // ETH_BATCH's own comment). Independently caught exactly as
+          // before -- a failure here has never been able to affect
+          // production selection and still can't.
           ctx.waitUntil(logAnomalyGateExperiment(env, coin, h).catch(err => console.error(`Anomaly-gate experiment ${coin}/${h}h failed:`, err)));
           ctx.waitUntil(logMomentumSelectionExperiment(env, coin, h).catch(err => console.error(`Momentum experiment ${coin}/${h}h failed:`, err)));
         }
       }
-    } else {
-      // See runPredictionCronTick's own comment for the full 3h-tick
-      // dispatch design (batched-sequential, replacing the previous
-      // fully-concurrent 6-way dispatch to fix the LINK/ETH selection
-      // starvation -- see chat history 2026-09-02 for the investigation).
-      ctx.waitUntil(runPredictionCronTick(env).then(
+    } else if (event.cron === '0 */3 * * *') {
+      ctx.waitUntil(runCoinBatch(env, BTC_BATCH).then(
+        () => refreshDailyReportCache(env).catch(err => console.error('Daily report cache refresh failed:', err))
+      ));
+    } else if (event.cron === '1 */3 * * *') {
+      ctx.waitUntil(runCoinBatch(env, LINK_BATCH).then(
+        () => refreshDailyReportCache(env).catch(err => console.error('Daily report cache refresh failed:', err))
+      ));
+    } else if (event.cron === '2 */3 * * *') {
+      ctx.waitUntil(runCoinBatch(env, ETH_BATCH).then(
         () => refreshDailyReportCache(env).catch(err => console.error('Daily report cache refresh failed:', err))
       ));
     }
+    // No catch-all else: an unrecognized event.cron does nothing, rather
+    // than falling back to running every coin (the exact failure mode
+    // this fix exists to prevent). refreshDailyReportCache now runs once
+    // per coin invocation (3x per 3h window instead of once) -- a minor,
+    // harmless redundancy (it's an idempotent read-and-cache refresh),
+    // accepted in exchange for not needing any cross-invocation state to
+    // track "was I the last of the three" cleanly.
   },
 };

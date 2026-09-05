@@ -36,3 +36,12 @@ database_id = "f91ca980-b886-423a-bd6f-f3baea46d181"
 # "daily" means once a day rather than drifting).
 [triggers]
 crons = ["0 */3 * * *", "0 7 * * *"]
+
+# Forwards LINK_* diagnostic checkpoint logs (see PR #34) into D1 via
+# tail-logger/ -- read-only observability, cannot affect this Worker's
+# own request/scheduled handling (tail consumers run after this Worker
+# has already finished, asynchronously, best-effort). Requires Workers
+# Paid or Enterprise per Cloudflare's own docs; flagged as an open
+# question in the PR that added this, not assumed to work silently.
+[[tail_consumers]]
+service = "pulseworker-v2-tail-logger"

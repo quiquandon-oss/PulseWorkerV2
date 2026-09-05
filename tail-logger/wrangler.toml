@@ -1,0 +1,11 @@
+name = "pulseworker-v2-tail-logger"
+main = "index.js"
+compatibility_date = "2024-11-01"
+account_id = "f58e761fbc8e62dc404d8684290af264"
+
+# Same D1 database as pulseworker-v2 -- writes only to the new
+# link_diagnostic_log table, created additively for this purpose.
+[[d1_databases]]
+binding = "DB"
+database_name = "sentiment-history"
+database_id = "f91ca980-b886-423a-bd6f-f3baea46d181"

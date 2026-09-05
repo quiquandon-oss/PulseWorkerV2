@@ -138,7 +138,7 @@ describe('logAnomalyGateExperiment — activation gating and no production inter
     source = extractFunctions(
       'logAnomalyGateExperiment', 'decideSelectionSoftened', 'computeLcaScore', 'coreTableForCoin', 'nearestRow', 'fetchEligibilityCounts', 'fetchVariantRowsByTable'
     ) + '\n\n' + extractConstants(
-      'SELECTION_VARIANTS', 'SELECTION_MIN_HISTORY', 'SELECTION_MIN_MATCHED', 'SELECTION_CRITICAL_Z', 'ANOMALY_GATE_MARGIN_FACTOR'
+      'SELECTION_VARIANTS', 'SELECTION_MIN_HISTORY', 'SELECTION_MIN_MATCHED', 'SELECTION_CRITICAL_Z', 'ANOMALY_GATE_MARGIN_FACTOR', 'EXPERIMENT_2_COINS'
     );
   });
 

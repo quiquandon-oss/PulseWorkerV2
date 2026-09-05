@@ -83,22 +83,25 @@ describe('refreshDailyReportCache — recomputes and upserts', () => {
 });
 
 describe('regression: the cron dispatch refreshes the cache after predictions settle', () => {
-  it('each of the three per-coin scheduled() branches calls refreshDailyReportCache, sequenced after its own runCoinBatch resolves', () => {
+  it('the shared 3h scheduled() branch calls refreshDailyReportCache once, sequenced after runCoinCronTick resolves', () => {
     // scheduled() is an object-method shorthand (`async scheduled(...) {`),
     // not `async function scheduled(...)` -- extractFunctions can't find
     // it, so this reads the raw source directly for this one structural check.
-    // Updated 2026-09-05: runPredictionCronTick (3 sequential batches in
-    // one invocation) was removed entirely -- BTC/LINK/ETH now each get
-    // their own scheduled() invocation and their own runCoinBatch call,
-    // per the coin-invocation-isolation fix (confirmed exceededCpu
-    // production evidence). refreshDailyReportCache now runs once per
-    // coin invocation (3x per 3h window instead of once) -- a minor,
-    // accepted redundancy, since it's an idempotent read-and-cache
-    // refresh and there's no cheap way to know "am I the last of the
-    // three" across separate invocations.
+    // Updated 2026-09-05 (twice, same day): a same-day attempt at
+    // per-coin invocation isolation (runPredictionCronTick removed,
+    // replaced with 3 staggered cron triggers) was reverted after its
+    // deploy failed on Cloudflare's account-wide Cron Trigger limit.
+    // Current design restores a single shared 3h trigger running all
+    // three coins sequentially via runCoinCronTick, so
+    // refreshDailyReportCache is back to running once per 3h tick,
+    // exactly as it did before any of this day's changes.
     const src = readFileSync(new URL('../worker.js', import.meta.url), 'utf8');
-    const refreshCalls = src.match(/runCoinBatch\(env, \w+_BATCH\)\.then\(\s*\(\) => refreshDailyReportCache\(env\)/g) || [];
-    expect(refreshCalls).toHaveLength(3);
-    expect(src).not.toContain('function runPredictionCronTick(');
+    expect(src).toMatch(/runCoinCronTick\(env\)\.then\(\s*\(\) => refreshDailyReportCache\(env\)/);
+    // Exactly one such chained call site inside scheduled() -- other
+    // refreshDailyReportCache(env) references elsewhere (its own
+    // definition, and an unrelated cache-miss fallback call) are
+    // pre-existing and untouched by this change.
+    const chainedCalls = src.match(/\.then\(\s*\(\) => refreshDailyReportCache\(env\)/g) || [];
+    expect(chainedCalls).toHaveLength(1);
   });
 });

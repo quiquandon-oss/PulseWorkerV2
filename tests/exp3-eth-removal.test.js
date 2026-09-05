@@ -25,50 +25,43 @@ function buildScope() {
 }
 
 describe('MOMENTUM_EXPERIMENT_COINS — the scope registry itself', () => {
-  it('contains exactly BTC and LINK, not ETH', () => {
+  it('contains exactly BTC (further narrowed 2026-09-05, was BTC+LINK)', () => {
     const scope = buildScope();
-    expect(scope.MOMENTUM_EXPERIMENT_COINS).toEqual(['BTC', 'LINK']);
+    expect(scope.MOMENTUM_EXPERIMENT_COINS).toEqual(['BTC']);
   });
 });
 
-describe('ETH cannot enter the momentum experiment, for either horizon', () => {
-  it('returns immediately with coin_not_in_experiment for ETH/24h, before touching env.DB at all', async () => {
+describe('LINK and ETH cannot enter the momentum experiment, for either horizon (2026-09-05: LINK also excluded, was previously allowed alongside BTC)', () => {
+  it('returns immediately with coin_not_in_experiment for LINK and ETH, both horizons, before touching env.DB at all', async () => {
     const scope = buildScope();
-    let dbTouched = false;
-    const db = { prepare() { dbTouched = true; throw new Error('env.DB.prepare should never be called for ETH'); } };
-    const result = await scope.logMomentumSelectionExperiment({ DB: db }, 'ETH', 24);
-    expect(result).toEqual({ ok: true, status: 'coin_not_in_experiment', logged: false });
-    expect(dbTouched).toBe(false);
-  });
-
-  it('returns immediately with coin_not_in_experiment for ETH/12h, before touching env.DB at all', async () => {
-    const scope = buildScope();
-    let dbTouched = false;
-    const db = { prepare() { dbTouched = true; throw new Error('env.DB.prepare should never be called for ETH'); } };
-    const result = await scope.logMomentumSelectionExperiment({ DB: db }, 'ETH', 12);
-    expect(result).toEqual({ ok: true, status: 'coin_not_in_experiment', logged: false });
-    expect(dbTouched).toBe(false);
-  });
-
-  it('BTC and LINK are unaffected by the guard -- they proceed past it and do touch env.DB', async () => {
-    const scope = buildScope();
-    for (const coin of ['BTC', 'LINK']) {
-      let dbTouched = false;
-      const db = {
-        prepare(sql) {
-          dbTouched = true;
-          return { bind: () => ({ first: async () => ({}), all: async () => ({ results: [] }), run: async () => ({}) }) };
-        },
-      };
-      const result = await scope.logMomentumSelectionExperiment({ DB: db }, coin, 24);
-      expect(dbTouched).toBe(true);
-      expect(result.status).not.toBe('coin_not_in_experiment');
+    for (const coin of ['LINK', 'ETH']) {
+      for (const horizon of [12, 24]) {
+        let dbTouched = false;
+        const db = { prepare() { dbTouched = true; throw new Error(`env.DB.prepare should never be called for ${coin}`); } };
+        const result = await scope.logMomentumSelectionExperiment({ DB: db }, coin, horizon);
+        expect(result).toEqual({ ok: true, status: 'coin_not_in_experiment', logged: false });
+        expect(dbTouched).toBe(false);
+      }
     }
   });
+
+  it('BTC alone is unaffected by the guard -- it proceeds past it and does touch env.DB', async () => {
+    const scope = buildScope();
+    let dbTouched = false;
+    const db = {
+      prepare(sql) {
+        dbTouched = true;
+        return { bind: () => ({ first: async () => ({}), all: async () => ({ results: [] }), run: async () => ({}) }) };
+      },
+    };
+    const result = await scope.logMomentumSelectionExperiment({ DB: db }, 'BTC', 24);
+    expect(dbTouched).toBe(true);
+    expect(result.status).not.toBe('coin_not_in_experiment');
+  });
 });
 
-describe('ETH cannot write selection_decisions_momentum', () => {
-  it('no INSERT statement is ever prepared for ETH, on either horizon', async () => {
+describe('ETH and LINK cannot write selection_decisions_momentum', () => {
+  it('no INSERT statement is ever prepared for ETH or LINK, on either horizon', async () => {
     const scope = buildScope();
     const preparedStatements = [];
     const db = {
@@ -77,8 +70,10 @@ describe('ETH cannot write selection_decisions_momentum', () => {
         return { bind: () => ({ first: async () => null, all: async () => ({ results: [] }), run: async () => ({}) }) };
       },
     };
-    await scope.logMomentumSelectionExperiment({ DB: db }, 'ETH', 24);
-    await scope.logMomentumSelectionExperiment({ DB: db }, 'ETH', 12);
+    for (const coin of ['ETH', 'LINK']) {
+      await scope.logMomentumSelectionExperiment({ DB: db }, coin, 24);
+      await scope.logMomentumSelectionExperiment({ DB: db }, coin, 12);
+    }
     expect(preparedStatements).toHaveLength(0);
     expect(preparedStatements.some(sql => sql.includes('INSERT INTO selection_decisions_momentum'))).toBe(false);
   });

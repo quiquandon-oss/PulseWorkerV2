@@ -1321,7 +1321,29 @@ function decideSelectionSoftened(scores, marginFactor) {
 // Any failure here is caught by the caller and must never affect the
 // production predict/select cycle -- same resilience contract already
 // established for Challenger.
+//
+// Scope restriction (2026-09-05): Experiment 2 restricted to BTC only,
+// same guard pattern as Experiment 3's MOMENTUM_EXPERIMENT_COINS (PR #32)
+// -- checked before any D1 query, computation, or write. Production
+// predictions, Challenger, SELECTION_VARIANTS, selection_decisions, and
+// normal learning/selection are completely unaffected for LINK and ETH;
+// this guard only prevents them from entering this research-only
+// anomaly-gate comparison. Part of the same 2026-09-05 change that
+// reduces Cron Triggers back to the account's actual Workers Free
+// budget (5 total account-wide; V1 already uses 3) by returning
+// BTC+LINK+ETH production dispatch to one shared 3h cron trigger while
+// cutting the two most expensive research-only passes (this one and
+// Experiment 3) down to BTC only, rather than needing separate cron
+// triggers per coin for research purposes.
+const EXPERIMENT_2_COINS = ['BTC'];
+
 async function logAnomalyGateExperiment(env, coin, horizonHours) {
+  // Guard is the very first thing this function does -- LINK and ETH
+  // return before any D1 query, computation, or write, for any horizon.
+  if (!EXPERIMENT_2_COINS.includes(coin)) {
+    return { ok: true, status: 'coin_not_in_experiment', logged: false };
+  }
+
   const variantDefs = SELECTION_VARIANTS[coin];
   if (!variantDefs) return { ok: false, error: 'unknown coin' };
   const coreTable = coreTableForCoin(coin);
@@ -1463,7 +1485,10 @@ const MOMENTUM_EXPERIMENT_VARIANT = { key: 'challenger_momentum', table: 'challe
 // cron are completely unaffected for ETH -- this constant only gates
 // entry into the research-only momentum comparison below. BTC and LINK
 // are unchanged.
-const MOMENTUM_EXPERIMENT_COINS = ['BTC', 'LINK'];
+// Scope restriction (2026-09-05): further narrowed from ['BTC','LINK']
+// (PR #32) to BTC only, same reasoning -- see EXPERIMENT_2_COINS's own
+// comment for the full context (Cron Trigger account budget).
+const MOMENTUM_EXPERIMENT_COINS = ['BTC'];
 
 // Never calls selectBestVariant or decideSelection, never writes to
 // selection_decisions or selection_decisions_anomaly -- its only write
@@ -5632,53 +5657,44 @@ async function runCoinHorizonChain(env, predictFn, coin, horizon) {
 // correct even if a future edit removes one of its internal try/catch
 // blocks and a chain genuinely rejects.
 //
-// Diagnostic-only timing instrumentation added 2026-09-02, per the
-// forensic investigation into the observed BTC=complete / LINK=partial /
-// ETH=none pattern across sequential batches. Captures Promise.allSettled's
-// own return value (previously discarded) purely to log it -- the
-// Promise.allSettled call itself, its semantics, and runCoinHorizonChain
-// are all unchanged. One compact log line per batch (not per chain) --
-// coin is shared across the batch's chains, horizon/status/error are
-// per-chain within the single log line. This is read-only observability:
-// no timeout, no retry, no circuit breaker, no change to what runs or
-// how failures are handled -- purely measuring what already happens, to
-// convert the still-unproven "cumulative resource exhaustion across
-// sequential batches" hypothesis into evidence one way or the other.
-// Per-coin batch definitions -- extracted unchanged from the previous
-// runPredictionCronTick's own `batches` array. Same predictFn, same
-// coin string, same two horizons, same order within each coin. Nothing
-// about WHAT runs or HOW it runs (still both horizons of one coin
-// concurrently via runCoinBatch) has changed; only WHEN each one runs
-// changes now (see scheduled() below).
+// Per-coin batch definitions -- same predictFn, same coin string, same
+// two horizons per coin, unchanged since PR #30.
 const BTC_BATCH = [{ predictFn: predictAndLog, coin: 'BTC', horizon: 24 }, { predictFn: predictAndLog, coin: 'BTC', horizon: 12 }];
 const LINK_BATCH = [{ predictFn: linkPredictAndLog, coin: 'LINK', horizon: 24 }, { predictFn: linkPredictAndLog, coin: 'LINK', horizon: 12 }];
 const ETH_BATCH = [{ predictFn: ethPredictAndLog, coin: 'ETH', horizon: 24 }, { predictFn: ethPredictAndLog, coin: 'ETH', horizon: 12 }];
 
-// Coin-isolation fix (2026-09-05): replaces runPredictionCronTick, which
-// ran BTC's, LINK's, and ETH's batches sequentially inside ONE
-// scheduled() invocation. Direct Cloudflare production evidence (Workers
-// Logs, 2026-09-05 12:00 UTC tick) showed that invocation terminated
-// with outcome=exceededCpu after 2010ms CPU / 6401ms wall time -- the
-// account's CPU-time budget for a single invocation was exhausted before
-// later-dispatched coins (LINK, then ETH) could reliably complete,
-// regardless of how batches within that one invocation were sequenced
-// or concurrency-limited (PR #30 already bounded peak concurrency to 2;
-// that reduced but could not eliminate the shared-invocation CPU budget
-// itself). The only way to give each coin its own, independent CPU
-// budget on Workers Free (no [limits] cpu_ms override exists, and
-// raising one requires Workers Paid) is to make each coin its own
-// scheduled() invocation entirely. See wrangler.toml's `crons` array:
-// BTC keeps the original "0 */3 * * *" (minute 0), LINK is
-// "1 */3 * * *" (minute 1), ETH is "2 */3 * * *" (minute 2) -- same 3h
-// cadence for every coin, just staggered by one minute each so they can
-// never land in the same invocation.
+// Dispatch history, 2026-09-05 (same day, two attempts):
 //
-// runCoinBatch and runCoinHorizonChain are completely unchanged --
-// same predict-then-select sequence, same Challenger call, same
-// PR #34 LINK_* checkpoints, same PR #31 batch_complete logging. Only
-// the dispatcher (scheduled(), below) changed: instead of looping over
-// all three batches in one call, each cron trigger now maps to exactly
-// one coin's batch.
+// Attempt 1 tried isolating BTC/LINK/ETH into three separate scheduled()
+// invocations via three staggered 3h Cron Triggers (BTC "0 */3 * * *",
+// LINK "1 */3 * * *", ETH "2 */3 * * *"), directly addressing a
+// confirmed Cloudflare exceededCpu termination (Workers Logs,
+// 2026-09-05 12:00 UTC: cpuTimeMs=2010, wallTimeMs=6401) where the
+// shared invocation's CPU budget was exhausted before later-dispatched
+// coins could complete. That deploy FAILED: Cron Triggers are capped at
+// 5 per ACCOUNT on Workers Free (not per Worker), and V1
+// (sentiment-ff75) already uses 3 of those 5, leaving only 2 for this
+// Worker -- not enough for 3 separate 3h triggers plus the daily one.
+//
+// Current design (this one) reverts to ONE shared 3h Cron Trigger
+// running all three coins' batches sequentially in one invocation --
+// the same shape PR #30 used, restored here as runCoinCronTick below --
+// fitting within the account's real 2-trigger budget for this Worker
+// (1 shared 3h + 1 daily). This does not fix the exceededCpu risk by
+// itself; it trades that off against staying deployable at all on the
+// current plan. What DOES reduce load without needing more triggers:
+// Experiment 2 and Experiment 3 are now restricted to BTC only (see
+// EXPERIMENT_2_COINS / MOMENTUM_EXPERIMENT_COINS) -- removing the two
+// most expensive research-only eligibility+scoring passes for LINK and
+// ETH cuts real per-invocation cost without touching production
+// coverage (BTC+LINK+ETH prediction/Challenger/selection all still run,
+// unchanged). Restoring full per-coin CPU isolation later needs either
+// a Workers Paid upgrade (250 Cron Triggers/account) or reducing V1's
+// own cron count -- both are decisions for later, not made here.
+//
+// runCoinBatch and runCoinHorizonChain are unaffected by any of this --
+// same predict-then-select sequence, same Challenger call, same PR #34
+// LINK_* checkpoints, same PR #31 batch_complete logging.
 async function runCoinBatch(env, chains) {
   const batchStart = Date.now();
   const tasks = chains.map(({ predictFn, coin, horizon }) => runCoinHorizonChain(env, predictFn, coin, horizon));
@@ -5696,6 +5712,17 @@ async function runCoinBatch(env, chains) {
       error: settled[i].status === 'rejected' ? String(settled[i].reason) : null,
     })),
   }));
+}
+
+// Restores PR #30's shape (3 sequential batches, one shared invocation)
+// under a new name -- see the dispatch-history comment above for why.
+// Peak concurrency within any one batch stays bounded to 2 (a coin's
+// own two horizons), same as PR #30; batches themselves still run
+// sequentially, not concurrently with each other.
+async function runCoinCronTick(env) {
+  for (const batch of [BTC_BATCH, LINK_BATCH, ETH_BATCH]) {
+    await runCoinBatch(env, batch);
+  }
 }
 
 export default {
@@ -6380,9 +6407,12 @@ export default {
           // production decision, so daily freshness is enough; moving
           // them here removes 2 of those 3 passes from the contended 3h
           // tick entirely, on top of the query-batching in
-          // fetchEligibilityCounts/fetchVariantRowsByTable, and now each
-          // coin's own isolated 3h invocation (see BTC_BATCH/LINK_BATCH/
-          // ETH_BATCH's own comment). Independently caught exactly as
+          // fetchEligibilityCounts/fetchVariantRowsByTable. Also note
+          // (2026-09-05): both are now further restricted to BTC only
+          // (EXPERIMENT_2_COINS / MOMENTUM_EXPERIMENT_COINS) -- this loop
+          // still iterates all three coins for the calibration refreshes
+          // above, but these two calls return immediately, before any
+          // D1 access, for LINK and ETH. Independently caught exactly as
           // before -- a failure here has never been able to affect
           // production selection and still can't.
           ctx.waitUntil(logAnomalyGateExperiment(env, coin, h).catch(err => console.error(`Anomaly-gate experiment ${coin}/${h}h failed:`, err)));
@@ -6390,24 +6420,17 @@ export default {
         }
       }
     } else if (event.cron === '0 */3 * * *') {
-      ctx.waitUntil(runCoinBatch(env, BTC_BATCH).then(
-        () => refreshDailyReportCache(env).catch(err => console.error('Daily report cache refresh failed:', err))
-      ));
-    } else if (event.cron === '1 */3 * * *') {
-      ctx.waitUntil(runCoinBatch(env, LINK_BATCH).then(
-        () => refreshDailyReportCache(env).catch(err => console.error('Daily report cache refresh failed:', err))
-      ));
-    } else if (event.cron === '2 */3 * * *') {
-      ctx.waitUntil(runCoinBatch(env, ETH_BATCH).then(
+      // ONE shared 3h trigger, all three coins -- see runCoinCronTick's
+      // own comment for why this reverted from three separate triggers
+      // back to this shared-invocation shape (Cron Trigger account
+      // budget on Workers Free).
+      ctx.waitUntil(runCoinCronTick(env).then(
         () => refreshDailyReportCache(env).catch(err => console.error('Daily report cache refresh failed:', err))
       ));
     }
-    // No catch-all else: an unrecognized event.cron does nothing, rather
-    // than falling back to running every coin (the exact failure mode
-    // this fix exists to prevent). refreshDailyReportCache now runs once
-    // per coin invocation (3x per 3h window instead of once) -- a minor,
-    // harmless redundancy (it's an idempotent read-and-cache refresh),
-    // accepted in exchange for not needing any cross-invocation state to
-    // track "was I the last of the three" cleanly.
+    // No catch-all else: an unrecognized event.cron does nothing.
+    // refreshDailyReportCache runs once per 3h tick, after all three
+    // coins' batches have settled (back to the original, pre-2026-09-05
+    // shape now that dispatch is single-invocation again).
   },
 };

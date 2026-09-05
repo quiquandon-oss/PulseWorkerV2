@@ -83,18 +83,22 @@ describe('refreshDailyReportCache — recomputes and upserts', () => {
 });
 
 describe('regression: the cron dispatch refreshes the cache after predictions settle', () => {
-  it('scheduled() calls refreshDailyReportCache, sequenced after runPredictionCronTick resolves', () => {
+  it('each of the three per-coin scheduled() branches calls refreshDailyReportCache, sequenced after its own runCoinBatch resolves', () => {
     // scheduled() is an object-method shorthand (`async scheduled(...) {`),
     // not `async function scheduled(...)` -- extractFunctions can't find
     // it, so this reads the raw source directly for this one structural check.
-    // Updated 2026-09-02: the old single Promise.allSettled(predictionTasks)
-    // across all 6 chains was replaced by runPredictionCronTick (3
-    // sequential batches of 2, to fix the LINK/ETH selection starvation --
-    // see that function's own comment). refreshDailyReportCache still runs
-    // once, after everything settles, exactly as before -- only what it's
-    // chained onto changed name/shape.
+    // Updated 2026-09-05: runPredictionCronTick (3 sequential batches in
+    // one invocation) was removed entirely -- BTC/LINK/ETH now each get
+    // their own scheduled() invocation and their own runCoinBatch call,
+    // per the coin-invocation-isolation fix (confirmed exceededCpu
+    // production evidence). refreshDailyReportCache now runs once per
+    // coin invocation (3x per 3h window instead of once) -- a minor,
+    // accepted redundancy, since it's an idempotent read-and-cache
+    // refresh and there's no cheap way to know "am I the last of the
+    // three" across separate invocations.
     const src = readFileSync(new URL('../worker.js', import.meta.url), 'utf8');
-    expect(src).toMatch(/runPredictionCronTick\(env\)\.then\(/);
-    expect(src).toMatch(/refreshDailyReportCache\(env\)/);
+    const refreshCalls = src.match(/runCoinBatch\(env, \w+_BATCH\)\.then\(\s*\(\) => refreshDailyReportCache\(env\)/g) || [];
+    expect(refreshCalls).toHaveLength(3);
+    expect(src).not.toContain('function runPredictionCronTick(');
   });
 });

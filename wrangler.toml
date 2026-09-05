@@ -29,17 +29,22 @@ binding = "DB"
 database_name = "sentiment-history"
 database_id = "f91ca980-b886-423a-bd6f-f3baea46d181"
 
-# 3h cadence per coin, staggered by one minute each (2026-09-05 fix for a
-# confirmed Cloudflare exceededCpu termination -- see worker.js's
-# BTC_BATCH/LINK_BATCH/ETH_BATCH comment for the full rationale): each of
-# BTC (minute 0), LINK (minute 1), ETH (minute 2) now gets its own
-# scheduled() invocation and its own independent CPU budget, instead of
-# all three sharing one invocation. Same 3h frequency as before for every
-# coin -- nothing reduced. Daily at 07:00 UTC: comprehensive Gemini
-# analysis (arbitrary fixed hour, just needs to be consistent so "daily"
-# means once a day rather than drifting) plus Experiments 2/3.
+# 2 total Cron Triggers for this Worker, fitting the account's real
+# Workers Free budget (2026-09-05): capped at 5 Cron Triggers per
+# ACCOUNT (not per Worker); V1 (sentiment-ff75) already uses 3 of those
+# 5, leaving exactly 2 for this Worker. One shared 3h trigger runs
+# BTC+LINK+ETH production (predictions, Challenger, selection) --
+# unrestricted, all three coins, same as before PR #30 introduced
+# per-coin batching within this one invocation. The daily 07:00 trigger
+# runs Gemini analyses, calibration refreshes, and Experiments 2/3 --
+# the experiments are restricted to BTC only in code (see worker.js's
+# EXPERIMENT_2_COINS / MOMENTUM_EXPERIMENT_COINS), not by cron
+# structure, since research-only load reduction doesn't need a
+# dedicated trigger. See worker.js's runCoinCronTick comment for the
+# full history of why a 4-trigger, fully-isolated-per-coin design was
+# attempted and reverted the same day.
 [triggers]
-crons = ["0 */3 * * *", "1 */3 * * *", "2 */3 * * *", "0 7 * * *"]
+crons = ["0 */3 * * *", "0 7 * * *"]
 
 # Codifies what was already turned on directly via the dashboard
 # (2026-09-05), so it doesn't silently get reset on the next deploy —

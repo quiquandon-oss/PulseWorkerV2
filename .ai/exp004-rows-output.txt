@@ -6,10 +6,61 @@ Resource location: remote
 
 🌀 Executing on remote database sentiment-history (f91ca980-b886-423a-bd6f-f3baea46d181):
 🌀 To execute on your local development database, remove the --remote flag from your wrangler command.
-🚣 Executed 1 command in 0.21ms
+🚣 Executed 1 command in 0.27ms
 [
   {
-    "results": [],
+    "results": [
+      {
+        "id": 3,
+        "coin": "BTC",
+        "horizon_hours": 12,
+        "ts": 1788671764359,
+        "target_ts": 1788714964359,
+        "input_end_ts": 1788663610788,
+        "price_at_prediction": 79879,
+        "forecast_price": 79862.1640625,
+        "predicted_return_pct": -0.021076800535810413,
+        "direction": "DOWN",
+        "model_version": "timesfm-2.5-200m",
+        "checkpoint": "google/timesfm-2.5-200m-pytorch",
+        "inference_backend": "torch-cpu",
+        "context_length": 128,
+        "features_used": "univariate: btc_price only, no covariates",
+        "production_chosen_variant": "challenger_calibrated",
+        "actual_return_pct": null,
+        "actual_direction": null,
+        "correct": null,
+        "absolute_error": null,
+        "signed_error": null,
+        "resolved_ts": null,
+        "forecast_horizon_steps": 4
+      },
+      {
+        "id": 4,
+        "coin": "BTC",
+        "horizon_hours": 24,
+        "ts": 1788671764359,
+        "target_ts": 1788758164359,
+        "input_end_ts": 1788663610788,
+        "price_at_prediction": 79879,
+        "forecast_price": 79849.015625,
+        "predicted_return_pct": -0.037537243831294836,
+        "direction": "DOWN",
+        "model_version": "timesfm-2.5-200m",
+        "checkpoint": "google/timesfm-2.5-200m-pytorch",
+        "inference_backend": "torch-cpu",
+        "context_length": 128,
+        "features_used": "univariate: btc_price only, no covariates",
+        "production_chosen_variant": "calibrated",
+        "actual_return_pct": null,
+        "actual_direction": null,
+        "correct": null,
+        "absolute_error": null,
+        "signed_error": null,
+        "resolved_ts": null,
+        "forecast_horizon_steps": 8
+      }
+    ],
     "success": true,
     "meta": {
       "served_by": "v3-prod",
@@ -17,14 +68,14 @@ Resource location: remote
       "served_by_colo": "IAD",
       "served_by_primary": true,
       "timings": {
-        "sql_duration_ms": 0.2149
+        "sql_duration_ms": 0.2711
       },
-      "duration": 0.2149,
+      "duration": 0.2711,
       "changes": 0,
       "last_row_id": 0,
       "changed_db": false,
       "size_after": 4206592,
-      "rows_read": 1,
+      "rows_read": 2,
       "rows_written": 0,
       "total_attempts": 1
     }
@@ -38,10 +89,27 @@ Resource location: remote
 
 🌀 Executing on remote database sentiment-history (f91ca980-b886-423a-bd6f-f3baea46d181):
 🌀 To execute on your local development database, remove the --remote flag from your wrangler command.
-🚣 Executed 1 command in 0.22ms
+🚣 Executed 1 command in 0.42ms
 [
   {
-    "results": [],
+    "results": [
+      {
+        "coin": "BTC",
+        "horizon_hours": 12,
+        "n": 1,
+        "earliest": 1788671764359,
+        "latest": 1788671764359,
+        "resolved_count": 0
+      },
+      {
+        "coin": "BTC",
+        "horizon_hours": 24,
+        "n": 1,
+        "earliest": 1788671764359,
+        "latest": 1788671764359,
+        "resolved_count": 0
+      }
+    ],
     "success": true,
     "meta": {
       "served_by": "v3-prod",
@@ -49,14 +117,14 @@ Resource location: remote
       "served_by_colo": "IAD",
       "served_by_primary": true,
       "timings": {
-        "sql_duration_ms": 0.216
+        "sql_duration_ms": 0.4158
       },
-      "duration": 0.216,
+      "duration": 0.4158,
       "changes": 0,
       "last_row_id": 0,
       "changed_db": false,
       "size_after": 4206592,
-      "rows_read": 1,
+      "rows_read": 2,
       "rows_written": 0,
       "total_attempts": 1
     }

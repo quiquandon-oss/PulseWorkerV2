@@ -6,7 +6,7 @@ Resource location: remote
 
 🌀 Executing on remote database sentiment-history (f91ca980-b886-423a-bd6f-f3baea46d181):
 🌀 To execute on your local development database, remove the --remote flag from your wrangler command.
-🚣 Executed 1 command in 0.24ms
+🚣 Executed 1 command in 0.22ms
 [
   {
     "results": [
@@ -66,9 +66,9 @@ Resource location: remote
       "served_by_colo": "IAD",
       "served_by_primary": true,
       "timings": {
-        "sql_duration_ms": 0.2429
+        "sql_duration_ms": 0.2153
       },
-      "duration": 0.2429,
+      "duration": 0.2153,
       "changes": 0,
       "last_row_id": 0,
       "changed_db": false,
@@ -87,7 +87,7 @@ Resource location: remote
 
 🌀 Executing on remote database sentiment-history (f91ca980-b886-423a-bd6f-f3baea46d181):
 🌀 To execute on your local development database, remove the --remote flag from your wrangler command.
-🚣 Executed 1 command in 0.23ms
+🚣 Executed 1 command in 0.33ms
 [
   {
     "results": [
@@ -115,9 +115,9 @@ Resource location: remote
       "served_by_colo": "IAD",
       "served_by_primary": true,
       "timings": {
-        "sql_duration_ms": 0.2342
+        "sql_duration_ms": 0.3269
       },
-      "duration": 0.2342,
+      "duration": 0.3269,
       "changes": 0,
       "last_row_id": 0,
       "changed_db": false,

@@ -10,7 +10,7 @@ on:
   workflow_dispatch: {}
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   validate:
@@ -58,14 +58,24 @@ jobs:
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
         run: |
-          echo "=== sqlite_master check ==="
-          wrangler d1 execute sentiment-history --remote --command "SELECT type, name, tbl_name FROM sqlite_master WHERE name LIKE '%experiment_4%'"
+          echo "=== sqlite_master check ===" >> validation_output.txt
+          wrangler d1 execute sentiment-history --remote --command "SELECT type, name, tbl_name FROM sqlite_master WHERE name LIKE '%experiment_4%'" >> validation_output.txt
 
       - name: Real btc_data cadence -- last rows, raw timestamps
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
         run: |
-          echo "=== total btc_data row count ==="
-          wrangler d1 execute sentiment-history --remote --command "SELECT COUNT(*) as n FROM btc_data"
-          echo "=== last 40 distinct timestamps (raw) ==="
-          wrangler d1 execute sentiment-history --remote --command "SELECT DISTINCT ts FROM btc_data ORDER BY ts DESC LIMIT 40"
+          echo "=== total btc_data row count ===" >> validation_output.txt
+          wrangler d1 execute sentiment-history --remote --command "SELECT COUNT(*) as n FROM btc_data" >> validation_output.txt
+          echo "=== last 40 distinct timestamps (raw) ===" >> validation_output.txt
+          wrangler d1 execute sentiment-history --remote --command "SELECT DISTINCT ts FROM btc_data ORDER BY ts DESC LIMIT 40" >> validation_output.txt
+
+      - name: Commit output for retrieval
+        run: |
+          git config user.name "exp4-validation-bot"
+          git config user.email "actions@github.com"
+          mkdir -p .ai
+          mv validation_output.txt .ai/exp004-validation-output.txt
+          git add .ai/exp004-validation-output.txt
+          git commit -m "chore(temp): exp4 validation output" || echo "nothing to commit"
+          git push

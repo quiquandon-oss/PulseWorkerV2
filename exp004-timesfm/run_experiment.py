@@ -207,7 +207,17 @@ def generate_forecasts():
         predicted_return_pct = (forecast_price - price_at_prediction) / price_at_prediction * 100
         direction = "UP" if predicted_return_pct > 0 else "DOWN"  # documented threshold: > 0, not >=
         production_variant = fetch_production_chosen_variant(horizon_hours)
-        target_ts = now_ms + horizon_hours * 3600000
+        # target_ts is anchored to input_end_ts (the last real data point
+        # actually fed to the model), not now_ms (when the script happens
+        # to execute). The forecast represents the model's prediction for
+        # input_end_ts + horizon -- there's a real, observed gap between
+        # input_end_ts and now_ms (btc_data's own tick cadence vs. when
+        # this script runs), so anchoring to now_ms would resolve against
+        # the wrong future point. This is the only change in this fix --
+        # TimesFM itself, context length, cadence detection, model
+        # parameters, production selection, and evaluation thresholds are
+        # all untouched.
+        target_ts = input_end_ts + horizon_hours * 3600000
         print(f"[exp004] BTC/{horizon_hours}h: step_ms={step_ms} ({step_ms/3600000:.3f}h) "
               f"horizon_steps={horizon_steps} context_length={len(context_prices)}")
 

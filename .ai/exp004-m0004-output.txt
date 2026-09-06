@@ -1,0 +1,105 @@
+=== before ===
+
+ ⛅️ wrangler 4.86.0
+───────────────────
+Resource location: remote 
+
+🌀 Executing on remote database sentiment-history (f91ca980-b886-423a-bd6f-f3baea46d181):
+🌀 To execute on your local development database, remove the --remote flag from your wrangler command.
+🚣 Executed 1 command in 0.16ms
+[
+  {
+    "results": [
+      {
+        "n": 6,
+        "unresolved": 6
+      }
+    ],
+    "success": true,
+    "meta": {
+      "served_by": "v3-prod",
+      "served_by_region": "ENAM",
+      "served_by_colo": "IAD",
+      "served_by_primary": true,
+      "timings": {
+        "sql_duration_ms": 0.1553
+      },
+      "duration": 0.1553,
+      "changes": 0,
+      "last_row_id": 0,
+      "changed_db": false,
+      "size_after": 4227072,
+      "rows_read": 6,
+      "rows_written": 0,
+      "total_attempts": 1
+    }
+  }
+]
+=== applying DELETE ===
+
+ ⛅️ wrangler 4.86.0 (update available 4.129.0)
+──────────────────────────────────────────────
+Resource location: remote 
+
+🌀 Executing on remote database sentiment-history (f91ca980-b886-423a-bd6f-f3baea46d181):
+🌀 To execute on your local development database, remove the --remote flag from your wrangler command.
+🚣 Executed 1 command in 0.34ms
+[
+  {
+    "results": [],
+    "success": true,
+    "meta": {
+      "served_by": "v3-prod",
+      "served_by_region": "ENAM",
+      "served_by_colo": "IAD",
+      "served_by_primary": true,
+      "timings": {
+        "sql_duration_ms": 0.3366
+      },
+      "duration": 0.3366,
+      "changes": 6,
+      "last_row_id": 0,
+      "changed_db": true,
+      "size_after": 4227072,
+      "rows_read": 6,
+      "rows_written": 6,
+      "total_attempts": 1
+    }
+  }
+]
+=== after ===
+
+ ⛅️ wrangler 4.86.0 (update available 4.129.0)
+──────────────────────────────────────────────
+Resource location: remote 
+
+🌀 Executing on remote database sentiment-history (f91ca980-b886-423a-bd6f-f3baea46d181):
+🌀 To execute on your local development database, remove the --remote flag from your wrangler command.
+🚣 Executed 1 command in 0.13ms
+[
+  {
+    "results": [
+      {
+        "n": 0
+      }
+    ],
+    "success": true,
+    "meta": {
+      "served_by": "v3-prod",
+      "served_by_region": "ENAM",
+      "served_by_colo": "IAD",
+      "served_by_primary": true,
+      "timings": {
+        "sql_duration_ms": 0.1304
+      },
+      "duration": 0.1304,
+      "changes": 0,
+      "last_row_id": 0,
+      "changed_db": false,
+      "size_after": 4227072,
+      "rows_read": 0,
+      "rows_written": 0,
+      "total_attempts": 1
+    }
+  }
+]

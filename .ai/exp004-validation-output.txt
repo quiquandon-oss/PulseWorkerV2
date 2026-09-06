@@ -1,0 +1,237 @@
+=== sqlite_master check ===
+
+ ⛅️ wrangler 4.86.0 (update available 4.129.0)
+──────────────────────────────────────────────
+Resource location: remote 
+
+🌀 Executing on remote database sentiment-history (f91ca980-b886-423a-bd6f-f3baea46d181):
+🌀 To execute on your local development database, remove the --remote flag from your wrangler command.
+🚣 Executed 1 command in 0.33ms
+[
+  {
+    "results": [
+      {
+        "type": "table",
+        "name": "experiment_4_timesfm",
+        "tbl_name": "experiment_4_timesfm"
+      },
+      {
+        "type": "index",
+        "name": "idx_experiment_4_timesfm_unresolved",
+        "tbl_name": "experiment_4_timesfm"
+      },
+      {
+        "type": "index",
+        "name": "idx_experiment_4_timesfm_coin_horizon_ts",
+        "tbl_name": "experiment_4_timesfm"
+      }
+    ],
+    "success": true,
+    "meta": {
+      "served_by": "v3-prod",
+      "served_by_region": "ENAM",
+      "served_by_colo": "IAD",
+      "served_by_primary": true,
+      "timings": {
+        "sql_duration_ms": 0.33
+      },
+      "duration": 0.33,
+      "changes": 0,
+      "last_row_id": 0,
+      "changed_db": false,
+      "size_after": 4198400,
+      "rows_read": 55,
+      "rows_written": 0,
+      "total_attempts": 1
+    }
+  }
+]
+=== total btc_data row count ===
+
+ ⛅️ wrangler 4.86.0 (update available 4.129.0)
+──────────────────────────────────────────────
+Resource location: remote 
+
+🌀 Executing on remote database sentiment-history (f91ca980-b886-423a-bd6f-f3baea46d181):
+🌀 To execute on your local development database, remove the --remote flag from your wrangler command.
+🚣 Executed 1 command in 0.25ms
+[
+  {
+    "results": [
+      {
+        "n": 1884
+      }
+    ],
+    "success": true,
+    "meta": {
+      "served_by": "v3-prod",
+      "served_by_region": "ENAM",
+      "served_by_colo": "IAD",
+      "served_by_primary": true,
+      "timings": {
+        "sql_duration_ms": 0.2509
+      },
+      "duration": 0.2509,
+      "changes": 0,
+      "last_row_id": 0,
+      "changed_db": false,
+      "size_after": 4198400,
+      "rows_read": 1884,
+      "rows_written": 0,
+      "total_attempts": 1
+    }
+  }
+]
+=== last 40 distinct timestamps (raw) ===
+
+ ⛅️ wrangler 4.86.0 (update available 4.129.0)
+──────────────────────────────────────────────
+Resource location: remote 
+
+🌀 Executing on remote database sentiment-history (f91ca980-b886-423a-bd6f-f3baea46d181):
+🌀 To execute on your local development database, remove the --remote flag from your wrangler command.
+🚣 Executed 1 command in 0.23ms
+[
+  {
+    "results": [
+      {
+        "ts": 1788663611029
+      },
+      {
+        "ts": 1788663610788
+      },
+      {
+        "ts": 1788652810813
+      },
+      {
+        "ts": 1788652810575
+      },
+      {
+        "ts": 1788642045656
+      },
+      {
+        "ts": 1788642045504
+      },
+      {
+        "ts": 1788631264144
+      },
+      {
+        "ts": 1788631263849
+      },
+      {
+        "ts": 1788620445709
+      },
+      {
+        "ts": 1788620445617
+      },
+      {
+        "ts": 1788609645904
+      },
+      {
+        "ts": 1788609645885
+      },
+      {
+        "ts": 1788598835986
+      },
+      {
+        "ts": 1788598835934
+      },
+      {
+        "ts": 1788588035053
+      },
+      {
+        "ts": 1788577231435
+      },
+      {
+        "ts": 1788577231405
+      },
+      {
+        "ts": 1788566431029
+      },
+      {
+        "ts": 1788566430910
+      },
+      {
+        "ts": 1788555639199
+      },
+      {
+        "ts": 1788555632390
+      },
+      {
+        "ts": 1788544840749
+      },
+      {
+        "ts": 1788544840551
+      },
+      {
+        "ts": 1788534047082
+      },
+      {
+        "ts": 1788534046713
+      },
+      {
+        "ts": 1788534043759
+      },
+      {
+        "ts": 1788534043142
+      },
+      {
+        "ts": 1788523226358
+      },
+      {
+        "ts": 1788523226265
+      },
+      {
+        "ts": 1788512426090
+      },
+      {
+        "ts": 1788512425841
+      },
+      {
+        "ts": 1788501660103
+      },
+      {
+        "ts": 1788501660070
+      },
+      {
+        "ts": 1788490833630
+      },
+      {
+        "ts": 1788490833479
+      },
+      {
+        "ts": 1788480028568
+      },
+      {
+        "ts": 1788480028536
+      },
+      {
+        "ts": 1788469233986
+      },
+      {
+        "ts": 1788469233288
+      },
+      {
+        "ts": 1788458427794
+      }
+    ],
+    "success": true,
+    "meta": {
+      "served_by": "v3-prod",
+      "served_by_region": "ENAM",
+      "served_by_colo": "IAD",
+      "served_by_primary": true,
+      "timings": {
+        "sql_duration_ms": 0.2299
+      },
+      "duration": 0.2299,
+      "changes": 0,
+      "last_row_id": 0,
+      "changed_db": false,
+      "size_after": 4198400,
+      "rows_read": 42,
+      "rows_written": 0,
+      "total_attempts": 1
+    }
+  }
+]

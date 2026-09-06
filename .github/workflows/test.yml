@@ -21,3 +21,17 @@ jobs:
         run: npm ci
       - name: Run tests
         run: npm test
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      # Only pytest -- NOT torch/timesfm. exp004-timesfm/run_experiment.py
+      # imports those lazily, inside generate_forecasts() itself,
+      # specifically so this test suite (scope/data-integrity/model-
+      # integrity/production-isolation/failure-handling checks) can run
+      # in every CI job without needing the real, large ML dependencies
+      # installed just to verify the surrounding logic.
+      - name: Install pytest
+        run: pip install pytest --break-system-packages
+      - name: Run Experiment 4 tests
+        run: python3 -m pytest exp004-timesfm/ -v

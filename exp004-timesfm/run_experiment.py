@@ -79,13 +79,46 @@ def sql_escape(value):
     return "'" + str(value).replace("'", "''") + "'"
 
 
+DEDUP_TOLERANCE_MS = 60000  # collapse near-simultaneous price-log writes
+                             # from the same cron tick (both horizon calls
+                             # each log price separately, ~150-300ms apart
+                             # in practice -- confirmed against real
+                             # btc_data). Without this, a naive median-
+                             # delta calculation is dominated by these
+                             # sub-second intra-tick gaps rather than the
+                             # real ~3h inter-tick spacing -- confirmed
+                             # empirically (2026-09-06): naive median on
+                             # real data gave ~6.8s, implying ~6345 steps
+                             # for a "12h" horizon, versus the correct 4
+                             # steps once deduplicated. This constant and
+                             # the dedup step below exist specifically
+                             # because of that finding, not speculatively.
+
+
+def dedupe_near_simultaneous(price_history):
+    """Collapses any run of consecutive (ts, price) points within
+    DEDUP_TOLERANCE_MS of each other into a single point (the first one
+    in the run), so the resulting series reflects one observation per
+    real cron tick rather than one per horizon-call's own price-log
+    write. price_history must already be sorted by ts ascending."""
+    if not price_history:
+        return []
+    result = [price_history[0]]
+    for ts, price in price_history[1:]:
+        if ts - result[-1][0] > DEDUP_TOLERANCE_MS:
+            result.append((ts, price))
+    return result
+
+
 def fetch_price_history():
-    """Full BTC price history, oldest first -- same table PulseWorkerV2's
-    own runPrediction reads from (btc_data). No WHERE clause needed since
-    we want everything available AS OF NOW; input_end_ts is recorded
-    explicitly below to prove exactly what was actually used."""
+    """Full BTC price history, oldest first, DEDUPLICATED to one point
+    per real cron tick -- same table PulseWorkerV2's own runPrediction
+    reads from (btc_data). No WHERE clause needed since we want
+    everything available AS OF NOW; input_end_ts is recorded explicitly
+    below to prove exactly what was actually used."""
     rows = run_d1("SELECT ts, btc_price FROM btc_data ORDER BY ts ASC")
-    return [(int(r["ts"]), float(r["btc_price"])) for r in rows if r.get("btc_price") is not None]
+    raw = [(int(r["ts"]), float(r["btc_price"])) for r in rows if r.get("btc_price") is not None]
+    return dedupe_near_simultaneous(raw)
 
 
 def fetch_production_chosen_variant(horizon_hours: int):
@@ -97,6 +130,10 @@ def fetch_production_chosen_variant(horizon_hours: int):
 
 
 def median_delta_ms(price_history):
+    """Median spacing between consecutive points. Callers must pass an
+    already-deduplicated series (see dedupe_near_simultaneous) -- this
+    function does not defend against near-simultaneous duplicate
+    clusters itself."""
     deltas = sorted(b[0] - a[0] for a, b in zip(price_history, price_history[1:]) if b[0] > a[0])
     if not deltas:
         raise RuntimeError("insufficient price history to determine sampling interval")

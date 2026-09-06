@@ -74,6 +74,48 @@ def test_input_end_ts_is_recorded_and_never_exceeds_prediction_time():
     assert "ORDER BY ts ASC" in src
 
 
+def test_dedup_collapses_near_simultaneous_pairs_from_the_two_horizon_calls():
+    """Reproduces the exact real-data shape confirmed against production
+    btc_data (2026-09-06): each cron tick logs price twice (once per
+    horizon call), ~150-300ms apart, with ~3h between ticks. Without
+    dedup, a naive median-delta calculation is dominated by these
+    sub-second gaps -- confirmed empirically to compute ~6.8s instead of
+    ~3h, which would have made horizon_steps wrong by roughly 3 orders
+    of magnitude (~6345 instead of 4 for a 12h horizon)."""
+    tick_spacing_ms = 3 * 3600000
+    base = 1788458427794
+    raw = []
+    for i in range(20):
+        tick_ts = base + i * tick_spacing_ms
+        raw.append((tick_ts, 90000.0 + i))
+        raw.append((tick_ts + 200, 90000.0 + i))  # the second horizon call's own price-log write
+    deduped = run_experiment.dedupe_near_simultaneous(raw)
+    assert len(deduped) == 20  # one point per real tick, not 40
+    step = run_experiment.median_delta_ms(deduped)
+    assert abs(step - tick_spacing_ms) < 1000  # within 1s of the real ~3h spacing
+    # And the horizon_steps this would produce, matching generate_forecasts' own formula:
+    assert round(12 * 3600000 / step) == 4
+    assert round(24 * 3600000 / step) == 8
+
+
+def test_naive_undeduped_median_would_have_been_wrong_by_orders_of_magnitude():
+    """Documents the bug this fix addresses, using the same synthetic
+    shape as the dedup test above but WITHOUT deduping -- proving the
+    old behavior really was wrong, not just theoretically risky."""
+    tick_spacing_ms = 3 * 3600000
+    base = 1788458427794
+    raw = []
+    for i in range(20):
+        tick_ts = base + i * tick_spacing_ms
+        raw.append((tick_ts, 90000.0 + i))
+        raw.append((tick_ts + 200, 90000.0 + i))
+    raw.sort()
+    naive_step = run_experiment.median_delta_ms(raw)  # deliberately NOT deduped
+    assert naive_step < 1000  # dominated by the ~200ms intra-tick gaps, not ~3h
+    naive_horizon_steps_12h = round(12 * 3600000 / naive_step)
+    assert naive_horizon_steps_12h > 1000  # wildly wrong, confirming the bug's real magnitude
+
+
 def test_target_ts_uses_horizon_hours_consistently_with_pulseworkerv2():
     src = open(os.path.join(os.path.dirname(__file__), "run_experiment.py")).read()
     assert "target_ts = now_ms + horizon_hours * 3600000" in src

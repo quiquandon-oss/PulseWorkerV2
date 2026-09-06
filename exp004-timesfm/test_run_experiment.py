@@ -116,6 +116,51 @@ def test_naive_undeduped_median_would_have_been_wrong_by_orders_of_magnitude():
     assert naive_horizon_steps_12h > 1000  # wildly wrong, confirming the bug's real magnitude
 
 
+def test_recent_window_ignores_an_older_different_cadence_era_mixed_into_full_history():
+    """Reproduces the EXACT real bug found against production btc_data
+    (2026-09-06): the full historical dataset contains an older ~1h
+    cadence era (570 of 1046 real deduplicated ticks) alongside the
+    current ~3h era (173 ticks) -- a real run using the full history's
+    median computed step_ms=1h, giving horizon_steps=12/24 instead of
+    the correct 4/8. This test builds a synthetic series with the same
+    two-era shape and confirms median_delta_ms, using only the most
+    recent RECENT_CADENCE_WINDOW points, correctly reflects the CURRENT
+    era and ignores the older one entirely."""
+    one_hour = 3600000
+    three_hours = 3 * one_hour
+    base = 1_700_000_000_000
+
+    # Older era: 800 ticks at ~1h spacing (dominates by raw count, same
+    # as the real data, where the 1h era outnumbers the 3h era).
+    older_era = [(base + i * one_hour, 90000.0) for i in range(800)]
+    # Current (recent) era: 80 ticks at ~3h spacing, appended after.
+    current_era_start = older_era[-1][0] + three_hours
+    recent_era = [(current_era_start + i * three_hours, 90000.0) for i in range(80)]
+
+    full_history = older_era + recent_era
+    assert len(full_history) > run_experiment.RECENT_CADENCE_WINDOW
+
+    step = run_experiment.median_delta_ms(full_history)
+    # Must reflect the CURRENT (~3h) era, not the older (~1h) era that
+    # dominates the full history by count.
+    assert abs(step - three_hours) < 1000, (
+        f"median_delta_ms computed {step}ms ({step/3600000:.2f}h) -- expected ~3h "
+        f"(the current era), not ~1h (the older era that outnumbers it in the full history)"
+    )
+    assert round(12 * 3600000 / step) == 4
+    assert round(24 * 3600000 / step) == 8
+
+
+def test_context_length_stays_within_the_recent_cadence_era():
+    """CONTEXT_LENGTH=128 at the current ~3h cadence covers ~16 days --
+    small enough to plausibly stay within a single cadence era, unlike
+    the original 512 (which, at 3h spacing, would reach back ~64 days --
+    long enough to cross into btc_data's real older ~1h era)."""
+    assert run_experiment.CONTEXT_LENGTH == 128
+    days_covered_at_current_cadence = (run_experiment.CONTEXT_LENGTH * 3) / 24
+    assert days_covered_at_current_cadence < 30  # well under a month, deliberately conservative
+
+
 def test_target_ts_uses_horizon_hours_consistently_with_pulseworkerv2():
     src = open(os.path.join(os.path.dirname(__file__), "run_experiment.py")).read()
     assert "target_ts = now_ms + horizon_hours * 3600000" in src
@@ -166,10 +211,25 @@ def test_selection_decisions_is_only_ever_read_not_written():
     assert "INTO selection_decisions" not in src
 
 
-def test_only_write_target_is_experiment_4_timesfm():
+def test_context_length_and_horizon_steps_are_not_swapped():
+    """Directly guards against the real bug found in PR #39's validation
+    run: context_length and forecast_horizon_steps were swapped in the
+    original INSERT (context_length stored horizon_steps' value; there
+    was no column for horizon_steps at all). Confirmed against the real
+    run's own stored data: context_length showed 12 and 24 (==
+    horizon_hours), not a plausible context-window size."""
+    src = open(os.path.join(os.path.dirname(__file__), "run_experiment.py")).read()
+    # Column declaration order: context_length must come directly before
+    # forecast_horizon_steps.
+    assert "inference_backend, context_length, " in src
+    assert "forecast_horizon_steps, features_used" in src
+    # And the actual f-string values passed at those same two positions,
+    # in the same order: len(context_prices) then horizon_steps.
+    assert "{len(context_prices)}, {horizon_steps}, {sql_escape(FEATURES_USED)}" in src
     src = open(os.path.join(os.path.dirname(__file__), "run_experiment.py")).read()
     assert "INSERT INTO experiment_4_timesfm" in src
     assert "UPDATE experiment_4_timesfm" in src
+    assert "forecast_horizon_steps" in src
     insert_targets = re.findall(r"INSERT INTO (\w+)", src)
     update_targets = re.findall(r"UPDATE (\w+) SET", src)
     assert set(insert_targets) == {"experiment_4_timesfm"}

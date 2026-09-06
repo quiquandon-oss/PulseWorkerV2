@@ -29,7 +29,8 @@ CREATE TABLE experiment_4_timesfm (
   model_version TEXT NOT NULL,            -- e.g. 'timesfm-2.5-200m'
   checkpoint TEXT NOT NULL,               -- e.g. 'google/timesfm-2.5-200m-pytorch'
   inference_backend TEXT NOT NULL,        -- e.g. 'torch-cpu'
-  context_length INTEGER NOT NULL,
+  context_length INTEGER NOT NULL,        -- actual number of historical points fed to the model (len(context_prices))
+  forecast_horizon_steps INTEGER NOT NULL,-- number of forecast steps requested from the model, derived from RECENT sampling cadence (see run_experiment.py's RECENT_CADENCE_WINDOW)
   features_used TEXT NOT NULL,            -- e.g. 'univariate: btc_price only, no covariates'
   production_chosen_variant TEXT,         -- selection_decisions.chosen_variant at prediction time, for comparison only -- never written back to
   actual_return_pct REAL,                 -- filled in at resolution

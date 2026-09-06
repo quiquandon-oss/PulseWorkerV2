@@ -51,8 +51,32 @@ HORIZONS_HOURS = [12, 24]  # same two horizons PulseWorkerV2 already supports fo
 MODEL_VERSION = "timesfm-2.5-200m"
 CHECKPOINT = "google/timesfm-2.5-200m-pytorch"
 INFERENCE_BACKEND = "torch-cpu"
-CONTEXT_LENGTH = 512  # conservative, well within TimesFM 2.5's supported context; see report for rationale
+CONTEXT_LENGTH = 128  # see RECENT_CADENCE_WINDOW's comment for why this
+                       # is 128, not a larger number like 512
 FEATURES_USED = "univariate: btc_price only, no covariates"
+RECENT_CADENCE_WINDOW = 60  # number of RECENT deduplicated ticks used to
+                             # detect the current sampling cadence -- NOT
+                             # the full history. Confirmed empirically
+                             # (2026-09-06) that btc_data's full history
+                             # spans multiple different cron-cadence eras
+                             # (the project's cadence was tightened from
+                             # 6h to 3h at some point, and full-history
+                             # analysis found the single largest cluster
+                             # of tick-to-tick deltas is actually ~1h --
+                             # an older era -- not the current ~3h
+                             # cadence). A global median across all of
+                             # history computed ~1h, not ~3h, which would
+                             # have made horizon_steps wrong by 3x (12/24
+                             # instead of the correct 4/8). Using only the
+                             # most recent RECENT_CADENCE_WINDOW ticks
+                             # avoids this. CONTEXT_LENGTH=128 (down from
+                             # an initial 512) for the same underlying
+                             # reason: TimesFM assumes roughly uniform
+                             # spacing across its input context, so the
+                             # context window itself must also stay
+                             # within the current, consistent-cadence era
+                             # rather than reaching back far enough to
+                             # cross into an older, differently-spaced one.
 
 
 def run_d1(sql: str):
@@ -130,13 +154,22 @@ def fetch_production_chosen_variant(horizon_hours: int):
 
 
 def median_delta_ms(price_history):
-    """Median spacing between consecutive points. Callers must pass an
-    already-deduplicated series (see dedupe_near_simultaneous) -- this
-    function does not defend against near-simultaneous duplicate
-    clusters itself."""
-    deltas = sorted(b[0] - a[0] for a, b in zip(price_history, price_history[1:]) if b[0] > a[0])
+    """Median spacing between consecutive points, computed from only the
+    most RECENT RECENT_CADENCE_WINDOW points -- not the full history.
+    Callers must pass an already-deduplicated series (see
+    dedupe_near_simultaneous) -- this function does not defend against
+    near-simultaneous duplicate clusters itself.
+
+    Confirmed empirically (2026-09-06) that using the full history here
+    is wrong: btc_data spans multiple different cron-cadence eras (an
+    older ~1h era dominates the full-history tick count, even though the
+    current era is ~3h), so a global median reflects history, not the
+    current sampling rate. See RECENT_CADENCE_WINDOW's own comment for
+    the full finding."""
+    recent = price_history[-RECENT_CADENCE_WINDOW:]
+    deltas = sorted(b[0] - a[0] for a, b in zip(recent, recent[1:]) if b[0] > a[0])
     if not deltas:
-        raise RuntimeError("insufficient price history to determine sampling interval")
+        raise RuntimeError("insufficient recent price history to determine sampling interval")
     return deltas[len(deltas) // 2]
 
 
@@ -175,16 +208,18 @@ def generate_forecasts():
         direction = "UP" if predicted_return_pct > 0 else "DOWN"  # documented threshold: > 0, not >=
         production_variant = fetch_production_chosen_variant(horizon_hours)
         target_ts = now_ms + horizon_hours * 3600000
+        print(f"[exp004] BTC/{horizon_hours}h: step_ms={step_ms} ({step_ms/3600000:.3f}h) "
+              f"horizon_steps={horizon_steps} context_length={len(context_prices)}")
 
         sql = (
             "INSERT INTO experiment_4_timesfm "
             "(coin, horizon_hours, ts, target_ts, input_end_ts, price_at_prediction, forecast_price, "
             "predicted_return_pct, direction, model_version, checkpoint, inference_backend, context_length, "
-            "features_used, production_chosen_variant) VALUES ("
+            "forecast_horizon_steps, features_used, production_chosen_variant) VALUES ("
             f"{sql_escape(COIN)}, {horizon_hours}, {now_ms}, {target_ts}, {input_end_ts}, "
             f"{price_at_prediction}, {forecast_price}, {predicted_return_pct}, {sql_escape(direction)}, "
             f"{sql_escape(MODEL_VERSION)}, {sql_escape(CHECKPOINT)}, {sql_escape(INFERENCE_BACKEND)}, "
-            f"{horizon_steps}, {sql_escape(FEATURES_USED)}, {sql_escape(production_variant)})"
+            f"{len(context_prices)}, {horizon_steps}, {sql_escape(FEATURES_USED)}, {sql_escape(production_variant)})"
         )
         run_d1(sql)
         print(f"[exp004] logged BTC/{horizon_hours}h forecast: price_now={price_at_prediction} "

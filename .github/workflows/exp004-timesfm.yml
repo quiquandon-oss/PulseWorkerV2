@@ -1,0 +1,71 @@
+name: Experiment 4 - TimesFM Challenger (BTC only, research only)
+
+# BTC-only, per the explicit spec rule: "If Experiment 4 requires a
+# separate/dedicated cron, Experiment 4 MUST BE BTC ONLY." It requires
+# one here structurally, not by choice -- TimesFM is a PyTorch model
+# that cannot execute inside Cloudflare's Worker/global cron at all (no
+# Python runtime in a V8 isolate, and the checkpoint alone exceeds any
+# Workers memory limit), so "reuse the existing execution cycle" is not
+# an available option regardless of coin scope.
+#
+# This is a completely independent scheduling mechanism from Cloudflare's
+# Cron Triggers -- it does not consume any of the account's 5-Cron-
+# Trigger-per-account Workers Free budget (see wrangler.toml's own
+# comment for that unrelated, already-resolved constraint). Runs once
+# daily (not every 3h) -- a deliberately conservative cadence: TimesFM
+# inference itself is cheap, but there's no reason to run this more
+# often than needed for a research comparison, and public-repo GitHub
+# Actions minutes, while unlimited, aren't a reason to be wasteful.
+# Offset 30 minutes from the existing 07:00 UTC daily cron to avoid
+# coinciding with it, though the two are otherwise unrelated (different
+# infrastructure entirely).
+on:
+  schedule:
+    - cron: '30 7 * * *'
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+jobs:
+  exp004:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install wrangler
+        run: npm install -g wrangler
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      # CPU-only torch explicitly -- GitHub-hosted runners have no GPU,
+      # and the default `pip install torch` would otherwise pull a much
+      # larger CUDA-enabled build for no benefit here.
+      - name: Install TimesFM (CPU)
+        run: |
+          pip install torch --index-url https://download.pytorch.org/whl/cpu
+          pip install timesfm[torch]
+
+      - name: Run Experiment 4 (forecast + resolve) -- with timing/memory capture for validation
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          /usr/bin/time -v python exp004-timesfm/run_experiment.py > exp004_run_output.txt 2>&1
+          echo "EXIT_CODE=$?" >> exp004_run_output.txt
+
+      - name: Commit run output for validation retrieval
+        if: always()
+        run: |
+          git config user.name "exp4-validation-bot"
+          git config user.email "actions@github.com"
+          mkdir -p .ai
+          mv exp004_run_output.txt .ai/exp004-real-run-output.txt || true
+          git add .ai/exp004-real-run-output.txt
+          git commit -m "chore(temp): exp4 real run output" || echo "nothing to commit"
+          git push

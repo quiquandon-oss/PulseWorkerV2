@@ -6,7 +6,24 @@ Resource location: remote
 
 🌀 Executing on remote database sentiment-history (f91ca980-b886-423a-bd6f-f3baea46d181):
 🌀 To execute on your local development database, remove the --remote flag from your wrangler command.
-🚣 Executed 1 command in 0.47ms
+
+[31m✘ [41;31m[[41;97mERROR[41;31m][0m [1mA request to the Cloudflare API (/accounts/f58e761fbc8e62dc404d8684290af264/d1/database/f91ca980-b886-423a-bd6f-f3baea46d181/query) failed.[0m
+
+  duplicate column name: forecast_horizon_steps: SQLITE_ERROR [code: 7500]
+  
+  If you think this is a bug, please open an issue at: [4mhttps://github.com/cloudflare/workers-sdk/issues/new/choose[0m
+
+
+🪵  Logs were written to "/home/runner/.config/.wrangler/logs/wrangler-2026-09-06_05-17-17_655.log"
+(column may already exist -- continuing)
+
+ ⛅️ wrangler 4.86.0 (update available 4.129.0)
+──────────────────────────────────────────────
+Resource location: remote 
+
+🌀 Executing on remote database sentiment-history (f91ca980-b886-423a-bd6f-f3baea46d181):
+🌀 To execute on your local development database, remove the --remote flag from your wrangler command.
+🚣 Executed 1 command in 0.27ms
 [
   {
     "results": [],
@@ -17,46 +34,15 @@ Resource location: remote
       "served_by_colo": "IAD",
       "served_by_primary": true,
       "timings": {
-        "sql_duration_ms": 0.4705
+        "sql_duration_ms": 0.2722
       },
-      "duration": 0.4705,
+      "duration": 0.2722,
       "changes": 0,
       "last_row_id": 0,
-      "changed_db": true,
-      "size_after": 4206592,
-      "rows_read": 57,
-      "rows_written": 1,
-      "total_attempts": 1
-    }
-  }
-]
-
- ⛅️ wrangler 4.86.0 (update available 4.129.0)
-──────────────────────────────────────────────
-Resource location: remote 
-
-🌀 Executing on remote database sentiment-history (f91ca980-b886-423a-bd6f-f3baea46d181):
-🌀 To execute on your local development database, remove the --remote flag from your wrangler command.
-🚣 Executed 1 command in 0.20ms
-[
-  {
-    "results": [],
-    "success": true,
-    "meta": {
-      "served_by": "v3-prod",
-      "served_by_region": "ENAM",
-      "served_by_colo": "IAD",
-      "served_by_primary": true,
-      "timings": {
-        "sql_duration_ms": 0.2013
-      },
-      "duration": 0.2013,
-      "changes": 2,
-      "last_row_id": 0,
-      "changed_db": true,
+      "changed_db": false,
       "size_after": 4206592,
       "rows_read": 4,
-      "rows_written": 2,
+      "rows_written": 0,
       "total_attempts": 1
     }
   }
@@ -68,7 +54,7 @@ Resource location: remote
 
 🌀 Executing on remote database sentiment-history (f91ca980-b886-423a-bd6f-f3baea46d181):
 🌀 To execute on your local development database, remove the --remote flag from your wrangler command.
-🚣 Executed 1 command in 0.16ms
+🚣 Executed 1 command in 0.19ms
 [
   {
     "results": [
@@ -83,9 +69,9 @@ Resource location: remote
       "served_by_colo": "IAD",
       "served_by_primary": true,
       "timings": {
-        "sql_duration_ms": 0.1614
+        "sql_duration_ms": 0.1878
       },
-      "duration": 0.1614,
+      "duration": 0.1878,
       "changes": 0,
       "last_row_id": 0,
       "changed_db": false,

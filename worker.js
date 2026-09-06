@@ -4182,6 +4182,37 @@ async function getChallengerRecent(env, limit = 20) {
   return { ok: true, predictions: results };
 }
 
+// Experiment 4 (Google TimesFM research challenger, BTC-only) read side.
+// Read-only, zero writes, no effect on any production/selection logic --
+// this experiment doesn't run inside the Worker at all (see
+// .github/workflows/exp004-timesfm.yml), so there is nothing here to
+// accidentally couple to selectBestVariant/decideSelection. Both queries
+// use the (coin, horizon_hours, ts) index from .ai/migrations/0002 --
+// bounded LIMIT on the row query, a single aggregate COUNT on the summary,
+// neither is a full-table scan.
+async function getTimesFmRecent(env, coin, horizonHours, limit = 20) {
+  const summaryRow = await env.DB.prepare(
+    `SELECT COUNT(*) AS total,
+            SUM(CASE WHEN resolved_ts IS NOT NULL THEN 1 ELSE 0 END) AS resolved
+     FROM experiment_4_timesfm WHERE coin = ? AND horizon_hours = ?`
+  ).bind(coin, horizonHours).first();
+  const total = summaryRow?.total || 0;
+  const resolved = summaryRow?.resolved || 0;
+
+  const { results } = await env.DB.prepare(
+    `SELECT * FROM experiment_4_timesfm WHERE coin = ? AND horizon_hours = ?
+     ORDER BY ts DESC LIMIT ?`
+  ).bind(coin, horizonHours, limit).all();
+
+  return {
+    ok: true,
+    coin,
+    horizon_hours: horizonHours,
+    summary: { total, resolved, unresolved: total - resolved },
+    forecasts: results,
+  };
+}
+
 async function predictAndLog(env, horizonHours = 24, { allowWrite = false } = {}) {
   // Resolving already-existing pending predictions is NOT "creating new
   // training data" -- it fills in the real outcome on a row that already
@@ -6071,6 +6102,27 @@ export default {
       try {
         const limit = Math.min(100, parseInt(url.searchParams.get('limit') || '20', 10));
         const result = await getChallengerRecent(env, limit);
+        return new Response(JSON.stringify(result), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+      } catch (err) {
+        return new Response(JSON.stringify({ ok: false, error: String(err) }), { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+      }
+    }
+
+    // ---- GET /research/timesfm-recent?horizon=12|24&limit=20 -- Experiment 4
+    // (Google TimesFM research challenger) read side. BTC-only, matching the
+    // experiment's own scope (see exp004-timesfm/run_experiment.py) -- coin
+    // is not a query param because there is no other coin to ask for.
+    // Read-only, zero writes, no effect on production/selection logic; a
+    // sibling of /research/anomaly-gate and /challenger-recent above, not a
+    // modification of either. ----
+    if (url.pathname === '/research/timesfm-recent' && request.method === 'GET') {
+      try {
+        const horizon = parseInt(url.searchParams.get('horizon'), 10);
+        if (![12, 24].includes(horizon)) {
+          return new Response(JSON.stringify({ ok: false, error: 'horizon must be 12 or 24' }), { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+        }
+        const limit = Math.min(100, parseInt(url.searchParams.get('limit') || '20', 10));
+        const result = await getTimesFmRecent(env, 'BTC', horizon, limit);
         return new Response(JSON.stringify(result), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
       } catch (err) {
         return new Response(JSON.stringify({ ok: false, error: String(err) }), { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });

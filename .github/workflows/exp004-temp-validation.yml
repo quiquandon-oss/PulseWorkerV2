@@ -54,6 +54,25 @@ jobs:
           wrangler d1 execute sentiment-history --remote --command "CREATE INDEX IF NOT EXISTS idx_experiment_4_timesfm_unresolved ON experiment_4_timesfm(target_ts) WHERE resolved_ts IS NULL"
           wrangler d1 execute sentiment-history --remote --command "CREATE INDEX IF NOT EXISTS idx_experiment_4_timesfm_coin_horizon_ts ON experiment_4_timesfm(coin, horizon_hours, ts)"
 
+      - name: Apply migration 0003 (add forecast_horizon_steps, clean up contaminated test rows)
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          echo "=== migration 0003 ===" > migration0003_output.txt
+          (wrangler d1 execute sentiment-history --remote --command "ALTER TABLE experiment_4_timesfm ADD COLUMN forecast_horizon_steps INTEGER" >> migration0003_output.txt 2>&1) || echo "(column may already exist -- continuing)" >> migration0003_output.txt
+          wrangler d1 execute sentiment-history --remote --command "DELETE FROM experiment_4_timesfm WHERE id IN (1, 2)" >> migration0003_output.txt
+          wrangler d1 execute sentiment-history --remote --command "SELECT sql FROM sqlite_master WHERE name='experiment_4_timesfm'" >> migration0003_output.txt
+
+      - name: Commit migration 0003 output
+        run: |
+          git config user.name "exp4-validation-bot"
+          git config user.email "actions@github.com"
+          git pull
+          mv migration0003_output.txt .ai/exp004-migration0003-output.txt
+          git add .ai/exp004-migration0003-output.txt
+          git commit -m "chore(temp): migration 0003 output" || echo "nothing to commit"
+          git push
+
       - name: Verify table and indexes exist
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}

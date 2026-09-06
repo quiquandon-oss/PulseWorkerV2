@@ -6,7 +6,7 @@ Resource location: remote
 
 🌀 Executing on remote database sentiment-history (f91ca980-b886-423a-bd6f-f3baea46d181):
 🌀 To execute on your local development database, remove the --remote flag from your wrangler command.
-🚣 Executed 1 command in 0.23ms
+🚣 Executed 1 command in 0.19ms
 [
   {
     "results": [
@@ -33,13 +33,13 @@ Resource location: remote
       "served_by_colo": "IAD",
       "served_by_primary": true,
       "timings": {
-        "sql_duration_ms": 0.2319
+        "sql_duration_ms": 0.1919
       },
-      "duration": 0.2319,
+      "duration": 0.1919,
       "changes": 0,
       "last_row_id": 0,
       "changed_db": false,
-      "size_after": 4198400,
+      "size_after": 4206592,
       "rows_read": 55,
       "rows_written": 0,
       "total_attempts": 1
@@ -54,7 +54,7 @@ Resource location: remote
 
 🌀 Executing on remote database sentiment-history (f91ca980-b886-423a-bd6f-f3baea46d181):
 🌀 To execute on your local development database, remove the --remote flag from your wrangler command.
-🚣 Executed 1 command in 0.19ms
+🚣 Executed 1 command in 0.22ms
 [
   {
     "results": [
@@ -69,13 +69,13 @@ Resource location: remote
       "served_by_colo": "IAD",
       "served_by_primary": true,
       "timings": {
-        "sql_duration_ms": 0.1942
+        "sql_duration_ms": 0.2153
       },
-      "duration": 0.1942,
+      "duration": 0.2153,
       "changes": 0,
       "last_row_id": 0,
       "changed_db": false,
-      "size_after": 4198400,
+      "size_after": 4206592,
       "rows_read": 1884,
       "rows_written": 0,
       "total_attempts": 1
@@ -90,7 +90,7 @@ Resource location: remote
 
 🌀 Executing on remote database sentiment-history (f91ca980-b886-423a-bd6f-f3baea46d181):
 🌀 To execute on your local development database, remove the --remote flag from your wrangler command.
-🚣 Executed 1 command in 2.29ms
+🚣 Executed 1 command in 3.36ms
 [
   {
     "results": [
@@ -5670,13 +5670,13 @@ Resource location: remote
       "served_by_colo": "IAD",
       "served_by_primary": true,
       "timings": {
-        "sql_duration_ms": 2.2911
+        "sql_duration_ms": 3.3563
       },
-      "duration": 2.2911,
+      "duration": 3.3563,
       "changes": 0,
       "last_row_id": 0,
       "changed_db": false,
-      "size_after": 4198400,
+      "size_after": 4206592,
       "rows_read": 1884,
       "rows_written": 0,
       "total_attempts": 1

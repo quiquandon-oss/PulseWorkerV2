@@ -1,0 +1,38 @@
+name: (temp) Apply Exp4 migration 0004 + verify
+
+on:
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Install wrangler
+        run: npm install -g wrangler
+
+      - name: Apply migration 0004 and check before/after row count
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          echo "=== before ===" > m0004_output.txt
+          wrangler d1 execute sentiment-history --remote --command "SELECT COUNT(*) as n, SUM(CASE WHEN resolved_ts IS NULL THEN 1 ELSE 0 END) as unresolved FROM experiment_4_timesfm" >> m0004_output.txt
+          echo "=== applying DELETE ===" >> m0004_output.txt
+          wrangler d1 execute sentiment-history --remote --command "DELETE FROM experiment_4_timesfm WHERE resolved_ts IS NULL" >> m0004_output.txt
+          echo "=== after ===" >> m0004_output.txt
+          wrangler d1 execute sentiment-history --remote --command "SELECT COUNT(*) as n FROM experiment_4_timesfm" >> m0004_output.txt
+
+      - name: Commit output
+        run: |
+          git config user.name "exp4-validation-bot"
+          git config user.email "actions@github.com"
+          mv m0004_output.txt .ai/exp004-m0004-output.txt
+          git add .ai/exp004-m0004-output.txt
+          git commit -m "chore(temp): migration 0004 output" || echo "nothing to commit"
+          git push

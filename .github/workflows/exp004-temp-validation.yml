@@ -79,3 +79,22 @@ jobs:
           git add .ai/exp004-validation-output.txt
           git commit -m "chore(temp): exp4 validation output" || echo "nothing to commit"
           git push
+
+      - name: Query real experiment_4_timesfm rows (post real-run validation)
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          echo "=== all experiment_4_timesfm rows ===" > exp004_rows_output.txt
+          wrangler d1 execute sentiment-history --remote --command "SELECT * FROM experiment_4_timesfm ORDER BY id ASC" >> exp004_rows_output.txt
+          echo "=== row count by coin/horizon ===" >> exp004_rows_output.txt
+          wrangler d1 execute sentiment-history --remote --command "SELECT coin, horizon_hours, COUNT(*) as n, MIN(ts) as earliest, MAX(ts) as latest, SUM(CASE WHEN resolved_ts IS NOT NULL THEN 1 ELSE 0 END) as resolved_count FROM experiment_4_timesfm GROUP BY coin, horizon_hours" >> exp004_rows_output.txt
+
+      - name: Commit rows output
+        run: |
+          git config user.name "exp4-validation-bot"
+          git config user.email "actions@github.com"
+          git pull
+          mv exp004_rows_output.txt .ai/exp004-rows-output.txt
+          git add .ai/exp004-rows-output.txt
+          git commit -m "chore(temp): exp4 real rows output" || echo "nothing to commit"
+          git push

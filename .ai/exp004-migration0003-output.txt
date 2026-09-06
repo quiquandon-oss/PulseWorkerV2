@@ -14,7 +14,7 @@ Resource location: remote
   If you think this is a bug, please open an issue at: [4mhttps://github.com/cloudflare/workers-sdk/issues/new/choose[0m
 
 
-🪵  Logs were written to "/home/runner/.config/.wrangler/logs/wrangler-2026-09-06_05-17-17_655.log"
+🪵  Logs were written to "/home/runner/.config/.wrangler/logs/wrangler-2026-09-06_05-23-18_232.log"
 (column may already exist -- continuing)
 
  ⛅️ wrangler 4.86.0 (update available 4.129.0)
@@ -23,7 +23,7 @@ Resource location: remote
 
 🌀 Executing on remote database sentiment-history (f91ca980-b886-423a-bd6f-f3baea46d181):
 🌀 To execute on your local development database, remove the --remote flag from your wrangler command.
-🚣 Executed 1 command in 0.27ms
+🚣 Executed 1 command in 0.24ms
 [
   {
     "results": [],
@@ -34,9 +34,9 @@ Resource location: remote
       "served_by_colo": "IAD",
       "served_by_primary": true,
       "timings": {
-        "sql_duration_ms": 0.2722
+        "sql_duration_ms": 0.2414
       },
-      "duration": 0.2722,
+      "duration": 0.2414,
       "changes": 0,
       "last_row_id": 0,
       "changed_db": false,
@@ -54,7 +54,7 @@ Resource location: remote
 
 🌀 Executing on remote database sentiment-history (f91ca980-b886-423a-bd6f-f3baea46d181):
 🌀 To execute on your local development database, remove the --remote flag from your wrangler command.
-🚣 Executed 1 command in 0.19ms
+🚣 Executed 1 command in 0.23ms
 [
   {
     "results": [
@@ -69,9 +69,9 @@ Resource location: remote
       "served_by_colo": "IAD",
       "served_by_primary": true,
       "timings": {
-        "sql_duration_ms": 0.1878
+        "sql_duration_ms": 0.227
       },
-      "duration": 0.1878,
+      "duration": 0.227,
       "changes": 0,
       "last_row_id": 0,
       "changed_db": false,

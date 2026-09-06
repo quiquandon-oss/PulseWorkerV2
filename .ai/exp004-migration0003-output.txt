@@ -1,0 +1,98 @@
+=== migration 0003 ===
+
+ ⛅️ wrangler 4.86.0 (update available 4.129.0)
+──────────────────────────────────────────────
+Resource location: remote 
+
+🌀 Executing on remote database sentiment-history (f91ca980-b886-423a-bd6f-f3baea46d181):
+🌀 To execute on your local development database, remove the --remote flag from your wrangler command.
+🚣 Executed 1 command in 0.47ms
+[
+  {
+    "results": [],
+    "success": true,
+    "meta": {
+      "served_by": "v3-prod",
+      "served_by_region": "ENAM",
+      "served_by_colo": "IAD",
+      "served_by_primary": true,
+      "timings": {
+        "sql_duration_ms": 0.4705
+      },
+      "duration": 0.4705,
+      "changes": 0,
+      "last_row_id": 0,
+      "changed_db": true,
+      "size_after": 4206592,
+      "rows_read": 57,
+      "rows_written": 1,
+      "total_attempts": 1
+    }
+  }
+]
+
+ ⛅️ wrangler 4.86.0 (update available 4.129.0)
+──────────────────────────────────────────────
+Resource location: remote 
+
+🌀 Executing on remote database sentiment-history (f91ca980-b886-423a-bd6f-f3baea46d181):
+🌀 To execute on your local development database, remove the --remote flag from your wrangler command.
+🚣 Executed 1 command in 0.20ms
+[
+  {
+    "results": [],
+    "success": true,
+    "meta": {
+      "served_by": "v3-prod",
+      "served_by_region": "ENAM",
+      "served_by_colo": "IAD",
+      "served_by_primary": true,
+      "timings": {
+        "sql_duration_ms": 0.2013
+      },
+      "duration": 0.2013,
+      "changes": 2,
+      "last_row_id": 0,
+      "changed_db": true,
+      "size_after": 4206592,
+      "rows_read": 4,
+      "rows_written": 2,
+      "total_attempts": 1
+    }
+  }
+]
+
+ ⛅️ wrangler 4.86.0 (update available 4.129.0)
+──────────────────────────────────────────────
+Resource location: remote 
+
+🌀 Executing on remote database sentiment-history (f91ca980-b886-423a-bd6f-f3baea46d181):
+🌀 To execute on your local development database, remove the --remote flag from your wrangler command.
+🚣 Executed 1 command in 0.16ms
+[
+  {
+    "results": [
+      {
+        "sql": "CREATE TABLE experiment_4_timesfm (\n  id INTEGER PRIMARY KEY AUTOINCREMENT,\n  coin TEXT NOT NULL,\n  horizon_hours INTEGER NOT NULL,\n  ts INTEGER NOT NULL,\n  target_ts INTEGER NOT NULL,\n  input_end_ts INTEGER NOT NULL,\n  price_at_prediction REAL NOT NULL,\n  forecast_price REAL,\n  predicted_return_pct REAL,\n  direction TEXT,\n  model_version TEXT NOT NULL,\n  checkpoint TEXT NOT NULL,\n  inference_backend TEXT NOT NULL,\n  context_length INTEGER NOT NULL,\n  features_used TEXT NOT NULL,\n  production_chosen_variant TEXT,\n  actual_return_pct REAL,\n  actual_direction TEXT,\n  correct INTEGER,\n  absolute_error REAL,\n  signed_error REAL,\n  resolved_ts INTEGER\n, forecast_horizon_steps INTEGER)"
+      }
+    ],
+    "success": true,
+    "meta": {
+      "served_by": "v3-prod",
+      "served_by_region": "ENAM",
+      "served_by_colo": "IAD",
+      "served_by_primary": true,
+      "timings": {
+        "sql_duration_ms": 0.1614
+      },
+      "duration": 0.1614,
+      "changes": 0,
+      "last_row_id": 0,
+      "changed_db": false,
+      "size_after": 4206592,
+      "rows_read": 55,
+      "rows_written": 0,
+      "total_attempts": 1
+    }
+  }
+]

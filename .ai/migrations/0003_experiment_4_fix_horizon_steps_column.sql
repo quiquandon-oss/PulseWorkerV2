@@ -1,0 +1,33 @@
+-- Fix for a real bug found during PR #39's scientific validation pass
+-- (2026-09-06). experiment_4_timesfm was already created (migration
+-- 0002) and used for one real validation run before this bug was
+-- caught -- this migration adds the missing column and removes the two
+-- contaminated rows that run produced.
+--
+-- Bug found: the original INSERT statement wrote `horizon_steps` into
+-- the `context_length` column (a column/value mapping mistake), and
+-- there was no dedicated column for the actual forecast horizon step
+-- count at all. Confirmed against the real run's own stored rows:
+-- context_length showed 12 and 24 (== horizon_hours) instead of a
+-- plausible context-window size.
+--
+-- Separately, but discovered via the same real run: the ORIGINAL
+-- horizon_steps calculation itself was ALSO wrong, because it computed
+-- sampling cadence from btc_data's ENTIRE history, which spans multiple
+-- different cron-cadence eras (confirmed: 570 of 1046 deduplicated
+-- historical ticks are ~1h apart, an older era, versus the current ~3h
+-- cadence which only shows up in the most recent ~173 ticks). The real
+-- run's stored values (forecast_horizon_steps 12 and 24, implying
+-- step_ms=1h) proved this concretely -- not a hypothetical risk.
+-- run_experiment.py now computes cadence from only the most recent
+-- RECENT_CADENCE_WINDOW ticks, and CONTEXT_LENGTH was reduced from 512
+-- to 128 for the same reason (the context window itself must also stay
+-- within the current, consistent-cadence era).
+ALTER TABLE experiment_4_timesfm ADD COLUMN forecast_horizon_steps INTEGER;
+
+-- Removes the two rows produced by the real validation run before this
+-- fix -- both used the wrong horizon_steps (12/24 instead of the
+-- correct 4/8) and have the context_length/horizon_steps values
+-- swapped. Contaminated test artifacts, not valid experimental data;
+-- safe to delete since nothing else references this table yet.
+DELETE FROM experiment_4_timesfm WHERE id IN (1, 2);

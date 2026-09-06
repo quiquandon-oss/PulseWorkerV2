@@ -163,7 +163,14 @@ def test_context_length_stays_within_the_recent_cadence_era():
 
 def test_target_ts_uses_horizon_hours_consistently_with_pulseworkerv2():
     src = open(os.path.join(os.path.dirname(__file__), "run_experiment.py")).read()
-    assert "target_ts = now_ms + horizon_hours * 3600000" in src
+    assert "target_ts = input_end_ts + horizon_hours * 3600000" in src
+    # And explicitly NOT anchored to execution time -- this is the exact
+    # methodological correction this test guards: the forecast represents
+    # input_end_ts + horizon, not now_ms + horizon, since there is a real,
+    # observed gap between when data was last available and when the
+    # script happens to execute (confirmed on real data: input_end_ts was
+    # ~2.27h before now_ms in the first real validation run).
+    assert "target_ts = now_ms + horizon_hours * 3600000" not in src
 
 
 def test_resolution_uses_nearest_price_at_or_after_target_ts_not_before():

@@ -1,0 +1,13 @@
+-- Cleanup for the target_ts methodology correction (2026-09-06).
+--
+-- The 4 real forecast rows produced during PR #39's validation used
+-- target_ts = execution_time + horizon, not target_ts = input_end_ts +
+-- horizon. Since the forecast represents the model's prediction for
+-- input_end_ts + horizon specifically, resolving these rows against
+-- their old target_ts would compare the forecast to the wrong future
+-- point. None of the 4 rows have resolved yet (confirmed: all had
+-- resolved_ts IS NULL at the time of this migration), so deleting them
+-- loses zero real walk-forward signal -- this is the correct, low-cost
+-- point to fix the dataset's methodological consistency before any
+-- data has actually been used for anything.
+DELETE FROM experiment_4_timesfm WHERE resolved_ts IS NULL;

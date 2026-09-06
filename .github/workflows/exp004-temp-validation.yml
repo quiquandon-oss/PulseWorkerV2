@@ -67,8 +67,8 @@ jobs:
         run: |
           echo "=== total btc_data row count ===" >> validation_output.txt
           wrangler d1 execute sentiment-history --remote --command "SELECT COUNT(*) as n FROM btc_data" >> validation_output.txt
-          echo "=== last 40 distinct timestamps (raw) ===" >> validation_output.txt
-          wrangler d1 execute sentiment-history --remote --command "SELECT DISTINCT ts FROM btc_data ORDER BY ts DESC LIMIT 40" >> validation_output.txt
+          echo "=== last 120 distinct timestamps (raw) ===" >> validation_output.txt
+          wrangler d1 execute sentiment-history --remote --command "SELECT DISTINCT ts FROM btc_data ORDER BY ts DESC LIMIT 120" >> validation_output.txt
 
       - name: Commit output for retrieval
         run: |

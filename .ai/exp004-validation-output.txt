@@ -6,7 +6,7 @@ Resource location: remote
 
 🌀 Executing on remote database sentiment-history (f91ca980-b886-423a-bd6f-f3baea46d181):
 🌀 To execute on your local development database, remove the --remote flag from your wrangler command.
-🚣 Executed 1 command in 0.17ms
+🚣 Executed 1 command in 0.20ms
 [
   {
     "results": [
@@ -33,9 +33,9 @@ Resource location: remote
       "served_by_colo": "IAD",
       "served_by_primary": true,
       "timings": {
-        "sql_duration_ms": 0.1734
+        "sql_duration_ms": 0.1962
       },
-      "duration": 0.1734,
+      "duration": 0.1962,
       "changes": 0,
       "last_row_id": 0,
       "changed_db": false,
@@ -54,7 +54,7 @@ Resource location: remote
 
 🌀 Executing on remote database sentiment-history (f91ca980-b886-423a-bd6f-f3baea46d181):
 🌀 To execute on your local development database, remove the --remote flag from your wrangler command.
-🚣 Executed 1 command in 0.19ms
+🚣 Executed 1 command in 0.16ms
 [
   {
     "results": [
@@ -69,9 +69,9 @@ Resource location: remote
       "served_by_colo": "IAD",
       "served_by_primary": true,
       "timings": {
-        "sql_duration_ms": 0.193
+        "sql_duration_ms": 0.1593
       },
-      "duration": 0.193,
+      "duration": 0.1593,
       "changes": 0,
       "last_row_id": 0,
       "changed_db": false,
@@ -82,7 +82,7 @@ Resource location: remote
     }
   }
 ]
-=== last 40 distinct timestamps (raw) ===
+=== last 120 distinct timestamps (raw) ===
 
  ⛅️ wrangler 4.86.0 (update available 4.129.0)
 ──────────────────────────────────────────────
@@ -90,7 +90,7 @@ Resource location: remote
 
 🌀 Executing on remote database sentiment-history (f91ca980-b886-423a-bd6f-f3baea46d181):
 🌀 To execute on your local development database, remove the --remote flag from your wrangler command.
-🚣 Executed 1 command in 0.22ms
+🚣 Executed 1 command in 0.30ms
 [
   {
     "results": [
@@ -213,6 +213,246 @@ Resource location: remote
       },
       {
         "ts": 1788458427794
+      },
+      {
+        "ts": 1788458427728
+      },
+      {
+        "ts": 1788426017149
+      },
+      {
+        "ts": 1788426017114
+      },
+      {
+        "ts": 1788415217508
+      },
+      {
+        "ts": 1788415217272
+      },
+      {
+        "ts": 1788404412127
+      },
+      {
+        "ts": 1788404412107
+      },
+      {
+        "ts": 1788393612447
+      },
+      {
+        "ts": 1788393612280
+      },
+      {
+        "ts": 1788328807009
+      },
+      {
+        "ts": 1788328807008
+      },
+      {
+        "ts": 1788318007106
+      },
+      {
+        "ts": 1788318006904
+      },
+      {
+        "ts": 1788307207154
+      },
+      {
+        "ts": 1788307207140
+      },
+      {
+        "ts": 1788296407627
+      },
+      {
+        "ts": 1788296407438
+      },
+      {
+        "ts": 1788285607034
+      },
+      {
+        "ts": 1788285607032
+      },
+      {
+        "ts": 1788274807146
+      },
+      {
+        "ts": 1788274807085
+      },
+      {
+        "ts": 1788264007629
+      },
+      {
+        "ts": 1788264007293
+      },
+      {
+        "ts": 1788253206955
+      },
+      {
+        "ts": 1788242407410
+      },
+      {
+        "ts": 1788242407191
+      },
+      {
+        "ts": 1788231659115
+      },
+      {
+        "ts": 1788231658974
+      },
+      {
+        "ts": 1788220803893
+      },
+      {
+        "ts": 1788220803866
+      },
+      {
+        "ts": 1788210004334
+      },
+      {
+        "ts": 1788210004327
+      },
+      {
+        "ts": 1788199204197
+      },
+      {
+        "ts": 1788199204175
+      },
+      {
+        "ts": 1788188404645
+      },
+      {
+        "ts": 1788188404528
+      },
+      {
+        "ts": 1788177604345
+      },
+      {
+        "ts": 1788177604137
+      },
+      {
+        "ts": 1788166803257
+      },
+      {
+        "ts": 1788166803242
+      },
+      {
+        "ts": 1788156003127
+      },
+      {
+        "ts": 1788156003042
+      },
+      {
+        "ts": 1788145203438
+      },
+      {
+        "ts": 1788145203297
+      },
+      {
+        "ts": 1788134403420
+      },
+      {
+        "ts": 1788134403415
+      },
+      {
+        "ts": 1788123603546
+      },
+      {
+        "ts": 1788123603533
+      },
+      {
+        "ts": 1788112803965
+      },
+      {
+        "ts": 1788112803955
+      },
+      {
+        "ts": 1788102003917
+      },
+      {
+        "ts": 1788102003856
+      },
+      {
+        "ts": 1788091205357
+      },
+      {
+        "ts": 1788091203992
+      },
+      {
+        "ts": 1788080404195
+      },
+      {
+        "ts": 1788080403131
+      },
+      {
+        "ts": 1788069653903
+      },
+      {
+        "ts": 1788069653808
+      },
+      {
+        "ts": 1788058854075
+      },
+      {
+        "ts": 1788058853801
+      },
+      {
+        "ts": 1788048054166
+      },
+      {
+        "ts": 1788048053847
+      },
+      {
+        "ts": 1788037254492
+      },
+      {
+        "ts": 1788037254203
+      },
+      {
+        "ts": 1788026454441
+      },
+      {
+        "ts": 1788026454253
+      },
+      {
+        "ts": 1788015654117
+      },
+      {
+        "ts": 1788015653825
+      },
+      {
+        "ts": 1788004854320
+      },
+      {
+        "ts": 1788004854310
+      },
+      {
+        "ts": 1787994055723
+      },
+      {
+        "ts": 1787994054157
+      },
+      {
+        "ts": 1787983254199
+      },
+      {
+        "ts": 1787983254189
+      },
+      {
+        "ts": 1787972454487
+      },
+      {
+        "ts": 1787972454278
+      },
+      {
+        "ts": 1787961654077
+      },
+      {
+        "ts": 1787961653802
+      },
+      {
+        "ts": 1787950854288
+      },
+      {
+        "ts": 1787950854230
       }
     ],
     "success": true,
@@ -222,14 +462,14 @@ Resource location: remote
       "served_by_colo": "IAD",
       "served_by_primary": true,
       "timings": {
-        "sql_duration_ms": 0.2152
+        "sql_duration_ms": 0.2997
       },
-      "duration": 0.2152,
+      "duration": 0.2997,
       "changes": 0,
       "last_row_id": 0,
       "changed_db": false,
       "size_after": 4198400,
-      "rows_read": 42,
+      "rows_read": 123,
       "rows_written": 0,
       "total_attempts": 1
     }

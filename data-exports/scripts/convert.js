@@ -51,6 +51,7 @@ function toCsv(rows) {
 
 function main() {
   const summary = [];
+  let challengerFreshness = null; // populated below if that table's raw file loads successfully
   for (const t of TABLES) {
     const rawPath = path.join(RAW_DIR, t.raw);
     if (!fs.existsSync(rawPath)) {
@@ -74,9 +75,30 @@ function main() {
       earliestTs: timestamps.length ? Math.min(...timestamps) : null,
       latestTs: timestamps.length ? Math.max(...timestamps) : null,
     });
+
+    // The aggregate "Latest" column above is computed across ALL rows in
+    // the file -- for challenger_predictions.csv that means 3 coins x 2
+    // horizons combined, so one healthy combo (e.g. a coin/horizon still
+    // updating every ~3h) fully hides another that has silently stopped
+    // (discovered 2026-09-01: BTC both horizons and LINK 24h had gone
+    // 100+ hours without a new row while the aggregate "Latest" column
+    // still looked fresh, because ETH 12h alone was enough to make the
+    // max look current). Per-(coin, horizon_hours) breakdown here so a
+    // stall like that is visible in STATUS.md itself, not just
+    // discoverable by someone manually cross-referencing D1.
+    if (t.raw === 'challenger_predictions.json') {
+      const byKey = new Map();
+      for (const r of rows) {
+        if (!r.coin || r.horizon_hours == null || typeof r.ts !== 'number') continue;
+        const key = `${r.coin}/${r.horizon_hours}h`;
+        if (!byKey.has(key) || r.ts > byKey.get(key)) byKey.set(key, r.ts);
+      }
+      challengerFreshness = [...byKey.entries()].sort(([a], [b]) => a.localeCompare(b));
+    }
   }
 
   const nowIso = new Date().toISOString();
+  const nowMs = Date.now();
   const lines = [
     '# Export status (auto-generated, do not hand-edit)',
     '',
@@ -94,6 +116,24 @@ function main() {
     const latest = s.latestTs ? new Date(s.latestTs).toISOString() : 'n/a';
     lines.push(`| ${s.csv} | ${s.rowCount} | ${earliest} | ${latest} |`);
   }
+
+  if (challengerFreshness && challengerFreshness.length) {
+    lines.push('');
+    lines.push('## Challenger prediction freshness, per coin/horizon');
+    lines.push('');
+    lines.push('The table above shows one aggregate "Latest" for all coins/horizons combined -- a single fresh combo can mask a stalled one. This breaks it out so a silent stall (a specific coin/horizon no longer getting new challenger_predictions rows, even though others still are) is visible here directly, without a manual D1 investigation.');
+    lines.push('');
+    lines.push('| Coin/Horizon | Latest challenger row | Hours stale |');
+    lines.push('|---|---|---|');
+    for (const [key, ts] of challengerFreshness) {
+      const hoursStale = ((nowMs - ts) / 3600000).toFixed(1);
+      const flag = Number(hoursStale) > 6 ? ' ⚠️' : '';
+      lines.push(`| ${key} | ${new Date(ts).toISOString()} | ${hoursStale}${flag} |`);
+    }
+    lines.push('');
+    lines.push('⚠️ = more than 6h since that specific coin/horizon\'s last challenger prediction (expected cadence is ~3h). p_up_momentum, p_up_flat, p_up_tilted, and calibrated_p_up_flat all come from this same row, so a stall here is why selection_decisions_momentum.csv stays empty for that coin/horizon too -- it can never accumulate the 50 resolved rows it needs to start logging.');
+  }
+
   lines.push('');
   lines.push('See README.md in this directory for column documentation and context.');
   lines.push('');

@@ -25,8 +25,10 @@ jobs:
           echo "=== now ===" > $OUT
           wrangler d1 execute sentiment-history --remote --command "SELECT datetime('now') as now_utc, CAST(strftime('%s','now') AS INTEGER)*1000 as now_ms" >> $OUT
 
+          echo "=== EXP-002: schema check ===" >> $OUT
+          wrangler d1 execute sentiment-history --remote --command "SELECT sql FROM sqlite_master WHERE name='selection_decisions_anomaly'" >> $OUT
           echo "=== EXP-002: actual decision content (not just counts) ===" >> $OUT
-          wrangler d1 execute sentiment-history --remote --command "SELECT id, coin, horizon_hours, ts, cleared_gate, chosen_variant FROM selection_decisions_anomaly WHERE coin='BTC' ORDER BY ts DESC LIMIT 10" >> $OUT
+          wrangler d1 execute sentiment-history --remote --command "SELECT * FROM selection_decisions_anomaly WHERE coin='BTC' ORDER BY ts DESC LIMIT 10" >> $OUT
 
           echo "=== EXP-003 eligibility trend: resolved p_up_momentum by day ===" >> $OUT
           wrangler d1 execute sentiment-history --remote --command "SELECT horizon_hours, date(ts/1000, 'unixepoch') as day, COUNT(*) as n FROM challenger_predictions WHERE coin='BTC' AND p_up_momentum IS NOT NULL AND realized_up IS NOT NULL GROUP BY horizon_hours, day ORDER BY day ASC" >> $OUT

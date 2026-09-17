@@ -33,5 +33,5 @@ jobs:
       # installed just to verify the surrounding logic.
       - name: Install pytest
         run: pip install pytest --break-system-packages
-      - name: Run Experiment 4 tests
-        run: python3 -m pytest exp004-timesfm/ -v
+      - name: Run Experiment 4 and research schema tests
+        run: python3 -m pytest exp004-timesfm/ research/ -v

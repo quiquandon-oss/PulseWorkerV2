@@ -98,8 +98,24 @@ for i in range(200, len(closes)):
                       div_score(divergence(closes,i,60))) / 5)
     tech_by_date[d] = t_score
 
+DEFAULTS = {
+    'fng':(14,1.0),'funding':(15,1.0),'longshort':(10,0.5),'global':(6,1.0),
+    'cryptonews':(15,0.7),'macrogeo':(8,0.7),'geopolitics':(10,0.6),'regulatory':(12,0.6),
+    'sosovalue':(15,0.7),'onchain':(8,0.5),'oil':(6,0.6),'yield10y':(5,0.6),'usd':(8,0.6),
+    'nasdaq':(6,0.7),'sp500':(6,0.7),'ninemag':(8,0.6),'foufi':(6,0.4),'etfflows':(10,0.8),
+    'hypefunding':(4,0.4),'gold':(5,0.5),'strc':(5,0.35),
+}
+def compute_composite(src):
+    active = [(k, v, DEFAULTS[k][0], DEFAULTS[k][1]) for k, v in src.items() if k in DEFAULTS]
+    if not active: return None
+    weighted = [(k, v, w*c) for k,v,w,c in active]
+    total = sum(cw for _,_,cw in weighted) or 1
+    return round(sum(v*(cw/total) for _,v,cw in weighted))
+
 with open('data.json') as f:
     sent_days = json.load(f)
+for d in sent_days:
+    d['recomputed'] = compute_composite(d['src'])
 
 merged = []
 for i in range(len(sent_days)-1):

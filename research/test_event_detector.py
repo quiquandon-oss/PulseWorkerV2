@@ -481,14 +481,14 @@ def test_volatility_minimum_span_accepts_a_genuine_7_day_gap_tolerant_series():
 
 # ---- Fingerprint: deterministic, stable, no DB writes ----
 
-def test_every_event_carries_an_event_fingerprint():
+def test_every_event_carries_a_fingerprint():
     conn = fresh_db()
     base = 10_000_000_000
     insert_prices(conn, [(base, 90000), (base + DAY, 96000)])
     events = ed.detect_large_moves(conn, start_ts=base, end_ts=base + 2 * DAY)
     assert len(events) == 1
-    assert "event_fingerprint" in events[0]
-    assert isinstance(events[0]["event_fingerprint"], str) and len(events[0]["event_fingerprint"]) > 0
+    assert "fingerprint" in events[0]
+    assert isinstance(events[0]["fingerprint"], str) and len(events[0]["fingerprint"]) > 0
     conn.close()
 
 
@@ -498,7 +498,7 @@ def test_fingerprint_is_stable_across_repeated_identical_runs():
     insert_prices(conn, [(base, 90000), (base + DAY, 96000)])
     run1 = ed.detect_large_moves(conn, start_ts=base, end_ts=base + 2 * DAY)
     run2 = ed.detect_large_moves(conn, start_ts=base, end_ts=base + 2 * DAY)
-    assert run1[0]["event_fingerprint"] == run2[0]["event_fingerprint"], (
+    assert run1[0]["fingerprint"] == run2[0]["fingerprint"], (
         "identical input run twice must produce the identical fingerprint"
     )
     conn.close()
@@ -509,7 +509,7 @@ def test_fingerprints_differ_for_genuinely_different_events():
     base = 10_000_000_000
     insert_prices(conn, [(base, 90000), (base + DAY, 96000), (base + 5 * DAY, 88000)])
     events = ed.detect_large_moves(conn, start_ts=base, end_ts=base + 6 * DAY)
-    fingerprints = [e["event_fingerprint"] for e in events]
+    fingerprints = [e["fingerprint"] for e in events]
     assert len(fingerprints) == len(set(fingerprints)), "distinct events must not share a fingerprint"
     conn.close()
 
@@ -528,7 +528,7 @@ def test_failure_cluster_fingerprint_disambiguates_coin_and_horizon():
     conn.commit()
     btc_events = ed.detect_v2_failure_clusters(conn, "BTC", 24, start_ts=base, end_ts=base + 10 * HOUR)
     eth_events = ed.detect_v2_failure_clusters(conn, "ETH", 12, start_ts=base, end_ts=base + 10 * HOUR)
-    assert btc_events[0]["event_fingerprint"] != eth_events[0]["event_fingerprint"]
+    assert btc_events[0]["fingerprint"] != eth_events[0]["fingerprint"]
     conn.close()
 
 
@@ -542,4 +542,20 @@ def test_fingerprint_generation_makes_no_database_calls():
     src = inspect.getsource(ed._fingerprint)
     assert "conn" not in src
     assert "execute" not in src
+
+
+def test_fingerprint_key_matches_pr1_schema_column_name_exactly():
+    """PR1's research_events table defines the column as `fingerprint`
+    (verified directly against the real migration in
+    .ai/migrations/0005_research_schema.sql). Every event dict here must
+    use that exact key -- not event_fingerprint or any other variant --
+    so a future persistence layer can insert an event dict's values
+    directly without a field-name mapping step."""
+    conn = fresh_db()
+    base = 10_000_000_000
+    insert_prices(conn, [(base, 90000), (base + DAY, 96000)])
+    events = ed.detect_large_moves(conn, start_ts=base, end_ts=base + 2 * DAY)
+    assert "fingerprint" in events[0]
+    assert "event_fingerprint" not in events[0]
+    conn.close()
 

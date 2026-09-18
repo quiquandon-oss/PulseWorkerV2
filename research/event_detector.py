@@ -215,7 +215,7 @@ def detect_large_moves(conn, start_ts, end_ts):
                 "trigger_threshold": LARGE_MOVE_THRESHOLD_PCT,
                 "trigger_version": TRIGGER_VERSION,
                 "is_post_event_analysis": 0,
-                "event_fingerprint": _fingerprint("LARGE_MOVE", ts, direction, TRIGGER_VERSION),
+                "fingerprint": _fingerprint("LARGE_MOVE", ts, direction, TRIGGER_VERSION),
             })
     return events
 
@@ -262,7 +262,7 @@ def detect_regime_reversals(conn, start_ts, end_ts):
                     "trigger_threshold": None,
                     "trigger_version": TRIGGER_VERSION,
                     "is_post_event_analysis": 0,
-                    "event_fingerprint": _fingerprint("REGIME_REVERSAL", ts, direction, TRIGGER_VERSION),
+                    "fingerprint": _fingerprint("REGIME_REVERSAL", ts, direction, TRIGGER_VERSION),
                 })
             # A gap wider than MAX_OBSERVATION_GAP_MS deliberately does NOT
             # emit an event -- the two states aren't treated as consecutive.
@@ -303,7 +303,7 @@ def detect_volatility_expansion(conn, start_ts, end_ts):
                 "trigger_threshold": VOLATILITY_EXPANSION_RATIO_THRESHOLD,
                 "trigger_version": TRIGGER_VERSION,
                 "is_post_event_analysis": 0,
-                "event_fingerprint": _fingerprint("VOLATILITY_EXPANSION", ts, TRIGGER_VERSION),
+                "fingerprint": _fingerprint("VOLATILITY_EXPANSION", ts, TRIGGER_VERSION),
             })
     return events
 
@@ -338,7 +338,7 @@ def detect_v2_failure_clusters(conn, coin, horizon_hours, start_ts, end_ts):
                     "trigger_threshold": float(V2_FAILURE_CLUSTER_LENGTH),
                     "trigger_version": TRIGGER_VERSION,
                     "is_post_event_analysis": 0,
-                    "event_fingerprint": _fingerprint("V2_FAILURE_CLUSTER", ts, direction, TRIGGER_VERSION),
+                    "fingerprint": _fingerprint("V2_FAILURE_CLUSTER", ts, direction, TRIGGER_VERSION),
                 })
     return events
 
@@ -382,6 +382,6 @@ def detect_v1_btc_divergence(conn, start_ts, end_ts):
             "trigger_threshold": LARGE_MOVE_THRESHOLD_PCT,
             "trigger_version": TRIGGER_VERSION,
             "is_post_event_analysis": 1,
-            "event_fingerprint": _fingerprint("V1_BTC_DIVERGENCE", future[0], direction, TRIGGER_VERSION),
+            "fingerprint": _fingerprint("V1_BTC_DIVERGENCE", future[0], direction, TRIGGER_VERSION),
         })
     return events

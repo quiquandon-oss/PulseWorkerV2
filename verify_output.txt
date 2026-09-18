@@ -1,0 +1,15 @@
+=== Step 1: fetching real recent btc_data ===
+real btc_data rows pulled: 303
+
+real events detected: 0
+
+=== Step 2: inserting 0 real event(s) into research_events ===
+
+=== Step 3: running the real evidence collector (genuine live RSS feeds) ===
+
+=== Step 4: real evidence collected (sample) ===
+total real evidence rows collected: 0
+
+=== Step 5: writing 0 real evidence row(s) to production D1 ===
+
+Done.

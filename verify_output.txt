@@ -1,0 +1,36 @@
+=== Step 1: fetching real recent btc_data ===
+real btc_data rows pulled: 1854
+
+real events detected: 12
+  LARGE_MOVE ts=1787184011429 direction=UP fingerprint=LARGE_MOVE|1787184011429|UP|pr3-v1
+  LARGE_MOVE ts=1787270450499 direction=UP fingerprint=LARGE_MOVE|1787270450499|UP|pr3-v1
+  LARGE_MOVE ts=1787356850593 direction=UP fingerprint=LARGE_MOVE|1787356850593|UP|pr3-v1
+  LARGE_MOVE ts=1787443248574 direction=UP fingerprint=LARGE_MOVE|1787443248574|UP|pr3-v1
+  LARGE_MOVE ts=1788480028536 direction=UP fingerprint=LARGE_MOVE|1788480028536|UP|pr3-v1
+  REGIME_REVERSAL ts=1787184011429 direction=chop_to_rally fingerprint=REGIME_REVERSAL|1787184011429|chop_to_rally|pr3-v1
+  REGIME_REVERSAL ts=1787961653802 direction=rally_to_chop fingerprint=REGIME_REVERSAL|1787961653802|rally_to_chop|pr3-v1
+  VOLATILITY_EXPANSION ts=1787356850593 direction=None fingerprint=VOLATILITY_EXPANSION|1787356850593|pr3-v1
+  VOLATILITY_EXPANSION ts=1787443248574 direction=None fingerprint=VOLATILITY_EXPANSION|1787443248574|pr3-v1
+  VOLATILITY_EXPANSION ts=1787529645649 direction=None fingerprint=VOLATILITY_EXPANSION|1787529645649|pr3-v1
+  VOLATILITY_EXPANSION ts=1787616041497 direction=None fingerprint=VOLATILITY_EXPANSION|1787616041497|pr3-v1
+  VOLATILITY_EXPANSION ts=1787702455655 direction=None fingerprint=VOLATILITY_EXPANSION|1787702455655|pr3-v1
+
+=== Step 2: inserting 3 real event(s) into research_events ===
+  real event_id=1  LARGE_MOVE  fingerprint=LARGE_MOVE|1787184011429|UP|pr3-v1
+  real event_id=2  LARGE_MOVE  fingerprint=LARGE_MOVE|1787270450499|UP|pr3-v1
+  real event_id=3  LARGE_MOVE  fingerprint=LARGE_MOVE|1787356850593|UP|pr3-v1
+
+=== Step 3: running the real evidence collector (genuine live RSS feeds) ===
+
+  event_id=1 counters: {'feeds_attempted': 5, 'http_requests': 5, 'successful_responses': 5, 'failed_responses': 0, 'articles_seen': 116, 'articles_new': 0, 'articles_deduplicated': 0, 'articles_stored': 0, 'articles_skipped_by_cap': 0, 'event_id': 1}
+
+  event_id=2 counters: {'feeds_attempted': 5, 'http_requests': 5, 'successful_responses': 5, 'failed_responses': 0, 'articles_seen': 116, 'articles_new': 0, 'articles_deduplicated': 0, 'articles_stored': 0, 'articles_skipped_by_cap': 0, 'event_id': 2}
+
+  event_id=3 counters: {'feeds_attempted': 5, 'http_requests': 5, 'successful_responses': 5, 'failed_responses': 0, 'articles_seen': 116, 'articles_new': 0, 'articles_deduplicated': 0, 'articles_stored': 0, 'articles_skipped_by_cap': 0, 'event_id': 3}
+
+=== Step 4: real evidence collected (sample) ===
+total real evidence rows collected: 0
+
+=== Step 5: writing 0 real evidence row(s) to production D1 ===
+
+Done.

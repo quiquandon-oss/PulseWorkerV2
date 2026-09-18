@@ -1,0 +1,33 @@
+-- PR5b: additive index only.
+--
+-- research/outcome_engine.py's forward-return query intentionally does
+-- NOT filter on predictions.horizon_hours (unlike resolver.py and
+-- selection_resolver.py), because it must resolve a forward return for
+-- EVERY prediction in the requested time window regardless of which
+-- horizon that prediction itself targets (outcome_engine computes
+-- fixed 1h/3h/6h/12h/24h forward returns -- a different axis entirely
+-- from predictions.horizon_hours, which is 12 or 24 in production).
+--
+-- The existing idx_predictions_horizon_ts(horizon_hours, ts) cannot be
+-- used for a range SEEK on ts alone -- confirmed via a real
+-- EXPLAIN QUERY PLAN against production before this migration was
+-- written (see PR description): the outer query resolves to
+-- "SCAN p USING COVERING INDEX idx_predictions_horizon_ts" -- a full
+-- index scan bounded by total row count, not a range-bounded search.
+-- Harmless today at ~1,068 total prediction rows, but exactly the kind
+-- of unbounded-with-scale pattern this project has deliberately
+-- avoided everywhere else (resolver.py's own docstring calls this out
+-- explicitly).
+--
+-- This index makes outcome_engine.py's read cost bounded by the
+-- requested (start_ts, end_ts) window, not by the total number of
+-- predictions ever recorded -- the same property resolver.py and
+-- selection_resolver.py already have, confirmed via a second real
+-- EXPLAIN QUERY PLAN with this index present (see PR description).
+--
+-- Purely additive: does not modify any existing table, column,
+-- trigger, view, or application code path. No V1/V2 behavior change.
+-- Not applied to production by this PR -- pending review, per this
+-- project's established process (same as PR5a's 0008 migration on its
+-- own branch).
+CREATE INDEX IF NOT EXISTS idx_predictions_ts ON predictions(ts);

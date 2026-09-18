@@ -1,9 +1,9 @@
 """
 PR4: internet evidence collection.
 
-PR3 event -> bounded time window -> fixed 4-feed set -> RSS items ->
-provenance + 3 timestamps -> canonicalization -> deduplication ->
-optional keyword score -> research_event_evidence.
+PR3 event -> bounded time window -> fixed 5-feed set across 4 feed
+categories -> RSS items -> provenance + 3 timestamps -> canonicalization
+-> deduplication -> optional keyword score -> research_event_evidence.
 
 Explicitly NOT: causal explanation, LLM interpretation, semantic
 relevance judgment, coefficient optimization, V1/V2 modification,
@@ -22,6 +22,7 @@ pure analysis; PR4's job is to persist a durable evidence record.
 """
 import hashlib
 import re
+import sqlite3
 import urllib.request
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
@@ -41,9 +42,13 @@ FEEDS = {
 # ---- Frozen bounds ----
 MAX_ARTICLES_PER_FEED = 15  # reuses the exact existing cap already used by
 # PulseWorker's own parseRssTitles (`items.length >= 15) break` -- verified
-# in source, not invented fresh here.
-MAX_ARTICLES_STORED_PER_EVENT = 40  # bounded even though 5 feeds x 15 raw
-# items = 75 max candidates before window filtering -- generous but capped.
+# in source, not invented fresh here. CORRECTED per review: this caps
+# QUALIFYING candidates (post-window-filter) per feed per event, not raw
+# RSS item order -- applying it before the window filter would bias
+# evidence toward whatever ordering a feed happens to use.
+MAX_ARTICLES_STORED_PER_EVENT = 40  # bounded even though 5 feeds x 15
+# qualifying items = 75 max candidates after window filtering -- generous
+# but capped.
 MAX_RETRIES_PER_FEED = 1  # exactly one retry, on failure only, never on success
 WINDOW_LOOKBACK_MS = 48 * 3600000  # reuses event_detector.MAX_OBSERVATION_GAP_MS's
 # own 48h, for consistency across the research modules
@@ -104,7 +109,16 @@ def parse_rss_items(xml_text, feed_url, publisher):
     rather than reusing that one."""
     items = []
     blocks = re.findall(r"<item[\s\S]*?</item>", xml_text)
-    for block in blocks[:MAX_ARTICLES_PER_FEED]:
+    # No cap here -- per review, truncating raw RSS items before applying
+    # the event window would bias evidence toward whatever ordering a feed
+    # happens to use. The 15-per-feed cap is applied downstream, in
+    # collect_evidence_for_event, AFTER the event window filter -- against
+    # qualifying candidates, not raw feed order. A generous safety bound
+    # (200) still guards against a pathological feed with an absurd item
+    # count, without affecting normal RSS feeds (which are themselves
+    # typically well under this).
+    RAW_SAFETY_BOUND = 200
+    for block in blocks[:RAW_SAFETY_BOUND]:
         title_m = re.search(r"<title>(?:<!\[CDATA\[)?([\s\S]*?)(?:\]\]>)?</title>", block)
         link_m = re.search(r"<link>(?:<!\[CDATA\[)?([\s\S]*?)(?:\]\]>)?</link>", block)
         pubdate_m = re.search(r"<pubDate>(?:<!\[CDATA\[)?([\s\S]*?)(?:\]\]>)?</pubDate>", block)
@@ -177,15 +191,25 @@ def collect_evidence_for_event(conn, event_id, event_ts, fetcher=None):
         if body is None:
             continue  # fail closed for this feed, continue with the others
 
+        # CORRECTED per review: parse the full feed first, THEN filter by
+        # the event window, THEN apply the per-feed cap to the resulting
+        # QUALIFYING candidates -- not to raw RSS item order. A relevant
+        # older article must not be discarded just because a feed lists
+        # 15+ unrelated recent items ahead of it.
+        qualifying_this_feed = 0
         for item in parse_rss_items(body, feed_url, publisher):
             counters["articles_seen"] += 1
             if not in_event_window(item["publication_ts"], event_ts):
                 continue  # outside the frozen window -- not a candidate at all
 
+            if qualifying_this_feed >= MAX_ARTICLES_PER_FEED:
+                counters["articles_skipped_by_cap"] += 1
+                continue
             if counters["articles_stored"] >= MAX_ARTICLES_STORED_PER_EVENT:
                 counters["articles_skipped_by_cap"] += 1
                 continue
 
+            qualifying_this_feed += 1
             content_hash = _content_hash(
                 item["publisher"], item["article_url"], item["publication_ts"], item["headline"]
             )
@@ -205,10 +229,15 @@ def collect_evidence_for_event(conn, event_id, event_ts, fetcher=None):
                      relation, content_hash),
                 )
                 counters["articles_stored"] += 1
-            except Exception:
-                # UNIQUE(event_id, content_hash) violation -- already
-                # collected for this event. Not an error, not counted as
-                # skipped-by-cap -- its own explicit counter.
+            except sqlite3.IntegrityError:
+                # CORRECTED per review: only the EXPECTED conflict
+                # (UNIQUE(event_id, content_hash) violation -- already
+                # collected for this exact event) is treated as a
+                # duplicate. Any other exception (malformed SQL, missing
+                # table, schema mismatch, connection failure) must not be
+                # silently swallowed as if it were a successful dedup --
+                # it propagates and fails the operation, exactly as an
+                # audit/evidence layer requires.
                 counters["articles_deduplicated"] += 1
 
     return counters

@@ -45,7 +45,9 @@ def d1_execute(sql):
 # ---- Step 1: pull real recent btc_data, run the real detector ----
 print("=== Step 1: fetching real recent btc_data ===")
 now_ms = int(time.time() * 1000)
-lookback_ms = 20 * 24 * 3600000
+lookback_ms = 60 * 24 * 3600000  # widened from 20d after a first pass found
+# zero events in the shorter, genuinely-quiet recent window -- 60d is known
+# from earlier real testing this session to include a real volatile period
 rows = d1_query(f"SELECT ts, btc_price FROM btc_data WHERE ts >= {now_ms - lookback_ms} ORDER BY ts ASC")
 print(f"real btc_data rows pulled: {len(rows)}")
 

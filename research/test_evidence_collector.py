@@ -302,19 +302,17 @@ def test_articles_outside_window_are_not_seen_as_candidates_at_all():
     conn.close()
 
 
-# ---- Error handling: only the expected UNIQUE conflict is a "duplicate" ----
+# ---- Error handling: only the expected UNIQUE(event_id, content_hash)
+# conflict is a "duplicate" -- every other IntegrityError must propagate ----
 
-def test_unexpected_db_error_propagates_not_silently_counted_as_duplicate():
-    """The exact bug from review: a genuine, unexpected database error must
+def test_unexpected_operational_error_propagates_not_silently_counted_as_duplicate():
+    """A broader unexpected-error case (missing columns entirely) -- must
     raise, not be swallowed and miscounted as a successful deduplication."""
     conn = fresh_db()
     event_ts = 100_000_000_000
     conn.execute("INSERT INTO research_events (fingerprint, event_ts, detection_ts, category) "
                  "VALUES ('fp1', ?, ?, 'LARGE_MOVE')", (event_ts, event_ts))
     conn.commit()
-    # Break the table AFTER setup so the INSERT itself fails for a reason
-    # that has nothing to do with the UNIQUE(event_id, content_hash)
-    # constraint -- a missing required column.
     conn.execute("DROP TABLE research_event_evidence")
     conn.execute("CREATE TABLE research_event_evidence (evidence_id INTEGER PRIMARY KEY)")
     xml = rss_xml([("Headline", "https://a.com/1", rfc822(event_ts))])
@@ -326,8 +324,8 @@ def test_unexpected_db_error_propagates_not_silently_counted_as_duplicate():
 
 def test_genuine_uniqueness_conflict_is_still_counted_as_duplicate():
     """Confirms the fix didn't break the legitimate, expected case --
-    IntegrityError from the real UNIQUE(event_id, content_hash) constraint
-    is still correctly classified as a duplicate, not raised."""
+    the real UNIQUE(event_id, content_hash) constraint is still correctly
+    classified as a duplicate, not raised."""
     conn = fresh_db()
     event_ts = 100_000_000_000
     conn.execute("INSERT INTO research_events (fingerprint, event_ts, detection_ts, category) "
@@ -335,10 +333,66 @@ def test_genuine_uniqueness_conflict_is_still_counted_as_duplicate():
     conn.commit()
     xml = rss_xml([("Headline", "https://a.com/1", rfc822(event_ts))])
     fetcher = make_fetcher({ALL_FEED_URLS[0]: xml})
-    ec.collect_evidence_for_event(conn, 1, event_ts, fetcher=fetcher)  # first run: stores it
-    counters = ec.collect_evidence_for_event(conn, 1, event_ts, fetcher=fetcher)  # second: dupe
+    ec.collect_evidence_for_event(conn, 1, event_ts, fetcher=fetcher)
+    counters = ec.collect_evidence_for_event(conn, 1, event_ts, fetcher=fetcher)
     assert counters["articles_deduplicated"] == 1
     conn.close()
+
+
+def test_foreign_key_violation_propagates_not_counted_as_duplicate():
+    """The exact remaining bug from review: sqlite3.IntegrityError also
+    covers FOREIGN KEY failures -- these must never be miscounted as a
+    duplicate. Verified against the real, observed exception message
+    ('FOREIGN KEY constraint failed', no column detail at all -- distinct
+    from the UNIQUE message)."""
+    conn = fresh_db()
+    conn.execute("PRAGMA foreign_keys = ON")
+    event_ts = 100_000_000_000
+    # Deliberately NOT inserting the referenced research_events row --
+    # event_id=999 does not exist, so the FOREIGN KEY constraint
+    # (research_event_evidence.event_id REFERENCES research_events)
+    # must fail on insert.
+    xml = rss_xml([("Headline", "https://a.com/1", rfc822(event_ts))])
+    fetcher = make_fetcher({ALL_FEED_URLS[0]: xml})
+    with pytest.raises(sqlite3.IntegrityError) as exc_info:
+        ec.collect_evidence_for_event(conn, 999, event_ts, fetcher=fetcher)
+    assert not ec._is_expected_uniqueness_conflict(exc_info.value)
+    n_rows = conn.execute("SELECT COUNT(*) FROM research_event_evidence").fetchone()[0]
+    assert n_rows == 0, "a foreign-key failure must not leave a phantom row, and must not be miscounted"
+
+
+def test_not_null_violation_propagates_not_counted_as_duplicate():
+    """Direct proof against the real message format
+    ('NOT NULL constraint failed: <table>.<column>') -- distinct from
+    both UNIQUE and FOREIGN KEY messages, and must also propagate."""
+    conn = fresh_db()
+    event_ts = 100_000_000_000
+    conn.execute("INSERT INTO research_events (fingerprint, event_ts, detection_ts, category) "
+                 "VALUES ('fp1', ?, ?, 'LARGE_MOVE')", (event_ts, event_ts))
+    conn.commit()
+    try:
+        conn.execute("INSERT INTO research_event_evidence "
+                      "(event_id, feed_url, article_url, publisher, publication_ts, collection_ts, "
+                      "headline, evidence_relation, content_hash) "
+                      "VALUES (1, 'f', 'a', 'p', 1, 1, NULL, 'SAME_WINDOW', 'h')")
+        pytest.fail("expected a NOT NULL violation on the headline column")
+    except sqlite3.IntegrityError as e:
+        assert str(e).startswith("NOT NULL constraint failed")
+        assert not ec._is_expected_uniqueness_conflict(e)
+    conn.close()
+
+
+def test_is_expected_uniqueness_conflict_helper_directly():
+    """Unit-level proof of the classifier itself, against all three real,
+    observed message formats -- not just the end-to-end behavior above."""
+    unique_exc = sqlite3.IntegrityError(
+        "UNIQUE constraint failed: research_event_evidence.event_id, research_event_evidence.content_hash"
+    )
+    not_null_exc = sqlite3.IntegrityError("NOT NULL constraint failed: research_event_evidence.headline")
+    fk_exc = sqlite3.IntegrityError("FOREIGN KEY constraint failed")
+    assert ec._is_expected_uniqueness_conflict(unique_exc) is True
+    assert ec._is_expected_uniqueness_conflict(not_null_exc) is False
+    assert ec._is_expected_uniqueness_conflict(fk_exc) is False
 
 
 # ---- 9. Deterministic rerun ----

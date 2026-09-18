@@ -113,10 +113,10 @@ def parse_rss_items(xml_text, feed_url, publisher):
     # the event window would bias evidence toward whatever ordering a feed
     # happens to use. The 15-per-feed cap is applied downstream, in
     # collect_evidence_for_event, AFTER the event window filter -- against
-    # qualifying candidates, not raw feed order. A generous safety bound
-    # (200) still guards against a pathological feed with an absurd item
-    # count, without affecting normal RSS feeds (which are themselves
-    # typically well under this).
+    # qualifying candidates, not raw feed order.
+    # RAW_SAFETY_BOUND below is a 200-item raw parsing safety bound against
+    # a pathological feed -- it is NOT the evidence cap. The evidence cap
+    # remains exactly 15 qualifying articles/feed/event, applied later.
     RAW_SAFETY_BOUND = 200
     for block in blocks[:RAW_SAFETY_BOUND]:
         title_m = re.search(r"<title>(?:<!\[CDATA\[)?([\s\S]*?)(?:\]\]>)?</title>", block)
@@ -141,6 +141,28 @@ def _default_fetcher(url):
     req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
     with urllib.request.urlopen(req, timeout=15) as resp:
         return resp.status, resp.read().decode("utf-8", errors="replace")
+
+
+def _is_expected_uniqueness_conflict(exc):
+    """Distinguishes the ONE expected conflict -- UNIQUE(event_id,
+    content_hash), meaning this exact article was already collected for
+    this exact event -- from every other kind of sqlite3.IntegrityError
+    (NOT NULL, FOREIGN KEY, CHECK, or any other integrity failure), which
+    must propagate rather than being miscounted as a duplicate.
+
+    Verified directly against real sqlite3 exception message formats
+    (not assumed): a UNIQUE violation reads exactly
+    'UNIQUE constraint failed: research_event_evidence.event_id,
+    research_event_evidence.content_hash'; NOT NULL reads
+    'NOT NULL constraint failed: <table>.<column>'; FOREIGN KEY reads
+    'FOREIGN KEY constraint failed' with no column detail at all. These
+    prefixes are distinct and stable in sqlite3's own error reporting."""
+    msg = str(exc)
+    return (
+        msg.startswith("UNIQUE constraint failed")
+        and "event_id" in msg
+        and "content_hash" in msg
+    )
 
 
 def _fetch_feed_with_retry(feed_url, fetcher, counters):
@@ -229,15 +251,13 @@ def collect_evidence_for_event(conn, event_id, event_ts, fetcher=None):
                      relation, content_hash),
                 )
                 counters["articles_stored"] += 1
-            except sqlite3.IntegrityError:
-                # CORRECTED per review: only the EXPECTED conflict
-                # (UNIQUE(event_id, content_hash) violation -- already
-                # collected for this exact event) is treated as a
-                # duplicate. Any other exception (malformed SQL, missing
-                # table, schema mismatch, connection failure) must not be
-                # silently swallowed as if it were a successful dedup --
-                # it propagates and fails the operation, exactly as an
-                # audit/evidence layer requires.
-                counters["articles_deduplicated"] += 1
+            except sqlite3.IntegrityError as e:
+                if _is_expected_uniqueness_conflict(e):
+                    counters["articles_deduplicated"] += 1
+                else:
+                    # NOT NULL, FOREIGN KEY, CHECK, or any other integrity
+                    # failure -- NOT the same thing as an already-collected
+                    # duplicate. Must propagate, not be silently miscounted.
+                    raise
 
     return counters

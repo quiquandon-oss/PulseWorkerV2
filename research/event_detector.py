@@ -97,7 +97,7 @@ def _validate_window(start_ts, end_ts):
         raise ValueError(f"requested window ({end_ts - start_ts}ms) exceeds MAX_WINDOW_MS ({MAX_WINDOW_MS}ms)")
 
 
-def _fetch_bounded_daily_prices(conn, start_ts, end_ts):
+def _fetch_bounded_prices(conn, start_ts, end_ts):
     """The one bounded, indexed SQL query every detector below builds on.
     Fetches btc_data rows from (start_ts - LOOKBACK_BUFFER_MS) to end_ts
     -- still a fixed-width bound, never unbounded -- then deduplicates
@@ -116,6 +116,46 @@ def _fetch_bounded_daily_prices(conn, start_ts, end_ts):
     return deduped
 
 
+MIN_DAILY_SPAN_DAYS = 5  # minimum number of DISTINCT CALENDAR DAYS
+# required within a 7-day window before a regime/volatility calculation
+# is attempted -- not a raw row count. Confirmed necessary: btc_data is
+# genuinely intraday in production (verified directly: 299 rows over 21
+# distinct days, ~14.2 readings/day, matching the 3h production cron),
+# so a row-count check (e.g. "at least 4 rows") could be satisfied by as
+# little as half a day of real elapsed time. Requiring 5 of the 7
+# calendar days present tolerates real-world gaps (this project's price
+# logging has had documented reliability issues) while still ensuring
+# the calculation reflects something close to a genuine 7-day span, not
+# an intraday cluster mistaken for one.
+
+
+def _resample_daily(prices):
+    """Reduces an already tick-deduplicated price series to at most one
+    observation per UTC calendar day (the first reading of each day) --
+    exactly the same methodology used to characterize
+    LARGE_MOVE_THRESHOLD_PCT and FROZEN_VOLATILITY_BASELINE_PCT in the
+    first place (both were computed from one-price-per-day series, not
+    raw intraday data). Every detector below operates on this
+    daily-resampled series, not the raw intraday one, so that a 24h/7d
+    calculation here is mathematically the same kind of quantity as the
+    one the frozen thresholds were derived from -- not a differently-
+    sampled approximation of it.
+
+    This also eliminates a real, empirically-confirmed bug: iterating
+    over raw intraday rows as independent "candidates" caused the same
+    underlying move to be reported as multiple duplicate events (one per
+    intraday reading landing near it) rather than once per real event."""
+    from datetime import datetime, timezone
+    daily = []
+    seen_days = set()
+    for ts, price in prices:
+        day = datetime.fromtimestamp(ts / 1000, tz=timezone.utc).date()
+        if day not in seen_days:
+            seen_days.add(day)
+            daily.append((ts, price))
+    return daily
+
+
 def _price_at_or_before(prices, ts):
     """Nearest prior price at or before ts, from an already-fetched,
     already-sorted, already-bounded list -- no further SQL query. Linear
@@ -130,9 +170,31 @@ def _price_at_or_before(prices, ts):
     return result
 
 
+def _distinct_days_in_range(prices, start_ts, end_ts):
+    from datetime import datetime, timezone
+    days = set()
+    for ts, _ in prices:
+        if start_ts <= ts <= end_ts:
+            days.add(datetime.fromtimestamp(ts / 1000, tz=timezone.utc).date())
+    return len(days)
+
+
+def _fingerprint(*parts):
+    """Deterministic, stable event identity -- same input always produces
+    the same string, different logical events produce different strings.
+    Pipe-joined rather than hashed, deliberately: these values are all
+    small and non-sensitive, and a readable fingerprint is easier to
+    inspect/debug than an opaque hash while providing the exact same
+    determinism/uniqueness properties PR1's UNIQUE index needs. No
+    database access of any kind -- pure string formatting over values
+    already computed by the caller."""
+    return "|".join(str(p) for p in parts)
+
+
 def detect_large_moves(conn, start_ts, end_ts):
     _validate_window(start_ts, end_ts)
-    prices = _fetch_bounded_daily_prices(conn, start_ts, end_ts)
+    raw_prices = _fetch_bounded_prices(conn, start_ts, end_ts)
+    prices = _resample_daily(raw_prices)
     events = []
     for ts, price in prices:
         if ts < start_ts:
@@ -143,22 +205,24 @@ def detect_large_moves(conn, start_ts, end_ts):
         prior_ts, prior_price = prior
         pct_return = (price - prior_price) / prior_price * 100
         if abs(pct_return) > LARGE_MOVE_THRESHOLD_PCT:
+            direction = "UP" if pct_return > 0 else "DOWN"
             events.append({
                 "category": "LARGE_MOVE",
                 "event_ts": ts,  # the completed move's own end timestamp, not its start
-                "direction": "UP" if pct_return > 0 else "DOWN",
+                "direction": direction,
                 "intensity": abs(pct_return),
                 "trigger_metric": "24h_btc_return_pct",
                 "trigger_threshold": LARGE_MOVE_THRESHOLD_PCT,
                 "trigger_version": TRIGGER_VERSION,
                 "is_post_event_analysis": 0,
+                "event_fingerprint": _fingerprint("LARGE_MOVE", ts, direction, TRIGGER_VERSION),
             })
     return events
 
 
-def _classify_regime(prices, ts):
-    prior = _price_at_or_before(prices, ts - 7 * 24 * 3600000)
-    current = _price_at_or_before(prices, ts)
+def _classify_regime(daily_prices, ts):
+    prior = _price_at_or_before(daily_prices, ts - 7 * 24 * 3600000)
+    current = _price_at_or_before(daily_prices, ts)
     if prior is None or current is None:
         return None
     trail7_pct = (current[1] - prior[1]) / prior[1] * 100
@@ -171,25 +235,34 @@ def _classify_regime(prices, ts):
 
 def detect_regime_reversals(conn, start_ts, end_ts):
     _validate_window(start_ts, end_ts)
-    prices = _fetch_bounded_daily_prices(conn, start_ts, end_ts)
+    raw_prices = _fetch_bounded_prices(conn, start_ts, end_ts)
+    prices = _resample_daily(raw_prices)
     candidates = [(ts, price) for ts, price in prices if ts >= start_ts]
     events = []
     prev_ts, prev_regime = None, None
     for ts, _ in candidates:
+        # Minimum-span check: require at least MIN_DAILY_SPAN_DAYS distinct
+        # calendar days within the trailing 7-day window before trusting a
+        # classification -- not a raw row count (see MIN_DAILY_SPAN_DAYS's
+        # own comment for why a row-count check would be wrong here).
+        if _distinct_days_in_range(prices, ts - 7 * 24 * 3600000, ts) < MIN_DAILY_SPAN_DAYS:
+            continue
         regime = _classify_regime(prices, ts)
         if regime is None:
             continue
         if prev_regime is not None and regime != prev_regime:
             if prev_ts is not None and (ts - prev_ts) <= MAX_OBSERVATION_GAP_MS:
+                direction = f"{prev_regime}_to_{regime}"
                 events.append({
                     "category": "REGIME_REVERSAL",
                     "event_ts": ts,
-                    "direction": f"{prev_regime}_to_{regime}",
+                    "direction": direction,
                     "intensity": None,
                     "trigger_metric": "7d_regime_classification",
                     "trigger_threshold": None,
                     "trigger_version": TRIGGER_VERSION,
                     "is_post_event_analysis": 0,
+                    "event_fingerprint": _fingerprint("REGIME_REVERSAL", ts, direction, TRIGGER_VERSION),
                 })
             # A gap wider than MAX_OBSERVATION_GAP_MS deliberately does NOT
             # emit an event -- the two states aren't treated as consecutive.
@@ -199,13 +272,22 @@ def detect_regime_reversals(conn, start_ts, end_ts):
 
 def detect_volatility_expansion(conn, start_ts, end_ts):
     _validate_window(start_ts, end_ts)
-    prices = _fetch_bounded_daily_prices(conn, start_ts, end_ts)
+    raw_prices = _fetch_bounded_prices(conn, start_ts, end_ts)
+    prices = _resample_daily(raw_prices)
     candidates = [(ts, price) for ts, price in prices if ts >= start_ts]
     events = []
     for ts, _ in candidates:
         window = [(p_ts, p) for p_ts, p in prices if ts - 7 * 24 * 3600000 <= p_ts <= ts]
-        if len(window) < 4:
+        # Minimum-span check: distinct calendar days actually present in
+        # the trailing 7-day window, not a raw row count -- see
+        # MIN_DAILY_SPAN_DAYS's own comment for why this distinction is
+        # required once btc_data is known to be intraday.
+        if _distinct_days_in_range(prices, ts - 7 * 24 * 3600000, ts) < MIN_DAILY_SPAN_DAYS:
             continue
+        # Returns computed between consecutive DAILY-resampled points --
+        # the same kind of quantity (day-over-day return) that
+        # FROZEN_VOLATILITY_BASELINE_PCT was itself characterized from,
+        # not returns between whatever intraday rows happen to exist.
         rets = [(window[i + 1][1] - window[i][1]) / window[i][1] * 100 for i in range(len(window) - 1)]
         mean = sum(rets) / len(rets)
         variance = sum((r - mean) ** 2 for r in rets) / len(rets)
@@ -221,6 +303,7 @@ def detect_volatility_expansion(conn, start_ts, end_ts):
                 "trigger_threshold": VOLATILITY_EXPANSION_RATIO_THRESHOLD,
                 "trigger_version": TRIGGER_VERSION,
                 "is_post_event_analysis": 0,
+                "event_fingerprint": _fingerprint("VOLATILITY_EXPANSION", ts, TRIGGER_VERSION),
             })
     return events
 
@@ -245,15 +328,17 @@ def detect_v2_failure_clusters(conn, coin, horizon_hours, start_ts, end_ts):
         else:
             streak += 1
             if streak == V2_FAILURE_CLUSTER_LENGTH:
+                direction = f"{coin}_{horizon_hours}h"
                 events.append({
                     "category": "V2_FAILURE_CLUSTER",
                     "event_ts": ts,
-                    "direction": f"{coin}_{horizon_hours}h",
+                    "direction": direction,
                     "intensity": float(streak),
                     "trigger_metric": "consecutive_incorrect_predictions",
                     "trigger_threshold": float(V2_FAILURE_CLUSTER_LENGTH),
                     "trigger_version": TRIGGER_VERSION,
                     "is_post_event_analysis": 0,
+                    "event_fingerprint": _fingerprint("V2_FAILURE_CLUSTER", ts, direction, TRIGGER_VERSION),
                 })
     return events
 
@@ -264,7 +349,8 @@ def detect_v1_btc_divergence(conn, start_ts, end_ts):
     BTC's subsequent move is known; this must never be read as evidence
     V1 predicted the move."""
     _validate_window(start_ts, end_ts)
-    prices = _fetch_bounded_daily_prices(conn, start_ts, end_ts)
+    raw_prices = _fetch_bounded_prices(conn, start_ts, end_ts)
+    prices = _resample_daily(raw_prices)
     history_rows = conn.execute(
         "SELECT ts, score FROM history WHERE ts >= ? AND ts < ?",
         (start_ts, end_ts),
@@ -286,14 +372,16 @@ def detect_v1_btc_divergence(conn, start_ts, end_ts):
         btc_up = pct_return > 0
         if v1_bullish == btc_up:
             continue  # same direction -- not a divergence
+        direction = f"v1_{'bullish' if v1_bullish else 'bearish'}_btc_{'up' if btc_up else 'down'}"
         events.append({
             "category": "V1_BTC_DIVERGENCE",
             "event_ts": future[0],
-            "direction": f"v1_{'bullish' if v1_bullish else 'bearish'}_btc_{'up' if btc_up else 'down'}",
+            "direction": direction,
             "intensity": abs(pct_return),
             "trigger_metric": "v1_extreme_vs_24h_btc_return",
             "trigger_threshold": LARGE_MOVE_THRESHOLD_PCT,
             "trigger_version": TRIGGER_VERSION,
             "is_post_event_analysis": 1,
+            "event_fingerprint": _fingerprint("V1_BTC_DIVERGENCE", future[0], direction, TRIGGER_VERSION),
         })
     return events

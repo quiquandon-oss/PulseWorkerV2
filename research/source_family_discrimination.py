@@ -139,6 +139,83 @@ history`) -- no new query against predictions/history/btc_data.
 `family_subsplit_stability()` and the nested OLS comparison sort by ts
 ascending and split chronologically, never shuffled, exactly mirroring
 `hypothesis_gate.source_subsplit_stability()`'s own discipline.
+
+=====================================================================
+Independent audit findings (post-PR-open review of PR #54) -- read
+before interpreting any DISCRIMINATED_INCREMENTAL result
+=====================================================================
+
+Three findings from an independent line-by-line + numerical audit,
+disclosed here because they materially affect how confidently a
+result should be read, even though no logic defect was found (ols_nvar
+was cross-checked against two independently-coded algorithms --
+cofactor-expansion Cramer's rule and Frisch-Waugh-Lovell sequential
+residualization via repeated ols_1var -- and higher_order_partial_
+correlation against the equivalent multiple-regression-residual
+method; all matched the module's own output to machine precision,
+~1e-12 to 1e-15, on the real production data, not just on synthetic
+test fixtures).
+
+1. HORIZON SELECTION IS NOT INDEPENDENT OF THE RESULT IT PRODUCES.
+   select_primary_horizon_per_family() picks the horizon with PR5e's
+   own largest composite-only rmse_reduction_pct, then THIS module
+   re-tests that SAME horizon with a joint control set. Re-running the
+   joint test at a family's OTHER PR5e horizons (not just the selected
+   primary one) on the production snapshot found:
+     fng:    6h=+1.55% (NOT_DISCRIMINATED), 12h=+4.40% (NOT_DISCRIMINATED),
+             24h=+10.99% (DISCRIMINATED_INCREMENTAL, the selected horizon)
+     global: 6h=-0.50%, 12h=-4.88%, 24h=-9.31% -- negative at EVERY
+             horizon, i.e. NOT sensitive to which one was selected
+     onchain: only one PR5e horizon exists (24h) -- selection could not
+             have been a factor either way
+   fng's DISCRIMINATED_INCREMENTAL status is THEREFORE SPECIFIC TO ITS
+   SELECTED HORIZON, not a horizon-independent property of the family --
+   a genuinely different, weaker claim than "fng carries incremental
+   information" stated without qualification. The monotonic-looking
+   1.55%->4.40%->10.99% trend across increasing horizon length is
+   consistent with a real, horizon-dependent economic effect, but this
+   snapshot alone cannot distinguish that from a selection artifact.
+   `global`'s NOT_DISCRIMINATED verdict, by contrast, is robust: it
+   would have been reached regardless of which horizon PR5e had
+   preferred. This asymmetry -- confirmed by re-running, not merely
+   asserted -- is the honest state of the evidence and is reported here
+   rather than smoothed over.
+2. SAMPLE REDUCTION (n~445-495 per family in PR5e down to n=257 here)
+   IS DRIVEN OVERWHELMINGLY BY ONE VARIABLE, NOT SYMMETRIC ACROSS ALL
+   THREE FAMILIES. Of 495 history rows in the analysis window (V1
+   composite is present in all 495; the `history` table's own row count
+   in this window differs from its raw table total because the window
+   is bounded by `predictions`, not by `history`'s own range -- see
+   point 3 below): `fng` present in 448 (90.5%), `onchain` in 453
+   (91.5%), but `global` present in only 317 (64.0%) -- `global`'s
+   sparser availability, not fng's or onchain's, is the dominant driver
+   of the 495->257 reduction (495*0.905*0.640*0.915 ~ 262, close to the
+   actual 257, indicating missingness across the three sources is
+   close to independent, not concentrated in the same rows). The
+   257-row complete-case sample spans 33.8 of the full window's 33.9
+   days (not clustered into a narrow sub-period), though `global`'s
+   own coverage density rises somewhat over the window (~35-43% in the
+   first third, ~58-69% in the final third) -- a real, mild temporal
+   trend worth knowing about, not evidence of a sharp regime split.
+   All three families' evaluations independently verified to operate
+   on the EXACT SAME 257 timestamps (confirmed by direct set
+   comparison), so the fng/global/onchain results are directly
+   comparable, not confounded by different sample composition.
+3. `history`'s raw table count (500 in this session's snapshot) is NOT
+   the same number as the 495 rows that fall inside the analysis
+   window derived from `predictions`' own min/max ts -- the 5-row gap
+   is `history` rows outside that window, not a discrepancy or an
+   error. Reports and documentation should state the WINDOWED count
+   (495) when discussing this module's own sample, reserving the raw
+   table count only for snapshot-freshness comparisons.
+
+None of these findings changed any computed number (the RMSE
+reductions, coefficients, and partial correlations reported by this
+module were independently reproduced to floating-point precision) --
+they change how much weight a reader should place on `fng`'s result
+specifically, and they were added to this docstring and to
+research/README.md's PR5f section as a direct result of that review,
+not spontaneously.
 """
 
 import sys

@@ -115,6 +115,53 @@ prediction's error is checked against that boundary explicitly:
   - test_error_classification.py::test_no_lookahead_event_before_prediction_never_used
     and ::test_event_at_or_before_prediction_ts_excluded_from_window
     give constructive proof of this boundary, not just a comment.
+
+  IMPORTANT (post-review clarification): empirical_staleness_threshold()
+  and empirical_magnitude_threshold() are DESCRIPTIVE BATCH STATISTICS,
+  computed once over every row in the requested analysis window --
+  including rows chronologically AFTER the specific prediction being
+  classified. That is safe and correct for what they are (a reporting
+  threshold characterizing "typical" staleness/magnitude across this
+  window, exactly like movement_distribution's own percentiles), but
+  they must NEVER be read as information available to the original V2
+  prediction at prediction_ts -- no online, real-time process could
+  have computed "this window's own future median" before the window
+  finished. Only the per-row inputs actually compared against these
+  thresholds (v1_staleness_gap_ms, the row's own realized_return) are
+  prediction-time-safe in the Section 4 sense; the thresholds
+  themselves are research-time-only batch summaries.
+
+=====================================================================
+IMPORTANT (post-review clarification): winner labels are NOT
+independent evidence of cause prevalence
+=====================================================================
+
+classify_prediction() reports exactly ONE error_type per prediction --
+the highest-priority match in the fixed, documented, and now
+explicitly tested precedence order (see classify_prediction()'s own
+docstring and test_error_classification.py's priority-interaction
+tests). When a prediction's window genuinely satisfies MULTIPLE
+candidate causes at once (real production data shows this happens --
+see the PR description), only the highest-ranked one is ever reported
+as error_type; the others are NOT silently discarded -- they remain
+visible via contributing_signals's own counts (e.g.
+regime_reversal_events_in_window) for exactly this audit purpose -- but
+they never appear as error_type and are therefore invisible to any
+code that only reads the winner-label counts.
+
+Consequence: the error_counts this module reports (WRONG_DIRECTION=N,
+UNEXPECTED_SHOCK=M, ...) are WINNER-LABEL frequencies under this fixed
+precedence, NOT independent estimates of how often each underlying
+cause was present. A category ranked low in the precedence order
+(REGIME_CHANGE, MISLEADING_SENTIMENT, TECHNICAL_SENTIMENT_CONFLICT,
+STALE_SENTIMENT) can be systematically under-counted here even when it
+was genuinely present, simply because something higher-ranked also
+matched. Do not treat these frequencies as mutually exclusive
+population-level prevalence estimates without first consulting
+contributing_signals (or a future overlap analysis over all matched
+categories, not just the winner) -- this PR does not build that
+overlap analysis; it is intentionally out of scope here (see PR
+description for the queued follow-up).
 """
 
 import sys

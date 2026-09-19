@@ -413,6 +413,50 @@ prediction -- proven, not just commented, by
 `test_no_lookahead_event_before_prediction_never_used` and
 `test_v1_btc_divergence_always_used_as_post_outcome_only`.
 
+### Interpretation caveats (required reading before using these counts)
+
+Two clarifications added after independent review, both documentation-
+only (no classification logic changed):
+
+> Classification labels are mutually exclusive winner labels determined
+> by documented precedence. `contributing_signals` preserves additional
+> matched categories. Winner-label frequencies must not be interpreted
+> as independent estimates of causal prevalence.
+
+> `empirical_staleness_threshold()` and `empirical_magnitude_threshold()`
+> are descriptive batch statistics calculated from the analysis window.
+> They must not be interpreted as information available to the original
+> prediction at prediction time.
+
+The first exists because `classify_prediction()` reports exactly one
+`error_type` per prediction (the highest-ranked match in the fixed
+precedence below), even when a prediction's window genuinely satisfies
+multiple candidate causes at once -- confirmed happening in real
+production data (see "Real production findings" below) and now proven
+with constructive tests (`test_large_move_outranks_regime_reversal_when_both_present`
+and five siblings in `test_error_classification.py`) rather than only
+observed from the aggregate output. The suppressed categories are never
+discarded -- they remain visible per-row via `contributing_signals`'s
+own counts -- but they are invisible to any code that reads only the
+`error_counts` totals. A queued, NOT-yet-built follow-up ("PR5d-
+followup: overlap analysis") would report every matched category
+per prediction (not only the winner) plus a co-occurrence matrix, to
+let the two views -- "what does the current deterministic taxonomy
+assign" vs. "what candidate explanations were actually simultaneously
+present" -- be compared directly. This PR deliberately does not build
+that; the priority chain itself is not being redesigned until that
+overlap data exists.
+
+The second exists because the PROPOSED staleness/magnitude cuts are
+computed once over the *entire* analysis window (including rows
+chronologically after the specific prediction being classified) -- a
+valid batch descriptive statistic (the same kind PR5b's
+`movement_distribution` module already computes), but never something
+an online, real-time process could have known before the window
+finished. Only the per-row inputs actually compared against these
+thresholds (a row's own staleness gap, a row's own realized_return) are
+prediction-time-safe in the Section 4 sense.
+
 ### Real production findings (read-only, never persisted)
 
 Run once against the real 1070-row `predictions` table (395 at 12h,

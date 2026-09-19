@@ -97,22 +97,69 @@ exact matching, never NLP, never invented labels) finds:
                                      credited towards "geopolitics" --
                                      a source gets at most one topic)
 
-  NO deterministic match to any PR4 evidence category (17 of 21):
+  NO DIRECT topical/textual match to any PR4 evidence category (17 of 21):
     fng, funding, longshort, global, gold, hypefunding, nasdaq,
     ninemag, oil, onchain, sosovalue, sp500, strc, usd, yield10y.
   By their own naming these are quantitative/market-derived indicators
   (fear-greed index, funding rate, long/short positioning ratio,
   global market cap, spot commodity/FX/equity-index prices, on-chain
-  metrics, an ETF-flow tracker) -- not news-narrative sources -- and
-  this module reports, honestly, that NO article-evidence bridge can
-  be deterministically established for them. This is a discovered
-  fact about the data, not a judgment about whether those sources are
-  useful.
+  metrics, an ETF-flow tracker) -- not news-narrative sources.
+
+  IMPORTANT, CORRECTED INTERPRETATION (per independent review of this
+  PR): this module reports only that NO DIRECT topical/textual bridge
+  can be deterministically established for these 17 sources via a
+  string match against PR4's feed categories. It does NOT establish,
+  and must never be read as establishing, that these sources are
+  STRUCTURALLY INCAPABLE of relevance to a real-world event. A
+  quantitative/market indicator can plausibly be a downstream
+  CONSEQUENCE of information rather than a textual description of it:
+
+      real-world event -> information/news -> market participants
+      react -> FNG / ETF flows / on-chain / positioning / technical
+      indicators shift -> BTC reaction
+
+  Establishing THAT kind of indirect, consequence-based relevance is a
+  materially different, harder research question than a deterministic
+  keyword/category match, and is explicitly OUT OF SCOPE for this PR
+  (see "Indirect relevance is explicitly out of scope" below). The
+  correct statement is: "the current deterministic topical bridge
+  cannot establish DIRECT textual relevance for 17 sources" -- not
+  "17 sources can never be relevant." This module's relevance labels
+  (`RELEVANT`/`POSSIBLY_RELEVANT`/`NOT_ESTABLISHED`/
+  `INSUFFICIENT_EVIDENCE`) describe what THIS check found, not a
+  final, permanent verdict on the source.
 
 This mapping is intentionally small and mechanical. If it is wrong or
 incomplete, that is itself useful, disclosed information (Section 12 /
 "evidence limitations") -- this module does not attempt to guess a
 better one.
+
+=====================================================================
+Indirect relevance is explicitly out of scope (per independent review)
+=====================================================================
+
+This PR classifies only DIRECT topical/textual affinity (a source key
+string matching a PR4 evidence-feed category name). It does NOT
+attempt to classify or even gesture at INDIRECT / event-impact
+relevance (e.g. "FNG moved because of this event" or "on-chain shows a
+market reaction to this event"). Introducing that would require a
+materially different, currently-undefined methodology (what counts as
+a "consequence," over what lag, compared against what baseline) and
+would contaminate this PR's narrow, mechanical result with a
+subjective interpretation of what "relevance" means. That is
+deliberately left as a separate, later research question -- not
+started, not scaffolded, not implied by any label this module emits.
+
+`affinity_status` (see `source_topic_affinity()` and every result row)
+makes this explicit and separate from the overall `relevance` verdict:
+  `DIRECT_TOPIC_RELEVANCE`: this source's key has a direct topical/
+    textual match to a PR4 evidence category (still requires actual
+    qualifying evidence to reach RELEVANT/POSSIBLY_RELEVANT -- having
+    the affinity is necessary, never sufficient, by itself).
+  `NO_DIRECT_TOPIC_AFFINITY`: no such direct match exists for this
+    source. The overall relevance result is still `NOT_ESTABLISHED`
+    (per this deterministic check), which is NOT the same claim as
+    "this source cannot be relevant" -- see above.
 
 =====================================================================
 Event interpretation
@@ -155,6 +202,16 @@ import source_analysis as sa  # noqa: E402
 RELEVANCE_LABELS = ("RELEVANT", "POSSIBLY_RELEVANT", "NOT_ESTABLISHED", "INSUFFICIENT_EVIDENCE")
 TEMPORAL_STATUSES = ("PRE_EVENT_EVIDENCE", "SAME_WINDOW_EVIDENCE", "POST_EVENT_CONTEXT", "NO_EVIDENCE")
 
+# Separate from RELEVANCE_LABELS on purpose (per independent review):
+# whether a source has a DIRECT topical/textual match to a PR4 evidence
+# category is metadata about the source, not itself a relevance verdict.
+# NO_DIRECT_TOPIC_AFFINITY never means "cannot be relevant" -- it means
+# only that this deterministic textual check found no match. See module
+# docstring's "Indirect relevance is explicitly out of scope" section.
+DIRECT_TOPIC_RELEVANCE = "DIRECT_TOPIC_RELEVANCE"
+NO_DIRECT_TOPIC_AFFINITY = "NO_DIRECT_TOPIC_AFFINITY"
+AFFINITY_STATUSES = (DIRECT_TOPIC_RELEVANCE, NO_DIRECT_TOPIC_AFFINITY)
+
 # Deterministic, code-derived source -> PR4-evidence-category affinity.
 # See module docstring's "Source interpretation" section for the exact
 # derivation. `None` means: no deterministic bridge exists for this
@@ -181,6 +238,15 @@ def source_topic_affinity(source_key):
     """Returns (topic, match_type) or (None, None). See module
     docstring."""
     return SOURCE_TOPIC_AFFINITY.get(source_key, (None, None))
+
+
+def source_affinity_status(source_key):
+    """DIRECT_TOPIC_RELEVANCE or NO_DIRECT_TOPIC_AFFINITY -- see module
+    docstring's 'Indirect relevance is explicitly out of scope'
+    section. This is metadata about the source's textual match, never
+    itself a claim about whether the source can be relevant."""
+    topic, _match_type = source_topic_affinity(source_key)
+    return DIRECT_TOPIC_RELEVANCE if topic is not None else NO_DIRECT_TOPIC_AFFINITY
 
 
 def evidence_topic(evidence_row):
@@ -297,12 +363,21 @@ def classify_evidence_temporal_status(evidence_row, event_ts, same_window_tolera
 
 def classify_relevance(source_key, evidence_rows, event_ts):
     """Descriptive, explainable, deterministic. Returns
-    {"result", "reason", "evidence_ids", "temporal_statuses"}.
+    {"result", "reason", "evidence_ids", "temporal_statuses", "affinity_status"}.
+
+    `affinity_status` (DIRECT_TOPIC_RELEVANCE / NO_DIRECT_TOPIC_AFFINITY)
+    is reported alongside `result` but is NEVER folded into it -- see
+    module docstring's 'Indirect relevance is explicitly out of scope'.
+    `NO_DIRECT_TOPIC_AFFINITY` + `result=NOT_ESTABLISHED` together mean
+    exactly: "this deterministic textual check found no direct bridge,"
+    NOT "this source cannot be relevant."
     """
+    affinity_status = source_affinity_status(source_key)
+
     if not evidence_rows:
         return {"result": "INSUFFICIENT_EVIDENCE",
                 "reason": "no research_event_evidence rows exist for this event",
-                "evidence_ids": [], "temporal_statuses": []}
+                "evidence_ids": [], "temporal_statuses": [], "affinity_status": affinity_status}
 
     topic, match_type = source_topic_affinity(source_key)
     annotated = []
@@ -317,26 +392,34 @@ def classify_relevance(source_key, evidence_rows, event_ts):
 
     if topic is None:
         return {"result": "NOT_ESTABLISHED",
-                "reason": f"source '{source_key}' has no deterministic topical bridge to any PR4 "
-                          "evidence category (quantitative/market-derived source, not a news source)",
+                "reason": f"no DIRECT topical/textual affinity was established for source "
+                          f"'{source_key}' by this deterministic keyword/category check. This does "
+                          "NOT establish that the source is incapable of relevance -- it may "
+                          "represent an indirect, downstream consequence of information (e.g. "
+                          "market participants reacting to news) rather than a textual description "
+                          "of the information itself; that kind of indirect relevance is explicitly "
+                          "out of scope for this check.",
                 "evidence_ids": all_ids,
-                "temporal_statuses": sorted({a["temporal_status"] for a in annotated})}
+                "temporal_statuses": sorted({a["temporal_status"] for a in annotated}),
+                "affinity_status": affinity_status}
 
     if not predictive_eligible:
         return {"result": "NOT_ESTABLISHED",
                 "reason": "evidence exists but only as POST_EVENT_CONTEXT -- cannot establish "
                           "pre-event relevance from post-event information",
                 "evidence_ids": all_ids,
-                "temporal_statuses": sorted({a["temporal_status"] for a in annotated})}
+                "temporal_statuses": sorted({a["temporal_status"] for a in annotated}),
+                "affinity_status": affinity_status}
 
     exact_pre_event_matches = [a for a in predictive_eligible
                                 if a["topic"] == topic and a["temporal_status"] == "PRE_EVENT_EVIDENCE"]
     if exact_pre_event_matches and match_type == "EXACT":
         return {"result": "RELEVANT",
-                "reason": f"pre-event evidence from a feed topically matching source '{source_key}' "
-                          f"('{topic}', {match_type} match) exists strictly before event_ts",
+                "reason": f"pre-event evidence from a feed with direct topical affinity to source "
+                          f"'{source_key}' ('{topic}', {match_type} match) exists strictly before event_ts",
                 "evidence_ids": [a["row"]["evidence_id"] for a in exact_pre_event_matches],
-                "temporal_statuses": ["PRE_EVENT_EVIDENCE"]}
+                "temporal_statuses": ["PRE_EVENT_EVIDENCE"],
+                "affinity_status": affinity_status}
 
     any_topic_matches = [a for a in predictive_eligible if a["topic"] == topic]
     if any_topic_matches:
@@ -345,13 +428,15 @@ def classify_relevance(source_key, evidence_rows, event_ts):
                           "only as SAME_WINDOW evidence, or via a partial/prefix source-topic match "
                           "rather than an exact one",
                 "evidence_ids": [a["row"]["evidence_id"] for a in any_topic_matches],
-                "temporal_statuses": sorted({a["temporal_status"] for a in any_topic_matches})}
+                "temporal_statuses": sorted({a["temporal_status"] for a in any_topic_matches}),
+                "affinity_status": affinity_status}
 
     return {"result": "NOT_ESTABLISHED",
-            "reason": f"pre-event/same-window evidence exists, but none of it topically matches "
-                      f"source '{source_key}' ('{topic}')",
+            "reason": f"pre-event/same-window evidence exists, but none of it has direct topical "
+                      f"affinity to source '{source_key}' ('{topic}')",
             "evidence_ids": [a["row"]["evidence_id"] for a in predictive_eligible],
-            "temporal_statuses": sorted({a["temporal_status"] for a in predictive_eligible})}
+            "temporal_statuses": sorted({a["temporal_status"] for a in predictive_eligible}),
+            "affinity_status": affinity_status}
 
 
 # =====================================================================
@@ -408,6 +493,7 @@ def summarize_by_source(dataset):
     for source_key in dataset["source_keys"]:
         s = per_source.get(source_key, {})
         combined[source_key] = {
+            "affinity_status": source_affinity_status(source_key),  # metadata, never a relevance verdict
             "events_evaluated": n_events,
             "source_observations_available": s.get("source_observations_available", 0),
             "pre_event_evidence_available": s.get("PRE_EVENT_EVIDENCE", 0),

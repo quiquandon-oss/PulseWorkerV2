@@ -430,3 +430,81 @@ def test_internal_model_events_are_flagged_not_treated_as_real_world():
     for e in failure_events:
         assert e["is_internal_model_event"] is True
     conn.close()
+
+
+# =====================================================================
+# Corrected-interpretation tests (per independent audit): a source with
+# no direct topical/textual affinity must never be characterized as
+# structurally incapable of relevance, and the affinity concept must
+# stay a separate field from the relevance verdict.
+# =====================================================================
+
+def test_no_direct_affinity_does_not_claim_structural_incapacity():
+    conn = _fresh_db()
+    event_ts = 100 * HOUR
+    event_id = _insert_persisted_event(conn, event_ts)
+    _insert_evidence(conn, event_id, CRYPTO_FEED, publication_ts=event_ts - 2 * HOUR)
+    conn.commit()
+    evidence_rows = esrel.fetch_evidence_for_event_ts(conn, event_ts)
+    result = esrel.classify_relevance("fng", evidence_rows, event_ts)
+    assert result["result"] == "NOT_ESTABLISHED"
+    reason_lower = result["reason"].lower()
+    # must NOT bare-assert incapacity (these specific unqualified
+    # phrasings must never appear at all)
+    for forbidden in ["can never be relevant", "cannot be relevant", "17 sources can never"]:
+        assert forbidden not in reason_lower
+    # must explicitly NEGATE the incapacity claim, not merely omit it
+    assert "does not establish that the source is incapable" in reason_lower
+    # must disclose that indirect/consequence relevance is a separate,
+    # out-of-scope question rather than a settled negative
+    assert "indirect" in reason_lower
+    conn.close()
+
+
+def test_affinity_status_is_separate_field_from_relevance_result():
+    result = esrel.classify_relevance("fng", [], 100 * HOUR)
+    assert result["affinity_status"] == esrel.NO_DIRECT_TOPIC_AFFINITY
+    assert result["result"] == "INSUFFICIENT_EVIDENCE"  # unaffected by affinity_status
+
+
+def test_source_affinity_status_deterministic_and_fixed():
+    assert esrel.source_affinity_status("geopolitics") == esrel.DIRECT_TOPIC_RELEVANCE
+    assert esrel.source_affinity_status("regulatory") == esrel.DIRECT_TOPIC_RELEVANCE
+    assert esrel.source_affinity_status("cryptonews") == esrel.DIRECT_TOPIC_RELEVANCE
+    assert esrel.source_affinity_status("macrogeo") == esrel.DIRECT_TOPIC_RELEVANCE
+    for source_key in ("fng", "funding", "longshort", "global", "gold", "hypefunding",
+                        "nasdaq", "ninemag", "oil", "onchain", "sosovalue", "sp500",
+                        "strc", "usd", "yield10y"):
+        assert esrel.source_affinity_status(source_key) == esrel.NO_DIRECT_TOPIC_AFFINITY
+
+
+def test_relevance_labels_unchanged_no_indirect_label_introduced():
+    # Guards against scope creep: exactly the original four relevance
+    # labels, no fifth "INDIRECT_RELEVANCE"-style label added.
+    assert esrel.RELEVANCE_LABELS == ("RELEVANT", "POSSIBLY_RELEVANT", "NOT_ESTABLISHED", "INSUFFICIENT_EVIDENCE")
+    assert esrel.AFFINITY_STATUSES == ("DIRECT_TOPIC_RELEVANCE", "NO_DIRECT_TOPIC_AFFINITY")
+
+
+def test_direct_affinity_alone_is_not_sufficient_for_relevant():
+    # Having DIRECT_TOPIC_RELEVANCE does not by itself produce RELEVANT
+    # -- qualifying evidence is still required (affinity is necessary,
+    # never sufficient).
+    result = esrel.classify_relevance("geopolitics", [], 100 * HOUR)
+    assert result["affinity_status"] == esrel.DIRECT_TOPIC_RELEVANCE
+    assert result["result"] == "INSUFFICIENT_EVIDENCE"
+
+
+def test_source_summary_includes_affinity_status_without_ranking():
+    conn = _fresh_db()
+    for i in range(60):
+        ts = i * HOUR
+        _insert_history(conn, ts, {"fng": (i * 7) % 100, "geopolitics": (i * 3) % 100})
+        _insert_btc(conn, ts, 100.0 + i * 0.2)
+    conn.commit()
+    dataset = esrel.build_event_source_relevance_dataset(conn, 10 * HOUR, 59 * HOUR)
+    summary = esrel.summarize_by_source(dataset)
+    assert summary["fng"]["affinity_status"] == esrel.NO_DIRECT_TOPIC_AFFINITY
+    assert summary["geopolitics"]["affinity_status"] == esrel.DIRECT_TOPIC_RELEVANCE
+    for source_key, stats in summary.items():
+        assert "rank" not in stats
+        assert "score" not in stats

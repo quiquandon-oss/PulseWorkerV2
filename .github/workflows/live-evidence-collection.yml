@@ -1,0 +1,72 @@
+name: Live Event & Evidence Collection
+
+# PR-6: closes the timing gap the PR4 diagnosis found (evidence
+# collection was run once, manually, ~27-29 days after the events it
+# targeted -- long after free RSS feeds had aged the articles out of
+# retention). This workflow runs PR3 detection and PR4 evidence
+# collection back-to-back, on a recurring FREE schedule, so evidence is
+# always attempted close in time to the event itself.
+#
+# $0: GitHub Actions `schedule:` only -- the Cloudflare account's own
+# Cron Trigger budget is already fully committed elsewhere in this
+# project (documented in research/README.md), so this deliberately does
+# NOT add a new Cloudflare cron. No paid API, no paid news/search, no
+# paid LLM -- reuses the existing five free RSS feeds PR4 already uses.
+#
+# All detection/matching/safeguard logic lives in, and is unit-tested
+# in, research/live_evidence_pipeline.py (which itself reuses PR3's
+# event_detector.py and PR4's evidence_collector.py completely
+# UNCHANGED). This workflow only wires that pipeline to real D1 via
+# wrangler, exactly like export-learning-data.yml already does.
+#
+# Writes ONLY two tables: research_events and research_event_evidence.
+# No V1/V2/Worker file is touched. No migration. No deployment.
+
+on:
+  schedule:
+    # Every 6 hours -- frequent enough to keep detection-to-collection
+    # timing close (the documented root cause of the original failure
+    # was a ~29-DAY gap, not an hours-scale one), infrequent enough to
+    # stay comfortably within GitHub Actions' free minutes budget (each
+    # run reads a few small, bounded D1 windows and completes in well
+    # under a minute of runner time).
+    - cron: '0 */6 * * *'
+  workflow_dispatch: {}
+
+# Prevents two runs from ever processing the same window concurrently
+# (a scheduled trigger firing while a previous run is still in
+# progress would otherwise risk racing on the same candidate events).
+concurrency:
+  group: live-evidence-collection
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  collect:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node (for wrangler)
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install wrangler
+        run: npm install -g wrangler
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Run research/ tests (never run this pipeline against production on red tests)
+        run: python3 -m pytest research/ -v
+
+      - name: Run live event detection + evidence collection
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: python3 scripts/live-evidence-pipeline/run.py

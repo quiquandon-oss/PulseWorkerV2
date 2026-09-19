@@ -706,3 +706,224 @@ action this PR takes.
   are descriptive ratios over a small evaluable sample, not
   statistical estimates with a confidence interval -- no significance
   claim is made or implied anywhere in this module.
+
+## PR5e: research hypothesis & evidence gate
+
+Scope: turns the already-computed, already-reviewed outputs of PR5c,
+PR5d, and PR5d-followup into explicit, persistent, auditable
+hypothesis records, gated through a fixed, deterministic pipeline. No
+V1/V2/Worker/PR3/PR5d-classifier change, no new production table, no
+production write of any kind (`persist_hypothesis()` is exercised only
+against an in-memory sqlite3 fixture in this session). PR5e is an
+**evidence gate, not a discovery generator**: it never asserts a
+hypothesis is true, only how far it has advanced through the gates.
+
+### Lifecycle (reused verbatim, not reinvented)
+
+`OBSERVATION -> MONITOR -> RESEARCH_HYPOTHESIS -> VALIDATION_READY ->
+BUILD_REQUEST -> AWAITING_APPROVAL -> IMPLEMENTED -> VALIDATED ->
+REJECTED -> ROLLED_BACK`, exactly PR5a's own migration-0008 documented
+lifecycle. This PR structurally never assigns past `BUILD_REQUEST` --
+`AWAITING_APPROVAL`/`IMPLEMENTED`/`VALIDATED`/`ROLLED_BACK` all require
+a real human decision and/or deployment, outside this PR's scope
+(enforced by `test_never_assigns_beyond_build_request`).
+
+### Evidence gates 0-5
+
+| Gate | Question | Source candidates | Taxonomy candidates |
+|---|---|---|---|
+| 0 Observation | Does a measurable sample exist? | `level2.status=="OK"` and `n>0` | `n_resolved>0` |
+| 1 Repeatability | Does the pattern reappear independently? | `>=2` horizons for the same source at STATISTICALLY_SIGNIFICANT/STABLE | PR5d's own recurring-across-dimensions flag |
+| 2 Association | Is there a measurable relationship? | PR5c's `classify_evidence()` label (SIGNIFICANT or STABLE) | concentrated share exceeds baseline by >=`STABILITY_EPSILON` |
+| 3 Incremental value | Beyond the V1 composite / baseline? | discovery-half **partial correlation** \|r\|>=`STABILITY_EPSILON` | effect exceeds baseline by >=`TAXONOMY_INCREMENTAL_MULTIPLIER * STABILITY_EPSILON` (2x Gate 2's bar) |
+| 4 Out-of-sample validation | Does it hold on unseen data? | validation-half OOS RMSE improved (PR5c's own `level3.oos.status`) | chronological holdout on error-classification breakdowns |
+| 5 Build-request eligible | Gates 0-4 passed, evidence_type != EXPLANATORY, AND evidence_status == `STATISTICALLY_SIGNIFICANT` specifically | | |
+
+Every threshold above is reused from PR5c's own already-justified
+constants (`MIN_SAMPLE_FOR_LEVEL2`, `STABILITY_EPSILON`,
+`OOS_SPLIT_FRACTION`) or is that same constant doubled with the
+rationale stated inline (`TAXONOMY_INCREMENTAL_MULTIPLIER = 2`) -- no
+new arbitrary number is introduced. Where the available data cannot
+support a gate, the gate returns `passed: False` with an explicit
+`INSUFFICIENT_DATA`/`INSUFFICIENT_DATA_FOR_HOLDOUT` reason rather than
+forcing a decision.
+
+### Gate independence bug found and fixed during this PR's own required validation run
+
+Before opening this PR, an earlier draft was run against the real
+production snapshot (as the build authorization requires) and produced
+**38 of 105 source candidates reaching BUILD_REQUEST** -- a result
+flatly inconsistent with "an evidence gate, not a discovery generator."
+Root cause: Gates 3 and 4 for source candidates both tested the
+identical field (`level3.oos.status=="IMPROVED"`), and Gate 3 for
+taxonomy candidates was a bare duplicate of Gate 2 -- two gates that
+looked independent in the ladder but read the same signal add no real
+discriminative power, and a single train/validation RMSE comparison is
+close to a coin flip for a weak-signal source.
+
+Fixed, before any external review, by making Gate 3 read a genuinely
+different, discovery-half-only statistic than Gate 4 (partial
+correlation for sources; a stricter 2x-epsilon bar for taxonomy), and
+by adding Gate 5's explicit `evidence_status == STATISTICALLY_SIGNIFICANT`
+requirement -- the one place "do not manufacture statistical
+significance" is enforced at the BUILD_REQUEST boundary specifically
+(a stable-but-non-significant candidate can still reach
+RESEARCH_HYPOTHESIS/VALIDATION_READY; it cannot reach BUILD_REQUEST on
+that basis alone). Re-running the same snapshot after the fix produced
+23 of 105 -- see "Known limitations" below for why even this number is
+not "23 independent discoveries." Full detail: `hypothesis_gate.py`'s
+own module docstring, section "Gate independence correction."
+
+### Temporal safety
+
+Gates 0-3 consume only already-computed, already-reviewed report
+fields (PR5c's as-of joins, PR5d's event-window-overlap checks,
+PR5d-followup's `contributing_signals` reads) -- no new query against
+predictions/history/btc_data for the core pipeline. The one new
+computation, `chronological_holdout_for_taxonomy_candidate()` (Gate 4
+for taxonomy candidates), reuses `error_classification`'s own
+`breakdown_by_*()` functions on a chronologically-sorted (never
+shuffled) split of the SAME already-fetched rows. Post-event-only
+evidence (PR3's `MISLEADING_SENTIMENT`/`V1_BTC_DIVERGENCE`, always
+`is_post_event_analysis=1`) is forced `evidence_type="EXPLANATORY"`
+and Gate 5 hard-requires `evidence_type != "EXPLANATORY"` -- it can
+reach RESEARCH_HYPOTHESIS/VALIDATION_READY but never BUILD_REQUEST.
+
+### Six-part decomposition, never collapsed
+
+Every evaluated candidate carries `observation`, `association`,
+`incremental_information`, `hypothesis_statement`, `evidence_status`,
+and `validation_status` as distinct fields (plus `lifecycle_status`,
+`evidence_type`, `source_redundancy_note`, and the full `gate_results`
+for audit). `winner_label`/`all_matched_categories`/`suppressed_categories`
+from PR5d-followup are preserved verbatim inside
+`observation.detail`, never collapsed into a single flag.
+
+### Two different "validation" concepts
+
+`lifecycle_status` (the ten-stage column) includes a stage literally
+named `VALIDATED`, but that means "validated in production after being
+implemented." This PR's own `validation_status`
+(`NOT_YET_TESTED`/`PASSED_HOLDOUT`/`FAILED_HOLDOUT`/`INSUFFICIENT_DATA_FOR_HOLDOUT`)
+is a separate, pre-implementation concept, stored in the reused
+`out_of_sample_status` column, and is never a synonym for the
+lifecycle's own later `VALIDATED` stage. A `FAILED_HOLDOUT` candidate
+is demoted straight to `lifecycle_status="REJECTED"`.
+
+### Source redundancy caveat
+
+`source_redundancy_note()` never reports a source candidate as cleared
+"beyond its correlated group" -- only `UNKNOWN_STRONG_REDUNDANCY_PRESENT`
+(a \|r\|>=0.7 partner exists per PR5c's own pairwise/vs-composite
+redundancy output) or `NOT_REDUNDANT_OBSERVED` (no such partner found;
+NOT a clearance). Every BUILD_REQUEST candidate carries this note
+inside `known_confounders`, visible, never hidden.
+
+### Schema reuse -- no migration proposed
+
+`research_hypotheses` (PR5a, migration 0008, still not deployed to
+production -- confirmed by direct read-only `sqlite_master` check this
+session, same as every prior PR5 round) already has every column this
+PR needs: `subject`/`statement` (hypothesis identity), `status` (the
+ten-stage lifecycle), `out_of_sample_status` (this PR's
+`validation_status`), `source_analysis_ids` (traceability -- honestly
+empty for this snapshot, since production `research_analyses` has zero
+rows), and `evidence_summary_json` (the full six-part decomposition +
+gate results, never an opaque free-text blurb). No schema change is
+proposed; per the build authorization, this PR does not apply the
+migration.
+
+### BUILD_REQUEST semantics -- human approval required
+
+`build_build_request_candidate()` only ever runs on a
+`lifecycle_status=="BUILD_REQUEST"` record and assembles the exact
+hypothesis, affected component (always `"research_only"` -- this PR
+never proposes a V1/V2 change directly), evidence for and against,
+sample size, time period, validation method, baseline comparison,
+known confounders, overlap/redundancy considerations, expected
+measurable effect, and a hardcoded `proposed_change_description` of
+`"NONE"` plus `human_approval_required: True`. **A BUILD_REQUEST is not
+permission to modify production**; this PR implements no V1/V2 change.
+
+### Production snapshot
+
+Same production D1 (`sentiment-history`), pulled fresh, read-only:
+1070 `predictions` rows (unchanged since the PR5d-followup review),
+500 `history` rows, 2095 `btc_data` rows. Prediction window: ts
+1785582508231 .. 1789797630549 (~49 days, unchanged). **Difference from
+the PR5d-followup snapshot**: `history`'s ts range shifted to
+1786858540345 .. 1789816132898 -- some of the earliest rows aged out of
+the table's rolling retention and new rows were appended since; row
+*count* is unchanged (500) but the underlying rows are not identical.
+This does not change the analysis window (`start_ts`/`end_ts` are still
+derived from `predictions`, untouched by `history`'s retention), and is
+recorded here per the build authorization's "do not silently change the
+analysis window" / "identify any difference from the previous snapshot."
+
+Results (`source_horizons=(1,3,6,12,24)`, `horizons=(12,24)`):
+
+- 105 source candidates (21 sources x 5 horizons), 4 taxonomy
+  candidates.
+- `lifecycle_status_counts`: `VALIDATION_READY=30`, `BUILD_REQUEST=23`,
+  `REJECTED=56` (0 at `OBSERVATION`/`MONITOR`/`RESEARCH_HYPOTHESIS` --
+  every candidate in this snapshot had enough resolved predictions to
+  clear at least Gate 2).
+- 23 BUILD_REQUEST candidates, all `SOURCE_INCREMENTAL_INFO` (0
+  taxonomy candidates reached BUILD_REQUEST -- the 4 taxonomy
+  candidates all show `evidence_status=INCONCLUSIVE`, which Gate 5's
+  significance requirement excludes by construction).
+- Of the 23, 21 carry `source_redundancy_note=NOT_REDUNDANT_OBSERVED`
+  and 2 (`etfflows` at 12h/24h) carry
+  `UNKNOWN_STRONG_REDUNDANCY_PRESENT`.
+- Re-running `build_hypothesis_report()` twice against the identical
+  snapshot produced an identical report (`report_1 == report_2`),
+  confirmed both in `test_deterministic_rerun_identical_report` and
+  against this real snapshot.
+
+### Known limitations
+
+- **Horizon overlap is not corrected for.** Most of the 23 BUILD_REQUEST
+  candidates are the SAME source appearing at several adjacent horizons
+  (e.g. `global` at 1h/3h/6h/12h/24h, `gold` at 1h/3h/6h/12h). Forward-
+  return windows across adjacent horizons overlap substantially and are
+  highly autocorrelated, so a pattern at one horizon is likely to
+  reappear at the next for that reason alone, not because it was
+  independently reconfirmed. Neither Gate 1 (repeatability across
+  horizons) nor PR5c's own Benjamini-Hochberg correction (across the
+  full source x horizon grid) models this within-source horizon
+  overlap -- an inherited property of PR5c's already-merged
+  methodology, not a new bug in this PR, and this PR does not invent a
+  new correction for it. **Read this snapshot's BUILD_REQUEST count as
+  "candidates worth an independent human second look," not as a count
+  of independently-confirmed discoveries.**
+- **Gate 3's partial-correlation threshold is a coarse floor, not a
+  significance test.** At this snapshot's typical per-source sample
+  size (~450-500 resolved predictions), the standard error of a
+  partial correlation is roughly 0.045-0.047, so a purely-noise partial
+  correlation has a non-trivial (order ~25-30%) chance of clearing
+  `STABILITY_EPSILON=0.05` on its own. This constant was reused as-is
+  from PR5c (never a new number), where it was calibrated as an
+  economically-meaningful-effect floor, not a formal test statistic --
+  Gate 5's separate, stricter `evidence_status==STATISTICALLY_SIGNIFICANT`
+  requirement (PR5c's own BH-corrected test) is where the real
+  statistical filtering for BUILD_REQUEST happens.
+- `chronological_holdout_for_taxonomy_candidate()` only supports 3 of
+  PR5d's 5 breakdown dimensions (`v1_composite_bucket`, `regime`,
+  `model_version`); `chronological_period` and `confidence_band`
+  candidates return `INSUFFICIENT_DATA_FOR_HOLDOUT` with an explicit
+  reason rather than a hastily-added breakdown. Documented as a
+  limitation, not silently worked around.
+- A taxonomy candidate can reach `lifecycle_status="VALIDATION_READY"`
+  while its own `evidence_status` is `INCONCLUSIVE` (this snapshot's 4
+  taxonomy candidates all do): Gate 1 (recurrence across breakdown
+  dimensions) drives `evidence_status`, while Gates 3/4 (which do not
+  depend on Gate 1) drive `lifecycle_status`. This is intentional --
+  the two fields answer different questions and are never collapsed --
+  but it means `lifecycle_status` alone should never be read as a
+  stand-in for `evidence_status`; Gate 5 already requires both before
+  BUILD_REQUEST.
+- `research_hypotheses.source_analysis_ids` is honestly empty for
+  every hypothesis persisted from this snapshot, because production
+  `research_analyses` (PR1's own table) has zero rows to reference --
+  not a defect in this PR, a fact about what has and has not been
+  persisted upstream so far.

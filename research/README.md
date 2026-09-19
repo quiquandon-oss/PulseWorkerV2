@@ -42,9 +42,10 @@ Consequences that every later phase of this system must respect:
 | V2 linkage (`selection_decisions`/`predictions`) | Deferred | PR2, only after a non-correlated join strategy is proven via `EXPLAIN QUERY PLAN` |
 | Event detection (thresholds, no LLM) | Deferred | PR3 |
 | Internet evidence layer (`research_event_evidence`, one-to-many from `research_events`) | Deferred | PR4 |
-| Analysis engine (effectiveness, redundancy, stability) | Deferred | PR5 |
+| Analysis engine (effectiveness, redundancy, stability) | Deferred | PR5b-e |
+| `research_hypotheses` table + selection-decision resolver | Built, PR5a | This migration + `research/selection_resolver.py` |
 | Scheduled loop (daily/weekly, GitHub Actions only) | Deferred | PR6 |
-| `research_hypotheses` / `research_build_requests` | Deferred | PR7-8 |
+| `research_build_requests` | Deferred | PR8 |
 | Lab UI extension | Deferred | PR9, only after the backend is proven |
 
 ### Why V2 linkage isn't in PR1
@@ -92,3 +93,52 @@ uniqueness constraint rather than creating a duplicate row. Verified
 directly in `research/test_migration.py` — a duplicate-fingerprint
 insert raises `IntegrityError` and leaves the table unchanged, not just
 asserted from the schema text.
+
+## PR5a: research_hypotheses + selection_resolver.py
+
+Scope: an additive `research_hypotheses` table (`.ai/migrations/
+0008_research_hypotheses.sql`) for tracking a hypothesis's lifecycle
+across repeated analysis runs (something the single-run
+`research_analyses` table can't represent), plus a new read-only module,
+`research/selection_resolver.py`, that resolves which `selection_decisions`
+row was "live" for a given BTC prediction. No PR5 analysis code exists
+yet -- this PR only builds the schema and the one join PR5b-e will need.
+
+### Why selection_decisions.prediction_ts is not a usable join key
+
+This was meant to be a simple decision (earliest vs. latest duplicate row
+per prediction_ts), but real production data shows the premise itself
+was wrong. selectBestVariant() in worker.js scores each candidate
+variant using only rows where realized_up IS NOT NULL -- which, by
+construction, excludes the very prediction it's nominally attached to via
+prediction_ts (that prediction hasn't resolved yet at write time). So
+chosen_p_up reflects whichever OTHER, already-resolved prediction
+happened to be most recent at that moment, not the p_up of the prediction
+named by prediction_ts.
+
+Real proof, one BTC/24h prediction (prediction_ts=1789614039967): 7
+selection_decisions rows exist for it, ts ranging from ~1.4h to ~29h
+AFTER the prediction was made. chosen_p_up drifts from 0.667 (earliest
+row) to 0.333 (latest rows) across that single prediction_ts -- proof
+that no single row of the seven was ever "the" answer; the join key
+itself doesn't mean what it looks like it means. worker.js confirms this
+directly in its own comments: production reads selection_decisions via
+ORDER BY ts DESC LIMIT 1 relative to now -- a rolling as-of-now state,
+not a per-prediction attribute.
+
+selection_resolver.py therefore joins on wall-clock time, not
+prediction_ts: MAX(sd.ts) WHERE sd.ts <= predictions.ts -- the same
+as-of shape PR2's resolver.py already uses for V1<->V2 alignment.
+Applied to the real chain above, this correctly returns no selection
+decision at all for that prediction (all 7 rows are logged after it),
+rather than attaching one of seven hindsight-drifted candidates.
+Confirmed index-driven via a real EXPLAIN QUERY PLAN against production
+D1 -- idx_predictions_horizon_ts and the existing
+idx_selection_decisions_coin_time cover every step, no new index needed.
+Verified in research/test_selection_resolver.py, including a direct
+reproduction of the real 7-row chain.
+
+Scope is BTC only (predictions/selection_decisions) for PR5a, matching
+PR2's own precedent of not generalizing across coins until each coin's
+table shape is independently verified -- LINK/ETH are explicitly
+deferred.

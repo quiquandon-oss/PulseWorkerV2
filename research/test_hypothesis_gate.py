@@ -20,6 +20,7 @@ import pytest
 sys.path.insert(0, os.path.dirname(__file__))
 import hypothesis_gate as hg  # noqa: E402
 import error_classification as ec  # noqa: E402
+import source_analysis as sa  # noqa: E402
 
 HOUR = 3600000
 DAY = 24 * HOUR
@@ -82,6 +83,49 @@ def insert_history(conn, ts, score, sources_json=None, technical_score=None, gol
 
 def insert_price(conn, ts, price):
     conn.execute("INSERT INTO btc_data (ts, btc_price) VALUES (?, ?)", (ts, price))
+
+
+def _synthetic_matrix_source(n, y_fn, source_key="a"):
+    """Builds (matrix_rows, outcome_rows) in the exact shape
+    source_analysis.extract_source_matrix()/outcome_engine.compute_
+    forward_returns_from_history() return, WITHOUT touching a DB --
+    y_fn(i, composite, source) controls the outcome deterministically
+    (no randomness -- every value below is exactly reproducible) so
+    Gate 4's magnitude/stability behavior can be verified against a
+    real, non-mocked call to hg.source_subsplit_stability() and
+    sa.level3_incremental_for_source().
+    """
+    matrix_rows, outcome_rows = [], []
+    for i in range(n):
+        ts = i * HOUR
+        composite = 50 + (i % 7)
+        source_value = (i % 11) - 5
+        y = y_fn(i, composite, source_value)
+        matrix_rows.append({"ts": ts, "v1_composite": float(composite), "gold_regime": None,
+                             "sources": {source_key: float(source_value)}})
+        outcome_rows.append({"anchor_ts": ts, "outcome_status": "RESOLVED", "forward_return_pct": y})
+    return matrix_rows, outcome_rows
+
+
+def _deterministic_noise(i):
+    """A fixed, non-random pseudo-noise sequence in [-6, 6] -- deterministic
+    (same input always gives same output), used only to make synthetic
+    OOS fixtures realistic (a perfectly noiseless relationship makes
+    EVERY nonzero coefficient look like a ~100% RMSE reduction, which
+    is not representative of the real production snapshot)."""
+    return ((i * 37) % 13) - 6
+
+
+def _source_candidate_from_level3(level3, source_key="a", horizon_hours=24,
+                                   evidence_label="STATISTICALLY_SIGNIFICANT", repeatability_count=2,
+                                   redundancy_pairwise=None, redundancy_vs_composite=None):
+    return {
+        "candidate_type": "SOURCE_INCREMENTAL_INFO", "subject": f"source:{source_key}:{horizon_hours}h",
+        "source_key": source_key, "horizon_hours": horizon_hours,
+        "level2": {"status": "OK", "n": level3.get("n"), "effect_size_r": 0.9, "p_corrected": 0.0001},
+        "evidence_label": evidence_label, "level3": level3, "repeatability_count": repeatability_count,
+        "redundancy_pairwise": redundancy_pairwise or {}, "redundancy_vs_composite": redundancy_vs_composite,
+    }
 
 
 # =====================================================================
@@ -176,7 +220,10 @@ def test_incremental_value_gate_passes_when_level3_improved():
     assert gate3["passed"] is True
     assert gate3["beyond_composite"] == "MEASURABLE_PARTIAL_ASSOCIATION"
     # never claims Level-3-beyond-correlated-group
-    assert gate3["beyond_correlated_group"] in ("UNKNOWN_STRONG_REDUNDANCY_PRESENT", "NOT_REDUNDANT_OBSERVED")
+    assert gate3["beyond_correlated_group"] in ("REDUNDANCY_UNRESOLVED", "NO_STRONG_PAIRWISE_REDUNDANCY_DETECTED")
+    # v2: Gate 3 must explicitly flag it is NOT independent confirmation of Gate 2
+    assert gate3["independent_of_gate2"] is False
+    assert "not independent" in gate3["note"].lower() or "never" in gate3["note"].lower()
 
 
 def test_incremental_value_gate_fails_when_level3_not_improved():
@@ -239,56 +286,121 @@ def test_chronological_holdout_passes_when_pattern_holds_both_halves():
 
 
 # =====================================================================
-# 7. Failed validation
+# 7. Failed validation (v2: a clearly NEGATIVE full-validation OOS point
+# estimate, verified against a real regime-reversal fixture)
 # =====================================================================
 
 def test_failed_validation_demotes_to_rejected():
-    candidate = {
-        "candidate_type": "SOURCE_INCREMENTAL_INFO", "subject": "s", "source_key": "a", "horizon_hours": 24,
-        "level2": {"status": "OK", "n": 200, "effect_size_r": 0.3, "p_corrected": 0.01},
-        "evidence_label": "STATISTICALLY_SIGNIFICANT",
-        "level3": {"status": "OK", "oos": {"status": "NOT_IMPROVED"}, "n_discovery": 100, "n_validation": 50},
-        "repeatability_count": 2, "redundancy_pairwise": {}, "redundancy_vs_composite": None,
-    }
-    result = hg.evaluate_candidate(candidate)
-    # gate3 (incremental) fails here (NOT_IMPROVED), not gate4 itself
-    assert result["gate_results"]["gate3"]["passed"] is False
-    assert result["lifecycle_status"] != "BUILD_REQUEST"
+    n = 300
+    split_idx = int(n * hg.OOS_SPLIT_FRACTION)
+
+    def y_fn(i, c, s):
+        # relationship holds in discovery, REVERSES sign in validation --
+        # the discovery-fit full model should do measurably WORSE OOS.
+        return (3.0 * s + 0.01 * c) if i < split_idx else (-3.0 * s + 0.01 * c)
+
+    matrix_rows, outcome_rows = _synthetic_matrix_source(n, y_fn)
+    level3 = sa.level3_incremental_for_source(matrix_rows, outcome_rows, "a", 24)
+    assert (level3["oos"]["rmse_reduction_pct"]) < 0  # sanity-check the fixture itself
+    candidate = _source_candidate_from_level3(level3)
+    result = hg.evaluate_candidate(candidate, source_matrix_rows=matrix_rows, source_outcome_rows=outcome_rows)
+    assert result["oos_validation"]["validation_status"] == "FAILED_HOLDOUT"
+    assert result["lifecycle_status"] == "REJECTED"
 
 
 def test_explicit_failed_holdout_demotes_to_rejected():
-    candidate = {
-        "candidate_type": "SOURCE_INCREMENTAL_INFO", "subject": "s", "source_key": "a", "horizon_hours": 24,
-        "level2": {"status": "OK", "n": 200, "effect_size_r": 0.3, "p_corrected": 0.01},
-        "evidence_label": "STATISTICALLY_SIGNIFICANT",
-        "level3": {"status": "OK", "oos": {"status": "IMPROVED"}, "n_discovery": 100, "n_validation": 50},
-        "repeatability_count": 2, "redundancy_pairwise": {}, "redundancy_vs_composite": None,
-    }
     gate_results = {
-        "gate0": hg.gate0_observation(candidate), "gate1": hg.gate1_repeatability(candidate),
-        "gate2": hg.gate2_association(candidate), "gate3": hg.gate3_incremental_value(candidate),
+        "gate0": {"passed": True}, "gate1": {"passed": True}, "gate2": {"passed": True},
+        "gate3": {"passed": True},
         "gate4": {"validation_status": "FAILED_HOLDOUT", "passed": False},
     }
     assert hg.assign_lifecycle_status(gate_results) == "REJECTED"
 
 
 # =====================================================================
-# 8. Successful validation
+# 8. Successful validation -- meaningful positive OOS improvement CAN
+# promote when stability criteria are satisfied
 # =====================================================================
 
 def test_successful_validation_reaches_build_request():
-    candidate = {
-        "candidate_type": "SOURCE_INCREMENTAL_INFO", "subject": "s", "source_key": "a", "horizon_hours": 24,
-        "level2": {"status": "OK", "n": 200, "effect_size_r": 0.3, "p_corrected": 0.01},
-        "evidence_label": "STATISTICALLY_SIGNIFICANT",
-        "level3": {"status": "OK", "partial_correlation": 0.25,
-                   "oos": {"status": "IMPROVED", "rmse_reduction_pct": 10.0},
-                   "n_discovery": 140, "n_validation": 60},
-        "repeatability_count": 2, "redundancy_pairwise": {}, "redundancy_vs_composite": None,
-    }
-    result = hg.evaluate_candidate(candidate)
+    matrix_rows, outcome_rows = _synthetic_matrix_source(300, lambda i, c, s: 3.0 * s + 0.01 * c)
+    level3 = sa.level3_incremental_for_source(matrix_rows, outcome_rows, "a", 24)
+    candidate = _source_candidate_from_level3(level3)
+    result = hg.evaluate_candidate(candidate, source_matrix_rows=matrix_rows, source_outcome_rows=outcome_rows)
+    assert result["oos_validation"]["meaningful_effect"] is True
+    assert result["oos_validation"]["sign_stable_across_subsplit"] is True
     assert result["lifecycle_status"] == "BUILD_REQUEST"
     assert result["validation_status"] == "PASSED_HOLDOUT"
+
+
+# =====================================================================
+# NEW (v2): positive but negligible OOS improvement does NOT promote
+# =====================================================================
+
+def test_negligible_positive_oos_improvement_does_not_promote():
+    """Full-validation point estimate is positive AND stable across both
+    sub-windows, but below MEANINGFUL_OOS_IMPROVEMENT_PCT (5%) -- must
+    be NOT_REPLICATED, never PASSED_HOLDOUT/BUILD_REQUEST."""
+    matrix_rows, outcome_rows = _synthetic_matrix_source(
+        300, lambda i, c, s: 0.3 * s + 0.01 * c + 1.5 * _deterministic_noise(i))
+    level3 = sa.level3_incremental_for_source(matrix_rows, outcome_rows, "a", 24)
+    full_red = level3["oos"]["rmse_reduction_pct"]
+    assert 0 < full_red < hg.MEANINGFUL_OOS_IMPROVEMENT_PCT  # sanity-check the fixture
+    candidate = _source_candidate_from_level3(level3)
+    result = hg.evaluate_candidate(candidate, source_matrix_rows=matrix_rows, source_outcome_rows=outcome_rows)
+    assert result["oos_validation"]["meaningful_effect"] is False
+    assert result["validation_status"] == "NOT_REPLICATED"
+    assert result["lifecycle_status"] != "BUILD_REQUEST"
+    assert result["lifecycle_status"] != "REJECTED"  # positive estimate is not evidence AGAINST it
+
+
+# =====================================================================
+# NEW (v2): unstable OOS improvement does NOT promote, even if the
+# full-validation magnitude alone would have cleared the 5% floor
+# =====================================================================
+
+def test_unstable_oos_improvement_does_not_promote():
+    n = 300
+    split_idx = int(n * hg.OOS_SPLIT_FRACTION)
+    validation_len = n - split_idx
+    sub2_start = split_idx + validation_len // 2
+
+    def y_fn(i, c, s):
+        base = 0.5 * s + 0.01 * c + 1.0 * _deterministic_noise(i)
+        if i >= sub2_start:
+            base -= 0.35 * s  # weakens/reverses the relationship in JUST the second validation sub-window
+        return base
+
+    matrix_rows, outcome_rows = _synthetic_matrix_source(n, y_fn)
+    level3 = sa.level3_incremental_for_source(matrix_rows, outcome_rows, "a", 24)
+    full_red = level3["oos"]["rmse_reduction_pct"]
+    assert full_red >= hg.MEANINGFUL_OOS_IMPROVEMENT_PCT  # magnitude alone WOULD clear the floor
+    subsplit = hg.source_subsplit_stability(matrix_rows, outcome_rows, "a", 24)
+    assert subsplit["sign_stable_across_subsplit"] is False  # but it does not replicate
+    candidate = _source_candidate_from_level3(level3)
+    result = hg.evaluate_candidate(candidate, source_matrix_rows=matrix_rows, source_outcome_rows=outcome_rows)
+    assert result["oos_validation"]["meaningful_effect"] is True
+    assert result["oos_validation"]["sign_stable_across_subsplit"] is False
+    assert result["validation_status"] == "NOT_REPLICATED"
+    assert result["lifecycle_status"] != "BUILD_REQUEST"
+
+
+# =====================================================================
+# NEW (v2): insufficient validation sample does NOT promote (honest
+# INSUFFICIENT_DATA_FOR_HOLDOUT, never a forced PASSED/FAILED)
+# =====================================================================
+
+def test_insufficient_validation_sample_does_not_promote():
+    n = 80  # validation half ~24 rows; each sub-half ~12, below MIN_SAMPLE_FOR_HOLDOUT_HALF (30)
+    matrix_rows, outcome_rows = _synthetic_matrix_source(n, lambda i, c, s: 3.0 * s + 0.01 * c)
+    level3 = sa.level3_incremental_for_source(matrix_rows, outcome_rows, "a", 24)
+    assert level3["oos"]["rmse_reduction_pct"] > 0  # a positive point estimate alone...
+    subsplit = hg.source_subsplit_stability(matrix_rows, outcome_rows, "a", 24)
+    assert subsplit["status"] == "INSUFFICIENT_DATA_FOR_SUBSPLIT"  # ...cannot be confirmed at this sample size
+    candidate = _source_candidate_from_level3(level3)
+    result = hg.evaluate_candidate(candidate, source_matrix_rows=matrix_rows, source_outcome_rows=outcome_rows)
+    assert result["validation_status"] == "INSUFFICIENT_DATA_FOR_HOLDOUT"
+    assert result["lifecycle_status"] != "BUILD_REQUEST"
 
 
 # =====================================================================
@@ -296,23 +408,27 @@ def test_successful_validation_reaches_build_request():
 # =====================================================================
 
 def test_correlated_source_never_claims_beyond_group():
-    candidate = {
-        "candidate_type": "SOURCE_INCREMENTAL_INFO", "subject": "s", "source_key": "a", "horizon_hours": 24,
-        "level2": {"status": "OK", "n": 200, "effect_size_r": 0.3, "p_corrected": 0.01},
-        "evidence_label": "STATISTICALLY_SIGNIFICANT",
-        "level3": {"status": "OK", "partial_correlation": 0.25,
-                   "oos": {"status": "IMPROVED"}, "n_discovery": 140, "n_validation": 60},
-        "repeatability_count": 2,
-        "redundancy_pairwise": {("a", "b"): {"n": 100, "r": 0.9, "strong_redundancy": True}},
-        "redundancy_vs_composite": None,
-    }
+    """v2: REDUNDANCY_UNRESOLVED now also BLOCKS BUILD_REQUEST outright
+    (Gate 6) -- a candidate can have strong association, incremental
+    value, and a validated OOS effect and still be capped at
+    VALIDATION_READY if redundancy is unresolved."""
+    matrix_rows, outcome_rows = _synthetic_matrix_source(300, lambda i, c, s: 3.0 * s + 0.01 * c)
+    level3 = sa.level3_incremental_for_source(matrix_rows, outcome_rows, "a", 24)
+    candidate = _source_candidate_from_level3(
+        level3, redundancy_pairwise={("a", "b"): {"n": 100, "r": 0.9, "strong_redundancy": True}})
     note = hg.source_redundancy_note(candidate)
-    assert note == "UNKNOWN_STRONG_REDUNDANCY_PRESENT"
-    result = hg.evaluate_candidate(candidate)
-    assert result["source_redundancy_note"] == "UNKNOWN_STRONG_REDUNDANCY_PRESENT"
-    # even a BUILD_REQUEST candidate must carry this caveat, visible, not hidden
-    br = hg.build_build_request_candidate(result, candidate)
-    assert "UNKNOWN_STRONG_REDUNDANCY_PRESENT" in br["known_confounders"]
+    assert note == "REDUNDANCY_UNRESOLVED"
+    result = hg.evaluate_candidate(candidate, source_matrix_rows=matrix_rows, source_outcome_rows=outcome_rows)
+    assert result["source_redundancy_note"] == "REDUNDANCY_UNRESOLVED"
+    # Gates 0-5 all pass (the underlying evidence is genuinely strong) but
+    # Gate 6 blocks BUILD_REQUEST specifically because of the redundancy.
+    assert result["gate_results"]["gate5"]["passed"] is True
+    assert result["gate_results"]["gate6"]["passed"] is False
+    assert result["gate_results"]["gate6"]["blocked_by_unresolved_redundancy"] is True
+    assert result["lifecycle_status"] == "VALIDATION_READY"
+    assert result["lifecycle_status"] != "BUILD_REQUEST"
+    with pytest.raises(ValueError):
+        hg.build_build_request_candidate(result, candidate)
 
 
 def test_no_redundancy_reports_not_redundant_observed_not_a_clearance():
@@ -322,7 +438,25 @@ def test_no_redundancy_reports_not_redundant_observed_not_a_clearance():
         "level3": None, "repeatability_count": 1,
         "redundancy_pairwise": {}, "redundancy_vs_composite": {"n": 100, "r": 0.1, "strong_redundancy": False},
     }
-    assert hg.source_redundancy_note(candidate) == "NOT_REDUNDANT_OBSERVED"
+    note = hg.source_redundancy_note(candidate)
+    assert note == "NO_STRONG_PAIRWISE_REDUNDANCY_DETECTED"
+    # v2: this label must NEVER be readable as "independence established"
+    assert "INDEPENDENT" not in note
+    doc = inspect.getdoc(hg.source_redundancy_note) or ""
+    assert "never" in doc.lower() or "not establish" in doc.lower() or "does not" in doc.lower()
+
+
+def test_build_request_still_reachable_when_no_redundancy_signal():
+    """Sanity check that Gate 6's new redundancy check is not overly
+    strict: NO_STRONG_PAIRWISE_REDUNDANCY_DETECTED (the normal case, no
+    known strong partner) must still allow BUILD_REQUEST when every
+    other gate passes."""
+    matrix_rows, outcome_rows = _synthetic_matrix_source(300, lambda i, c, s: 3.0 * s + 0.01 * c)
+    level3 = sa.level3_incremental_for_source(matrix_rows, outcome_rows, "a", 24)
+    candidate = _source_candidate_from_level3(level3)
+    result = hg.evaluate_candidate(candidate, source_matrix_rows=matrix_rows, source_outcome_rows=outcome_rows)
+    assert result["source_redundancy_note"] == "NO_STRONG_PAIRWISE_REDUNDANCY_DETECTED"
+    assert result["lifecycle_status"] == "BUILD_REQUEST"
 
 
 # =====================================================================
@@ -335,41 +469,69 @@ def test_misleading_sentiment_forced_explanatory():
     assert hg.evidence_type_for_candidate(candidate) == "EXPLANATORY"
 
 
-def test_explanatory_only_evidence_blocks_gate5_even_if_all_else_passes():
+def test_significance_eligibility_gate_is_a_stricter_reread_of_gate2():
+    """v2: Gate 5 is documented and behaves as a STRICTER FORM of Gate 2's
+    own metric, not an independent evidence layer -- it passes only for
+    STATISTICALLY_SIGNIFICANT specifically, not the weaker STABLE label
+    Gate 2 itself already accepts."""
+    assert hg.gate5_significance_eligibility("STATISTICALLY_SIGNIFICANT")["passed"] is True
+    assert hg.gate5_significance_eligibility("STATISTICALLY_NON_SIGNIFICANT_BUT_STABLE")["passed"] is False
+    assert hg.gate5_significance_eligibility("INCONCLUSIVE")["passed"] is False
+    doc = inspect.getdoc(hg.gate5_significance_eligibility) or ""
+    assert "not an independent evidence layer" in doc.lower() or "not independent" in doc.lower()
+
+
+def test_explanatory_only_evidence_blocks_gate6_even_if_all_else_passes():
     gate_results = {
         "gate0": {"passed": True}, "gate1": {"passed": True}, "gate2": {"passed": True},
         "gate3": {"passed": True}, "gate4": {"passed": True, "validation_status": "PASSED_HOLDOUT"},
+        "gate5": {"passed": True},
     }
-    gate5 = hg.gate5_build_request_eligible(
-        gate_results, evidence_type="EXPLANATORY", evidence_status="STATISTICALLY_SIGNIFICANT")
-    assert gate5["passed"] is False
-    assert gate5["blocked_by_explanatory_only_evidence"] is True
+    gate6 = hg.gate6_build_request_eligible(
+        gate_results, evidence_type="EXPLANATORY", redundancy_note="NO_STRONG_PAIRWISE_REDUNDANCY_DETECTED")
+    assert gate6["passed"] is False
+    assert gate6["blocked_by_explanatory_only_evidence"] is True
 
 
-def test_predictive_evidence_allows_gate5_when_all_else_passes():
+def test_predictive_evidence_allows_gate6_when_all_else_passes():
     gate_results = {
         "gate0": {"passed": True}, "gate1": {"passed": True}, "gate2": {"passed": True},
         "gate3": {"passed": True}, "gate4": {"passed": True, "validation_status": "PASSED_HOLDOUT"},
+        "gate5": {"passed": True},
     }
-    gate5 = hg.gate5_build_request_eligible(
-        gate_results, evidence_type="PREDICTIVE", evidence_status="STATISTICALLY_SIGNIFICANT")
-    assert gate5["passed"] is True
+    gate6 = hg.gate6_build_request_eligible(
+        gate_results, evidence_type="PREDICTIVE", redundancy_note="NO_STRONG_PAIRWISE_REDUNDANCY_DETECTED")
+    assert gate6["passed"] is True
 
 
-def test_non_significant_evidence_blocks_gate5_even_if_all_else_passes():
+def test_non_significant_evidence_blocks_gate6_even_if_all_else_passes():
     """'Do not manufacture statistical significance': a candidate that is
     merely STATISTICALLY_NON_SIGNIFICANT_BUT_STABLE may still be a valid
     RESEARCH_HYPOTHESIS / VALIDATION_READY candidate (Gate 2 accepts it),
-    but must never reach BUILD_REQUEST on that basis alone."""
+    but must never reach BUILD_REQUEST on that basis alone -- Gate 5
+    fails, so Gate 6's all_prior_passed is False regardless of evidence
+    type or redundancy."""
     gate_results = {
         "gate0": {"passed": True}, "gate1": {"passed": True}, "gate2": {"passed": True},
         "gate3": {"passed": True}, "gate4": {"passed": True, "validation_status": "PASSED_HOLDOUT"},
+        "gate5": {"passed": False},
     }
-    gate5 = hg.gate5_build_request_eligible(
-        gate_results, evidence_type="PREDICTIVE",
-        evidence_status="STATISTICALLY_NON_SIGNIFICANT_BUT_STABLE")
-    assert gate5["passed"] is False
-    assert gate5["blocked_by_non_significant_evidence"] is True
+    gate6 = hg.gate6_build_request_eligible(
+        gate_results, evidence_type="PREDICTIVE", redundancy_note="NO_STRONG_PAIRWISE_REDUNDANCY_DETECTED")
+    assert gate6["passed"] is False
+    assert gate6["all_prior_gates_passed"] is False
+
+
+def test_unresolved_redundancy_blocks_gate6_even_if_all_else_passes():
+    gate_results = {
+        "gate0": {"passed": True}, "gate1": {"passed": True}, "gate2": {"passed": True},
+        "gate3": {"passed": True}, "gate4": {"passed": True, "validation_status": "PASSED_HOLDOUT"},
+        "gate5": {"passed": True},
+    }
+    gate6 = hg.gate6_build_request_eligible(
+        gate_results, evidence_type="PREDICTIVE", redundancy_note="REDUNDANCY_UNRESOLVED")
+    assert gate6["passed"] is False
+    assert gate6["blocked_by_unresolved_redundancy"] is True
 
 
 # =====================================================================
@@ -416,7 +578,7 @@ def test_observation_detail_never_collapses_winner_vs_matched():
 def test_lifecycle_transitions_in_order():
     base = {"gate0": {"passed": False}, "gate1": {"passed": False}, "gate2": {"passed": False},
             "gate3": {"passed": False}, "gate4": {"passed": False, "validation_status": "NOT_YET_TESTED"},
-            "gate5": {"passed": False}}
+            "gate5": {"passed": False}, "gate6": {"passed": False}}
     assert hg.assign_lifecycle_status(base) == "OBSERVATION"
 
     g = dict(base); g["gate0"] = {"passed": True}
@@ -432,7 +594,10 @@ def test_lifecycle_transitions_in_order():
     assert hg.assign_lifecycle_status(g) == "VALIDATION_READY"
 
     g["gate4"] = {"passed": True, "validation_status": "PASSED_HOLDOUT"}
+    assert hg.assign_lifecycle_status(g) == "VALIDATION_READY"  # gate5/gate6 not yet passed
+
     g["gate5"] = {"passed": True}
+    g["gate6"] = {"passed": True}
     assert hg.assign_lifecycle_status(g) == "BUILD_REQUEST"
 
 
@@ -448,10 +613,11 @@ def test_never_assigns_beyond_build_request():
 
 def test_build_request_requires_gate4_passed():
     gate_results = {"gate0": {"passed": True}, "gate1": {"passed": True}, "gate2": {"passed": True},
-                     "gate3": {"passed": True}, "gate4": {"passed": False, "validation_status": "NOT_YET_TESTED"}}
-    gate5 = hg.gate5_build_request_eligible(
-        gate_results, evidence_type="PREDICTIVE", evidence_status="STATISTICALLY_SIGNIFICANT")
-    assert gate5["passed"] is False
+                     "gate3": {"passed": True}, "gate4": {"passed": False, "validation_status": "NOT_YET_TESTED"},
+                     "gate5": {"passed": True}}
+    gate6 = hg.gate6_build_request_eligible(
+        gate_results, evidence_type="PREDICTIVE", redundancy_note="NO_STRONG_PAIRWISE_REDUNDANCY_DETECTED")
+    assert gate6["passed"] is False
 
 
 # =====================================================================
@@ -459,17 +625,41 @@ def test_build_request_requires_gate4_passed():
 # =====================================================================
 
 def test_no_build_request_when_validation_fails():
-    candidate = {
-        "candidate_type": "SOURCE_INCREMENTAL_INFO", "subject": "s", "source_key": "a", "horizon_hours": 24,
-        "level2": {"status": "OK", "n": 200, "effect_size_r": 0.3, "p_corrected": 0.01},
-        "evidence_label": "STATISTICALLY_SIGNIFICANT",
-        "level3": {"status": "OK", "oos": {"status": "NOT_IMPROVED"}, "n_discovery": 140, "n_validation": 60},
-        "repeatability_count": 2, "redundancy_pairwise": {}, "redundancy_vs_composite": None,
-    }
-    result = hg.evaluate_candidate(candidate)
+    n = 300
+    split_idx = int(n * hg.OOS_SPLIT_FRACTION)
+
+    def y_fn(i, c, s):
+        return (3.0 * s + 0.01 * c) if i < split_idx else (-3.0 * s + 0.01 * c)
+
+    matrix_rows, outcome_rows = _synthetic_matrix_source(n, y_fn)
+    level3 = sa.level3_incremental_for_source(matrix_rows, outcome_rows, "a", 24)
+    candidate = _source_candidate_from_level3(level3)
+    result = hg.evaluate_candidate(candidate, source_matrix_rows=matrix_rows, source_outcome_rows=outcome_rows)
     assert result["lifecycle_status"] != "BUILD_REQUEST"
     with pytest.raises(ValueError):
         hg.build_build_request_candidate(result, candidate)
+
+
+# =====================================================================
+# NEW (v2): a significant Gate 2 result does not automatically imply
+# BUILD_REQUEST -- Gate 4 (strengthened OOS check) must independently
+# pass too
+# =====================================================================
+
+def test_significant_gate2_does_not_automatically_imply_build_request():
+    candidate = {
+        "candidate_type": "SOURCE_INCREMENTAL_INFO", "subject": "source:a:24h", "source_key": "a",
+        "horizon_hours": 24,
+        "level2": {"status": "OK", "n": 500, "effect_size_r": 0.3, "p_corrected": 0.0001},
+        "evidence_label": "STATISTICALLY_SIGNIFICANT",  # Gate 2 AND Gate 5 both pass
+        "level3": None,  # but no Level 3 / OOS evidence exists at all
+        "repeatability_count": 2, "redundancy_pairwise": {}, "redundancy_vs_composite": None,
+    }
+    assert hg.gate2_association(candidate)["passed"] is True
+    result = hg.evaluate_candidate(candidate)
+    assert result["gate_results"]["gate5"]["passed"] is True  # significance alone: True
+    assert result["lifecycle_status"] != "BUILD_REQUEST"  # but Gate 4 has no evidence -> can't promote
+    assert result["validation_status"] == "INSUFFICIENT_DATA_FOR_HOLDOUT"
 
 
 # =====================================================================
@@ -496,14 +686,10 @@ def test_contradicted_evidence_never_passes_association_gate():
 
 def test_persist_and_retrieve_hypothesis():
     conn = fresh_db()
-    candidate = {
-        "candidate_type": "SOURCE_INCREMENTAL_INFO", "subject": "s", "source_key": "a", "horizon_hours": 24,
-        "level2": {"status": "OK", "n": 200, "effect_size_r": 0.3, "p_corrected": 0.01},
-        "evidence_label": "STATISTICALLY_SIGNIFICANT",
-        "level3": {"status": "OK", "oos": {"status": "IMPROVED"}, "n_discovery": 140, "n_validation": 60},
-        "repeatability_count": 2, "redundancy_pairwise": {}, "redundancy_vs_composite": None,
-    }
-    result = hg.evaluate_candidate(candidate)
+    matrix_rows, outcome_rows = _synthetic_matrix_source(300, lambda i, c, s: 3.0 * s + 0.01 * c)
+    level3 = sa.level3_incremental_for_source(matrix_rows, outcome_rows, "a", 24)
+    candidate = _source_candidate_from_level3(level3)
+    result = hg.evaluate_candidate(candidate, source_matrix_rows=matrix_rows, source_outcome_rows=outcome_rows)
     hypothesis_id = hg.persist_hypothesis(conn, 1000, result, source_analysis_ids=[])
     row = conn.execute(
         "SELECT subject, statement, status, out_of_sample_status, evidence_summary_json, source_analysis_ids "
@@ -567,7 +753,8 @@ def test_only_persist_hypothesis_contains_insert_into():
     functions = [
         hg.derive_source_candidates, hg.derive_taxonomy_candidates, hg.evidence_type_for_candidate,
         hg.source_redundancy_note, hg.gate0_observation, hg.gate1_repeatability, hg.gate2_association,
-        hg.gate3_incremental_value, hg.gate4_out_of_sample, hg.gate5_build_request_eligible,
+        hg.gate3_incremental_value, hg.gate4_out_of_sample, hg.gate5_significance_eligibility,
+        hg.gate6_build_request_eligible, hg.source_subsplit_stability,
         hg.assign_lifecycle_status, hg.assign_evidence_status, hg.evaluate_candidate,
         hg.build_build_request_candidate, hg.build_hypothesis_report,
         hg.chronological_holdout_for_taxonomy_candidate,
@@ -577,6 +764,128 @@ def test_only_persist_hypothesis_contains_insert_into():
         for forbidden in ["INSERT INTO", "UPDATE ", "DELETE FROM", "DROP ", "ALTER TABLE", "CREATE TABLE"]:
             assert forbidden not in fn_src, f"{fn.__name__} must be read-only -- found {forbidden}"
     assert "INSERT INTO" in inspect.getsource(hg.persist_hypothesis)
+
+
+# =====================================================================
+# NEW (v2): Gate 3 partial correlation does not count as independent
+# confirmation -- a candidate that clears Gate 3 but never gets a real
+# Gate 4 evaluation cannot reach BUILD_REQUEST on Gate 3 alone
+# =====================================================================
+
+def test_gate3_alone_never_reaches_build_request():
+    matrix_rows, outcome_rows = _synthetic_matrix_source(300, lambda i, c, s: 3.0 * s + 0.01 * c)
+    level3 = sa.level3_incremental_for_source(matrix_rows, outcome_rows, "a", 24)
+    candidate = _source_candidate_from_level3(level3)
+    # Gate 3 passes (partial correlation is real and measurable)...
+    assert hg.gate3_incremental_value(candidate)["passed"] is True
+    # ...but evaluate WITHOUT giving Gate 4 the raw rows it needs:
+    result = hg.evaluate_candidate(candidate)  # no source_matrix_rows/source_outcome_rows
+    assert result["gate_results"]["gate3"]["passed"] is True
+    assert result["gate_results"]["gate4"]["passed"] is False
+    assert result["lifecycle_status"] != "BUILD_REQUEST"
+
+
+# =====================================================================
+# NEW (v2): overlapping horizons do not count as independent
+# confirmations -- signal_family_summary groups by source, not by
+# (source, horizon) candidate
+# =====================================================================
+
+def test_overlapping_horizons_grouped_into_one_signal_family():
+    matrix_rows, outcome_rows = _synthetic_matrix_source(300, lambda i, c, s: 3.0 * s + 0.01 * c)
+    level3 = sa.level3_incremental_for_source(matrix_rows, outcome_rows, "a", 24)
+    hypotheses = []
+    for horizon_hours in (6, 12, 24):  # same source, three "adjacent" horizons, all BUILD_REQUEST
+        candidate = _source_candidate_from_level3(level3, horizon_hours=horizon_hours)
+        hypotheses.append(
+            hg.evaluate_candidate(candidate, source_matrix_rows=matrix_rows, source_outcome_rows=outcome_rows)
+        )
+    assert all(h["lifecycle_status"] == "BUILD_REQUEST" for h in hypotheses)
+    summary = hg._signal_family_summary(hypotheses)
+    assert summary["n_source_candidates"] == 3
+    assert summary["n_distinct_source_families"] == 1  # NOT 3 independent confirmations
+    assert summary["n_build_request_candidates"] == 3
+    assert summary["n_distinct_source_families_with_a_build_request"] == 1
+    assert "not independent" in summary["note"].lower()
+
+
+# =====================================================================
+# NEW (v2): gate funnel counts reconcile (monotonically non-increasing,
+# and BUILD_REQUEST count matches lifecycle_status_counts)
+# =====================================================================
+
+def test_gate_funnel_counts_reconcile():
+    matrix_rows, outcome_rows = _synthetic_matrix_source(300, lambda i, c, s: 3.0 * s + 0.01 * c)
+    level3_pass = sa.level3_incremental_for_source(matrix_rows, outcome_rows, "a", 24)
+    candidate_pass = _source_candidate_from_level3(level3_pass, source_key="a")
+    hyp_pass = hg.evaluate_candidate(candidate_pass, source_matrix_rows=matrix_rows, source_outcome_rows=outcome_rows)
+
+    candidate_fail = {
+        "candidate_type": "SOURCE_INCREMENTAL_INFO", "subject": "source:b:24h", "source_key": "b",
+        "horizon_hours": 24, "level2": {"status": "INSUFFICIENT_DATA", "n": 2},
+        "level3": None, "evidence_label": None, "repeatability_count": 0,
+        "redundancy_pairwise": {}, "redundancy_vs_composite": None,
+    }
+    hyp_fail = hg.evaluate_candidate(candidate_fail)
+
+    hypotheses = [hyp_pass, hyp_fail]
+    funnel = hg._funnel_counts(hypotheses)
+    assert funnel["total_candidates"] == 2
+    counts = [funnel[g] for g in hg._GATE_ORDER] + [funnel["BUILD_REQUEST"]]
+    assert all(counts[i] >= counts[i + 1] for i in range(len(counts) - 1))  # monotonically non-increasing
+    # hyp_fail has level2.status == INSUFFICIENT_DATA -- fails gate0 itself,
+    # so only hyp_pass should count as having PASSED gate0 (a true funnel,
+    # not "evaluated up to this point" which would trivially be 2/2).
+    assert funnel["gate0"] == 1
+    assert funnel["BUILD_REQUEST"] == 1
+    assert funnel["BUILD_REQUEST"] == sum(1 for h in hypotheses if h["lifecycle_status"] == "BUILD_REQUEST")
+
+
+# =====================================================================
+# NEW (v2): every rejected/non-promoted candidate has an auditable
+# first-failed-gate reason -- no candidate's fate is hidden
+# =====================================================================
+
+def test_every_non_build_request_candidate_has_auditable_reason():
+    candidates = [
+        {  # OBSERVATION only
+            "candidate_type": "SOURCE_INCREMENTAL_INFO", "subject": "source:x:1h", "source_key": "x",
+            "horizon_hours": 1, "level2": {"status": "INSUFFICIENT_DATA", "n": 2},
+            "level3": None, "evidence_label": None, "repeatability_count": 0,
+            "redundancy_pairwise": {}, "redundancy_vs_composite": None,
+        },
+        {  # CONTRADICTED -- fails gate2
+            "candidate_type": "SOURCE_INCREMENTAL_INFO", "subject": "source:y:1h", "source_key": "y",
+            "horizon_hours": 1, "level2": {"status": "OK", "n": 200, "effect_size_r": 0.1, "p_corrected": 0.8},
+            "evidence_label": "CONTRADICTED", "level3": None, "repeatability_count": 0,
+            "redundancy_pairwise": {}, "redundancy_vs_composite": None,
+        },
+    ]
+    for candidate in candidates:
+        result = hg.evaluate_candidate(candidate)
+        assert result["lifecycle_status"] != "BUILD_REQUEST"
+        failed_gate, reason = hg.first_failed_gate(result["gate_results"])
+        assert failed_gate is not None
+        assert failed_gate == result["first_failed_gate"]
+        assert reason == result["first_failed_reason"]
+        assert isinstance(reason, dict) and reason.get("passed") is False
+
+
+# =====================================================================
+# NEW (v2): BUILD_REQUEST still requires human approval, explicitly
+# =====================================================================
+
+def test_build_request_candidate_always_requires_human_approval():
+    matrix_rows, outcome_rows = _synthetic_matrix_source(300, lambda i, c, s: 3.0 * s + 0.01 * c)
+    level3 = sa.level3_incremental_for_source(matrix_rows, outcome_rows, "a", 24)
+    candidate = _source_candidate_from_level3(level3)
+    result = hg.evaluate_candidate(candidate, source_matrix_rows=matrix_rows, source_outcome_rows=outcome_rows)
+    assert result["lifecycle_status"] == "BUILD_REQUEST"
+    br = hg.build_build_request_candidate(result, candidate)
+    assert br["human_approval_required"] is True
+    assert br["proposed_change_description"].startswith("NONE")
+    assert "why_it_passed_the_promotion_gate" in br
+    assert "known_limitations" in br and len(br["known_limitations"]) > 0
 
 
 def test_no_network_or_llm_calls_anywhere_in_module():

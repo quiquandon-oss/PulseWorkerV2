@@ -323,3 +323,200 @@ strong sense -- it is largely the same regime split in time -- so the
 one short window," not as proof of a reversing macro relationship;
 this is stated explicitly, not smoothed over, per the spec's own
 prohibition on treating insufficient replication as more than it is.
+
+## PR5d: V2 error classification against resolved outcomes and event context
+
+Scope: BTC only (`predictions`), matching PR2/PR5a/PR5c's own precedent.
+Read-only against `predictions`, `history`, `btc_data`, `research_events`,
+`research_event_evidence`. No V1/V2 change, no coefficient change, no
+migration (verified genuinely unnecessary -- see below), no LLM/paid
+dependency, no build request, no PR5e.
+
+`research/error_classification.py` deterministically classifies every
+resolved BTC prediction into one of the nine required error types (or
+no error) via a single, versioned, first-match-wins decision rule
+(`CLASSIFICATION_RULE_VERSION = "pr5d-v1"`), then reports counts/rates
+by horizon, V1 composite bucket, PR3 event category, regime, confidence
+band, model version, and chronological period -- every bucket carrying
+its own sample size, never a bare rate.
+
+### Why no new migration
+
+The base query (`BASE_SQL`) reuses `resolver.py`'s exact as-of join
+shape (`h.ts = (SELECT MAX(h2.ts) FROM history h2 WHERE h2.ts <= p.ts)`),
+extended with the extra `predictions` columns PR5d needs (`p_up`,
+`realized_return`, `model_version`, `git_commit_sha`). Confirmed via a
+real `EXPLAIN QUERY PLAN` against production before writing any code:
+`SEARCH p USING INDEX idx_predictions_horizon_ts`, `SEARCH h USING
+INDEX idx_ts` for the join, `SEARCH h2 USING COVERING INDEX idx_ts` for
+the correlated subquery -- identical plan shape to `resolver.py`'s own
+proven query, no scan anywhere. `research_analyses`' existing
+`metric_json` TEXT column holds `methodology_version` alongside the
+rest of the findings payload, exactly as PR5c's `persist_analysis()`
+already established -- no schema change needed there either.
+
+### Event linkage: computed live, not read from the sparse persisted table
+
+Production `research_events` has only 3 rows (all `LARGE_MOVE`, from a
+single manual verification run) and `research_event_evidence` has 0
+rows (both confirmed by direct read-only count before writing any
+code). Joining against that table as the primary signal would make
+almost every prediction spuriously `MISSING_EVENT` for lack of
+persistence, not for a genuine absence of a market event. Instead,
+`fetch_events_for_window()` calls PR3's own, UNCHANGED public detector
+functions (`detect_large_moves`, `detect_regime_reversals`,
+`detect_volatility_expansion`, `detect_v1_btc_divergence`) once per
+analysis window and reuses the results across every prediction in that
+window (no N+1 query pattern). `find_evidence_for_event()` still offers
+an OPTIONAL, bounded cross-reference against the persisted
+`research_events`/`research_event_evidence` tables for Section 16 --
+tested against a fixture that has evidence, and expected to return
+`NO_EVIDENCE_FOUND` against real production data today, which is
+reported honestly, not hidden.
+
+### No new thresholds invented
+
+- V1 composite bucketing reuses `event_detector.FROZEN_V1_BEARISH_EXTREME`
+  (45) / `FROZEN_V1_BULLISH_EXTREME` (58) verbatim (imported, not
+  duplicated) -- the same boundary PR3's own `V1_BTC_DIVERGENCE`
+  detector already uses.
+- The magnitude cut separating `CORRECT_DIRECTION_WRONG_MAGNITUDE` from
+  a directionally-correct-and-close prediction is never hard-coded:
+  `empirical_magnitude_threshold()` reuses PR5b's
+  `movement_distribution.summarize_absolute_returns()` over the
+  window's own directionally-correct sample and proposes the median as
+  the cut (PROPOSED, not frozen -- human review required before
+  freezing), exactly mirroring `propose_movement_buckets()`'s own
+  convention.
+- The staleness gap for `STALE_SENTIMENT` is likewise derived from the
+  window's own `(prediction_ts - v1_observation_ts)` distribution
+  (`empirical_staleness_threshold()`, 90th percentile proposed as the
+  cut), never an invented number of hours.
+- `REGIME_CHANGE` and `UNEXPECTED_SHOCK` are driven entirely by PR3's
+  own, unmodified detector functions -- this module never re-derives or
+  re-freezes their thresholds.
+
+### Temporal safety
+
+Every source of explanatory signal is checked against
+`information available at prediction_ts -> prediction -> realized
+outcome at target_ts` explicitly: V1 context comes from the as-of join
+(never a later observation, by construction); PR3 events are only ever
+used from the set with `prediction_ts < event_ts <= target_ts` (checked
+via `_events_overlapping_window()`, with constructive boundary tests
+proving an event at or before `prediction_ts` is excluded and one at
+exactly `target_ts` is included); `V1_BTC_DIVERGENCE` events are
+additionally always `is_post_event_analysis=1` (PR3's own flag, read
+verbatim) and used here strictly as post-outcome context for
+`MISLEADING_SENTIMENT`, never as information available to the original
+prediction -- proven, not just commented, by
+`test_no_lookahead_event_before_prediction_never_used` and
+`test_v1_btc_divergence_always_used_as_post_outcome_only`.
+
+### Interpretation caveats (required reading before using these counts)
+
+Two clarifications added after independent review, both documentation-
+only (no classification logic changed):
+
+> Classification labels are mutually exclusive winner labels determined
+> by documented precedence. `contributing_signals` preserves additional
+> matched categories. Winner-label frequencies must not be interpreted
+> as independent estimates of causal prevalence.
+
+> `empirical_staleness_threshold()` and `empirical_magnitude_threshold()`
+> are descriptive batch statistics calculated from the analysis window.
+> They must not be interpreted as information available to the original
+> prediction at prediction time.
+
+The first exists because `classify_prediction()` reports exactly one
+`error_type` per prediction (the highest-ranked match in the fixed
+precedence below), even when a prediction's window genuinely satisfies
+multiple candidate causes at once -- confirmed happening in real
+production data (see "Real production findings" below) and now proven
+with constructive tests (`test_large_move_outranks_regime_reversal_when_both_present`
+and five siblings in `test_error_classification.py`) rather than only
+observed from the aggregate output. The suppressed categories are never
+discarded -- they remain visible per-row via `contributing_signals`'s
+own counts -- but they are invisible to any code that reads only the
+`error_counts` totals. A queued, NOT-yet-built follow-up ("PR5d-
+followup: overlap analysis") would report every matched category
+per prediction (not only the winner) plus a co-occurrence matrix, to
+let the two views -- "what does the current deterministic taxonomy
+assign" vs. "what candidate explanations were actually simultaneously
+present" -- be compared directly. This PR deliberately does not build
+that; the priority chain itself is not being redesigned until that
+overlap data exists.
+
+The second exists because the PROPOSED staleness/magnitude cuts are
+computed once over the *entire* analysis window (including rows
+chronologically after the specific prediction being classified) -- a
+valid batch descriptive statistic (the same kind PR5b's
+`movement_distribution` module already computes), but never something
+an online, real-time process could have known before the window
+finished. Only the per-row inputs actually compared against these
+thresholds (a row's own staleness gap, a row's own realized_return) are
+prediction-time-safe in the Section 4 sense.
+
+### Real production findings (read-only, never persisted)
+
+Run once against the real 1070-row `predictions` table (395 at 12h,
+675 at 24h) joined with the real 500-row `history` and 2095-row
+`btc_data` snapshots:
+
+- 12h: 391 resolved -- 128 no-error, 55 `WRONG_DIRECTION`, 67
+  `CORRECT_DIRECTION_WRONG_MAGNITUDE`, 83 `INSUFFICIENT_INFORMATION`
+  (predictions predating `history`'s own ~34-day retention window --
+  `predictions` spans ~49 days), 24 `UNEXPECTED_SHOCK`, 24
+  `TECHNICAL_SENTIMENT_CONFLICT`, 7 `STALE_SENTIMENT`, 3 `MISSING_EVENT`.
+- 24h: 673 resolved -- 228 no-error, 54 `WRONG_DIRECTION`, 85
+  `CORRECT_DIRECTION_WRONG_MAGNITUDE`, 174 `INSUFFICIENT_INFORMATION`,
+  68 `UNEXPECTED_SHOCK`, 48 `MISSING_EVENT`, 13
+  `TECHNICAL_SENTIMENT_CONFLICT`, 3 `STALE_SENTIMENT`.
+- `REGIME_CHANGE` and `MISLEADING_SENTIMENT` were never assigned in
+  this run -- verified independently (not just from the classifier's
+  own output) that every wrong-direction prediction whose window
+  overlapped a `REGIME_REVERSAL` or `V1_BTC_DIVERGENCE` event ALSO
+  overlapped a `LARGE_MOVE` event, which this module's fixed,
+  documented priority order ranks above both. This is a real,
+  deterministic consequence of the priority order and this window's
+  specific event co-occurrence pattern, not a detection failure --
+  stated explicitly as a limitation of the current priority design,
+  not hidden.
+- `model_version` isolation shows a real, stark difference: `legacy`
+  (420 resolved @24h) is dominated by `INSUFFICIENT_INFORMATION` (174)
+  because `legacy` predictions predate `history`'s retention window;
+  `knn-core-v1` (244 resolved @24h) has zero `INSUFFICIENT_INFORMATION`
+  but 77 `CORRECT_DIRECTION_WRONG_MAGNITUDE` and 67 `UNEXPECTED_SHOCK`.
+  Comparing raw error rates between these two model versions without
+  accounting for this V1-availability confound would be misleading --
+  reported here as a limitation, not smoothed into a single combined rate.
+- Two candidate observations (evidence_gate_status `OBSERVATION`, not
+  `RESEARCH_HYPOTHESIS` -- neither recurred across >=2 independent
+  breakdown dimensions in this run): V1 `BEARISH` bucket shows
+  `WRONG_DIRECTION` as its dominant error (58-67% share, n=45-57); the
+  earliest chronological period shows `INSUFFICIENT_INFORMATION` as
+  dominant (53-60% share) -- both are exactly the direct, expected
+  consequence of `history`'s shorter retention window and BEARISH's
+  smaller/noisier sample, not surprising findings.
+
+### Limitations
+
+- `predictions` spans ~49 days but `history` only ~34 -- roughly a
+  third of `predictions` rows have no V1 context at all
+  (`INSUFFICIENT_INFORMATION` dominates early rows and the `legacy`
+  model_version almost entirely as a result of this, not necessarily
+  of model quality).
+- `research_events`/`research_event_evidence` are too sparse in
+  production for the OPTIONAL PR4-evidence cross-reference to surface
+  anything real today -- `find_evidence_for_event()` is implemented and
+  tested, but a real run reports `NO_EVIDENCE_FOUND` throughout.
+- The fixed priority order (`UNEXPECTED_SHOCK` > `REGIME_CHANGE` >
+  `MISSING_EVENT` > `MISLEADING_SENTIMENT` > `TECHNICAL_SENTIMENT_CONFLICT`
+  > `STALE_SENTIMENT` > `WRONG_DIRECTION`) means a prediction matching
+  multiple candidate causes is only ever attributed to the highest-
+  priority one -- real data shows this order has visible consequences
+  (see above), and revisiting it is future work, not resolved here.
+- No error_type here is a validated, causal explanation -- every
+  classification is descriptive and every candidate_observation is
+  capped at `RESEARCH_HYPOTHESIS`, never higher, per the build
+  authorization.

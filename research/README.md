@@ -1478,3 +1478,47 @@ deterministic reruns, missing-source complete-case handling, no writes,
 no network, no V1/V2/Worker references). 419/419 research tests,
 523/523 Vitest. No `persist_*` function exists in this module. No
 migration applied. All production access read-only.
+
+## FNG-24h data-readiness check (`fng_24h_readiness.py`)
+
+A small, read-only follow-up to PR5g. It is **not** a new FNG analysis
+and computes no FNG performance number. It answers exactly one
+question: is there now enough genuinely new, resolvable 24h data after
+PR5g's own frozen reference window (`fng_24h_robustness.PR5F_REFERENCE
+["window_end_ts"]`, never re-hardcoded here) to run PR5g's
+already-defined Branch A?
+
+It reuses `check_new_chronological_data()` unmodified for the raw
+candidate-row count and the existing `MIN_SAMPLE_FOR_LEVEL3=40`
+threshold, and `source_analysis.extract_source_matrix()` unmodified to
+read each candidate row's parsed source values. A row counts toward
+readiness only when it has fng + all controls present **and** passes
+the same strict per-row rule `check_new_chronological_data()` already
+uses (`ts + 24h <= max(btc_data.ts)`) -- deliberately NOT
+`outcome_engine`'s own `outcome_status == "RESOLVED"` flag, which is a
+looser as-of proxy elsewhere in this project (it marks a row resolved
+as soon as any later price point exists at all, however close, which
+would understate the 24h horizon this check exists to enforce).
+
+`build_readiness_record(conn)` returns `status` of either
+`WAITING_FOR_NEW_24H_DATA` or `READY_FOR_PR5G_BRANCH_A`. Reaching
+`READY_FOR_PR5G_BRANCH_A` does not run Branch A and does not by itself
+authorize running it -- a separate, explicit authorization is still
+required before any new FNG analysis.
+
+Verified against a fresh, independent read-only production pull
+(2026-09-19): 6 candidate rows exist after PR5g's window, `btc_data`
+extends only ~1.1h past the newest of them (need 24h) ->
+`new_resolvable_rows = 0`, `status = WAITING_FOR_NEW_24H_DATA`,
+`data_gap_ms ≈ 82.5M ms (~22.9h)` -- consistent with PR5g's own Step 0
+finding.
+
+16 new tests in `test_fng_24h_readiness.py` (zero/below/exactly-at/
+above the 40-row threshold, partial and mixed future-data resolution,
+missing fng, missing a control family, the existing PR5f/PR5g sample
+never counted as new even as `btc_data` advances past the window,
+deterministic reruns, no writes, no network, no V1/V2/Worker
+references, no FNG performance computation). 435/435 research tests,
+523/523 Vitest. No `persist_*` function. No migration. No scheduling --
+this is a utility to be invoked manually or wired into scheduling in a
+separate, later, explicitly-authorized step.

@@ -520,3 +520,189 @@ Run once against the real 1070-row `predictions` table (395 at 12h,
   classification is descriptive and every candidate_observation is
   capped at `RESEARCH_HYPOTHESIS`, never higher, per the build
   authorization.
+
+## PR5d-followup: error taxonomy overlap / suppression analysis
+
+Scope: analysis-only. Measures the effect of PR5d's existing, UNCHANGED
+precedence chain -- does not redesign it, does not "fix" the taxonomy.
+No V1/V2/Worker change, no PR3 change, no priority-chain change, no new
+threshold, no schema migration, no production write (this module has
+no persistence function at all).
+
+### Why this analysis exists
+
+`classify_prediction()` reports exactly one `error_type` per prediction
+(the highest-ranked match under a fixed precedence). PR5d's own review
+found predictions that genuinely satisfy multiple candidate causes at
+once, with only the winner visible in `error_counts`. This follow-up
+answers, empirically: which categories actually matched simultaneously,
+and how much does the precedence change what the aggregate numbers show?
+
+### winner_label vs. all_matched_categories -- two different questions
+
+- **winner_label** (`research/error_classification.py`'s own
+  `error_type`, copied verbatim, never recomputed): "what does the
+  current deterministic taxonomy assign?"
+- **all_matched_categories** (this module, `research/error_overlap_analysis.py`):
+  "what candidate explanations were actually simultaneously present?",
+  derived by reading `contributing_signals`' own six fields directly --
+  `matched_categories_for_classification()` never re-runs an event-
+  window overlap query or recomputes an empirical threshold; it only
+  interprets values PR5d's classifier already computed.
+
+These are reported as two separate distributions (Section 6A/6B below)
+and must never be combined into one statistic.
+
+### Scope: the six categories in PR5d's reviewed precedence chain
+
+`UNEXPECTED_SHOCK`, `REGIME_CHANGE`, `MISSING_EVENT`,
+`MISLEADING_SENTIMENT`, `TECHNICAL_SENTIMENT_CONFLICT`,
+`STALE_SENTIMENT` each have their own independent match condition in
+`contributing_signals`. `WRONG_DIRECTION` / `CORRECT_DIRECTION_WRONG_MAGNITUDE`
+/ `INSUFFICIENT_INFORMATION` are PR5d's residual outcomes (not
+independently-matchable causes) and are excluded from co-occurrence/
+suppression, matching the follow-up's own worked example. PR3's own
+event category names map one-to-one to four of these six
+(`LARGE_MOVE`->`UNEXPECTED_SHOCK`, `REGIME_REVERSAL`->`REGIME_CHANGE`,
+`VOLATILITY_EXPANSION`->`MISSING_EVENT`,
+`V1_BTC_DIVERGENCE`->`MISLEADING_SENTIMENT`) by construction of
+`classify_prediction()` itself -- "LARGE_MOVE + REGIME_CHANGE" and
+"UNEXPECTED_SHOCK + REGIME_CHANGE" are the literal same measurement
+here, reported once.
+
+Rows with no V1 context (or UNRESOLVED) are `NOT_EVALUABLE` for all six
+categories, never assumed "no match" -- `classify_prediction()` itself
+never computes these signals for that population.
+
+### Production snapshot / window
+
+Same production D1 (`sentiment-history`) pulled fresh, read-only, for
+this follow-up: 1070 `predictions` rows (unchanged since the PR5d
+review round), 500 `history` rows (unchanged), 2095 `btc_data` rows.
+Window: ts 1785582508231 .. 1789797630549 (~49 days). Data had not
+changed since PR5d's own review session -- confirmed by comparing row
+counts and min/max timestamps before pulling full data, and confirmed
+after by an exact match against PR5d's previously reported winner
+counts (see regression check below).
+
+### Winner distribution (6A) vs. matched distribution (6B)
+
+12h (n_evaluable=211 of 391 resolved -- the rest lack V1 context):
+
+| Category | Winner count (6A) | Matched count (6B) |
+|---|---|---|
+| UNEXPECTED_SHOCK | 24 | 36 |
+| REGIME_CHANGE | 0 | 15 |
+| MISSING_EVENT | 3 | 29 |
+| MISLEADING_SENTIMENT | 0 | 15 |
+| TECHNICAL_SENTIMENT_CONFLICT | 24 | 91 |
+| STALE_SENTIMENT | 7 | 21 |
+
+24h (n_evaluable=311 of 673 resolved):
+
+| Category | Winner count (6A) | Matched count (6B) |
+|---|---|---|
+| UNEXPECTED_SHOCK | 68 | 116 |
+| REGIME_CHANGE | 0 | 37 |
+| MISSING_EVENT | 48 | 117 |
+| MISLEADING_SENTIMENT | 0 | 37 |
+| TECHNICAL_SENTIMENT_CONFLICT | 13 | 152 |
+| STALE_SENTIMENT | 3 | 31 |
+
+The gap between the two columns is the suppression effect: every
+category's matched count is >= its winner count, often by a large
+margin (`TECHNICAL_SENTIMENT_CONFLICT` matches 91-152 times but wins
+only 13-24 of them).
+
+### Suppression analysis (reconciles exactly: matched = winner + suppressed)
+
+24h, all six categories (12h shows the same pattern, smaller n):
+
+| Category | Matched | Winner | Suppressed | Rate | Suppressed by |
+|---|---|---|---|---|---|
+| UNEXPECTED_SHOCK | 116 | 68 | 48 | 41% | CORRECT_DIRECTION_WRONG_MAGNITUDE (43), no-error (5) |
+| REGIME_CHANGE | 37 | 0 | 37 | 100% | UNEXPECTED_SHOCK (21), CORRECT_DIRECTION_WRONG_MAGNITUDE (16) |
+| MISSING_EVENT | 117 | 48 | 69 | 59% | CORRECT_DIRECTION_WRONG_MAGNITUDE (34), UNEXPECTED_SHOCK (24), no-error (11) |
+| MISLEADING_SENTIMENT | 37 | 0 | 37 | 100% | UNEXPECTED_SHOCK (21), CORRECT_DIRECTION_WRONG_MAGNITUDE (16) |
+| TECHNICAL_SENTIMENT_CONFLICT | 152 | 13 | 139 | 91% | UNEXPECTED_SHOCK (47), CORRECT_DIRECTION_WRONG_MAGNITUDE (42), MISSING_EVENT (37), no-error (13) |
+| STALE_SENTIMENT | 31 | 3 | 28 | 90% | UNEXPECTED_SHOCK (9), CORRECT_DIRECTION_WRONG_MAGNITUDE (6), TECHNICAL_SENTIMENT_CONFLICT (4), MISSING_EVENT (1), no-error (8) |
+
+Note `suppressed_by_winner` includes `CORRECT_DIRECTION_WRONG_MAGNITUDE`
+and "no-error" (`None`) as winners in several rows: a row's V1/technical
+conflict or staleness gap can be present even when the *direction was
+correct* (these signals are computed regardless of direction
+correctness) -- in that case there is no "wrong direction" branch to
+compete in at all, so the row's true winner is the direction-correct
+outcome, and the matched-but-unused category is suppressed by that
+outcome, not by another wrong-direction category. This is reported
+exactly as computed, not smoothed into the wrong-direction-only story.
+
+### Specific overlap findings (Section 5, both horizons show the same qualitative pattern; 24h shown)
+
+- **UNEXPECTED_SHOCK + REGIME_CHANGE**: count_both=37 of 37 REGIME_CHANGE
+  matches (100% of REGIME_CHANGE's matches also have UNEXPECTED_SHOCK).
+- **UNEXPECTED_SHOCK + MISLEADING_SENTIMENT**: count_both=37 of 37 (100%,
+  identical pattern).
+- **REGIME_CHANGE + MISSING_EVENT**: count_both=0 -- these two NEVER
+  co-occur in this sample (a `REGIME_REVERSAL` event and a
+  `VOLATILITY_EXPANSION` event never overlapped the same prediction's
+  window).
+- **MISLEADING_SENTIMENT + TECHNICAL_SENTIMENT_CONFLICT**: count_both=25
+  of 37 MISLEADING_SENTIMENT matches (68%).
+- **STALE_SENTIMENT + TECHNICAL_SENTIMENT_CONFLICT**: count_both=15 of 31
+  STALE_SENTIMENT matches (48%).
+- A striking, unrequested-but-observed finding: **REGIME_CHANGE and
+  MISLEADING_SENTIMENT co-occur with each other 100% of the time in
+  both directions** (`count_both` == `count_a` == `count_b` == 37 at
+  24h, 15 at 12h) -- every `REGIME_REVERSAL` event in this window's
+  detected set coincides with a `V1_BTC_DIVERGENCE` event and vice
+  versa. Reported as an observation only; the underlying cause (only 3
+  distinct `REGIME_REVERSAL` timestamps and 9 `V1_BTC_DIVERGENCE`
+  events sharing one single daily-resampled timestamp, per PR3's own
+  frozen resampling logic) is a data-shape fact, not a claim about why.
+
+### Is REGIME_CHANGE/MISLEADING_SENTIMENT's absence explained by overlap?
+
+Yes, directly and completely, at both horizons: `fully_suppressed=True`
+for both categories at both 12h and 24h -- every single one of their
+15-37 matches was outranked by a higher-priority winner
+(`UNEXPECTED_SHOCK` and, for direction-correct rows,
+`CORRECT_DIRECTION_WRONG_MAGNITUDE`/no-error), never by an absence of
+the underlying signal itself. `winner=0` in both cases is fully
+accounted for by `suppressed=matched` -- not a detection gap.
+
+### Regression check (Section: PR5d results unchanged)
+
+`report["per_horizon"][h]["winner_distribution"]` was compared field-
+for-field against `ec.build_error_classification_report()`'s own
+`overall` breakdown for the same window, for both horizons -- exact
+match. PR5d's own classification results are provably unaffected by
+this module's existence.
+
+### Whether suppression is substantial or limited (measurement, not a recommendation)
+
+Substantial, by the numbers above: `TECHNICAL_SENTIMENT_CONFLICT` is
+suppressed 74-91% of the time it matches; `REGIME_CHANGE` and
+`MISLEADING_SENTIMENT` are suppressed 100% of the time. This is stated
+as a measurement only. **This PR does not recommend changing the
+priority chain** -- per the build authorization, any such change is a
+separate, explicitly human-reviewed decision. If a taxonomy redesign is
+warranted, it is a FOLLOW-UP HYPOTHESIS for a human to evaluate, not an
+action this PR takes.
+
+### Limitations
+
+- n_evaluable (211/395 at 12h, 311/675 at 24h) is smaller than PR5d's
+  own n_resolved, because rows with no V1 context are additionally
+  excluded here (see Scope above) -- roughly half the resolved
+  population is outside this measurement's reach, not just the ~1/3
+  PR5d itself flagged for `INSUFFICIENT_INFORMATION`.
+- The 100% co-occurrence of REGIME_CHANGE/MISLEADING_SENTIMENT is
+  observed in a small-n, single ~49-day window with only 3 distinct
+  REGIME_REVERSAL timestamps -- whether this is a lasting structural
+  property or an artifact of this specific sample is not established
+  by this PR.
+- Percentages in the co-occurrence matrix (`pct_of_a_containing_b` etc.)
+  are descriptive ratios over a small evaluable sample, not
+  statistical estimates with a confidence interval -- no significance
+  claim is made or implied anywhere in this module.

@@ -750,6 +750,28 @@ Where the available data cannot support a gate, the gate returns
 `passed: False` with an explicit `INSUFFICIENT_DATA`/
 `INSUFFICIENT_DATA_FOR_HOLDOUT` reason rather than forcing a decision.
 
+**On reusing `STABILITY_EPSILON`'s numeral, precisely stated**:
+`STABILITY_EPSILON` (0.05) was originally defined in
+`source_analysis.py` (Section 12) as *"|r| below this is treated as 'no
+material effect' when checking whether a non-significant or reversed-
+sign result is 'stable'/'contradicted' vs. merely noise"* -- a
+**correlation-scale evidence-classification floor**, used to decide
+whether a result is labeled stable/contradicted vs. inconclusive. It
+was never an economically- or predictively-calibrated minimum effect
+size. This PR reuses its *numeral* three further times: on a
+correlation scale again (Gate 3's partial correlation), on a share-
+difference scale (taxonomy Gates 2/3), and on a **percentage RMSE-
+reduction scale** (Gate 4's `MEANINGFUL_OOS_IMPROVEMENT_PCT = 5%`). Each
+reuse is a deliberate, documented **convention** to avoid inventing an
+unjustified new number -- **not a claim that these are statistically
+equivalent uses**, and no formal transformation connects a 0.05
+correlation-stability floor to a 5%-RMSE-reduction economic-effect
+floor. A future PR could replace Gate 4's floor with a genuinely
+economically-derived one (e.g. tied to realized trading costs/slippage)
+if such a figure becomes available; until then, this is the most
+defensible reuse available from already-approved constants, not
+evidence that 5% is itself a statistically optimal cutoff.
+
 ### v1 gate-independence bug, and the deeper v2 finding that followed
 
 Before PR #53 was first opened, an earlier draft was run against the
@@ -903,6 +925,20 @@ so a reader never mistakes "N BUILD_REQUEST candidates" for "N
 independent discoveries." In the production snapshot: 7 BUILD_REQUEST
 candidates reduce to 3 distinct source families (`fng`, `global`,
 `onchain`).
+
+**This grouping is an audit/reporting dimension only -- it does not
+gate anything and must not be read as "3 independent opportunities."**
+`signal_family_summary` is informational, exactly like
+`source_redundancy_note`: it tells a human reviewer how to weigh the
+BUILD_REQUEST list (3 underlying signals worth investigating, not 7),
+it does not filter, deduplicate, merge, or otherwise act on the
+candidates themselves. No downstream code treats "3 families" as a
+smaller or different set of BUILD_REQUEST candidates than the 7 that
+were actually produced -- `build_requests` still contains all 7, each
+independently auditable and independently subject to whatever human
+review follows. Collapsing horizons into "one candidate per family"
+would itself require a modeling choice (which horizon to keep, how to
+combine evidence across them) this PR deliberately does not make.
 
 ### Schema reuse -- no migration proposed
 

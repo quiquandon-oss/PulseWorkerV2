@@ -403,6 +403,43 @@ def test_insufficient_validation_sample_does_not_promote():
     assert result["lifecycle_status"] != "BUILD_REQUEST"
 
 
+def test_subsplit_stability_cannot_pass_below_the_sample_floor_even_with_a_perfect_signal():
+    """Boundary proof (per independent review): the two-window replication
+    check must refuse to declare stability below MIN_SAMPLE_FOR_HOLDOUT_HALF
+    (30) per sub-window, EVEN when the underlying relationship is a
+    perfect, noiseless, textbook-strong signal that WOULD trivially pass
+    at a slightly larger sample. This rules out the check silently
+    "passing by construction" on a trivial/small sample -- it is a hard
+    sample-size gate, not a statistic that happens to look good with too
+    little data.
+    """
+    y_fn = lambda i, c, s: 3.0 * s + 0.01 * c  # noqa: E731 -- as strong/clean a signal as possible
+
+    # n=192 -> validation sub-halves of exactly 29 rows each (one row
+    # short of MIN_SAMPLE_FOR_HOLDOUT_HALF) -- must be refused.
+    matrix_rows_29, outcome_rows_29 = _synthetic_matrix_source(192, y_fn)
+    result_29 = hg.source_subsplit_stability(matrix_rows_29, outcome_rows_29, "a", 24)
+    assert result_29["status"] == "INSUFFICIENT_DATA_FOR_SUBSPLIT"
+    assert result_29["n_sub1"] == 29 and result_29["n_sub2"] == 29
+
+    # n=198 -> validation sub-halves of exactly 30 rows each -- now
+    # evaluable, and (with this strong a signal) stable.
+    matrix_rows_30, outcome_rows_30 = _synthetic_matrix_source(198, y_fn)
+    result_30 = hg.source_subsplit_stability(matrix_rows_30, outcome_rows_30, "a", 24)
+    assert result_30["status"] == "OK"
+    assert result_30["n_sub1"] == 30 and result_30["n_sub2"] == 30
+    assert result_30["sign_stable_across_subsplit"] is True
+
+    # And the full gate4/evaluate_candidate path reflects the same refusal:
+    # a "trivially small sample with a perfect signal" is INSUFFICIENT_DATA_
+    # FOR_HOLDOUT, never a manufactured PASSED_HOLDOUT/BUILD_REQUEST.
+    level3_29 = sa.level3_incremental_for_source(matrix_rows_29, outcome_rows_29, "a", 24)
+    candidate_29 = _source_candidate_from_level3(level3_29)
+    result = hg.evaluate_candidate(candidate_29, source_matrix_rows=matrix_rows_29, source_outcome_rows=outcome_rows_29)
+    assert result["validation_status"] == "INSUFFICIENT_DATA_FOR_HOLDOUT"
+    assert result["lifecycle_status"] != "BUILD_REQUEST"
+
+
 # =====================================================================
 # 9. Correlated-source caveat
 # =====================================================================

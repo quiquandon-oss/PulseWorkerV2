@@ -243,11 +243,27 @@ The original Gate 4 accepted any positive `rmse_reduction_pct` (as low
 as 0.0086% observed in the production snapshot -- plausibly noise on a
 ~135-160 row validation half). Gate 4 now requires BOTH:
   1. Magnitude: full-validation rmse_reduction_pct >=
-     MEANINGFUL_OOS_IMPROVEMENT_PCT (5%). This reuses STABILITY_EPSILON
-     (0.05) -- PR5c's own "minimum meaningful effect size" unit,
-     already used on a correlation scale (Gate 3) and a share-difference
-     scale (taxonomy Gate 2/3) -- interpreted here as a percentage on
-     the RMSE-reduction scale. It was NOT picked to hit a target
+     MEANINGFUL_OOS_IMPROVEMENT_PCT (5%), reusing STABILITY_EPSILON
+     (0.05)'s NUMERIC VALUE on a new scale. Read PR5c's own comment on
+     STABILITY_EPSILON precisely before assuming this is a like-for-like
+     reuse: "|r| below this is treated as 'no material effect' when
+     checking whether a non-significant or reversed-sign result is
+     'stable'/'contradicted' vs. merely noise" (source_analysis.py,
+     Section 12). That is a CORRELATION-scale evidence-CLASSIFICATION
+     floor -- it decides whether a result counts as "stable" or
+     "contradicted" for labeling purposes, not an economically- or
+     predictively-calibrated minimum effect size. Taxonomy's Gate 2/3
+     already reuse the same 0.05 number on a THIRD scale (a share-
+     difference, concentrated_share - baseline_share). Applying the same
+     numeral a fourth time, as a percentage on the RMSE-reduction scale,
+     is a deliberate, documented CONVENTION to avoid inventing a new,
+     unjustified number -- it is NOT a claim that these four uses are
+     statistically equivalent, and no formal transformation connects
+     them. A future PR could replace this with an economically-derived
+     floor (e.g. tied to realized trading costs/slippage) if one becomes
+     available; until then, this is the most defensible reuse available
+     from already-approved constants, not evidence the 5% figure is
+     itself statistically optimal. It was NOT picked to hit a target
      BUILD_REQUEST count; see the empirical distribution below.
   2. Stability: source_subsplit_stability() splits the validation half
      itself into two non-overlapping chronological sub-windows and
@@ -360,14 +376,19 @@ STRONG_REDUNDANCY_THRESHOLD = sa.STRONG_REDUNDANCY_THRESHOLD  # 0.7, PR5c's own
 # STRICTER bar than Gate 2 (association) instead of duplicating it outright
 # (see gate3_incremental_value()'s docstring for why duplication was a bug).
 TAXONOMY_INCREMENTAL_MULTIPLIER = 2
-# v2 revision (independent review of PR #53): STABILITY_EPSILON (0.05),
-# already PR5c's own "minimum meaningful effect size" unit on a correlation
-# scale (Gate 3) and a share-difference scale (taxonomy Gate 2/3), reused a
-# THIRD time here as a percentage on the RMSE-reduction scale: a validation-
-# half OOS RMSE reduction must be at least 5% before it counts as
-# "meaningful," not merely "not exactly zero." Not a new number picked to
-# hit a target BUILD_REQUEST count -- see module docstring's "Gate 4
-# strengthening" section for the empirical justification.
+# v2 revision (independent review of PR #53): reuses STABILITY_EPSILON's
+# (0.05) NUMERIC VALUE a fourth time, now as a percentage on the RMSE-
+# reduction scale: a validation-half OOS RMSE reduction must be at least
+# 5% before it counts as "meaningful," not merely "not exactly zero."
+# IMPORTANT -- this is a documented CONVENTION, not a proven equivalence:
+# STABILITY_EPSILON was originally defined (source_analysis.py, Section
+# 12) as a correlation-scale "no material effect" floor for CLASSIFYING
+# a result as stable/contradicted vs. noise -- a statistical/evidence-
+# labeling threshold, not an economically- or predictively-calibrated
+# effect-size floor. Reusing its numeral here avoids inventing a new,
+# unjustified number, but does NOT claim the two uses are statistically
+# equivalent (see module docstring's "Gate 4 strengthening" section for
+# the full discussion). Not picked to hit a target BUILD_REQUEST count.
 MEANINGFUL_OOS_IMPROVEMENT_PCT = STABILITY_EPSILON * 100  # 5.0
 
 # The ten-stage lifecycle PR5a's migration already documents verbatim.

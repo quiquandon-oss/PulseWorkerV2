@@ -1328,3 +1328,153 @@ trusting a result at face value:
   composite) but is not a general n-family solution; a future surviving
   set with more members would need the same recursive/`ols_nvar`
   approach extended, not a new method invented ad hoc.
+
+## PR5g: FNG-24h temporal robustness / validation study
+
+Scope: a research-only follow-up to PR5f's own audit (PR #54), which
+found PR5f's `fng`-at-24h `DISCRIMINATED_INCREMENTAL` result was
+horizon-specific and asked whether it might also be specific to the
+one ~34-day sample PR5f evaluated. PR5g answers exactly that question
+and no other. It does not implement FNG, does not touch V1/V2/Worker,
+and performs no production write. Full predefined methodology (written
+BEFORE any new FNG number was computed) lives in
+`research/fng_24h_robustness.py`'s own module docstring; this section
+summarizes it and reports the result.
+
+### Primary hypothesis (fixed before computing anything new)
+
+H0: the PR5f FNG-24h incremental effect does not persist outside the
+original evaluation period. H1: it continues to provide incremental
+information beyond composite+global+onchain on genuinely new
+chronological evidence. H1 was never assumed.
+
+### Anti-cherry-picking rule
+
+Horizon = 24h only, inherited unchanged from PR5f -- never re-selected.
+6h/12h appear only as fixed context, copied verbatim from PR5f's own
+already-published audit numbers (1.55%/4.40%), never recomputed here.
+
+### Step 0: data availability (established before any FNG-specific
+result existed)
+
+Checked, read-only: `predictions`' own max ts was byte-for-byte
+unchanged from PR5f's recorded window end. Only 6 `history` rows and 8
+`btc_data` rows exist past that window end, and `btc_data` extends only
+a few hours beyond it -- far short of the 24 hours of future price data
+a new row needs to resolve a forward return at this horizon.
+**Conclusion: zero new resolvable observations exist.** This is an
+empirical fact checked before any FNG number was computed, not a
+post-hoc excuse. `check_new_chronological_data()` is written generically
+(never hardcodes "insufficient") so a future re-run with genuinely
+advanced production data would correctly detect that and take the
+primary design (Branch A) instead.
+
+### Methodology actually used: Branch B (predefined walk-forward on the
+existing sample)
+
+Because Step 0 found no new external data, PR5g falls back to its own
+predefined secondary design: split the SAME 257-row PR5f complete-case
+sample (identical rows, identical model, identical horizon) into 4
+equal chronological quartiles Q1-Q4, and run an expanding-window
+walk-forward: fold 1 trains on Q1/tests on Q2, fold 2 trains on
+Q1+Q2/tests on Q3, fold 3 trains on Q1+Q2+Q3/tests on Q4. Model spec is
+IDENTICAL to PR5f (composite+global+onchain baseline vs. +fng full,
+fit via `stats_utils.ols_nvar()`, RMSE-compared, chronological only).
+Branch A (freeze PR5f's own discovery-half model, apply it forward to a
+genuinely new period) is implemented and unit-tested against synthetic
+new-period data, ready for whenever real new data exists, but was not
+exercised on production today.
+
+**This is stated explicitly, per the build authorization's own
+required wording: "PR5g provides robustness evidence, not independent
+confirmation."** Branch B re-examines rows PR5e and PR5f already used,
+from a third chronological angle -- useful, but not the same
+evidentiary weight as a fresh sample.
+
+### Production snapshot
+
+Extracted 2026-09-19 (a fresh pull, read-only). `predictions`: 1070
+rows, ts range identical to PR5e/PR5f's own recorded window (byte-for-
+byte, confirming no new predictions exist). `history`: 500 rows,
+`btc_data`: 2099 rows -- both a handful of rows further along than
+PR5f's own snapshot, but (per Step 0) none of that handful can resolve
+a 24h forward return. The 257-row complete-case sample used here is
+IDENTICAL to PR5f's own (same window, same target/control set).
+
+### Results (predefined, not adjusted after seeing them)
+
+| Fold | Train period | Test period | n train / test | Baseline RMSE | Full RMSE | RMSE reduction |
+|---|---|---|---|---|---|---|
+| 1 | Q1 | Q2 | 64 / 64 | 2.7165 | 3.0969 | **-14.00%** |
+| 2 | Q1+Q2 | Q3 | 128 / 64 | 2.0238 | 2.0459 | **-1.09%** |
+| 3 | Q1+Q2+Q3 | Q4 | 192 / 65 | 2.3748 | 2.0749 | **+12.63%** |
+
+Only 1 of 3 folds is positive; the other two are negative (fold 1
+substantially so). Fold 3's test period (2026-09-14 through
+2026-09-19) is the portion of the sample most similar to PR5f's own
+original validation tail -- which is exactly where PR5f's own
+positive result came from. The earlier ~3/4 of the sample (folds 1-2)
+does **not** show a consistent positive FNG-24h effect under this
+predefined re-partitioning.
+
+**Overall classification: `walk_forward_classification = NOT_REPLICATED`
+(primary_classification = `INSUFFICIENT_DATA`, mechanically, because
+no new external data exists to test the actual H0/H1 question).**
+
+Both classifications were determined by predefined, mechanical rules
+fixed before any fold was computed (see the module docstring) -- not
+chosen after seeing which label looked best.
+
+### Interpretation (per Section 15's required wording)
+
+This does **not** mean "FNG is invalid" -- the underlying `ols_nvar`
+mathematics were independently re-verified in PR #54's audit and
+produce the identical numbers here. It also does **not** mean "FNG is
+validated," under any classification, ever. What it means: FNG-24h's
+positive effect, as PR5f measured it, appears concentrated in the tail
+of the sample rather than holding consistently across earlier chronological
+re-estimations of the same data -- a real, honestly-reported temporal-
+stability concern that materially tempers how much weight PR5f's
+original finding should carry, without new data to say more.
+
+### Limitations
+
+- **Not independent confirmation.** This is the third successive PR
+  (PR5e, PR5f, PR5g) analyzing the same underlying ~34-day sample.
+  Repeated looking at the same historical rows is not equivalent to a
+  fresh sample, however the partition is sliced.
+- **No genuinely new chronological data exists today.** The primary
+  hypothesis this study was designed to test (does the effect persist
+  OUTSIDE the original window) could not be tested at all.
+  `INSUFFICIENT_DATA` is the honest, predefined answer to that
+  specific question.
+- **Smaller per-fold samples than PR5f's own 70/30 split.** Each
+  quartile is ~64 rows; PR5f's own validation half was 78. Individual
+  fold RMSE-reduction point estimates carry more sampling noise than
+  PR5f's headline number.
+- **6h/12h context is not re-verified here** -- copied verbatim from
+  PR5f's own audit, per the fixed-horizon rule; a future study could
+  re-run the SAME walk-forward at those horizons but that is out of
+  PR5g's own predefined scope.
+- **No economic/trading-cost calibration.** This study reports RMSE
+  reduction only (a statistical/predictive-fit measure); no realized
+  P&L, slippage, or trading-cost data was available or used, and the
+  5% figure referenced for descriptive labeling (inherited from
+  PR5e/PR5f) is explicitly NOT re-asserted here as an economic
+  threshold -- see the module docstring's Section-11-compliance note.
+- **No significance test / confidence interval on the RMSE-reduction
+  point estimates.** Consistent with PR5e/PR5f's own established
+  convention (magnitude + directional stability, not p-values), this
+  study inherits the same limitation rather than inventing a new
+  statistical test.
+
+### Tests / production safety
+
+25 new tests in `test_fng_24h_robustness.py` (chronological ordering,
+no future-data leakage, fixed 24h horizon, no horizon re-selection,
+insufficient post-period data at multiple thresholds, minimum-sample
+handling, quartile construction, positive/negative/mixed replication,
+deterministic reruns, missing-source complete-case handling, no writes,
+no network, no V1/V2/Worker references). 419/419 research tests,
+523/523 Vitest. No `persist_*` function exists in this module. No
+migration applied. All production access read-only.

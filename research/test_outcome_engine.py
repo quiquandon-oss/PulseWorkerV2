@@ -30,7 +30,7 @@ def fresh_db():
         id INTEGER PRIMARY KEY AUTOINCREMENT, ts INTEGER NOT NULL, horizon_hours INTEGER NOT NULL
     )""")
     conn.execute("CREATE INDEX idx_predictions_horizon_ts ON predictions(horizon_hours, ts)")
-    # Added by this PR's own migration (0008_outcome_engine_predictions_ts_index.sql) --
+    # Added by this PR's own migration (0009_outcome_engine_predictions_ts_index.sql) --
     # see outcome_engine.py's module docstring for why it's needed.
     conn.execute("CREATE INDEX idx_predictions_ts ON predictions(ts)")
     conn.execute("""CREATE TABLE btc_data (

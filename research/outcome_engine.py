@@ -52,7 +52,7 @@ cannot serve as a range-seek index for a ts-only filter -- confirmed via
 a real EXPLAIN QUERY PLAN against production (see PR description),
 which showed a full covering-index SCAN rather than a bounded SEARCH.
 This PR therefore adds a small additive index,
-.ai/migrations/0008_outcome_engine_predictions_ts_index.sql
+.ai/migrations/0009_outcome_engine_predictions_ts_index.sql
 (`CREATE INDEX idx_predictions_ts ON predictions(ts)`), confirmed via a
 second EXPLAIN QUERY PLAN (local SQLite; see PR description) to turn
 the outer scan into a genuine bounded `SEARCH ... USING COVERING INDEX

@@ -344,6 +344,109 @@ def test_v1_btc_divergence_always_used_as_post_outcome_only():
 
 
 # =====================================================================
+# Priority-order interaction (post-review addition): when MULTIPLE
+# candidate causes overlap the SAME prediction's window simultaneously,
+# prove which one wins is exactly the documented, fixed order --
+# constructive proof this is deterministic precedence, not an
+# unintended gap or an accidental fallthrough. This directly answers
+# "is REGIME_CHANGE/MISLEADING_SENTIMENT's absence in a real run a
+# consequence of precedence, or a classification bug?" (it is
+# precedence -- these tests prove the rule fires correctly at every
+# rank when nothing higher-ranked is present, and is correctly
+# out-ranked when something higher-ranked IS present).
+# =====================================================================
+
+_BASE_WRONG_ROW = {"prediction_ts": 1000, "target_ts": 2000, "horizon_hours": 24, "model_version": "m",
+                    "p_up": 0.7, "realized_up": 0, "realized_return": -6.0, "v1_observation_ts": 500,
+                    "v1_composite": 55, "technical_score": 55, "gold_regime": None}
+
+
+def test_large_move_outranks_regime_reversal_when_both_present():
+    events = {
+        "LARGE_MOVE": [{"event_ts": 1500, "direction": "DOWN", "intensity": 6.0}],
+        "REGIME_REVERSAL": [{"event_ts": 1600, "direction": "rally_to_correction", "intensity": None}],
+    }
+    result = ec.classify_prediction(_BASE_WRONG_ROW, events, 10_000_000, 5.0)
+    assert result["error_type"] == "UNEXPECTED_SHOCK"
+    # both signals were actually seen, not silently dropped -- the
+    # suppressed one is still visible in contributing_signals for audit.
+    assert result["contributing_signals"]["regime_reversal_events_in_window"] == 1
+
+
+def test_regime_reversal_outranks_volatility_expansion_when_both_present():
+    events = {
+        "REGIME_REVERSAL": [{"event_ts": 1500, "direction": "rally_to_correction", "intensity": None}],
+        "VOLATILITY_EXPANSION": [{"event_ts": 1600, "direction": None, "intensity": 2.0}],
+    }
+    result = ec.classify_prediction(_BASE_WRONG_ROW, events, 10_000_000, 5.0)
+    assert result["error_type"] == "REGIME_CHANGE"
+    assert result["contributing_signals"]["volatility_expansion_events_in_window"] == 1
+
+
+def test_volatility_expansion_outranks_v1_btc_divergence_when_both_present():
+    events = {
+        "VOLATILITY_EXPANSION": [{"event_ts": 1500, "direction": None, "intensity": 2.0}],
+        "V1_BTC_DIVERGENCE": [{"event_ts": 1600, "direction": "v1_bullish_btc_down",
+                                "intensity": 5.0, "is_post_event_analysis": 1}],
+    }
+    result = ec.classify_prediction(_BASE_WRONG_ROW, events, 10_000_000, 5.0)
+    assert result["error_type"] == "MISSING_EVENT"
+    assert result["contributing_signals"]["v1_btc_divergence_events_in_window"] == 1
+
+
+def test_v1_btc_divergence_outranks_technical_conflict_when_both_present():
+    row = {**_BASE_WRONG_ROW, "v1_composite": 60, "technical_score": 40}  # composite/technical disagree
+    events = {"V1_BTC_DIVERGENCE": [{"event_ts": 1500, "direction": "v1_bullish_btc_down",
+                                      "intensity": 5.0, "is_post_event_analysis": 1}]}
+    result = ec.classify_prediction(row, events, 10_000_000, 5.0)
+    assert result["error_type"] == "MISLEADING_SENTIMENT"
+    assert result["contributing_signals"]["technical_sentiment_conflict"] is True
+
+
+def test_technical_conflict_outranks_stale_sentiment_when_both_present():
+    row = {**_BASE_WRONG_ROW, "v1_composite": 60, "technical_score": 40,  # disagree
+           "v1_observation_ts": 100}  # large staleness gap too
+    result = ec.classify_prediction(row, {}, staleness_threshold_ms=1, magnitude_threshold_pct=5.0)
+    assert result["error_type"] == "TECHNICAL_SENTIMENT_CONFLICT"
+    assert result["contributing_signals"]["v1_staleness_gap_exceeds_proposed_threshold"] is True
+
+
+def test_stale_sentiment_outranks_plain_wrong_direction_when_present():
+    row = {**_BASE_WRONG_ROW, "v1_observation_ts": 100}  # large gap, composite/technical agree
+    result = ec.classify_prediction(row, {}, staleness_threshold_ms=1, magnitude_threshold_pct=5.0)
+    assert result["error_type"] == "STALE_SENTIMENT"
+
+
+def test_each_rank_fires_correctly_when_nothing_higher_ranked_present():
+    # Complements the "X outranks Y" tests above: each label can also
+    # be reached on its own, proving the chain isn't order-dependent in
+    # a way that makes a lower rank unreachable in isolation.
+    assert ec.classify_prediction(
+        _BASE_WRONG_ROW, {"REGIME_REVERSAL": [{"event_ts": 1500, "direction": "d", "intensity": None}]},
+        10_000_000, 5.0,
+    )["error_type"] == "REGIME_CHANGE"
+    assert ec.classify_prediction(
+        _BASE_WRONG_ROW, {"VOLATILITY_EXPANSION": [{"event_ts": 1500, "direction": None, "intensity": 2.0}]},
+        10_000_000, 5.0,
+    )["error_type"] == "MISSING_EVENT"
+
+
+def test_priority_order_matches_documented_order_in_source():
+    # The docstring enumerates the order 1..11; this asserts the actual
+    # if/elif chain in the source checks large_moves before
+    # regime_reversals before vol_expansions before v1_divergences
+    # before technical_conflict before is_stale -- i.e. the documented
+    # order and the executable order cannot silently drift apart
+    # (a textual proxy, backed by the behavioral tests above).
+    src = inspect.getsource(ec.classify_prediction)
+    body = src[src.index("if not direction_correct:"):]
+    order = ["large_moves", "regime_reversals", "vol_expansions", "v1_divergences",
+             "technical_conflict", "is_stale"]
+    positions = [body.index(name) for name in order]
+    assert positions == sorted(positions)
+
+
+# =====================================================================
 # Deterministic rerun
 # =====================================================================
 

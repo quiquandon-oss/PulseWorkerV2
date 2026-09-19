@@ -142,3 +142,60 @@ Scope is BTC only (predictions/selection_decisions) for PR5a, matching
 PR2's own precedent of not generalizing across coins until each coin's
 table shape is independently verified -- LINK/ETH are explicitly
 deferred.
+
+## PR5b: outcome engine + empirical movement distribution
+
+`research/outcome_engine.py` computes continuous BTC forward returns
+for every V2 prediction in a bounded window, at fixed outcome horizons
+(1h/3h/6h/12h/24h) independent of what horizon that prediction itself
+targets (`predictions.horizon_hours`, currently 12 or 24 in production
+— a different axis). For each prediction it as-of-joins to `btc_data`
+twice: once for the price at/before the prediction timestamp, once for
+the price at/before `prediction_ts + horizon`, mirroring the proven-safe
+correlated-subquery shape from `resolver.py`/`selection_resolver.py`.
+
+A prediction is only ever reported `RESOLVED` when a genuinely new
+`btc_data` observation exists strictly after the prediction timestamp
+within the requested horizon; otherwise it is reported
+`UNRESOLVED_NO_FUTURE_PRICE_POINT` with all outcome fields `None` — it
+is never dropped from the result set and never given a fabricated or
+interpolated value. This directly answers PR5b's "do not silently
+interpolate missing outcomes" requirement.
+
+`research/movement_distribution.py` is a separate, pure-function module
+(no database, no network) that computes descriptive statistics —
+mean/median/stddev/min/max of the signed return, and P50/P75/P90/P95/P99
+of the *absolute* return — plus bucket counts against the illustrative
+`<1% / 1-2% / 2-3% / 3-4% / >=4%` boundaries, and reports what share of
+observed movement sits below PR3's frozen `LARGE_MOVE_THRESHOLD_PCT`
+(duplicated as `PR3_LARGE_MOVE_THRESHOLD_PCT`, asserted equal to
+`event_detector.LARGE_MOVE_THRESHOLD_PCT` by test so the two can never
+silently drift apart). Its `propose_movement_buckets()` output is
+always labeled `status: "PROPOSED"` — this PR does not freeze a bucket
+taxonomy anywhere; freezing is an explicit, separate, human-reviewed
+step outside this module's scope.
+
+Real production data (see PR description for the full numbers) shows
+84–100% of observed forward movement sits below PR3's 4% threshold
+depending on horizon — the large-move detector's frozen boundary is,
+by construction, silent on the great majority of subsequent BTC
+movement. That is reported here as a plain descriptive fact, not a
+recommendation to change PR3's threshold.
+
+### Why a new index (`idx_predictions_ts`) was needed
+
+`outcome_engine.py`'s outer query cannot filter on
+`predictions.horizon_hours` (it needs every prediction regardless of
+its own horizon), so the existing composite
+`idx_predictions_horizon_ts(horizon_hours, ts)` cannot serve as a range
+seek for a `ts`-only filter — confirmed via a real `EXPLAIN QUERY PLAN`
+against production before writing the migration, which showed a full
+covering-index `SCAN` rather than a bounded `SEARCH`. Harmless at
+today's ~1,068 total prediction rows, but the same category of
+unbounded-with-scale pattern this project has avoided everywhere else.
+`.ai/migrations/0009_outcome_engine_predictions_ts_index.sql` adds a
+plain `CREATE INDEX idx_predictions_ts ON predictions(ts)` — purely
+additive, no behavior change, confirmed via a second `EXPLAIN QUERY
+PLAN` (local SQLite) to restore a genuine bounded search. (Renumbered
+from 0008 to 0009 after PR5a's own 0008 migration merged first — see
+git history for the coordination note.)

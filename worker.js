@@ -5756,6 +5756,456 @@ async function runCoinCronTick(env) {
   }
 }
 
+// =====================================================================
+// Research Lab (read-only, PR-7) -- gives a transparent visual window
+// into the PR3 event detector / PR6 live evidence pipeline while it
+// accumulates real evidence on its own schedule. Every function below
+// ONLY reads (env.DB.prepare(...).all()/.first() -- never .run()) from
+// the existing research_events/research_event_evidence/btc_data/history
+// tables; nothing here writes to D1, changes V1/V2 prediction or
+// selection logic, or touches research/*.py (PR3/PR4/PR6 stay
+// completely unmodified -- this is a display layer over their output).
+// =====================================================================
+
+// Verbatim copy of research/event_source_relevance.py's own
+// SOURCE_TOPIC_AFFINITY dict (PR-3), for DISPLAY only -- the Python
+// module itself is not imported, referenced, or modified. Keeping this
+// a literal, disclosed copy (not re-derived) means it can never
+// silently drift from what PR-3's own methodology actually says.
+const SOURCE_TOPIC_AFFINITY_DISPLAY = {
+  geopolitics: 'DIRECT_TOPIC_RELEVANCE',
+  regulatory: 'DIRECT_TOPIC_RELEVANCE',
+  cryptonews: 'DIRECT_TOPIC_RELEVANCE',
+  macrogeo: 'DIRECT_TOPIC_RELEVANCE',
+};
+
+// Mirrors research/event_source_reaction.py's resolve_horizon_reaction()
+// methodology exactly (same anchor/target logic, same quality
+// fractions) so BTC-reaction figures shown here are computed the same
+// disclosed way already reviewed for PR1/PR2 -- not a new invented
+// calculation. horizon_ms values match that module's own
+// CANDIDATE_HORIZONS_MS entries for 6h/12h/24h.
+const REACTION_HORIZONS_MS = { '6h': 21600000, '12h': 43200000, '24h': 86400000 };
+const REACTION_GOOD_QUALITY_FRACTION = 0.25;
+const REACTION_APPROXIMATE_QUALITY_FRACTION = 0.75;
+
+async function resolveBtcReactionAtHorizon(env, eventTs, horizonMs, anchorRow) {
+  const targetTs = eventTs + horizonMs;
+  const row = await env.DB.prepare(
+    'SELECT ts, btc_price FROM btc_data WHERE ts > ? AND ts <= ? ORDER BY ts DESC LIMIT 1'
+  ).bind(eventTs, targetTs).first();
+  if (!row || !anchorRow || anchorRow.btc_price === 0) {
+    return { status: 'NO_DATA', quality: null, matched_ts: null, return_pct: null };
+  }
+  const gapAfterMs = targetTs - row.ts;
+  const quality = gapAfterMs <= horizonMs * REACTION_GOOD_QUALITY_FRACTION ? 'GOOD'
+    : gapAfterMs <= horizonMs * REACTION_APPROXIMATE_QUALITY_FRACTION ? 'APPROXIMATE' : 'POOR';
+  return {
+    status: 'OK',
+    quality,
+    matched_ts: row.ts,
+    gap_after_ms: gapAfterMs,
+    return_pct: ((row.btc_price - anchorRow.btc_price) / anchorRow.btc_price) * 100.0,
+  };
+}
+
+// ---- LIVE RESEARCH DASHBOARD ----
+async function getResearchLabDashboard(env) {
+  const [btcLatest, v1Latest, eventsCount, evidenceCount, latestEvidenceTs, recentEvents] = await Promise.all([
+    env.DB.prepare('SELECT ts, btc_price FROM btc_data ORDER BY ts DESC LIMIT 1').first(),
+    env.DB.prepare('SELECT ts, score FROM history ORDER BY ts DESC LIMIT 1').first(),
+    env.DB.prepare('SELECT COUNT(*) AS n FROM research_events').first(),
+    env.DB.prepare('SELECT COUNT(*) AS n FROM research_event_evidence').first(),
+    env.DB.prepare('SELECT MAX(collection_ts) AS latest FROM research_event_evidence').first(),
+    env.DB.prepare(
+      `SELECT re.event_id, re.event_ts, re.category, re.direction,
+              (SELECT COUNT(*) FROM research_event_evidence ree WHERE ree.event_id = re.event_id) AS evidence_count
+       FROM research_events re ORDER BY re.event_ts DESC LIMIT 5`
+    ).all(),
+  ]);
+  return {
+    ok: true,
+    btc_latest: btcLatest || null,
+    v1_composite_latest: v1Latest ? { ts: v1Latest.ts, v1_composite: v1Latest.score } : null,
+    research_events_count: eventsCount ? eventsCount.n : 0,
+    research_event_evidence_count: evidenceCount ? evidenceCount.n : 0,
+    latest_evidence_collection_ts: latestEvidenceTs ? latestEvidenceTs.latest : null,
+    recent_events: (recentEvents && recentEvents.results) || [],
+    // GitHub Actions run history is not queryable from inside this Worker
+    // without a new credential (a GitHub PAT) -- out of scope for a
+    // read-only, $0, no-new-infrastructure PR. Disclosed as UNKNOWN
+    // rather than guessed at or silently omitted.
+    latest_scheduled_run_status: 'UNKNOWN — not exposed by any existing read-only data source available to this Worker',
+  };
+}
+
+// ---- EVENT EXPLORER ----
+async function getResearchLabEvents(env, limit, offset) {
+  const [total, rows] = await Promise.all([
+    env.DB.prepare('SELECT COUNT(*) AS n FROM research_events').first(),
+    env.DB.prepare(
+      `SELECT re.event_id, re.event_ts, re.detection_ts, re.category, re.direction, re.intensity,
+              re.trigger_metric, re.trigger_threshold, re.trigger_version,
+              (SELECT COUNT(*) FROM research_event_evidence ree WHERE ree.event_id = re.event_id) AS evidence_count
+       FROM research_events re ORDER BY re.event_ts DESC LIMIT ? OFFSET ?`
+    ).bind(limit, offset).all(),
+  ]);
+  return { ok: true, total: total ? total.n : 0, limit, offset, events: (rows && rows.results) || [] };
+}
+
+// ---- EVENT DETAIL ----
+async function getResearchLabEventDetail(env, eventId) {
+  const event = await env.DB.prepare(
+    `SELECT event_id, fingerprint, event_ts, detection_ts, category, direction, intensity,
+            available_before_prediction, is_post_event_analysis,
+            trigger_metric, trigger_threshold, trigger_version
+     FROM research_events WHERE event_id = ?`
+  ).bind(eventId).first();
+  if (!event) {
+    return { ok: false, error: 'event_not_found' };
+  }
+  const evidenceRows = await env.DB.prepare(
+    `SELECT evidence_id, feed_url, article_url, publisher, publication_ts, collection_ts,
+            headline, keyword_score, evidence_relation, content_hash
+     FROM research_event_evidence WHERE event_id = ? ORDER BY publication_ts ASC`
+  ).bind(eventId).all();
+
+  const anchorRow = await env.DB.prepare(
+    'SELECT ts, btc_price FROM btc_data WHERE ts <= ? ORDER BY ts DESC LIMIT 1'
+  ).bind(event.event_ts).first();
+
+  const btcReaction = {};
+  for (const [label, horizonMs] of Object.entries(REACTION_HORIZONS_MS)) {
+    btcReaction[label] = anchorRow
+      ? await resolveBtcReactionAtHorizon(env, event.event_ts, horizonMs, anchorRow)
+      : { status: 'NO_DATA', quality: null, matched_ts: null, return_pct: null };
+  }
+
+  return {
+    ok: true,
+    event,
+    evidence: (evidenceRows && evidenceRows.results) || [],
+    btc_reaction: btcReaction,
+  };
+}
+
+// ---- SOURCE RESEARCH VIEW ----
+// Deliberately does NOT rank, score, or recommend weight changes for any
+// source. affinity_status is the disclosed, static PR-3 textual-match
+// classification only (see SOURCE_TOPIC_AFFINITY_DISPLAY above);
+// observed_event_source_relationship is honestly INSUFFICIENT_EVIDENCE
+// for every source, because per-event source-relevance verdicts are
+// only ever produced as a one-off script report
+// (research/event_source_relevance.py) and are not persisted anywhere
+// in D1 as a queryable table -- there is no "existing research data"
+// this endpoint could truthfully show beyond that disclosed static
+// classification, and it does not invent any.
+async function getResearchLabSources(env) {
+  const rows = await env.DB.prepare(
+    'SELECT sources_json FROM history WHERE sources_json IS NOT NULL ORDER BY ts DESC LIMIT 50'
+  ).all();
+  const keySet = new Set();
+  for (const row of (rows && rows.results) || []) {
+    try {
+      const parsed = JSON.parse(row.sources_json);
+      if (parsed && typeof parsed === 'object') {
+        for (const key of Object.keys(parsed)) keySet.add(key);
+      }
+    } catch (_err) {
+      // Malformed sources_json for one row -- skip it, never let one bad
+      // row abort the whole listing.
+    }
+  }
+  const sources = [...keySet].sort().map((key) => ({
+    source_key: key,
+    affinity_status: SOURCE_TOPIC_AFFINITY_DISPLAY[key] || 'NO_DIRECT_TOPIC_AFFINITY',
+    observed_event_source_relationship: 'INSUFFICIENT_EVIDENCE',
+  }));
+  return {
+    ok: true,
+    sources,
+    note: 'affinity_status is a static PR-3 textual-match classification, not a ranking or score. ' +
+      'observed_event_source_relationship is INSUFFICIENT_EVIDENCE for every source because per-event ' +
+      'source relevance is not currently persisted in D1 as a queryable table.',
+  };
+}
+
+// ---- PIPELINE HEALTH ----
+async function getResearchLabPipelineHealth(env) {
+  const [eventsCount, evidenceCount, latestEvidenceTs, eventsWithoutEvidence, evidenceByPublisher] = await Promise.all([
+    env.DB.prepare('SELECT COUNT(*) AS n FROM research_events').first(),
+    env.DB.prepare('SELECT COUNT(*) AS n FROM research_event_evidence').first(),
+    env.DB.prepare('SELECT MAX(collection_ts) AS latest FROM research_event_evidence').first(),
+    // Same read-only query SHAPE as PR-6's own
+    // find_existing_events_without_evidence() (research/live_evidence_pipeline.py)
+    // -- reused for display, not imported: that module is Python, this is
+    // the Worker's own independent read-only display query, and PR-6's
+    // file itself is not touched.
+    env.DB.prepare(
+      `SELECT re.event_id, re.fingerprint, re.event_ts, re.category
+       FROM research_events re
+       WHERE NOT EXISTS (SELECT 1 FROM research_event_evidence ree WHERE ree.event_id = re.event_id)
+       ORDER BY re.event_ts DESC`
+    ).all(),
+    env.DB.prepare(
+      'SELECT publisher, COUNT(*) AS n FROM research_event_evidence GROUP BY publisher ORDER BY n DESC'
+    ).all(),
+  ]);
+  return {
+    ok: true,
+    research_events_count: eventsCount ? eventsCount.n : 0,
+    research_event_evidence_count: evidenceCount ? evidenceCount.n : 0,
+    latest_evidence_collection_ts: latestEvidenceTs ? latestEvidenceTs.latest : null,
+    events_without_evidence: (eventsWithoutEvidence && eventsWithoutEvidence.results) || [],
+    evidence_by_publisher: (evidenceByPublisher && evidenceByPublisher.results) || [],
+    feed_pipeline_status: 'UNKNOWN — GitHub Actions run history is not exposed to this Worker by any existing read-only source',
+  };
+}
+
+// Self-contained static page (vanilla HTML/CSS/JS, no build step, no
+// framework, no CDN dependency) -- this Worker has no existing static-
+// asset pipeline or [assets] binding, so embedding the page as a
+// template string and serving it from a new GET route is the smallest
+// addition that needs no new wrangler.toml binding, no new deploy
+// target, and no new infrastructure. It only ever calls the read-only
+// /api/research-lab/* JSON endpoints below, all same-origin -- no D1
+// credential of any kind reaches the browser.
+const RESEARCH_LAB_HTML = `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>CryptoPulse Research Lab</title>
+<style>
+  :root {
+    --bg: #0b0e14; --panel: #131720; --border: #232937; --text: #e6e9ef; --muted: #8a93a6;
+    --accent: #5b8cff; --verified: #2fae60; --strong: #4a90d9; --plausible: #c9922a; --unknown: #6b7280;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+  header { padding: 16px 20px; border-bottom: 1px solid var(--border); display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px; }
+  header h1 { font-size: 18px; margin: 0; }
+  nav { display: flex; gap: 6px; flex-wrap: wrap; }
+  nav button { background: transparent; color: var(--muted); border: 1px solid var(--border); border-radius: 6px; padding: 6px 12px; cursor: pointer; font-size: 13px; }
+  nav button.active { color: var(--text); border-color: var(--accent); background: rgba(91,140,255,0.12); }
+  main { padding: 20px; max-width: 1100px; margin: 0 auto; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 12px; margin-bottom: 20px; }
+  .tile { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 14px; }
+  .tile .label { font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.04em; }
+  .tile .value { font-size: 22px; margin-top: 4px; word-break: break-word; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--border); }
+  th { color: var(--muted); font-weight: 500; text-transform: uppercase; font-size: 11px; }
+  tr:hover { background: rgba(255,255,255,0.02); }
+  .table-wrap { overflow-x: auto; background: var(--panel); border: 1px solid var(--border); border-radius: 8px; }
+  .badge { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 11px; font-weight: 600; color: #0b0e14; }
+  .badge.VERIFIED { background: var(--verified); }
+  .badge.STRONGLY_SUPPORTED { background: var(--strong); }
+  .badge.PLAUSIBLE { background: var(--plausible); }
+  .badge.UNKNOWN, .badge.INSUFFICIENT_EVIDENCE, .badge.NO_DIRECT_TOPIC_AFFINITY { background: var(--unknown); }
+  .badge.DIRECT_TOPIC_RELEVANCE { background: var(--strong); }
+  .muted { color: var(--muted); }
+  .panel-title { font-size: 14px; color: var(--muted); margin: 24px 0 8px; text-transform: uppercase; letter-spacing: 0.04em; }
+  .empty { padding: 24px; text-align: center; color: var(--muted); }
+  a.link { color: var(--accent); }
+  .clickable { cursor: pointer; }
+  .back { background: none; border: none; color: var(--accent); cursor: pointer; font-size: 13px; margin-bottom: 12px; padding: 0; }
+  @media (max-width: 600px) { main { padding: 12px; } header { padding: 12px; } }
+</style>
+</head>
+<body>
+<header>
+  <h1>CryptoPulse Research Lab <span class="muted" style="font-size:12px;">read-only</span></h1>
+  <nav id="nav"></nav>
+</header>
+<main id="app"></main>
+<script>
+(function () {
+  const PAGES = ['Dashboard', 'Events', 'Evidence', 'Sources', 'Pipeline'];
+  const nav = document.getElementById('nav');
+  const app = document.getElementById('app');
+  let current = 'Dashboard';
+  let selectedEventId = null;
+
+  function badge(text) {
+    const cls = String(text).replace(/[^A-Za-z]/g, '_').toUpperCase();
+    return '<span class="badge ' + cls + '">' + text + '</span>';
+  }
+  function esc(s) {
+    return String(s === null || s === undefined ? '—' : s).replace(/[&<>"']/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+  }
+  function fmtTs(ts) { return ts ? new Date(ts).toISOString().replace('T', ' ').replace('Z', ' UTC') : '—'; }
+  function renderNav() {
+    nav.innerHTML = PAGES.map((p) => '<button data-page="' + p + '" class="' + (p === current ? 'active' : '') + '">' + p + '</button>').join('');
+    nav.querySelectorAll('button').forEach((b) => b.addEventListener('click', () => { current = b.dataset.page; selectedEventId = null; render(); }));
+  }
+  async function fetchJson(path) {
+    const res = await fetch(path);
+    return res.json();
+  }
+  function tile(label, value) {
+    return '<div class="tile"><div class="label">' + esc(label) + '</div><div class="value">' + value + '</div></div>';
+  }
+  function emptyState(msg) { return '<div class="empty">' + esc(msg) + '</div>'; }
+
+  async function renderDashboard() {
+    app.innerHTML = '<div class="empty">Loading…</div>';
+    const d = await fetchJson('/api/research-lab/dashboard');
+    if (!d.ok) { app.innerHTML = emptyState('Failed to load dashboard: ' + esc(d.error)); return; }
+    const btc = d.btc_latest ? '$' + Number(d.btc_latest.btc_price).toLocaleString() : 'No production evidence collected yet.';
+    const v1 = d.v1_composite_latest ? d.v1_composite_latest.v1_composite : 'No production evidence collected yet.';
+    let html = '<div class="grid">';
+    html += tile('BTC price (latest)', esc(btc));
+    html += tile('V1 composite (latest)', esc(v1));
+    html += tile('Research events', d.research_events_count);
+    html += tile('Evidence rows', d.research_event_evidence_count);
+    html += tile('Latest evidence collected', esc(fmtTs(d.latest_evidence_collection_ts)));
+    html += tile('Scheduled run status', badge('UNKNOWN') + '<div class="muted" style="font-size:11px;margin-top:4px;">' + esc(d.latest_scheduled_run_status) + '</div>');
+    html += '</div>';
+    html += '<div class="panel-title">Most recent events</div>';
+    if (!d.recent_events.length) {
+      html += emptyState('No production evidence collected yet.');
+    } else {
+      html += '<div class="table-wrap"><table><thead><tr><th>Event ID</th><th>Event TS</th><th>Category</th><th>Direction</th><th>Evidence</th></tr></thead><tbody>';
+      for (const e of d.recent_events) {
+        html += '<tr><td>' + e.event_id + '</td><td>' + esc(fmtTs(e.event_ts)) + '</td><td>' + esc(e.category) + '</td><td>' + esc(e.direction) + '</td><td>' + e.evidence_count + '</td></tr>';
+      }
+      html += '</tbody></table></div>';
+    }
+    app.innerHTML = html;
+  }
+
+  async function renderEvents() {
+    app.innerHTML = '<div class="empty">Loading…</div>';
+    const d = await fetchJson('/api/research-lab/events?limit=50&offset=0');
+    if (!d.ok) { app.innerHTML = emptyState('Failed to load events.'); return; }
+    if (!d.events.length) { app.innerHTML = emptyState('No production evidence collected yet.'); return; }
+    let html = '<div class="table-wrap"><table><thead><tr><th>Event ID</th><th>Event TS</th><th>Detection TS</th><th>Category</th>'
+      + '<th>Direction</th><th>Intensity</th><th>Trigger metric</th><th>Trigger threshold</th><th>Trigger version</th><th>Evidence</th></tr></thead><tbody>';
+    for (const e of d.events) {
+      html += '<tr class="clickable" data-event-id="' + e.event_id + '"><td>' + e.event_id + '</td><td>' + esc(fmtTs(e.event_ts)) + '</td><td>' + esc(fmtTs(e.detection_ts)) + '</td>'
+        + '<td>' + esc(e.category) + '</td><td>' + esc(e.direction) + '</td><td>' + esc(e.intensity) + '</td><td>' + esc(e.trigger_metric) + '</td>'
+        + '<td>' + esc(e.trigger_threshold) + '</td><td>' + esc(e.trigger_version) + '</td><td>' + e.evidence_count + '</td></tr>';
+    }
+    html += '</tbody></table></div><div class="muted" style="margin-top:8px;font-size:12px;">Click a row to open it in Evidence.</div>';
+    app.innerHTML = html;
+    app.querySelectorAll('tr[data-event-id]').forEach((tr) => tr.addEventListener('click', () => {
+      selectedEventId = tr.dataset.eventId; current = 'Evidence'; render();
+    }));
+  }
+
+  async function renderEvidence() {
+    app.innerHTML = '<div class="empty">Loading…</div>';
+    if (!selectedEventId) {
+      const d = await fetchJson('/api/research-lab/events?limit=1&offset=0');
+      if (d.ok && d.events.length) selectedEventId = d.events[0].event_id;
+    }
+    if (!selectedEventId) { app.innerHTML = emptyState('No production evidence collected yet.'); return; }
+    const d = await fetchJson('/api/research-lab/event?event_id=' + encodeURIComponent(selectedEventId));
+    if (!d.ok) { app.innerHTML = emptyState('Event not found.'); return; }
+    let html = '<button class="back" id="backBtn">&larr; Back to Events</button>';
+    html += '<div class="grid">';
+    html += tile('Event ID', d.event.event_id);
+    html += tile('Category', esc(d.event.category));
+    html += tile('Direction', esc(d.event.direction));
+    html += tile('Intensity', esc(d.event.intensity));
+    html += tile('Event TS', esc(fmtTs(d.event.event_ts)));
+    html += tile('Detection TS', esc(fmtTs(d.event.detection_ts)));
+    html += tile('Trigger metric', esc(d.event.trigger_metric));
+    html += tile('Trigger threshold', esc(d.event.trigger_threshold));
+    html += tile('Trigger version', esc(d.event.trigger_version));
+    html += '</div>';
+
+    html += '<div class="panel-title">BTC reaction (deterministic, from persisted btc_data)</div><div class="grid">';
+    for (const label of ['6h', '12h', '24h']) {
+      const r = d.btc_reaction[label];
+      const shown = r.status === 'OK' ? (r.return_pct >= 0 ? '+' : '') + r.return_pct.toFixed(2) + '%' : 'INSUFFICIENT EVIDENCE';
+      const q = r.status === 'OK' ? badge(r.quality) : badge('UNKNOWN');
+      html += tile(label + ' reaction', esc(shown) + ' ' + q);
+    }
+    html += '</div>';
+
+    html += '<div class="panel-title">Evidence articles</div>';
+    if (!d.evidence.length) {
+      html += emptyState('No production evidence collected yet.');
+    } else {
+      html += '<div class="table-wrap"><table><thead><tr><th>Publisher</th><th>Headline</th><th>Publication TS</th><th>Collection TS</th><th>Relation</th><th>Article</th></tr></thead><tbody>';
+      for (const ev of d.evidence) {
+        html += '<tr><td>' + esc(ev.publisher) + '</td><td>' + esc(ev.headline) + '</td><td>' + esc(fmtTs(ev.publication_ts)) + '</td>'
+          + '<td>' + esc(fmtTs(ev.collection_ts)) + '</td><td>' + badge(ev.evidence_relation) + '</td>'
+          + '<td><a class="link" href="' + esc(ev.article_url) + '" target="_blank" rel="noopener">open</a></td></tr>';
+      }
+      html += '</tbody></table></div>';
+    }
+    app.innerHTML = html;
+    const backBtn = document.getElementById('backBtn');
+    if (backBtn) backBtn.addEventListener('click', () => { current = 'Events'; render(); });
+  }
+
+  async function renderSources() {
+    app.innerHTML = '<div class="empty">Loading…</div>';
+    const d = await fetchJson('/api/research-lab/sources');
+    if (!d.ok || !d.sources.length) { app.innerHTML = emptyState('No production evidence collected yet.'); return; }
+    let html = '<div class="muted" style="margin-bottom:12px;font-size:12px;">' + esc(d.note) + '</div>';
+    html += '<div class="table-wrap"><table><thead><tr><th>V1 source key</th><th>Affinity status</th><th>Observed event/source relationship</th></tr></thead><tbody>';
+    for (const s of d.sources) {
+      html += '<tr><td>' + esc(s.source_key) + '</td><td>' + badge(s.affinity_status) + '</td><td>' + badge(s.observed_event_source_relationship) + '</td></tr>';
+    }
+    html += '</tbody></table></div>';
+    app.innerHTML = html;
+  }
+
+  async function renderPipeline() {
+    app.innerHTML = '<div class="empty">Loading…</div>';
+    const d = await fetchJson('/api/research-lab/pipeline-health');
+    if (!d.ok) { app.innerHTML = emptyState('Failed to load pipeline health.'); return; }
+    let html = '<div class="grid">';
+    html += tile('Research events', d.research_events_count);
+    html += tile('Evidence rows', d.research_event_evidence_count);
+    html += tile('Latest evidence collected', esc(fmtTs(d.latest_evidence_collection_ts)));
+    html += tile('Events without evidence', d.events_without_evidence.length);
+    html += tile('Feed/pipeline status', badge('UNKNOWN') + '<div class="muted" style="font-size:11px;margin-top:4px;">' + esc(d.feed_pipeline_status) + '</div>');
+    html += '</div>';
+
+    html += '<div class="panel-title">Events without evidence (retry-eligible or aged out)</div>';
+    if (!d.events_without_evidence.length) {
+      html += emptyState('None — every persisted event currently has at least one evidence row, or none exist yet.');
+    } else {
+      html += '<div class="table-wrap"><table><thead><tr><th>Event ID</th><th>Category</th><th>Event TS</th></tr></thead><tbody>';
+      for (const e of d.events_without_evidence) {
+        html += '<tr><td>' + e.event_id + '</td><td>' + esc(e.category) + '</td><td>' + esc(fmtTs(e.event_ts)) + '</td></tr>';
+      }
+      html += '</tbody></table></div>';
+    }
+
+    html += '<div class="panel-title">Evidence by publisher</div>';
+    if (!d.evidence_by_publisher.length) {
+      html += emptyState('No production evidence collected yet.');
+    } else {
+      html += '<div class="table-wrap"><table><thead><tr><th>Publisher</th><th>Evidence rows</th></tr></thead><tbody>';
+      for (const p of d.evidence_by_publisher) {
+        html += '<tr><td>' + esc(p.publisher) + '</td><td>' + p.n + '</td></tr>';
+      }
+      html += '</tbody></table></div>';
+    }
+    app.innerHTML = html;
+  }
+
+  async function render() {
+    renderNav();
+    if (current === 'Dashboard') return renderDashboard();
+    if (current === 'Events') return renderEvents();
+    if (current === 'Evidence') return renderEvidence();
+    if (current === 'Sources') return renderSources();
+    if (current === 'Pipeline') return renderPipeline();
+  }
+  render();
+})();
+</script>
+</body>
+</html>
+`;
+
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
@@ -6419,6 +6869,64 @@ export default {
         return new Response(JSON.stringify(result), { status: geminiStatusToHttpCode(result.status), headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
       } catch (err) {
         return new Response(JSON.stringify({ ok: false, status: 'error', error: String(err) }), { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+      }
+    }
+
+    // ---- Research Lab (read-only, PR-7) — see the dedicated section
+    // above `export default` for every function/constant these routes
+    // call. No route below ever writes to D1. ----
+    if (url.pathname === '/research-lab' && request.method === 'GET') {
+      return new Response(RESEARCH_LAB_HTML, { headers: { ...corsHeaders, 'Content-Type': 'text/html; charset=utf-8' } });
+    }
+
+    if (url.pathname === '/api/research-lab/dashboard' && request.method === 'GET') {
+      try {
+        const result = await getResearchLabDashboard(env);
+        return new Response(JSON.stringify(result), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+      } catch (err) {
+        return new Response(JSON.stringify({ ok: false, error: String(err) }), { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+      }
+    }
+
+    if (url.pathname === '/api/research-lab/events' && request.method === 'GET') {
+      try {
+        const limit = Math.min(200, Math.max(1, parseInt(url.searchParams.get('limit') || '50', 10) || 50));
+        const offset = Math.max(0, parseInt(url.searchParams.get('offset') || '0', 10) || 0);
+        const result = await getResearchLabEvents(env, limit, offset);
+        return new Response(JSON.stringify(result), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+      } catch (err) {
+        return new Response(JSON.stringify({ ok: false, error: String(err) }), { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+      }
+    }
+
+    if (url.pathname === '/api/research-lab/event' && request.method === 'GET') {
+      try {
+        const eventId = parseInt(url.searchParams.get('event_id'), 10);
+        if (!Number.isFinite(eventId)) {
+          return new Response(JSON.stringify({ ok: false, error: 'event_id must be an integer' }), { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+        }
+        const result = await getResearchLabEventDetail(env, eventId);
+        return new Response(JSON.stringify(result), { status: result.ok ? 200 : 404, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+      } catch (err) {
+        return new Response(JSON.stringify({ ok: false, error: String(err) }), { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+      }
+    }
+
+    if (url.pathname === '/api/research-lab/sources' && request.method === 'GET') {
+      try {
+        const result = await getResearchLabSources(env);
+        return new Response(JSON.stringify(result), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+      } catch (err) {
+        return new Response(JSON.stringify({ ok: false, error: String(err) }), { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+      }
+    }
+
+    if (url.pathname === '/api/research-lab/pipeline-health' && request.method === 'GET') {
+      try {
+        const result = await getResearchLabPipelineHealth(env);
+        return new Response(JSON.stringify(result), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+      } catch (err) {
+        return new Response(JSON.stringify({ ok: false, error: String(err) }), { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
       }
     }
 

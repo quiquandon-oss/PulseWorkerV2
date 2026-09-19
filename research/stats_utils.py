@@ -32,11 +32,18 @@ documented, not merely applied):
   the Level 1 report) rather than presented as a normalized, cross-
   source-comparable number.
 - Multiple-testing correction uses Benjamini-Hochberg (1995) step-up FDR
-  control, chosen (over the stricter Bonferroni) because PR5c runs many
-  correlated tests (the same BTC forward return is reused as the outcome
-  across every source at a given horizon, so tests are not independent)
-  and Bonferroni's independence assumption would be a worse fit, not a
-  more conservative one.
+  control. Bonferroni (family-wise error rate control) does NOT require
+  independent tests -- it remains valid, if conservative, under
+  arbitrary dependence, so that is not the reason for this choice.
+  BH is used here, stated neutrally, because PR5c's battery contains
+  many related source x horizon tests (the same BTC forward return is
+  reused as the outcome across every source at a given horizon) and
+  controlling the false discovery rate, rather than the stricter
+  family-wise error rate, is the better fit for a discovery-stage
+  screen across that many related tests; the correction method actually
+  used is always recorded explicitly alongside every result (see
+  run_level2_battery()'s "multiple_testing_correction" field) rather
+  than left implicit.
 """
 
 import math

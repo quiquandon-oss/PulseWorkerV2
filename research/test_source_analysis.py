@@ -398,6 +398,67 @@ def test_level3_uses_chronological_split_not_random():
 
 
 # =====================================================================
+# Level 3 scope: "beyond the V1 composite" ONLY, never "beyond
+# correlated/redundant sources" (post-review correction)
+# =====================================================================
+
+def test_level3_only_ever_conditions_on_source_and_composite():
+    # Level 3's model has exactly 3 coefficients (intercept, composite,
+    # source) -- no other source can be part of the conditioning set,
+    # by construction, not just by claim.
+    rnd_rows, outcome_rows = [], []
+    for i in range(60):
+        composite = float(i % 7)
+        source_val = float(i % 5)
+        y = 0.3 * composite + 1.0 * source_val
+        rnd_rows.append({"ts": i, "sources": {"alpha": source_val, "beta": float(i % 3)},
+                          "v1_composite": composite, "gold_regime": None})
+        outcome_rows.append({"anchor_ts": i, "outcome_status": "RESOLVED", "forward_return_pct": y})
+    result = sa.level3_incremental_for_source(rnd_rows, outcome_rows, "alpha", 1)
+    coefs = result["oos"]["regression_coefficients_full_model"]
+    assert set(coefs.keys()) == {"intercept", "composite_coef", "source_coef"}
+    # the presence of an unrelated correlated source ("beta") in the
+    # input rows must never appear in, or change the shape of, Level 3's
+    # own model -- it is simply never read by this function at all.
+    assert "beta" not in str(coefs)
+
+
+def test_level3_never_reads_redundancy_output():
+    # pairwise_source_redundancy()/source_vs_composite_redundancy() are
+    # never called from within level3_incremental_for_source() -- Level 3
+    # and Section 9's redundancy analysis are computed independently.
+    src = inspect.getsource(sa.level3_incremental_for_source)
+    assert "pairwise_source_redundancy(" not in src
+    assert "source_vs_composite_redundancy(" not in src
+
+
+def test_level3_docstrings_scope_claim_to_v1_composite_only():
+    module_src = inspect.getsource(sa)
+    function_src = inspect.getsource(sa.level3_incremental_for_source)
+    for src in (module_src, function_src):
+        assert "beyond the V1 composite" in src or "beyond THE V1 COMPOSITE" in src.upper()
+    # the corrected, narrower claim must be present...
+    assert "does NOT condition on any other source" in function_src or "does NOT condition on any other source" in module_src
+    # ...and the disclaimed broader claim must be explicitly named as
+    # NOT established, not merely absent.
+    assert "beyond correlated" in module_src.lower()
+    assert "not established" in module_src.lower() or "not addressed" in module_src.lower()
+
+
+def test_report_carries_explicit_level3_scope_note():
+    conn = fresh_db()
+    for i in range(10):
+        insert_history(conn, i * HOUR, 50, json.dumps({"alpha": i}))
+        insert_price(conn, i * HOUR, 100.0 + i)
+    report = sa.build_source_effectiveness_report(conn, 0, 10 * HOUR, horizons=(1,))
+    assert "level3_scope_note" in report
+    note = report["level3_scope_note"].lower()
+    assert "beyond the v1 composite" in note
+    assert "not" in note and "correlated" in note
+    conn.close()
+
+
+# =====================================================================
 # Chronological / OOS validation (Section 10)
 # =====================================================================
 

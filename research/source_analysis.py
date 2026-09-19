@@ -11,8 +11,23 @@ NOT assumed), determine for each source:
   LEVEL 1 -- does it contain usable signal/variation at all?
   LEVEL 2 -- is it associated with subsequent BTC outcome (correlation,
              NOT causation)?
-  LEVEL 3 -- does it add INCREMENTAL information beyond the V1 composite
-             and beyond other correlated sources (out-of-sample)?
+  LEVEL 3 -- does it add INCREMENTAL information BEYOND THE V1 COMPOSITE
+             specifically (out-of-sample)?
+
+SCOPE CORRECTION (post-review): Level 3, as implemented in this PR, only
+ever conditions on the V1 composite (history.score) -- via partial
+correlation controlling for the composite, and via a nested nested-OLS
+comparison of "composite alone" vs. "composite + source". It does NOT
+condition on any other empirically correlated/redundant source (Section
+9's pairwise_source_redundancy() runs entirely separately and its
+output is never fed into Level 3's regression). Therefore PR5c's Level
+3 result must be read strictly as "incremental beyond the V1 composite"
+-- it does NOT establish, and must never be described as establishing,
+"incremental beyond correlated/redundant sources". That broader
+question (e.g. controlling for a whole cluster of mutually correlated
+sources at once, or a multi-source ablation) is a separate, larger
+research question, explicitly NOT addressed by this PR -- narrowing the
+claim here rather than building that larger model now.
 
 Read-only with respect to production tables (`history`, `btc_data`). The
 only function in this module that writes anything is persist_analysis(),
@@ -473,6 +488,14 @@ def level3_incremental_for_source(rows, outcome_rows, source_key, horizon_hours,
     No coefficient from either model is used anywhere else in this
     codebase -- this function only ever reports whether OOS error goes
     down, never republishes a "better" formula.
+
+    SCOPE (post-review correction): both methods here condition ONLY on
+    the V1 composite. Neither controls for any other source, correlated
+    or not -- Section 9's redundancy helpers are never called from, or
+    fed into, this function. This result answers "incremental beyond the V1
+    composite" and nothing broader; "incremental beyond correlated/
+    redundant sources" is a separate, larger research question this PR
+    does not address (see module docstring's SCOPE CORRECTION section).
     """
     outcome_by_ts = {o["anchor_ts"]: o for o in outcome_rows}
     combined = []
@@ -706,6 +729,14 @@ def build_source_effectiveness_report(conn, start_ts, end_ts, horizons=(1, 3, 6,
     regime stability, sub-4% movement, and evidence classification into
     one deterministic, nested report. Read-only. Never writes.
 
+    Level 3 (the "level3" key below) is scoped strictly to "incremental
+    beyond the V1 composite" -- it does NOT condition on the "redundancy"
+    key's own findings (pairwise or vs.-composite correlations among
+    sources). The two are computed and reported entirely independently;
+    see level3_incremental_for_source()'s docstring and the module
+    docstring's SCOPE CORRECTION section for why that broader,
+    correlated-source-conditioned question is out of scope for this PR.
+
     Importing here (not at module top) keeps this orchestration function
     the one place that depends on outcome_engine/movement_distribution,
     consistent with this project's existing pattern of a DB-bound
@@ -773,6 +804,16 @@ def build_source_effectiveness_report(conn, start_ts, end_ts, horizons=(1, 3, 6,
             "Raw source values were NOT normalized before correlation -- "
             "Pearson r is scale-invariant. See source_analysis.py module "
             "docstring (Section 6) for the full rationale."
+        ),
+        "level3_scope_note": (
+            "Level 3 ('level3' key) measures incremental information "
+            "BEYOND THE V1 COMPOSITE ONLY (partial correlation and "
+            "nested-OLS RMSE, both controlling only for history.score). "
+            "It does NOT condition on any other source, correlated or "
+            "not -- the 'redundancy' key above is computed entirely "
+            "separately and is never fed into Level 3. Incremental "
+            "information beyond correlated/redundant sources remains a "
+            "separate research question, not established by this PR."
         ),
     }
 

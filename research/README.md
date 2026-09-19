@@ -238,17 +238,31 @@ was added.
   forward return at that same observation time (`history.ts`), at all
   five horizons (1h/3h/6h/12h/24h), with a 95% CI and p-value via the
   Fisher z-transformation (`research/stats_utils.py`), corrected across
-  the *entire* source x horizon battery with Benjamini-Hochberg FDR
-  (never per-test raw p < 0.05).
-- **Level 3** (`level3_incremental_for_source`): partial correlation
-  controlling for the V1 composite, plus a chronological (never
-  shuffled) discovery/validation split comparing a composite-only OLS
-  baseline against a composite+source OLS model's out-of-sample RMSE.
-  A source reaching Level 2 significance is NOT assumed to reach Level
-  3 — real production data confirms this distinction matters (see PR
-  description: several Level-2-significant sources show
-  `oos.status: NOT_IMPROVED`, i.e. no measurable incremental value once
-  the V1 composite is already in the model).
+  the *entire* source x horizon battery with Benjamini-Hochberg (BH)
+  FDR (never per-test raw p < 0.05). BH, not Bonferroni, is used here —
+  stated neutrally: Bonferroni does not require independent tests
+  either, but BH's false-discovery-rate control is the better fit for a
+  discovery-stage screen across this many related source x horizon
+  tests (the same BTC forward return is reused as the outcome across
+  every source at a given horizon). The correction method is recorded
+  explicitly alongside every result, never left implicit.
+- **Level 3** (`level3_incremental_for_source`): incremental information
+  **strictly beyond the V1 composite** — partial correlation controlling
+  for the V1 composite only, plus a chronological (never shuffled)
+  discovery/validation split comparing a composite-only OLS baseline
+  against a composite+source OLS model's out-of-sample RMSE. This does
+  **not** condition on any other, empirically correlated/redundant
+  source — Section 9's own redundancy findings (below) are computed
+  entirely separately and never feed into Level 3's regression. PR5c's
+  Level 3 result must therefore be read as "incremental beyond the V1
+  composite" only; "incremental beyond correlated/redundant sources" is
+  a separate, larger research question this PR does not address (a
+  multi-source ablation/regression was deliberately not added here — see
+  PR review notes). A source reaching Level 2 significance is NOT
+  assumed to reach Level 3 — real production data confirms this
+  distinction matters (see PR description: several Level-2-significant
+  sources show `oos.status: NOT_IMPROVED`, i.e. no measurable
+  incremental value once the V1 composite is already in the model).
 
 ### Source enumeration, missingness, and scale (Sections 5/6)
 

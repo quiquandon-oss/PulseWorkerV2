@@ -62,6 +62,9 @@ def main():
     print(f"eligible for evidence collection (<= {lep.MAX_EVENT_AGE_FOR_EVIDENCE_MS // 86400000}d old): "
           f"{summary['evidence_eligible_events']}")
     print(f"skipped evidence collection (too old): {summary['evidence_skipped_too_old_events']}")
+    print(f"existing events retried (no evidence, still eligible): {summary['retry_eligible_events']}")
+    print(f"existing events skipped on retry (no evidence, too old): {summary['retry_skipped_too_old_events']}")
+    print(f"event failures: {summary['event_failures']}")
 
     step_summary_path = os.environ.get("GITHUB_STEP_SUMMARY")
     if step_summary_path:
@@ -73,8 +76,17 @@ def main():
             f.write(f"- newly persisted events: {summary['newly_persisted_events']}\n")
             f.write(f"- evidence-eligible events: {summary['evidence_eligible_events']}\n")
             f.write(f"- evidence skipped (too old): {summary['evidence_skipped_too_old_events']}\n")
+            f.write(f"- existing events retried (no evidence, still eligible): {summary['retry_eligible_events']}\n")
+            f.write(f"- existing events skipped on retry (too old): {summary['retry_skipped_too_old_events']}\n")
+            f.write(f"- event failures: {summary['event_failures']}\n")
             for e in summary["events"]:
-                f.write(f"  - `{e['category']}` @ {e['event_ts']}: evidence={e['evidence']}\n")
+                f.write(f"  - `{e['category']}` @ {e['event_ts']} [{e['origin']}]: evidence={e['evidence']}\n")
+
+    if summary["event_failures"] > 0:
+        print(f"\nFAILING RUN: {summary['event_failures']} event(s) failed during processing "
+              f"(see per-event `evidence` entries above) -- reporting non-zero so this run is "
+              f"not shown as a false green.", file=sys.stderr)
+        sys.exit(1)
 
 
 if __name__ == "__main__":

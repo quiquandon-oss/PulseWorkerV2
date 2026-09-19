@@ -44,6 +44,17 @@ class FakeD1:
                            "category TEXT NOT NULL, direction TEXT, intensity REAL, "
                            "available_before_prediction INTEGER NOT NULL, is_post_event_analysis INTEGER NOT NULL DEFAULT 0, "
                            "trigger_metric TEXT, trigger_threshold REAL, trigger_version TEXT)")
+        # Matches production exactly (confirmed via a live read-only D1
+        # query during the PR #60 pre-merge audit) -- the PR #60 audit's
+        # Finding 4 was that this fixture omitted this index, so every
+        # test's dedup guarantee rested only on the app-level
+        # filter_genuinely_new() check, never on the backstop production
+        # actually relies on. Adding it here means EVERY test in this
+        # file now exercises the real constraint, not just
+        # test_production_unique_fingerprint_constraint_rejects_duplicates
+        # below.
+        self.conn.execute("CREATE UNIQUE INDEX idx_research_events_fingerprint ON research_events(fingerprint)")
+        self.conn.execute("CREATE INDEX idx_research_events_event_ts ON research_events(event_ts)")
         self.conn.executescript(open(
             os.path.join(os.path.dirname(__file__), "..", ".ai", "migrations", "0007_research_event_evidence.sql")
         ).read())
@@ -136,24 +147,35 @@ def test_new_event_is_persisted_and_evidence_collected_immediately():
 # 2. Already-known fingerprint -> skipped entirely (no duplicate processing)
 # =====================================================================
 
-def test_already_known_event_is_never_reprocessed():
-    # Run once to let real candidate events be genuinely detected and
-    # persisted (however many the synthetic price shape actually
-    # produces), then run again with IDENTICAL inputs: every candidate
-    # must now be "already known" and nothing may be re-persisted or
-    # re-collected -- proven by running the real pipeline twice, not by
-    # guessing fingerprints in advance.
+def test_already_known_event_with_evidence_is_never_reprocessed():
+    # Case B (PR #60 recovery-fix audit): existing event + evidence
+    # ALREADY STORED -> never recollected, ever. Run once to let a real
+    # candidate event be genuinely detected and persisted, with a
+    # fetcher that actually returns a matching article so real evidence
+    # rows get stored (not just an empty-channel response -- that would
+    # be Case C, covered separately below by
+    # test_existing_event_without_evidence_is_retried_when_eligible).
+    # Then run again with IDENTICAL inputs: the event must now be
+    # "already known" AND have evidence, so nothing may be re-persisted
+    # or re-collected -- proven by running the real pipeline twice, not
+    # by guessing fingerprints in advance.
     d1 = FakeD1()
     now_ts = 200 * DAY
+    event_ts = now_ts - 1 * DAY
     _seed_large_move(d1, now_ts, days_ago=1)
+    crypto_feed = ec.FEEDS["crypto"][0]
     fetcher_calls = {"n": 0}
 
     def counting_fetcher(url):
         fetcher_calls["n"] += 1
+        if url == crypto_feed:
+            return 200, rss_xml("BTC surges", "https://x.com/a", event_ts - 2 * HOUR)
         return 200, "<rss><channel></channel></rss>"
 
     first = lep.run_pipeline(d1.query, d1.execute, now_ts, evidence_fetcher=counting_fetcher)
     assert first["newly_persisted_events"] > 0
+    stored_after_first = d1.query("SELECT COUNT(*) AS n FROM research_event_evidence")[0]["n"]
+    assert stored_after_first > 0  # this test specifically requires real evidence to exist
     n_events_after_first = d1.query("SELECT COUNT(*) AS n FROM research_events")[0]["n"]
     fetcher_calls["n"] = 0  # reset -- only care about the SECOND run's calls now
 
@@ -161,9 +183,254 @@ def test_already_known_event_is_never_reprocessed():
 
     assert second["newly_persisted_events"] == 0
     assert second["already_known_events"] == first["newly_persisted_events"]
-    assert fetcher_calls["n"] == 0  # no RSS fetch at all for already-known events
+    assert second["retry_eligible_events"] == 0  # HAS evidence -> never a retry candidate
+    assert fetcher_calls["n"] == 0  # no RSS fetch at all -- evidence already exists
     n_events_after_second = d1.query("SELECT COUNT(*) AS n FROM research_events")[0]["n"]
     assert n_events_after_second == n_events_after_first  # never duplicated
+
+
+# =====================================================================
+# 2b. PR #60 recovery fix: existing event, NO evidence -> retry logic
+# =====================================================================
+
+def test_existing_event_without_evidence_is_retried_when_eligible():
+    """Case C -- THE KEY REGRESSION TEST for the PR #60 recovery fix.
+    Run 1 persists a new event whose evidence collection legitimately
+    finds zero matching articles (a real, valid outcome -- feeds
+    responded 200, nothing matched -- not a failure). Before the fix,
+    this event became permanently invisible to every future run
+    (filter_genuinely_new only ever checks research_events, never
+    research_event_evidence). After the fix, run 2 (same event, still
+    within MAX_EVENT_AGE_FOR_EVIDENCE_MS, still zero evidence rows)
+    must attempt evidence collection again -- proven by running the
+    real pipeline twice, not by asserting internal state directly."""
+    d1 = FakeD1()
+    now_ts = 200 * DAY
+    _seed_large_move(d1, now_ts, days_ago=1)
+
+    def empty_fetcher(url):
+        return 200, "<rss><channel></channel></rss>"  # legitimate zero-match outcome
+
+    first = lep.run_pipeline(d1.query, d1.execute, now_ts, evidence_fetcher=empty_fetcher)
+    assert first["newly_persisted_events"] > 0
+    assert d1.query("SELECT COUNT(*) AS n FROM research_event_evidence")[0]["n"] == 0
+
+    calls = {"n": 0}
+
+    def counting_empty_fetcher(url):
+        calls["n"] += 1
+        return 200, "<rss><channel></channel></rss>"
+
+    second = lep.run_pipeline(d1.query, d1.execute, now_ts, evidence_fetcher=counting_empty_fetcher)
+
+    assert second["newly_persisted_events"] == 0     # not re-detected/re-inserted as NEW
+    assert second["retry_eligible_events"] >= 1        # but IS retried as an existing event
+    assert calls["n"] > 0                              # RSS feeds were actually re-queried
+    retry_entries = [e for e in second["events"] if e["origin"] == "RETRY"]
+    assert len(retry_entries) >= 1
+
+
+def test_existing_event_without_evidence_too_old_is_skipped_not_retried():
+    """Case D: existing event, no evidence, aged past
+    MAX_EVENT_AGE_FOR_EVIDENCE_MS -> never retried, explicitly reported
+    SKIPPED_TOO_OLD (never silently dropped)."""
+    d1 = FakeD1()
+    now_ts = 200 * DAY
+    event_ts = now_ts - 4 * DAY
+    d1.seed_existing_event("fp-old-no-evidence", event_ts)
+    # Age the event out between "when it was seeded" and "now" by
+    # advancing now_ts past MAX_EVENT_AGE_FOR_EVIDENCE_MS relative to
+    # event_ts, landing inside EVIDENCE_RETRY_LOOKBACK_BUFFER_MS so the
+    # retry query still sees it (and can explicitly report it) exactly
+    # once before it ages out of the query entirely.
+    later_now_ts = event_ts + lep.MAX_EVENT_AGE_FOR_EVIDENCE_MS + HOUR
+    for i in range(15):
+        d1.insert_btc(later_now_ts - (15 - i) * DAY, 100.0)  # flat -- no NEW candidates
+
+    calls = {"n": 0}
+
+    def counting_fetcher(url):
+        calls["n"] += 1
+        return 200, "<rss><channel></channel></rss>"
+
+    summary = lep.run_pipeline(d1.query, d1.execute, later_now_ts, evidence_fetcher=counting_fetcher)
+
+    assert summary["retry_eligible_events"] == 0
+    assert summary["retry_skipped_too_old_events"] == 1
+    assert calls["n"] == 0  # never retried -- too old
+    retry_entries = [e for e in summary["events"] if e["origin"] == "RETRY"]
+    assert len(retry_entries) == 1
+    assert retry_entries[0]["evidence"] == "SKIPPED_TOO_OLD"
+
+
+def test_new_event_is_not_double_processed_by_the_retry_loop_in_the_same_run():
+    """Found via this fix's own production-data dry-run validation: a
+    brand-new event that legitimately gets zero evidence still has zero
+    research_event_evidence rows the moment the NEW-event loop finishes
+    -- if the retry loop (which runs immediately after, in the same
+    run_pipeline() call) didn't exclude fingerprints the NEW loop just
+    handled, it would immediately reprocess the same event a second
+    time before it ever had a chance to age between scheduled runs."""
+    d1 = FakeD1()
+    now_ts = 200 * DAY
+    _seed_large_move(d1, now_ts, days_ago=1)
+    calls = {"n": 0}
+
+    def counting_empty_fetcher(url):
+        calls["n"] += 1
+        return 200, "<rss><channel></channel></rss>"
+
+    summary = lep.run_pipeline(d1.query, d1.execute, now_ts, evidence_fetcher=counting_empty_fetcher)
+
+    assert summary["newly_persisted_events"] > 0
+    assert summary["retry_eligible_events"] == 0
+    origins_by_fingerprint = {}
+    for e in summary["events"]:
+        origins_by_fingerprint.setdefault(e["fingerprint"], []).append(e["origin"])
+    for fp, origins in origins_by_fingerprint.items():
+        assert origins == ["NEW"], f"{fp} was processed more than once in one run: {origins}"
+
+
+def test_temporary_feed_failure_leaves_event_retryable():
+    """Case C, via a genuinely failing fetcher rather than an
+    empty-content one: a feed-level exception is handled entirely
+    inside evidence_collector.py's own retry logic (UNCHANGED,
+    _fetch_feed_with_retry's except branch), producing a normal
+    completed-with-zero-evidence outcome, not a run_pipeline-level
+    FAILED status. The event must remain retry-eligible afterward,
+    exactly like the legitimate-zero-match case."""
+    d1 = FakeD1()
+    now_ts = 200 * DAY
+    _seed_large_move(d1, now_ts, days_ago=1)
+
+    def flaky_fetcher(url):
+        raise ConnectionError("simulated temporary feed failure")
+
+    first = lep.run_pipeline(d1.query, d1.execute, now_ts, evidence_fetcher=flaky_fetcher)
+    assert first["newly_persisted_events"] > 0
+    first_entry = [e for e in first["events"] if e["origin"] == "NEW"][0]
+    # Handled gracefully by evidence_collector.py's own per-feed retry --
+    # NOT a run_pipeline-level failure.
+    assert isinstance(first_entry["evidence"], dict)
+    assert first_entry["evidence"].get("status") != "FAILED"
+    assert first["event_failures"] == 0
+    assert d1.query("SELECT COUNT(*) AS n FROM research_event_evidence")[0]["n"] == 0
+
+    second = lep.run_pipeline(d1.query, d1.execute, now_ts, evidence_fetcher=flaky_fetcher)
+    assert second["retry_eligible_events"] >= 1
+    assert second["event_failures"] == 0
+
+
+def test_one_event_failure_does_not_abort_the_batch():
+    """Failure isolation (PR #60 recovery-fix audit, item 3): event B's
+    evidence-row INSERT raises. Event A (processed before B) and event
+    C (processed after B) must both still complete normally; the
+    summary must show B's failure explicitly rather than swallowing it,
+    and event_failures must be nonzero so run.py can exit non-zero."""
+    d1 = FakeD1()
+    now_ts = 200 * DAY
+    d1.seed_existing_event("fp-a", now_ts - 1 * DAY - 4 * HOUR, category="LARGE_MOVE")
+    d1.seed_existing_event("fp-b", now_ts - 1 * DAY - 2 * HOUR, category="LARGE_MOVE")
+    d1.seed_existing_event("fp-c", now_ts - 1 * DAY, category="LARGE_MOVE")
+    for i in range(15):
+        d1.insert_btc(now_ts - (15 - i) * DAY, 100.0)  # flat -- no NEW candidates
+
+    event_id_b = d1.query("SELECT event_id FROM research_events WHERE fingerprint = 'fp-b'")[0]["event_id"]
+    crypto_feed = ec.FEEDS["crypto"][0]
+    # One article, timed to fall inside all three (closely-spaced)
+    # events' [-48h,+24h] windows, so each of A/B/C independently finds
+    # it relevant and attempts an evidence-row INSERT.
+    article_pub_ts = now_ts - 1 * DAY - 3 * HOUR
+    fetcher = make_fetcher({crypto_feed: rss_xml("Shared headline", "https://x.com/shared", article_pub_ts)})
+
+    real_execute = d1.execute
+
+    def flaky_execute(sql):
+        if "INSERT INTO research_event_evidence" in sql and f"({event_id_b}," in sql:
+            raise RuntimeError("simulated D1 write failure for event B's evidence")
+        real_execute(sql)
+
+    summary = lep.run_pipeline(d1.query, flaky_execute, now_ts, evidence_fetcher=fetcher)
+
+    by_fp = {e["fingerprint"]: e for e in summary["events"]}
+    assert "fp-a" in by_fp and "fp-b" in by_fp and "fp-c" in by_fp
+
+    def is_failed(entry):
+        return isinstance(entry["evidence"], dict) and entry["evidence"].get("status") == "FAILED"
+
+    assert not is_failed(by_fp["fp-a"])
+    assert is_failed(by_fp["fp-b"])
+    assert not is_failed(by_fp["fp-c"])
+    assert summary["event_failures"] == 1
+    # A and C's own evidence was NOT lost/blocked by B's failure: each
+    # is a real counters dict reporting at least one stored article.
+    assert by_fp["fp-a"]["evidence"]["articles_stored"] >= 1
+    assert by_fp["fp-c"]["evidence"]["articles_stored"] >= 1
+
+
+def test_evidence_insert_failure_is_visible_and_not_falsely_reported_successful():
+    """Evidence-INSERT failure (PR #60 recovery-fix audit, item 3),
+    isolated to a single event so the failure/visibility contract is
+    unambiguous: the failing event's `evidence` entry must be the
+    explicit FAILED marker (never a counters dict claiming success),
+    and a second, independent event processed afterward must still
+    complete normally."""
+    d1 = FakeD1()
+    now_ts = 200 * DAY
+    d1.seed_existing_event("fp-fails", now_ts - 1 * DAY - 2 * HOUR, category="LARGE_MOVE")
+    d1.seed_existing_event("fp-succeeds", now_ts - 1 * DAY, category="LARGE_MOVE")
+    for i in range(15):
+        d1.insert_btc(now_ts - (15 - i) * DAY, 100.0)
+
+    event_id_fails = d1.query("SELECT event_id FROM research_events WHERE fingerprint = 'fp-fails'")[0]["event_id"]
+    crypto_feed = ec.FEEDS["crypto"][0]
+    article_pub_ts = now_ts - 1 * DAY - HOUR
+    fetcher = make_fetcher({crypto_feed: rss_xml("Headline", "https://x.com/a", article_pub_ts)})
+
+    real_execute = d1.execute
+
+    def flaky_execute(sql):
+        if "INSERT INTO research_event_evidence" in sql and f"({event_id_fails}," in sql:
+            raise RuntimeError("simulated evidence INSERT failure")
+        real_execute(sql)
+
+    summary = lep.run_pipeline(d1.query, flaky_execute, now_ts, evidence_fetcher=fetcher)
+
+    by_fp = {e["fingerprint"]: e for e in summary["events"]}
+    failed_entry = by_fp["fp-fails"]["evidence"]
+    assert isinstance(failed_entry, dict) and failed_entry.get("status") == "FAILED"
+    assert "error" in failed_entry
+    # Never falsely reported as a successful collection (which would be
+    # a plain counters dict without a "status" key at all).
+    assert failed_entry.get("status") != "successful_responses"
+    succeeded_entry = by_fp["fp-succeeds"]["evidence"]
+    assert not (isinstance(succeeded_entry, dict) and succeeded_entry.get("status") == "FAILED")
+    assert summary["event_failures"] == 1
+
+
+def test_production_unique_fingerprint_constraint_rejects_duplicates():
+    """The real production schema has a UNIQUE index on
+    research_events.fingerprint (confirmed via a live read-only D1
+    query during the PR #60 pre-merge audit: `CREATE UNIQUE INDEX
+    idx_research_events_fingerprint ON research_events(fingerprint)`).
+    FakeD1 now includes this same index (see FakeD1.__init__), so every
+    test in this file already exercises the real backstop, not just the
+    app-level filter_genuinely_new() check. This test additionally
+    proves the DB-level constraint itself actually fires, independent
+    of the app-level filter, by attempting to bypass
+    filter_genuinely_new entirely and insert a duplicate fingerprint
+    directly."""
+    d1 = FakeD1()
+    event = {"fingerprint": "dup-fp", "event_ts": 100, "category": "LARGE_MOVE", "direction": "UP",
+              "intensity": 5.0, "is_post_event_analysis": 0, "trigger_metric": "m",
+              "trigger_threshold": 4.0, "trigger_version": "v1"}
+    d1.execute(lep.build_insert_event_sql(event, detection_ts=200))
+    try:
+        d1.execute(lep.build_insert_event_sql(event, detection_ts=300))
+        assert False, "expected a UNIQUE constraint violation on research_events.fingerprint"
+    except sqlite3.IntegrityError as exc:
+        assert "UNIQUE constraint failed" in str(exc)
+        assert "fingerprint" in str(exc)
 
 
 # =====================================================================

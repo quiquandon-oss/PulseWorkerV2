@@ -88,6 +88,58 @@ authorization's explicit "Critical safeguard" section)
    Together these mean: even on this pipeline's very first-ever run
    (or after a long outage), it can NEVER repeat the exact mistake the
    PR4 diagnosis found (a ~29-day-late retroactive collection attempt).
+
+=====================================================================
+Recovery / idempotency fix (PR #60 pre-merge adversarial audit finding)
+=====================================================================
+
+The pre-merge audit found one verified defect: `filter_genuinely_new()`
+treated "fingerprint already exists in research_events" as fully
+equivalent to "nothing left to do," with no awareness of
+research_event_evidence at all. An event whose evidence collection
+never completed -- a temporary RSS/feed failure, a D1 evidence-INSERT
+failure, or a runner/crash between event persistence and evidence
+persistence -- became permanently invisible to every future run, even
+while still inside its own eligibility window.
+
+The fix does NOT touch filter_genuinely_new() or the NEW-event path's
+semantics or timing. It adds a second, independent source of work each
+run: `find_existing_events_without_evidence()` queries research_events
+for rows with no matching research_event_evidence row (via the
+existing event_id foreign key already in the schema -- no migration),
+bounded to roughly the eligibility window (see
+EVIDENCE_RETRY_LOOKBACK_BUFFER_MS below). Each returned row is
+re-checked against the SAME `is_eligible_for_evidence_collection()`
+the NEW-event path already uses:
+
+    - still eligible     -> evidence collection is attempted again
+      ("origin": "RETRY" in the summary)
+    - no longer eligible -> reported SKIPPED_TOO_OLD, same as the
+      NEW-event path, then never retried again once it ages past the
+      buffer
+
+KNOWN LIMITATION, disclosed rather than papered over: the existing
+schema cannot distinguish "evidence collection ran and legitimately
+found zero matching articles" from "evidence collection never ran at
+all" -- both look identical (zero rows in research_event_evidence for
+that event_id). This fix deliberately does NOT invent a new column or
+status to fake that distinction. The practical effect is that a
+legitimate "checked, nothing matched" event is retried on every
+scheduled run until it ages out of MAX_EVENT_AGE_FOR_EVIDENCE_MS (at
+most ~20 retries at the current 6-hour schedule) -- a small, bounded,
+disclosed cost, not a new failure mode. The alternative -- permanently
+stranding a crashed-but-recoverable event -- is the defect this fix
+exists to close, and is strictly worse.
+
+Failure isolation: any exception raised while processing one event
+(the event_id lookup, evidence collection, or an evidence-row INSERT)
+is caught, recorded as a `{"status": "FAILED", "error": "..."}`
+evidence entry for THAT event only, and the loop continues to the next
+event -- one event's failure no longer aborts every event after it in
+the same run. `summary["event_failures"]` counts how many events
+failed this way; the caller (run.py) exits non-zero when this is
+nonzero, so GitHub Actions reports a red run rather than a false green
+one.
 """
 
 import os
@@ -107,6 +159,12 @@ import evidence_collector as ec  # noqa: E402
 DETECTION_WINDOW_MS = 3 * 24 * 3600000          # candidate events must be <= 3 days old
 DETECTION_LOOKBACK_BUFFER_MS = ed.LOOKBACK_BUFFER_MS  # PR3's own 8-day requirement, reused
 MAX_EVENT_AGE_FOR_EVIDENCE_MS = 5 * 24 * 3600000  # belt-and-suspenders guard, see docstring
+EVIDENCE_RETRY_LOOKBACK_BUFFER_MS = 1 * 24 * 3600000  # see "Recovery / idempotency fix" above:
+# widens find_existing_events_without_evidence()'s query just enough that
+# an event which ages out of MAX_EVENT_AGE_FOR_EVIDENCE_MS between two
+# scheduled runs is still picked up (and explicitly reported
+# SKIPPED_TOO_OLD) at least once, instead of silently vanishing from
+# consideration the instant it crosses the boundary.
 
 _MIGRATIONS_DIR = os.path.join(os.path.dirname(__file__), "..", ".ai", "migrations")
 _EVIDENCE_TABLE_DDL = open(os.path.join(_MIGRATIONS_DIR, "0007_research_event_evidence.sql")).read()
@@ -175,6 +233,26 @@ def is_eligible_for_evidence_collection(event, now_ts, max_age_ms=MAX_EVENT_AGE_
     return (now_ts - event["event_ts"]) <= max_age_ms
 
 
+def find_existing_events_without_evidence(d1_query_fn, now_ts,
+                                           retry_lookback_buffer_ms=EVIDENCE_RETRY_LOOKBACK_BUFFER_MS):
+    """Safeguard 3 -- see "Recovery / idempotency fix" in the module
+    docstring. Derives evidence-completion state from the EXISTING
+    schema only: an event "has evidence" iff at least one row in
+    research_event_evidence references its event_id (no new column,
+    no migration). Bounded to roughly the eligibility window so this
+    stays a small, cheap query, same convention as every other
+    time-windowed query in this module -- an event that has
+    permanently aged out simply stops being returned at all."""
+    min_event_ts = now_ts - MAX_EVENT_AGE_FOR_EVIDENCE_MS - retry_lookback_buffer_ms
+    return d1_query_fn(
+        f"SELECT re.event_id AS event_id, re.fingerprint AS fingerprint, "
+        f"re.event_ts AS event_ts, re.category AS category FROM research_events re "
+        f"WHERE re.event_ts >= {min_event_ts} "
+        f"AND NOT EXISTS (SELECT 1 FROM research_event_evidence ree WHERE ree.event_id = re.event_id) "
+        f"ORDER BY re.event_ts ASC"
+    )
+
+
 # =====================================================================
 # Step 4: D1 write-statement builders (pure string building; execution
 # is always the caller's injected d1_execute_fn, never done here)
@@ -232,6 +310,23 @@ def _run_evidence_collection(real_event_id, event_ts, evidence_fetcher):
     return counters, [dict(zip(columns, row)) for row in rows]
 
 
+def _collect_and_store_evidence_safe(real_event_id, event_ts, evidence_fetcher, d1_execute_fn):
+    """Wraps _run_evidence_collection() (PR4's own logic, UNCHANGED)
+    plus replication of its results to the caller's injected
+    d1_execute_fn, catching ANY exception from either step so one
+    event's failure cannot abort the rest of the run (see "Failure
+    isolation" in the module docstring). Returns either the normal
+    counters dict -- success, including the legitimate "zero articles
+    matched" outcome -- or `{"status": "FAILED", "error": "..."}`."""
+    try:
+        counters, evidence_rows = _run_evidence_collection(real_event_id, event_ts, evidence_fetcher)
+        for row in evidence_rows:
+            d1_execute_fn(build_insert_evidence_sql(real_event_id, row))
+        return counters
+    except Exception as exc:
+        return {"status": "FAILED", "error": str(exc)}
+
+
 # =====================================================================
 # Top-level orchestration
 # =====================================================================
@@ -267,6 +362,8 @@ def run_pipeline(d1_query_fn, d1_execute_fn, now_ts, evidence_fetcher=None):
                           "predictions": len(prediction_rows)},
         "candidate_events": 0, "already_known_events": 0, "newly_persisted_events": 0,
         "evidence_eligible_events": 0, "evidence_skipped_too_old_events": 0,
+        "retry_eligible_events": 0, "retry_skipped_too_old_events": 0,
+        "event_failures": 0,
         "events": [],
     }
 
@@ -284,10 +381,16 @@ def run_pipeline(d1_query_fn, d1_execute_fn, now_ts, evidence_fetcher=None):
     summary["already_known_events"] = len(candidates) - len(new_events)
 
     for event in new_events:
-        d1_execute_fn(build_insert_event_sql(event, now_ts))
-        summary["newly_persisted_events"] += 1
         event_entry = {"fingerprint": event["fingerprint"], "category": event["category"],
-                        "event_ts": event["event_ts"], "evidence": None}
+                        "event_ts": event["event_ts"], "origin": "NEW", "evidence": None}
+        try:
+            d1_execute_fn(build_insert_event_sql(event, now_ts))
+        except Exception as exc:
+            event_entry["evidence"] = {"status": "FAILED", "error": str(exc)}
+            summary["event_failures"] += 1
+            summary["events"].append(event_entry)
+            continue
+        summary["newly_persisted_events"] += 1
 
         if not is_eligible_for_evidence_collection(event, now_ts):
             summary["evidence_skipped_too_old_events"] += 1
@@ -296,18 +399,53 @@ def run_pipeline(d1_query_fn, d1_execute_fn, now_ts, evidence_fetcher=None):
             continue
 
         summary["evidence_eligible_events"] += 1
-        id_rows = d1_query_fn(
-            f"SELECT event_id FROM research_events WHERE fingerprint = {_sql_literal(event['fingerprint'])}")
+        try:
+            id_rows = d1_query_fn(
+                f"SELECT event_id FROM research_events WHERE fingerprint = {_sql_literal(event['fingerprint'])}")
+        except Exception as exc:
+            event_entry["evidence"] = {"status": "FAILED", "error": str(exc)}
+            summary["event_failures"] += 1
+            summary["events"].append(event_entry)
+            continue
         if not id_rows:
             event_entry["evidence"] = "ERROR_EVENT_ID_NOT_FOUND_AFTER_INSERT"
+            summary["event_failures"] += 1
             summary["events"].append(event_entry)
             continue
         real_event_id = id_rows[0]["event_id"]
 
-        counters, evidence_rows = _run_evidence_collection(real_event_id, event["event_ts"], evidence_fetcher)
-        for row in evidence_rows:
-            d1_execute_fn(build_insert_evidence_sql(real_event_id, row))
-        event_entry["evidence"] = counters
+        result = _collect_and_store_evidence_safe(real_event_id, event["event_ts"], evidence_fetcher, d1_execute_fn)
+        if isinstance(result, dict) and result.get("status") == "FAILED":
+            summary["event_failures"] += 1
+        event_entry["evidence"] = result
+        summary["events"].append(event_entry)
+
+    # Safeguard 3 (recovery fix): existing events without evidence.
+    # Excludes fingerprints this SAME run's NEW-event loop above already
+    # gave an attempt to (whatever the outcome) -- confirmed via a real
+    # production-data dry run during this fix's own validation that,
+    # without this exclusion, a just-inserted event with zero evidence
+    # would immediately be picked up again by this second loop and
+    # double-fetch every feed within the same run, before the event has
+    # had any chance to age between scheduled runs at all.
+    new_event_fingerprints = {e["fingerprint"] for e in new_events}
+    for row in find_existing_events_without_evidence(d1_query_fn, now_ts):
+        if row["fingerprint"] in new_event_fingerprints:
+            continue
+        event_entry = {"fingerprint": row["fingerprint"], "category": row.get("category"),
+                        "event_ts": row["event_ts"], "origin": "RETRY", "evidence": None}
+
+        if not is_eligible_for_evidence_collection(row, now_ts):
+            summary["retry_skipped_too_old_events"] += 1
+            event_entry["evidence"] = "SKIPPED_TOO_OLD"
+            summary["events"].append(event_entry)
+            continue
+
+        summary["retry_eligible_events"] += 1
+        result = _collect_and_store_evidence_safe(row["event_id"], row["event_ts"], evidence_fetcher, d1_execute_fn)
+        if isinstance(result, dict) and result.get("status") == "FAILED":
+            summary["event_failures"] += 1
+        event_entry["evidence"] = result
         summary["events"].append(event_entry)
 
     return summary

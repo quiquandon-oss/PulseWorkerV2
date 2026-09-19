@@ -161,6 +161,54 @@ def test_ols_2var_singular_returns_none_triple():
     assert su.ols_2var(x1s, x2s, ys) == (None, None, None)
 
 
+# ---- ols_nvar (PR5f) ----
+
+def test_ols_nvar_matches_ols_2var_for_two_predictors():
+    x1s = [1, 2, 3, 4, 5, 6]
+    x2s = [2, 1, 4, 3, 6, 5]
+    ys = [1 + 2 * a + 3 * b for a, b in zip(x1s, x2s)]
+    b0_2var, b1_2var, b2_2var = su.ols_2var(x1s, x2s, ys)
+    intercept, coefs = su.ols_nvar([x1s, x2s], ys)
+    assert math.isclose(intercept, b0_2var, abs_tol=1e-6)
+    assert math.isclose(coefs[0], b1_2var, abs_tol=1e-6)
+    assert math.isclose(coefs[1], b2_2var, abs_tol=1e-6)
+
+
+def test_ols_nvar_recovers_exact_hyperplane_four_predictors():
+    n = 30
+    x1s = [i % 5 for i in range(n)]
+    x2s = [(i * 3) % 7 - 3 for i in range(n)]
+    x3s = [(i * 5) % 11 - 5 for i in range(n)]
+    x4s = [(i * 2) % 9 - 4 for i in range(n)]
+    ys = [1.5 + 2 * a + 0.5 * b - 3 * c + 4 * d
+          for a, b, c, d in zip(x1s, x2s, x3s, x4s)]
+    intercept, coefs = su.ols_nvar([x1s, x2s, x3s, x4s], ys)
+    assert math.isclose(intercept, 1.5, abs_tol=1e-6)
+    assert math.isclose(coefs[0], 2.0, abs_tol=1e-6)
+    assert math.isclose(coefs[1], 0.5, abs_tol=1e-6)
+    assert math.isclose(coefs[2], -3.0, abs_tol=1e-6)
+    assert math.isclose(coefs[3], 4.0, abs_tol=1e-6)
+
+
+def test_ols_nvar_singular_returns_none_pair():
+    x1s = [1, 2, 3, 4, 5, 6]
+    x2s = [2, 4, 6, 8, 10, 12]  # x2 = 2*x1 exactly -> collinear
+    ys = [1, 2, 3, 4, 5, 6]
+    assert su.ols_nvar([x1s, x2s], ys) == (None, None)
+
+
+def test_ols_nvar_insufficient_sample_returns_none_pair():
+    x1s = [1, 2, 3]
+    x2s = [2, 1, 4]
+    x3s = [3, 5, 1]
+    ys = [1, 2, 3]  # n=3, k=3 predictors -- needs n >= k+2 = 5
+    assert su.ols_nvar([x1s, x2s, x3s], ys) == (None, None)
+
+
+def test_ols_nvar_mismatched_column_lengths_returns_none_pair():
+    assert su.ols_nvar([[1, 2, 3], [1, 2]], [1, 2, 3]) == (None, None)
+
+
 # ---- rmse ----
 
 def test_rmse_zero_for_perfect_prediction():

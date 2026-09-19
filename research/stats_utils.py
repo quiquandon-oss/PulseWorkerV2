@@ -240,6 +240,57 @@ def _det3(m):
     )
 
 
+def ols_nvar(predictor_columns, ys):
+    """PR5f: general closed-form multiple linear regression
+    y = b0 + b1*x1 + ... + bk*xk for an arbitrary number of predictors k
+    (ols_1var/ols_2var above are the k=1/k=2 special cases, kept as-is
+    for their own callers -- this is purely additive, no existing
+    function's behavior changes).
+
+    `predictor_columns` is a list of k parallel value lists (one per
+    predictor, same length as `ys`). Solves the (k+1)x(k+1) normal-
+    equations system [X'X | X'y] via Gauss-Jordan elimination with
+    partial pivoting (rather than Cramer's rule -- practical for k>2
+    without a general symbolic-determinant implementation, and no less
+    exact for the well-conditioned, real-valued systems this project's
+    predictor counts produce).
+
+    Returns (intercept, [b1, ..., bk]), or (None, None) if n < k+2, any
+    predictor column has zero variance, or the system is singular
+    (e.g. two predictors perfectly collinear) -- never a fabricated fit.
+    """
+    k = len(predictor_columns)
+    n = len(ys)
+    if k == 0 or any(len(col) != n for col in predictor_columns):
+        return None, None
+    if n < k + 2:
+        return None, None
+
+    # Design matrix columns: [1, x1, ..., xk]. Build X'X and X'y directly
+    # from sums (same approach as ols_2var, generalized to k predictors).
+    design_cols = [[1.0] * n] + [list(map(float, col)) for col in predictor_columns]
+    dim = k + 1
+    xtx = [[sum(design_cols[i][r] * design_cols[j][r] for r in range(n)) for j in range(dim)] for i in range(dim)]
+    xty = [sum(design_cols[i][r] * ys[r] for r in range(n)) for i in range(dim)]
+
+    # Augmented matrix [X'X | X'y], Gauss-Jordan with partial pivoting.
+    aug = [xtx[i] + [xty[i]] for i in range(dim)]
+    for col in range(dim):
+        pivot_row = max(range(col, dim), key=lambda r: abs(aug[r][col]))
+        if abs(aug[pivot_row][col]) < 1e-12:
+            return None, None  # singular -- e.g. two predictors perfectly collinear
+        aug[col], aug[pivot_row] = aug[pivot_row], aug[col]
+        pivot_val = aug[col][col]
+        aug[col] = [v / pivot_val for v in aug[col]]
+        for r in range(dim):
+            if r != col:
+                factor = aug[r][col]
+                aug[r] = [aug[r][c] - factor * aug[col][c] for c in range(dim + 1)]
+
+    coefficients = [aug[i][dim] for i in range(dim)]
+    return coefficients[0], coefficients[1:]
+
+
 def rmse(actual, predicted):
     """Root-mean-square error. Returns None for empty/mismatched input."""
     n = len(actual)

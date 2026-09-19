@@ -1085,3 +1085,168 @@ Results (`source_horizons=(1,3,6,12,24)`, `horizons=(12,24)`):
   `research_analyses` (PR1's own table) has zero rows to reference --
   not a defect in this PR, a fact about what has and has not been
   persisted upstream so far.
+
+## PR5f: source-family discrimination
+
+Scope: for each of PR5e's surviving BUILD_REQUEST source families
+(`fng`, `global`, `onchain`), determines whether it carries incremental
+information BEYOND the V1 composite **AND** the other surviving
+families jointly -- the exact question PR5e's own `source_
+redundancy_note()` could only flag as unresolved. Entirely read-only,
+no persistence function exists in this module, no V1/V2/Worker/PR5e
+change of any kind. PR5e's own hypothesis records are read and reported
+side by side, never modified or re-persisted.
+
+### Why this is not circular with PR5e
+
+PR5e's Gate 3/4 condition on a control set of size 1 (the V1 composite
+only). This PR conditions on a STRICTLY LARGER set (composite + the
+other 2 surviving families) for the same outcome. Adding controls to a
+nested-OLS comparison can only reduce or leave unchanged a variable's
+apparent incremental contribution, never inflate it -- so a "survives"
+verdict here is strictly stronger evidence than PR5e's own Gate 4
+verdict, not a re-run with the same possible outcome. The production
+snapshot below demonstrates this concretely: two of the three families
+that passed PR5e's composite-only test do NOT survive this stricter one.
+
+### Methodology
+
+1. Reads a FRESH `hypothesis_gate.build_hypothesis_report()` (PR5e's
+   own, completely unmodified) to find the CURRENT surviving BUILD_REQUEST
+   families -- never hardcoded, so this stays correct if a future
+   snapshot's surviving set differs.
+2. Selects exactly ONE primary horizon per family: the horizon (among
+   that family's own PR5e BUILD_REQUEST horizons) with the largest
+   `oos_validation.rmse_reduction_pct` -- a deterministic criterion
+   from PR5e's own already-computed numbers, never cherry-picked. The
+   family's other horizons are reported separately as explicit,
+   non-gating CONTEXT ONLY (never independent confirmations -- they
+   overlap the primary horizon's forward-return window).
+3. Reports (never gates on) the exact pairwise Pearson correlation
+   between every pair of surviving families (PR5c's own `pairwise_
+   source_redundancy()`, unmodified).
+4. Reports a higher-order PARTIAL correlation of (family, outcome)
+   controlling for {composite, other family A, other family B} --
+   computed via the standard recursive partial-correlation identity
+   using ONLY pairwise Pearson correlations and PR5c's own single-
+   control `partial_correlation()`, applied repeatedly. Verified to
+   match the equivalent multiple-regression-residual computation to
+   machine precision (`test_higher_order_partial_correlation_matches_
+   regression_residual_method`). Reported for completeness, exactly
+   like PR5e's own Gate 3 -- NOT independent confirmation of the OOS
+   result below.
+5. **The principal held-out test**: a nested OLS comparison generalized
+   from PR5e's own v2 Gate 4 to a multi-predictor baseline. Baseline =
+   composite + other family A + other family B; full = baseline +
+   target family. Both fit on the discovery half (chronological, never
+   shuffled, `OOS_SPLIT_FRACTION=0.7`), RMSE-compared on the untouched
+   validation half. Uses a new general `stats_utils.ols_nvar()`
+   (validated against `ols_2var` for the 2-predictor case, and against
+   an exact hyperplane recovery for 4 predictors). **Reuses PR5e's own
+   v2 promotion criterion verbatim, no new threshold**: validation-half
+   RMSE reduction >= `MEANINGFUL_OOS_IMPROVEMENT_PCT` (5%) AND the same
+   direction replicates across two chronological sub-windows of the
+   validation half (`family_subsplit_stability()`, the direct
+   multi-predictor generalization of PR5e's own `source_subsplit_
+   stability()`).
+
+### Discrimination status -- reuses PR5e's vocabulary, adds one rollup
+
+`validation_status` is `hypothesis_gate.VALIDATION_STATUSES`, imported
+and reused verbatim. This PR adds exactly one new, narrow rollup:
+`discrimination_status` = `DISCRIMINATED_INCREMENTAL` (validation_status
+== `PASSED_HOLDOUT`), `NOT_DISCRIMINATED` (`NOT_REPLICATED` or
+`FAILED_HOLDOUT`), or `INSUFFICIENT_DATA` (`INSUFFICIENT_DATA_FOR_HOLDOUT`).
+**`DISCRIMINATED_INCREMENTAL` is NOT a promotion and NOT `hypothesis_
+gate`'s "VALIDATED" lifecycle stage** (which means validated in
+production after implementation, per PR5a's own schema, entirely
+outside this PR's scope) -- it answers a narrower question than PR5e's
+own `lifecycle_status` ("worthy of human review") and is reported
+side by side with it, never merging or overriding PR5e's own values.
+
+### Production snapshot
+
+Extracted 2026-09-19 (extraction_ts recorded per run). Same production
+D1 (`sentiment-history`), same window as PR5e's own (`predictions`
+table itself is byte-for-byte unchanged: 1070 rows, identical min/max
+ts -- the window derived from it is therefore identical, not silently
+changed). **Differences from PR5e's recorded snapshot**: `history`
+499->500 rows, `btc_data` 2095->2099 rows -- both tables' rolling
+retention/accumulation continuing to advance past the fixed prediction
+window, exactly the kind of drift PR5e's own README already documented
+between its own two snapshots. `surviving_families` unchanged: `fng`,
+`global`, `onchain`.
+
+Primary horizons selected (by PR5e's own largest `rmse_reduction_pct`):
+`fng`->24h, `global`->12h, `onchain`->24h.
+
+Pairwise family correlations (n~257-408, none anywhere near the 0.7
+strong-redundancy threshold, yet see the joint-model results below):
+
+| Pair | r | n |
+|---|---|---|
+| fng / global | 0.187 | 286 |
+| fng / onchain | -0.125 | 408 |
+| global / onchain | 0.166 | 286 |
+
+**Joint-control discrimination results** (n=257 for all three, same
+combined sample since all three families' values are required
+simultaneously):
+
+| Family | Controls | rmse_reduction_pct | Sub1 / Sub2 | Higher-order partial r | validation_status | discrimination_status |
+|---|---|---|---|---|---|---|
+| `fng` (24h) | composite, global, onchain | **+10.99%** | +5.92% / +13.04% (stable) | -0.262 | PASSED_HOLDOUT | **DISCRIMINATED_INCREMENTAL** |
+| `global` (12h) | composite, fng, onchain | **-4.88%** | -15.72% / -2.28% (unstable, both negative) | -0.373 | FAILED_HOLDOUT | NOT_DISCRIMINATED |
+| `onchain` (24h) | composite, fng, global | +4.93% | +7.63% / +3.63% (stable, but < 5% floor) | -0.190 | NOT_REPLICATED | NOT_DISCRIMINATED |
+
+**Only 1 of 3 surviving PR5e families (`fng`) is `DISCRIMINATED_INCREMENTAL`.**
+`global`'s marginal contribution turns NEGATIVE once `fng` and `onchain`
+are already in the model -- despite a merely moderate pairwise
+correlation with `fng` (r=0.187, far below the 0.7 "strong redundancy"
+threshold PR5e's own `source_redundancy_note()` checks). `onchain`'s
+effect is directionally consistent (both sub-windows positive) but
+falls just under the 5% meaningful-effect floor once the other two
+families are controlled for. This is the concrete demonstration of
+this PR's whole premise: PR5e's `NO_STRONG_PAIRWISE_REDUNDANCY_DETECTED`
+label (all three pairs here carry it) never meant "no shared
+information" -- even modest, sub-threshold correlations can fully
+explain away another candidate's OOS improvement once tested jointly.
+
+Determinism: re-running `build_family_discrimination_report()` twice
+against the identical snapshot produced an identical report.
+
+### Known limitations
+
+- **Reduced sample size.** Requiring all three families' values
+  simultaneously present drops the usable sample from PR5e's own
+  per-family n (445-495) to n=257 -- fewer rows overlap across all
+  three sources than for any single source alone. This is an honest
+  cost of the joint-control design, not hidden: every result above
+  reports its own n explicitly.
+- **Higher-order partial correlation is reported, not gated, and is
+  NOT independent of the OOS result** -- both are functions of the
+  same discovery-half data and the same variable set; a discrepancy
+  between them (e.g. `fng`'s negative partial r alongside a positive
+  RMSE reduction) is expected, not a defect: partial correlation
+  measures linear association direction, RMSE reduction measures
+  predictive error, and a regression can improve prediction while its
+  simple/partial correlation sign differs from an OLS coefficient's
+  sign in a multi-collinear system.
+- **Only one primary horizon per family was tested jointly**; the other
+  PR5e horizons are reported as context only, never independently
+  re-run through the joint-control test. A future PR could repeat this
+  analysis at each family's other horizons, but that would reintroduce
+  exactly the horizon-overlap pseudo-replication this PR's design
+  otherwise avoids.
+- **This result is specific to the trio {fng, global, onchain} and this
+  ~49-day snapshot.** A different surviving-family set (a future
+  snapshot) would need this analysis re-run, not extrapolated from
+  these numbers.
+- **`DISCRIMINATED_INCREMENTAL` is still not "validated."** `fng`'s
+  survival here is stronger evidence than PR5e's own BUILD_REQUEST
+  status, but it remains research evidence a human must review --
+  never a basis for automatically implementing a V1/V2 change.
+- The redundancy correction here is exact for THIS trio (3 families +
+  composite) but is not a general n-family solution; a future surviving
+  set with more members would need the same recursive/`ols_nvar`
+  approach extended, not a new method invented ad hoc.

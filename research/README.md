@@ -199,3 +199,127 @@ additive, no behavior change, confirmed via a second `EXPLAIN QUERY
 PLAN` (local SQLite) to restore a genuine bounded search. (Renumbered
 from 0008 to 0009 after PR5a's own 0008 migration merged first — see
 git history for the coordination note.)
+
+## PR5c: V1 source effectiveness, redundancy, and incremental information
+
+Scope: read-only research analysis of the 21 raw V1 sentiment sources
+found in `history.sources_json`, plus the three-level framework
+(signal exists / associated with outcome / adds incremental
+information) the PR5 specification requires. No V1/V2 change, no
+coefficient change, no production write, no migration, no LLM/paid
+dependency, no build request, no PR5d.
+
+### Why no new migration is needed
+
+Every new query this PR adds is bounded by `ts` against `history` and
+`btc_data`, both already covered by their existing `idx_ts` /
+`idx_btc_data_ts` indexes. Confirmed via real `EXPLAIN QUERY PLAN`
+runs against production D1 (`sentiment-history`) before writing any
+code: the history-anchored outcome query shows `SEARCH h USING INDEX
+idx_ts` plus `SEARCH b/b2 USING INDEX idx_btc_data_ts` for all three
+correlated subqueries — no scan anywhere; the source-discovery query
+(`json_each` over `sources_json`) shows the same indexed `SEARCH h`
+feeding the JSON virtual table, with only a small in-memory `DISTINCT`
+b-tree over the discovered keys (harmless at 21 keys / 500 rows).
+`research_analyses` (PR1) already has an unconstrained `metric_json
+TEXT` column, which is where this PR's entire nested findings payload
+is persisted — no new column, table, or index was required, so none
+was added.
+
+### The three levels (implemented in `research/source_analysis.py`)
+
+- **Level 1** (`source_coverage_report`): per-source coverage,
+  missingness, distinct-value count, raw min/max/mean/stddev, first/last
+  ts present. A source with zero variation or zero data is flagged
+  `NO_VARIATION`/`NO_DATA` and excluded from Level 2+ (there is nothing
+  to associate).
+- **Level 2** (`level2_association_for_source` / `run_level2_battery`):
+  Pearson correlation between each eligible source and the actual BTC
+  forward return at that same observation time (`history.ts`), at all
+  five horizons (1h/3h/6h/12h/24h), with a 95% CI and p-value via the
+  Fisher z-transformation (`research/stats_utils.py`), corrected across
+  the *entire* source x horizon battery with Benjamini-Hochberg (BH)
+  FDR (never per-test raw p < 0.05). BH, not Bonferroni, is used here —
+  stated neutrally: Bonferroni does not require independent tests
+  either, but BH's false-discovery-rate control is the better fit for a
+  discovery-stage screen across this many related source x horizon
+  tests (the same BTC forward return is reused as the outcome across
+  every source at a given horizon). The correction method is recorded
+  explicitly alongside every result, never left implicit.
+- **Level 3** (`level3_incremental_for_source`): incremental information
+  **strictly beyond the V1 composite** — partial correlation controlling
+  for the V1 composite only, plus a chronological (never shuffled)
+  discovery/validation split comparing a composite-only OLS baseline
+  against a composite+source OLS model's out-of-sample RMSE. This does
+  **not** condition on any other, empirically correlated/redundant
+  source — Section 9's own redundancy findings (below) are computed
+  entirely separately and never feed into Level 3's regression. PR5c's
+  Level 3 result must therefore be read as "incremental beyond the V1
+  composite" only; "incremental beyond correlated/redundant sources" is
+  a separate, larger research question this PR does not address (a
+  multi-source ablation/regression was deliberately not added here — see
+  PR review notes). A source reaching Level 2 significance is NOT
+  assumed to reach Level 3 — real production data confirms this
+  distinction matters (see PR description: several Level-2-significant
+  sources show `oos.status: NOT_IMPROVED`, i.e. no measurable
+  incremental value once the V1 composite is already in the model).
+
+### Source enumeration, missingness, and scale (Sections 5/6)
+
+`discover_sources()`/`extract_source_matrix()` derive the source list
+from the actual `sources_json` keys present in the requested window —
+nothing is hard-coded. A key absent from a given row is `None`, never
+`0`; `structural_shape_report()` reports how many distinct key-sets
+actually occurred (24, across the full current 500-row table).
+Raw values are never normalized before correlation (Pearson r is
+scale-invariant to any positive linear rescaling — see
+`stats_utils.py`'s docstring for the full argument); every reported
+regression coefficient is instead paired with that source's own
+Level 1 range so it is never misread as cross-source-comparable.
+
+### No-lookahead (Section 4)
+
+`research/outcome_engine.py` gained
+`compute_forward_returns_from_history()`, the same as-of, no-lookahead
+BTC forward-return computation as PR5b's `compute_forward_returns()`
+(predictions-anchored), anchored on `history.ts` instead — refactored
+to share one resolution rule (`_resolve_outcome()`) rather than
+duplicating PR5b's safety-critical logic. `research/evidence_temporal.py`
+adds an independent, orthogonal prediction-time eligibility check
+(`publication_ts < prediction_ts`, strict) for the one place PR4
+evidence could later be joined against a prediction — kept separate
+from PR4's own event-relative `PRE_EVENT/SAME_WINDOW/POST_EVENT`
+classification per the spec's explicit requirement not to conflate the
+two. PR4 evidence integration itself remains optional and unused by
+this PR's core analysis (Section 16); `source_analysis.py` has no
+dependency on `research_event_evidence` at all.
+
+### Persistence (Section 15)
+
+`source_analysis.persist_analysis()` is the only function in this PR
+that writes anything — a single `INSERT INTO research_analyses` using
+its existing, unmodified schema. It is exercised only against an
+in-memory SQLite fixture in `test_source_analysis.py` and is never
+invoked against a production connection anywhere in this PR (Section
+19: production D1 access stays read-only throughout). A separate,
+future authorized step decides if/when to actually run this against
+production.
+
+### Real production findings (see PR description for the full report)
+
+Run once, read-only, against the real 500-row `history` /
+2091-row `btc_data` tables (never persisted back): of 105 source x
+horizon tests, Benjamini-Hochberg marks 39 `STATISTICALLY_SIGNIFICANT`,
+20 `CONTRADICTED` (sign reverses between the chronological discovery
+and validation halves with an adequate, independent sample in both),
+20 `STATISTICALLY_NON_SIGNIFICANT_BUT_STABLE`, and 26 `INCONCLUSIVE`.
+`nasdaq`/`sp500` show strong pairwise redundancy (r=+0.82, expected --
+both are traditional macro proxies); `etfflows` shows strong
+redundancy against the V1 composite itself (r=+0.75). Because the
+entire history table currently spans only ~34 days, the chronological
+discovery/validation split is NOT an independent market regime in any
+strong sense -- it is largely the same regime split in time -- so the
+`CONTRADICTED` count above should be read as "sign instability within
+one short window," not as proof of a reversing macro relationship;
+this is stated explicitly, not smoothed over, per the spec's own
+prohibition on treating insufficient replication as more than it is.

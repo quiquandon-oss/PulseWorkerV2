@@ -88,6 +88,29 @@ WHERE p.ts >= ? AND p.ts <= ?
 ORDER BY p.ts ASC
 """
 
+# PR5c: same as-of shape as OUTCOME_SQL above, anchored on history.ts (the
+# V1 observation time) instead of predictions.ts. Added for
+# research/source_analysis.py's Level 2/3 source-vs-outcome analysis,
+# which needs a BTC forward return anchored at the moment a V1 source
+# value was observed, not at the moment V2 made a prediction -- a
+# different anchor table, but the identical no-lookahead resolution rule
+# (see _resolve_outcome() below, shared by both queries so that rule is
+# never duplicated). No new index required: history(ts) is already
+# covered by idx_ts (confirmed present in production; see PR5c PR
+# description for the real EXPLAIN QUERY PLAN), and the btc_data(ts)
+# as-of lookups reuse the already-existing idx_btc_data_ts, unchanged.
+HISTORY_OUTCOME_SQL = """
+SELECT
+  h.ts AS anchor_ts,
+  h.score AS v1_composite,
+  (SELECT b.btc_price FROM btc_data b WHERE b.ts <= h.ts ORDER BY b.ts DESC LIMIT 1) AS btc_price_at_anchor,
+  (SELECT b2.ts FROM btc_data b2 WHERE b2.ts <= h.ts + ? ORDER BY b2.ts DESC LIMIT 1) AS realized_future_ts,
+  (SELECT b2.btc_price FROM btc_data b2 WHERE b2.ts <= h.ts + ? ORDER BY b2.ts DESC LIMIT 1) AS realized_btc_price
+FROM history h
+WHERE h.ts >= ? AND h.ts <= ?
+ORDER BY h.ts ASC
+"""
+
 
 def _validate_bounds(start_ts, end_ts):
     if start_ts is None or end_ts is None:
@@ -97,6 +120,41 @@ def _validate_bounds(start_ts, end_ts):
     window = end_ts - start_ts
     if window > MAX_WINDOW_MS:
         raise ValueError(f"requested window ({window}ms) exceeds MAX_WINDOW_MS ({MAX_WINDOW_MS}ms)")
+
+
+def _resolve_outcome(anchor_ts, price_now, future_ts, price_future):
+    """The single, shared no-lookahead resolution rule used by BOTH
+    compute_forward_returns() (predictions-anchored) and
+    compute_forward_returns_from_history() (PR5c, history-anchored) --
+    extracted so this safety-critical logic exists in exactly one place
+    rather than being copy-pasted per anchor table.
+
+    A result is only ever RESOLVED when a genuinely new future price
+    point exists strictly after anchor_ts. See compute_forward_returns's
+    own docstring for the full rationale (unchanged by this refactor).
+    """
+    resolvable = (
+        price_now is not None
+        and price_future is not None
+        and future_ts is not None
+        and future_ts > anchor_ts
+    )
+    if resolvable:
+        forward_return_pct = ((price_future - price_now) / price_now) * 100.0
+        absolute_forward_return_pct = abs(forward_return_pct)
+        if forward_return_pct > 0:
+            realized_direction = "UP"
+        elif forward_return_pct < 0:
+            realized_direction = "DOWN"
+        else:
+            realized_direction = "FLAT"
+        outcome_status = "RESOLVED"
+    else:
+        forward_return_pct = None
+        absolute_forward_return_pct = None
+        realized_direction = None
+        outcome_status = "UNRESOLVED_NO_FUTURE_PRICE_POINT"
+    return forward_return_pct, absolute_forward_return_pct, realized_direction, outcome_status
 
 
 def compute_forward_returns(conn, start_ts, end_ts, horizon_hours):
@@ -143,33 +201,9 @@ def compute_forward_returns(conn, start_ts, end_ts, horizon_hours):
         future_ts = row["realized_future_ts"]
         price_future = row["realized_btc_price"]
 
-        # No-lookahead / no-stale-data guard: future_ts must be a
-        # genuinely new observation strictly after the prediction ts.
-        # If the cadence gap is wider than the horizon, there is no
-        # real outcome yet -- report that honestly rather than reusing
-        # a stale (or absent) price point.
-        resolvable = (
-            price_now is not None
-            and price_future is not None
-            and future_ts is not None
-            and future_ts > pts
+        forward_return_pct, absolute_forward_return_pct, realized_direction, outcome_status = (
+            _resolve_outcome(pts, price_now, future_ts, price_future)
         )
-
-        if resolvable:
-            forward_return_pct = ((price_future - price_now) / price_now) * 100.0
-            absolute_forward_return_pct = abs(forward_return_pct)
-            if forward_return_pct > 0:
-                realized_direction = "UP"
-            elif forward_return_pct < 0:
-                realized_direction = "DOWN"
-            else:
-                realized_direction = "FLAT"
-            outcome_status = "RESOLVED"
-        else:
-            forward_return_pct = None
-            absolute_forward_return_pct = None
-            realized_direction = None
-            outcome_status = "UNRESOLVED_NO_FUTURE_PRICE_POINT"
 
         results.append({
             "prediction_ts": pts,
@@ -194,4 +228,71 @@ def explain_outcome_query_plan(conn, start_ts, end_ts, horizon_hours):
     horizon_ms = OUTCOME_HORIZON_MS[horizon_hours]
     return conn.execute(
         "EXPLAIN QUERY PLAN " + OUTCOME_SQL, (horizon_ms, horizon_ms, start_ts, end_ts)
+    ).fetchall()
+
+
+def compute_forward_returns_from_history(conn, start_ts, end_ts, horizon_hours):
+    """PR5c: the same continuous-forward-return computation as
+    compute_forward_returns(), anchored on history.ts (when a V1 source
+    observation was made) instead of predictions.ts. Used by
+    research/source_analysis.py to pair each V1 source value with the
+    actual subsequent BTC outcome, for the same fixed horizons
+    (1h/3h/6h/12h/24h) and under the identical no-lookahead resolution
+    rule -- see _resolve_outcome(), reused (not reimplemented) here.
+
+    Same contract as compute_forward_returns(): both bounds are
+    required (no default), horizon_hours must be one of
+    OUTCOME_HORIZON_MS's keys, and every history row in the window is
+    represented exactly once in the output, RESOLVED or
+    UNRESOLVED_NO_FUTURE_PRICE_POINT -- never dropped, never
+    interpolated.
+
+    Each result dict additionally carries v1_composite (history.score at
+    that same ts) so callers can compute Level 3 "incremental beyond the
+    V1 composite" analysis without a second query.
+    """
+    _validate_bounds(start_ts, end_ts)
+    if horizon_hours not in OUTCOME_HORIZON_MS:
+        raise ValueError(
+            f"unsupported horizon_hours ({horizon_hours}); must be one of {sorted(OUTCOME_HORIZON_MS)}"
+        )
+    horizon_ms = OUTCOME_HORIZON_MS[horizon_hours]
+
+    cursor = conn.execute(HISTORY_OUTCOME_SQL, (horizon_ms, horizon_ms, start_ts, end_ts))
+    columns = [d[0] for d in cursor.description]
+    rows = [dict(zip(columns, row)) for row in cursor.fetchall()]
+
+    results = []
+    for row in rows:
+        anchor_ts = row["anchor_ts"]
+        price_now = row["btc_price_at_anchor"]
+        future_ts = row["realized_future_ts"]
+        price_future = row["realized_btc_price"]
+
+        forward_return_pct, absolute_forward_return_pct, realized_direction, outcome_status = (
+            _resolve_outcome(anchor_ts, price_now, future_ts, price_future)
+        )
+
+        results.append({
+            "anchor_ts": anchor_ts,
+            "v1_composite": row["v1_composite"],
+            "horizon_hours": horizon_hours,
+            "btc_price_at_anchor": price_now,
+            "realized_future_ts": future_ts,
+            "realized_btc_price": price_future,
+            "forward_return_pct": forward_return_pct,
+            "absolute_forward_return_pct": absolute_forward_return_pct,
+            "realized_direction": realized_direction,
+            "outcome_status": outcome_status,
+        })
+
+    return results
+
+
+def explain_history_outcome_query_plan(conn, start_ts, end_ts, horizon_hours):
+    """Returns the real EXPLAIN QUERY PLAN rows for the exact same bound
+    query compute_forward_returns_from_history() would run."""
+    horizon_ms = OUTCOME_HORIZON_MS[horizon_hours]
+    return conn.execute(
+        "EXPLAIN QUERY PLAN " + HISTORY_OUTCOME_SQL, (horizon_ms, horizon_ms, start_ts, end_ts)
     ).fetchall()

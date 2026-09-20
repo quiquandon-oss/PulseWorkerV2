@@ -1,0 +1,80 @@
+name: Experiment 9 - Event x Source x Real-World Evidence (research only)
+
+# EXP-009: Event x Source x Real-World Evidence. Runs research/event_source_
+# evidence_join.py's own build_event_source_evidence_dataset() -- UNCHANGED,
+# reused not reimplemented -- against real, bounded (<=90 days) production
+# data, and persists the report into the EXISTING research_analyses table
+# (schema unchanged since PR1), tagged subject='EXP-009:event_source_evidence'.
+#
+# Complementary to EXP-005 (exp005-source-effectiveness.yml), not a
+# replacement: EXP-005 asks whether a V1 source's own representation
+# carries information about subsequent BTC movement in the aggregate; this
+# experiment instead joins individual detected events, their already-
+# collected real-world evidence (research_events / research_event_evidence,
+# PR60/62's live pipeline), each source's representation at that time
+# (PR59, event_source_relevance.py), and the event's own control-adjusted
+# BTC reaction (PR57+PR58, controlled_event_reaction.py). Neither EXP-005
+# nor its methodology is read, written, or influenced by this workflow.
+#
+# Weekly, not daily, matching EXP-005's own reasoning: a meaningfully NEW
+# chronological window needs real time to pass for the underlying event/
+# evidence/reaction data to change -- re-running against a near-identical
+# 90-day window a day later would not produce independent evidence. Offset
+# one hour after EXP-005's own Monday run (rather than the identical
+# minute) purely to avoid two large research jobs starting at the exact
+# same instant; the two experiments are otherwise fully independent and
+# this has no bearing on either one's methodology.
+#
+# $0: GitHub Actions `schedule:` only -- does NOT add a new Cloudflare Cron
+# Trigger (same reasoning as exp005-source-effectiveness.yml and
+# exp004-timesfm.yml; the account's 5-Cron-Trigger budget is already fully
+# committed, see wrangler.toml's own comment).
+#
+# Writes ONLY research_analyses (INSERT only, never UPDATE/DELETE). No
+# V1/V2/Worker file is touched. No migration beyond the registry row
+# already added in .ai/migrations/0012_exp009_activation.sql (research_
+# analyses, research_events, research_event_evidence all already exist).
+# No production prediction/selection/coefficient logic is read, written,
+# or influenced by this workflow in any way.
+on:
+  schedule:
+    - cron: '0 10 * * 1'
+  workflow_dispatch: {}
+
+concurrency:
+  group: exp009-event-source-evidence
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  analyze:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node (for wrangler)
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install wrangler
+        run: npm install -g wrangler
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install pytest
+        run: pip install pytest --break-system-packages
+
+      - name: Run research/ tests (never run this pipeline against production on red tests)
+        run: python3 -m pytest research/ exp009-event-source-evidence/ -v
+
+      - name: Run event-source-evidence analysis
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: python3 exp009-event-source-evidence/run_experiment.py

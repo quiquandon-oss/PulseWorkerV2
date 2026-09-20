@@ -6159,6 +6159,99 @@ async function computeExp005LiveFields(env, requiredSample) {
   };
 }
 
+// EXP-009's own live-metric provider. Same data_source_table-as-lookup-
+// key convention as EXP-004/EXP-005 above -- never the literal
+// research_analyses table name, and never interpolated into SQL.
+const EXP009_SUBJECT = 'EXP-009:event_source_evidence'; // must match exp009-event-source-evidence/run_experiment.py's SUBJECT exactly
+
+// Unlike EXP-005, this experiment defines no statistical hypothesis
+// test (see its own registry row's success_criterion): it is an
+// evidence-accumulation / schema-validation phase whose milestone is
+// simply required_sample independent weekly/event batches with stable,
+// well-formed output. current_sample_size therefore counts accumulated
+// research_analyses rows for this subject, exactly as EXP-005's own
+// provider does, but oos_result here reports milestone progress rather
+// than a replicated significance/OOS-improvement verdict -- there is no
+// such verdict to compute for a purely descriptive join.
+async function computeExp009LiveFields(env, requiredSample) {
+  const [countRow, rows] = await Promise.all([
+    env.DB.prepare('SELECT COUNT(*) AS n FROM research_analyses WHERE subject = ?').bind(EXP009_SUBJECT).first(),
+    env.DB.prepare(
+      'SELECT analysis_ts, metric_json, validation_status FROM research_analyses WHERE subject = ? ORDER BY analysis_ts ASC'
+    ).bind(EXP009_SUBJECT).all(),
+  ]);
+  const runs = (rows && rows.results) || [];
+  const sampleCount = countRow ? countRow.n : 0;
+  const threshold = Number.isFinite(requiredSample) ? requiredSample : REQUIRED_SAMPLE_FALLBACK;
+  const insufficientSample = sampleCount === 0 || sampleCount < threshold;
+
+  if (sampleCount === 0) {
+    return {
+      current_sample_size: 0,
+      current_measured_result: 'NOT_AVAILABLE',
+      oos_result: 'NOT_AVAILABLE',
+      confidence_evidence_maturity: 'INSUFFICIENT_SAMPLE',
+      last_updated: null,
+    };
+  }
+
+  // Parse every accumulated run's metric_json (each one the FULL,
+  // unmodified output of research/event_source_evidence_join.py's own
+  // build_event_source_evidence_dataset(), as persisted by
+  // exp009-event-source-evidence/run_experiment.py). A stored report
+  // that fails to parse must degrade this experiment only, never the
+  // whole registry response -- same explicit handling as EXP-005's own
+  // provider above (getResearchLabRegistry's per-provider try/catch
+  // already covers a thrown error, but malformed JSON wouldn't throw
+  // until here).
+  let parsedRuns = [];
+  try {
+    parsedRuns = runs.map((r) => ({ ts: r.analysis_ts, report: JSON.parse(r.metric_json) }));
+  } catch (err) {
+    return {
+      current_sample_size: sampleCount,
+      current_measured_result: 'NOT_AVAILABLE',
+      oos_result: 'NOT_AVAILABLE',
+      confidence_evidence_maturity: 'UNKNOWN',
+      last_updated: runs[runs.length - 1].analysis_ts,
+    };
+  }
+
+  const latest = parsedRuns[parsedRuns.length - 1].report;
+  const interpretationTotals = {};
+  for (const counts of Object.values(latest.by_source_interpretation || {})) {
+    for (const [label, n] of Object.entries(counts)) {
+      interpretationTotals[label] = (interpretationTotals[label] || 0) + n;
+    }
+  }
+
+  const currentMeasuredResult = {
+    latest_run_ts: parsedRuns[parsedRuns.length - 1].ts,
+    n_real_world_events: latest.evidence_coverage ? latest.evidence_coverage.n_real_world_events : null,
+    n_real_world_events_with_any_evidence: latest.evidence_coverage ? latest.evidence_coverage.n_real_world_events_with_any_evidence : null,
+    n_event_source_rows: (latest.results || []).length,
+    interpretation_totals: interpretationTotals,
+    btc_outcome_coverage: latest.btc_outcome_coverage || null,
+    note: "Descriptive only, from the most recent single run. This experiment defines no statistical success threshold yet -- see the registry row's own success_criterion (schema-validation / evidence-accumulation milestone, not a hypothesis test).",
+  };
+
+  const oosResult = insufficientSample
+    ? 'INSUFFICIENT_SAMPLE'
+    : {
+        milestone: `${parsedRuns.length} of ${threshold} required independent weekly/event batches accumulated`,
+        runs_considered: parsedRuns.length,
+        note: "This experiment defines no statistical hypothesis test (see the registry row's own success_criterion) -- reaching required_sample marks only that enough independent batches exist to assess output stability, never a coefficient or production recommendation.",
+      };
+
+  return {
+    current_sample_size: sampleCount,
+    current_measured_result: currentMeasuredResult,
+    oos_result: oosResult,
+    confidence_evidence_maturity: insufficientSample ? 'INSUFFICIENT_SAMPLE' : 'ACCUMULATING',
+    last_updated: parsedRuns[parsedRuns.length - 1].ts,
+  };
+}
+
 // Maps a registry row's data_source_table to the function that computes
 // its live fields. A table name with no entry here (or a NULL
 // data_source_table) falls back to the static NOT_STARTED/NOT_AVAILABLE
@@ -6166,6 +6259,7 @@ async function computeExp005LiveFields(env, requiredSample) {
 const LIVE_METRIC_PROVIDERS = {
   experiment_4_timesfm: computeExperiment4TimesFmLiveFields,
   research_analyses_exp005_source_effectiveness: computeExp005LiveFields,
+  research_analyses_exp009_event_source_evidence: computeExp009LiveFields,
 };
 
 async function getResearchLabRegistry(env) {

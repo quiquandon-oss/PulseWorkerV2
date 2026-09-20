@@ -12,10 +12,10 @@ describe('Research Lab — read-only research API helpers', () => {
   let scope;
   beforeAll(() => {
     scope = evalInScope(
-      extractFunctions('computeExperiment4TimesFmLiveFields', 'getResearchLabRegistry') + '\n' +
+      extractFunctions('computeExperiment4TimesFmLiveFields', 'computeExp005LiveFields', 'getResearchLabRegistry') + '\n' +
       extractConstants('SOURCE_TOPIC_AFFINITY_DISPLAY', 'REACTION_HORIZONS_MS',
         'REACTION_GOOD_QUALITY_FRACTION', 'REACTION_APPROXIMATE_QUALITY_FRACTION', 'BTC_SERIES_WINDOW_MS',
-        'REQUIRED_SAMPLE_FALLBACK', 'LIVE_METRIC_PROVIDERS') + '\n' +
+        'REQUIRED_SAMPLE_FALLBACK', 'EXP005_SUBJECT', 'LIVE_METRIC_PROVIDERS') + '\n' +
       extractFunctions('resolveBtcReactionAtHorizon', 'getResearchLabDashboard', 'getResearchLabEvents',
         'getResearchLabEventDetail', 'getResearchLabSources', 'getResearchLabPipelineHealth')
     );
@@ -458,6 +458,139 @@ describe('Research Lab — read-only research API helpers', () => {
       expect(exp.oos_result).toBe('NOT_AVAILABLE');
       expect(exp.confidence_evidence_maturity).toBe('UNKNOWN');
       expect(db.calls).toHaveLength(1); // only the registry SELECT itself -- no second call was ever attempted
+    });
+  });
+
+  describe('computeExp005LiveFields — EXP-005 V1 Source Effectiveness', () => {
+    function makeReport(overrides) {
+      return {
+        sources_discovered: ['fng', 'global'],
+        evidence_labels: { 'fng|12h': 'STATISTICALLY_SIGNIFICANT', 'global|12h': 'INCONCLUSIVE' },
+        level3: { 'fng|12h': { oos: { status: 'IMPROVED' } }, 'global|12h': { oos: { status: 'NOT_IMPROVED' } } },
+        ...overrides,
+      };
+    }
+
+    it('zero accumulated runs -> honest zero, never fabricated data (0 of N runs)', async () => {
+      const db = makeDb([
+        { first: { n: 0 } },
+        { all: { results: [] } },
+      ]);
+      const result = await scope.computeExp005LiveFields({ DB: db }, 4);
+      expect(result.current_sample_size).toBe(0);
+      expect(result.current_measured_result).toBe('NOT_AVAILABLE');
+      expect(result.oos_result).toBe('NOT_AVAILABLE');
+      expect(result.confidence_evidence_maturity).toBe('INSUFFICIENT_SAMPLE');
+      expect(result.last_updated).toBe(null);
+    });
+
+    it('below required_sample: reports real descriptive counts from the latest run, but oos_result is gated INSUFFICIENT_SAMPLE -- never a conclusion from one early run', async () => {
+      const db = makeDb([
+        { first: { n: 1 } },
+        { all: { results: [{ analysis_ts: 1000, metric_json: JSON.stringify(makeReport({})), validation_status: 'candidate_signal_observed' }] } },
+      ]);
+      const result = await scope.computeExp005LiveFields({ DB: db }, 4);
+      expect(result.current_sample_size).toBe(1);
+      expect(result.current_measured_result.sources_discovered).toBe(2);
+      expect(result.current_measured_result.statistically_significant_pairs).toBe(1);
+      expect(result.current_measured_result.incremental_beyond_composite_pairs).toBe(1);
+      // The gate: even though this one run found a significant+improved
+      // pair, oos_result must NOT report it as replicated -- exactly
+      // "do not call it successful from an early positive result".
+      expect(result.oos_result).toBe('INSUFFICIENT_SAMPLE');
+      expect(result.confidence_evidence_maturity).toBe('INSUFFICIENT_SAMPLE');
+      expect(result.last_updated).toBe(1000);
+    });
+
+    it('at/above required_sample: oos_result reports ONLY pairs that replicated in EVERY accumulated run, not just the latest', async () => {
+      const runs = [
+        { analysis_ts: 1000, metric_json: JSON.stringify(makeReport({})) }, // fng|12h significant+improved
+        { analysis_ts: 2000, metric_json: JSON.stringify(makeReport({})) }, // fng|12h significant+improved again
+        { analysis_ts: 3000, metric_json: JSON.stringify(makeReport({
+          evidence_labels: { 'fng|12h': 'INCONCLUSIVE', 'global|12h': 'INCONCLUSIVE' }, // fng NOT significant this run
+          level3: { 'fng|12h': { oos: { status: 'NOT_IMPROVED' } }, 'global|12h': { oos: { status: 'NOT_IMPROVED' } } },
+        })) },
+        { analysis_ts: 4000, metric_json: JSON.stringify(makeReport({})) }, // fng|12h significant+improved again
+      ];
+      const db = makeDb([
+        { first: { n: 4 } },
+        { all: { results: runs } },
+      ]);
+      const result = await scope.computeExp005LiveFields({ DB: db }, 4);
+      expect(result.current_sample_size).toBe(4);
+      expect(result.confidence_evidence_maturity).toBe('ACCUMULATING');
+      // fng|12h was NOT significant+improved in run 3 -> must NOT be
+      // reported as replicated across "every accumulated run".
+      expect(result.oos_result.replicated_significant_and_incremental_pairs).toEqual([]);
+      expect(result.oos_result.runs_considered).toBe(4);
+    });
+
+    it('a pair that replicates in ALL accumulated runs IS reported once required_sample is reached', async () => {
+      const consistentReport = () => JSON.stringify(makeReport({}));
+      const db = makeDb([
+        { first: { n: 4 } },
+        { all: { results: [1000, 2000, 3000, 4000].map((ts) => ({ analysis_ts: ts, metric_json: consistentReport() })) } },
+      ]);
+      const result = await scope.computeExp005LiveFields({ DB: db }, 4);
+      expect(result.oos_result.replicated_significant_and_incremental_pairs).toEqual(['fng|12h']);
+    });
+
+    it('malformed metric_json (unparseable) degrades gracefully, never crashes, never fabricates', async () => {
+      const db = makeDb([
+        { first: { n: 1 } },
+        { all: { results: [{ analysis_ts: 999, metric_json: 'not valid json{{{' }] } },
+      ]);
+      const result = await scope.computeExp005LiveFields({ DB: db }, 4);
+      expect(result.current_sample_size).toBe(1);
+      expect(result.current_measured_result).toBe('NOT_AVAILABLE');
+      expect(result.confidence_evidence_maturity).toBe('UNKNOWN');
+      expect(result.last_updated).toBe(999);
+    });
+
+    it('every D1 call is SELECT-only, filtered by the exact EXP-005 subject, never a write', async () => {
+      const db = makeDb([
+        { first: { n: 1 } },
+        { all: { results: [{ analysis_ts: 1, metric_json: JSON.stringify(makeReport({})) }] } },
+      ]);
+      await scope.computeExp005LiveFields({ DB: db }, 4);
+      for (const call of db.calls) {
+        expect(call.sql).toMatch(/^SELECT/i);
+        expect(call.sql).not.toMatch(/\bINSERT\s+INTO\b|\bUPDATE\s+\w+\s+SET\b|\bDELETE\s+FROM\b/i);
+        expect(call.args).toEqual([scope.EXP005_SUBJECT]);
+      }
+    });
+
+    it('is wired into LIVE_METRIC_PROVIDERS under a dedicated lookup key, not the literal shared table name', () => {
+      expect(scope.LIVE_METRIC_PROVIDERS.research_analyses_exp005_source_effectiveness).toBe(scope.computeExp005LiveFields);
+    });
+
+    it('end-to-end via getResearchLabRegistry: EXP-005 wired correctly alongside EXP-004, each using its own provider', async () => {
+      const db = makeDb([
+        { all: { results: [
+          {
+            experiment_id: 'EXP-004', title: 't', research_question: 'q', purpose: 'p', experiment_type: 'TYPE_2',
+            expected_result: 'e', success_criterion: 's', start_date: null, target_date: null, status: 'ACCUMULATING',
+            baseline: 'b', required_sample: 30, conclusion: null, next_action: 'n', github_refs: null,
+            data_source_table: 'experiment_4_timesfm', created_ts: 1, updated_ts: 1,
+          },
+          {
+            experiment_id: 'EXP-005', title: 't2', research_question: 'q2', purpose: 'p2', experiment_type: 'TYPE_1',
+            expected_result: 'e2', success_criterion: 's2', start_date: null, target_date: null, status: 'ACCUMULATING',
+            baseline: 'b2', required_sample: 4, conclusion: null, next_action: 'n2', github_refs: null,
+            data_source_table: 'research_analyses_exp005_source_effectiveness', created_ts: 2, updated_ts: 2,
+          },
+        ] } },
+        { all: { results: [] } }, // EXP-004's own live query (empty)
+        { first: { n: 0 } },      // EXP-005's COUNT query
+        { all: { results: [] } }, // EXP-005's rows query
+      ]);
+      const result = await scope.getResearchLabRegistry({ DB: db });
+      expect(result.ok).toBe(true);
+      const exp004 = result.experiments.find((e) => e.experiment_id === 'EXP-004');
+      const exp005 = result.experiments.find((e) => e.experiment_id === 'EXP-005');
+      expect(exp004.current_measured_result).toBe('NOT_AVAILABLE');
+      expect(exp005.current_sample_size).toBe(0);
+      expect(exp005.confidence_evidence_maturity).toBe('INSUFFICIENT_SAMPLE');
     });
   });
 

@@ -1,0 +1,69 @@
+name: EXP-005 Param Size Probe (temporary, read-only, manual only)
+
+# TEMPORARY validation workflow -- created solely to empirically confirm
+# whether Cloudflare D1's REST API accepts a ~220-250KB bound parameter
+# value via exp005-source-effectiveness/run_experiment.py's own,
+# unmodified d1_api_query(), from an environment with real network
+# access to api.cloudflare.com (the local development sandbox used to
+# build this PR does not have that access).
+#
+# READ-ONLY: the only SQL ever sent is `SELECT length(?)` -- no table
+# is read, written, or even referenced. Does not import, call, or
+# exercise any other function in run_experiment.py (no D1 write path
+# is invoked). Not part of the experiment's real automation -- manual
+# dispatch only, no schedule -- and removed from the branch immediately
+# after use.
+on:
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Probe D1 bound-parameter size via the real d1_api_query()
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          python3 - <<'PYEOF'
+          import importlib.util
+
+          spec = importlib.util.spec_from_file_location(
+              "run_experiment", "exp005-source-effectiveness/run_experiment.py"
+          )
+          run_experiment = importlib.util.module_from_spec(spec)
+          spec.loader.exec_module(run_experiment)
+
+          PARAM_SIZE = 230_000  # ~230KB: comfortably above the real ~220,329-byte EXP-005 report
+          payload = "x" * PARAM_SIZE  # generated here, at runtime -- never hand-typed, never printed
+          sql = "SELECT length(?)"
+          expected = len(payload.encode("utf-8"))
+
+          print(f"sql_bytes={len(sql)}")
+          print(f"param_bytes={expected}")
+
+          results = run_experiment.d1_api_query(sql, [payload])
+          if not results:
+              print("returned_length=NONE")
+              raise SystemExit("D1 API returned no result rows")
+
+          returned = list(results[0].values())[0]
+          print(f"returned_length={returned}")
+          exact_match = (returned == expected)
+          print(f"exact_match={exact_match}")
+
+          if not exact_match:
+              raise SystemExit(f"MISMATCH: expected {expected}, got {returned}")
+
+          print("LARGE_PARAMETER_PROBE_RESULT=PASS")
+          PYEOF

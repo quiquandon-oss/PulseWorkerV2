@@ -15,7 +15,11 @@ import json
 import os
 import re
 import sqlite3
+import subprocess
 import sys
+from unittest.mock import MagicMock, patch
+
+import pytest
 
 _HERE = os.path.dirname(__file__)
 sys.path.insert(0, _HERE)
@@ -69,12 +73,14 @@ def test_workflow_does_not_touch_cloudflare_cron_triggers():
 
 def test_main_builds_its_only_production_write_via_the_one_sql_builder_helper():
     """main() must never construct a raw INSERT/UPDATE/DELETE string
-    itself -- its only production write is run_d1(sql) where sql comes
-    from build_insert_analysis_sql() (separately confirmed, by
+    itself -- its only production write is run_d1_file(sql) where sql
+    comes from build_insert_analysis_sql() (separately confirmed, by
     test_insert_sql_targets_research_analyses_with_correct_columns, to
     target research_analyses only). This proves main() has no OTHER,
     independent write path to production that could target a different
-    table."""
+    table. The write goes through run_d1_file (file-based transport),
+    not run_d1 (argv-based, --command) -- see run_d1_file's own tests
+    for why: a full production report is too large for --command."""
     with open(os.path.join(_HERE, "run_experiment.py")) as f:
         src = f.read()
     main_start = src.index("def main():")
@@ -83,7 +89,136 @@ def test_main_builds_its_only_production_write_via_the_one_sql_builder_helper():
     assert "UPDATE " not in main_src
     assert "DELETE FROM" not in main_src
     assert "build_insert_analysis_sql(" in main_src
-    assert main_src.count("run_d1(") == 3  # 2 SELECT fetches + 1 final write via the builder's output
+    assert main_src.count("run_d1(") == 2  # exactly the 2 SELECT fetches
+    assert main_src.count("run_d1_file(") == 1  # exactly the 1 final write
+
+
+# ---- run_d1_file (E2BIG fix: production run 35510891642 failed with
+# `[Errno 7] Argument list too long: 'wrangler'` because the real
+# report's INSERT (~220KB, 21 sources x 5 horizons) was passed as a
+# single --command argv element) ----
+
+def _realistic_large_sql_payload():
+    """Approximates the real production INSERT's size and shape (a
+    single-row INSERT with an embedded, already-escaped JSON blob
+    containing many source/horizon test entries, each with the full
+    field set level2.tests actually carries) -- not a toy 100-character
+    string; the real production run 35510891642 that exposed E2BIG
+    produced a ~220KB INSERT from 21 sources x 5 horizons, each entry
+    carrying ~15 fields (source_key, horizon_hours, n, n_candidate_rows,
+    dropped_*, status, effect_size_r, ci_low, ci_high, p_raw,
+    sample_size_status, oos_split{...}, p_corrected, significant).
+    Also embeds an already-doubled apostrophe to prove run_d1_file
+    transports the SQL byte-for-byte, never re-escaping or otherwise
+    mutating it."""
+    test_entry = {
+        "source_key": "placeholder", "horizon_hours": 1, "n": 220, "n_candidate_rows": 500,
+        "dropped_missing_source": 0, "dropped_missing_outcome_row": 0, "dropped_unresolved_outcome": 280,
+        "status": "OK", "effect_size_r": 0.01, "ci_low": -0.1, "ci_high": 0.1, "p_raw": 0.5,
+        "sample_size_status": "OK",
+        "oos_split": {"n_discovery": 154, "n_validation": 66, "r_discovery": 0.01, "r_validation": 0.02, "sign_stable": True},
+        "p_corrected": 0.6, "significant": False, "note": "it''s fine",
+    }
+    # Mirrors the real report's actual sections at real production scale
+    # (21 sources x 5 horizons for level2.tests/level3; C(21,2)=210 pairs
+    # for redundancy.pairwise) so this fixture's total size is
+    # genuinely representative, not just a single inflated section.
+    fake_metric_json = json.dumps({
+        "level2_tests": {f"source_{i}|{h}h": {**test_entry, "source_key": f"source_{i}", "horizon_hours": h}
+                          for i in range(21) for h in (1, 3, 6, 12, 24)},
+        "level3": {f"source_{i}|{h}h": {**test_entry, "source_key": f"source_{i}", "horizon_hours": h}
+                   for i in range(21) for h in (1, 3, 6, 12, 24)},
+        "redundancy_pairwise": {f"source_{i}|source_{j}": {"correlation": 0.1, "note": "it''s fine"}
+                                 for i in range(21) for j in range(i + 1, 21)},
+    })
+    sql = (
+        "INSERT INTO research_analyses (analysis_ts, window_start_ts, window_end_ts, sample_size, "
+        "subject, metric_json, multiple_testing_correction, validation_status) VALUES "
+        f"(1, 1, 1, 500, 'EXP-005:source_effectiveness', '{fake_metric_json}', '{{}}', 'observation')"
+    )
+    return sql
+
+
+def test_realistic_payload_is_actually_large_enough_to_represent_production_scale():
+    # Sanity check on the test fixture itself: the real production
+    # report (21 sources x 5 horizons, plus redundancy pairwise) that
+    # exposed E2BIG produced a ~220KB INSERT. This fixture must be the
+    # same order of magnitude, not a toy string, or the regression
+    # tests below would not actually exercise the failure class that
+    # broke production run 35510891642.
+    assert len(_realistic_large_sql_payload()) > 100_000
+
+
+def test_run_d1_file_writes_sql_to_a_temp_file_byte_identical_to_input():
+    sql = _realistic_large_sql_payload()
+    written_path = {}
+
+    def fake_run(cmd, capture_output, text, check):
+        file_idx = cmd.index("--file")
+        path = cmd[file_idx + 1]
+        written_path["path"] = path
+        with open(path) as f:
+            assert f.read() == sql  # byte-identical -- never re-escaped or truncated
+        result = MagicMock()
+        result.stdout = json.dumps([{"results": []}])
+        return result
+
+    with patch.object(run_experiment.subprocess, "run", side_effect=fake_run):
+        run_experiment.run_d1_file(sql)
+
+    # Cleanup: the temp file must not survive a successful call.
+    assert not os.path.exists(written_path["path"])
+
+
+def test_run_d1_file_never_passes_the_sql_as_an_argv_element():
+    """The whole point of the fix: OLD behavior (run_d1 with --command)
+    put the full SQL text directly into the subprocess argv list, which
+    the OS rejects past a size limit (E2BIG). NEW behavior must never
+    put the SQL text itself into any argv element -- only a short file
+    path, via --file."""
+    sql = _realistic_large_sql_payload()
+
+    def fake_run(cmd, capture_output, text, check):
+        assert "--file" in cmd
+        assert "--command" not in cmd
+        for arg in cmd:
+            assert sql not in arg
+            assert len(arg) < 4096  # every argv element stays small regardless of report size
+        result = MagicMock()
+        result.stdout = json.dumps([{"results": []}])
+        return result
+
+    with patch.object(run_experiment.subprocess, "run", side_effect=fake_run):
+        run_experiment.run_d1_file(sql)
+
+
+def test_run_d1_file_cleans_up_temp_file_even_when_wrangler_fails():
+    sql = _realistic_large_sql_payload()
+    captured = {}
+
+    def fake_run(cmd, capture_output, text, check):
+        captured["path"] = cmd[cmd.index("--file") + 1]
+        raise subprocess.CalledProcessError(1, cmd)
+
+    with patch.object(run_experiment.subprocess, "run", side_effect=fake_run):
+        with pytest.raises(subprocess.CalledProcessError):
+            run_experiment.run_d1_file(sql)
+
+    # Failure must not leave a temp file behind, and must not swallow
+    # the error into a false success.
+    assert not os.path.exists(captured["path"])
+
+
+def test_run_d1_file_returns_parsed_results_like_run_d1():
+    sql = _realistic_large_sql_payload()
+
+    def fake_run(cmd, capture_output, text, check):
+        result = MagicMock()
+        result.stdout = json.dumps([{"results": [{"ok": 1}]}])
+        return result
+
+    with patch.object(run_experiment.subprocess, "run", side_effect=fake_run):
+        assert run_experiment.run_d1_file(sql) == [{"ok": 1}]
 
 
 def test_build_local_mirror_writes_are_scoped_to_its_own_function_not_run_d1():

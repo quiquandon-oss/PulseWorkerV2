@@ -13,7 +13,10 @@ RESEARCH ONLY. This script:
      (schema unchanged since PR1 -- .ai/migrations/0005_research_schema.sql),
      tagged with subject='EXP-005:source_effectiveness' so this experiment's
      own rows are unambiguously distinguishable from anything else that
-     table may ever hold.
+     table may ever hold. The generated INSERT is written to a private
+     temp file and applied via `wrangler d1 execute --file` (run_d1_file)
+     rather than `--command`, because the full report is too large for a
+     single subprocess argv element -- see run_d1_file's own docstring.
 
 It NEVER writes to history, btc_data, predictions, selection_decisions,
 research_events, research_event_evidence, or experiment_4_timesfm. Its
@@ -45,9 +48,11 @@ Failure handling: if anything fails, this script exits non-zero and
 writes NOTHING. It never falls back to a fake/partial/synthetic report.
 """
 import json
+import os
 import subprocess
 import sys
 import sqlite3
+import tempfile
 from datetime import datetime, timezone
 
 sys.path.insert(0, "research")
@@ -62,13 +67,55 @@ WINDOW_MS = sa.MAX_WINDOW_MS  # 90 days -- the existing bound, never widened for
 def run_d1(sql: str):
     """Executes a SQL statement against production D1 via wrangler, exactly
     the same mechanism exp004-timesfm/run_experiment.py and
-    export-learning-data.yml already use."""
+    export-learning-data.yml already use. Only used for this script's two
+    small, fixed-size SELECT fetches -- never for the large generated
+    INSERT (see run_d1_file)."""
     result = subprocess.run(
         ["wrangler", "d1", "execute", DATABASE_NAME, "--remote", "--json", "--command", sql],
         capture_output=True, text=True, check=True,
     )
     parsed = json.loads(result.stdout)
     return parsed[0]["results"] if parsed and parsed[0].get("results") is not None else []
+
+
+def run_d1_file(sql: str):
+    """Executes a SQL statement against production D1 via wrangler's
+    --file mechanism instead of --command.
+
+    A full production EXP-005 report (one row per source, plus a
+    per-source-per-horizon test entry -- 21 sources x 5 horizons in the
+    real run) serializes to a multi-hundred-KB INSERT statement.
+    Passing that as a single --command argv element exceeds the OS's
+    execve() argument-list size limit -- confirmed in production:
+    GitHub Actions workflow run 35510891642 failed with `[Errno 7]
+    Argument list too long: 'wrangler'` before wrangler even started,
+    fetching real data (500 history rows, 2070 btc_data rows)
+    successfully but persisting nothing.
+
+    `wrangler d1 execute --help` documents --file as a first-class,
+    equally-supported alternative to --command ("A .sql file to
+    ingest"), verified against the exact wrangler version this
+    project's workflow installs. Writing sql to a private temp file
+    sidesteps the argv limit entirely -- the file has no size
+    constraint comparable to argv, and the SQL text itself is
+    transported byte-for-byte, unmodified.
+
+    The temp file holds only the generated INSERT text (no
+    credentials) and is always removed -- on both success and
+    failure -- via the finally block; it is never left behind for
+    debugging, and never written into the repository."""
+    fd, path = tempfile.mkstemp(suffix=".sql", prefix="exp005_insert_")
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write(sql)
+        result = subprocess.run(
+            ["wrangler", "d1", "execute", DATABASE_NAME, "--remote", "--json", "--file", path],
+            capture_output=True, text=True, check=True,
+        )
+        parsed = json.loads(result.stdout)
+        return parsed[0]["results"] if parsed and parsed[0].get("results") is not None else []
+    finally:
+        os.remove(path)
 
 
 def sql_escape(value):
@@ -192,7 +239,7 @@ def main():
         sample_size=report["n_history_rows"], metric_json_obj=report,
         multiple_testing_correction=multiple_testing_correction, validation_status=validation_status,
     )
-    run_d1(sql)
+    run_d1_file(sql)
     print(f"[exp005] persisted analysis: sample_size={report['n_history_rows']} "
           f"sources_discovered={report['sources_discovered']} "
           f"sources_eligible={report['sources_eligible_for_level2plus']} "

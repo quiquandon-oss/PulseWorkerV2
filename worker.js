@@ -5810,8 +5810,16 @@ async function resolveBtcReactionAtHorizon(env, eventTs, horizonMs, anchorRow) {
 }
 
 // ---- LIVE RESEARCH DASHBOARD ----
+const BTC_SERIES_WINDOW_MS = 30 * 24 * 3600000; // 30 days -- confirmed against
+// real production data (~670 rows over 30 days) to be small and cheap, same
+// bounded-window convention every other query in this file already uses.
+// Added specifically so the mobile dashboard's BTC chart (24h/7d/30d range
+// toggle) can be rendered from a genuine series instead of only the single
+// latest point -- the ONE backend addition this UI redesign required,
+// since no existing endpoint exposed more than one BTC point. Still
+// SELECT-only, still the same existing btc_data table.
 async function getResearchLabDashboard(env) {
-  const [btcLatest, v1Latest, eventsCount, evidenceCount, latestEvidenceTs, recentEvents] = await Promise.all([
+  const [btcLatest, v1Latest, eventsCount, evidenceCount, latestEvidenceTs, recentEvents, btcSeries] = await Promise.all([
     env.DB.prepare('SELECT ts, btc_price FROM btc_data ORDER BY ts DESC LIMIT 1').first(),
     env.DB.prepare('SELECT ts, score FROM history ORDER BY ts DESC LIMIT 1').first(),
     env.DB.prepare('SELECT COUNT(*) AS n FROM research_events').first(),
@@ -5822,10 +5830,14 @@ async function getResearchLabDashboard(env) {
               (SELECT COUNT(*) FROM research_event_evidence ree WHERE ree.event_id = re.event_id) AS evidence_count
        FROM research_events re ORDER BY re.event_ts DESC LIMIT 5`
     ).all(),
+    env.DB.prepare(
+      `SELECT ts, btc_price FROM btc_data WHERE ts >= (SELECT MAX(ts) FROM btc_data) - ${BTC_SERIES_WINDOW_MS} ORDER BY ts ASC`
+    ).all(),
   ]);
   return {
     ok: true,
     btc_latest: btcLatest || null,
+    btc_price_series: (btcSeries && btcSeries.results) || [],
     v1_composite_latest: v1Latest ? { ts: v1Latest.ts, v1_composite: v1Latest.score } : null,
     research_events_count: eventsCount ? eventsCount.n : 0,
     research_event_evidence_count: evidenceCount ? evidenceCount.n : 0,
@@ -5974,225 +5986,673 @@ const RESEARCH_LAB_HTML = `<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <title>CryptoPulse Research Lab</title>
 <style>
   :root {
-    --bg: #0b0e14; --panel: #131720; --border: #232937; --text: #e6e9ef; --muted: #8a93a6;
-    --accent: #5b8cff; --verified: #2fae60; --strong: #4a90d9; --plausible: #c9922a; --unknown: #6b7280;
+    --bg: #05070d;
+    --bg-glow: radial-gradient(ellipse 120% 60% at 50% -10%, rgba(91,108,255,0.16), transparent 60%);
+    --panel: #0f1320;
+    --panel-2: #141a2b;
+    --border: #232a3d;
+    --text: #eef0f6;
+    --muted: #8b93ac;
+    --muted-2: #5f6784;
+    --accent: #6d7bff;
+    --accent-2: #9d6dff;
+    --verified: #35c17a;
+    --strong: #4a9fe0;
+    --plausible: #e0a83c;
+    --unknown: #6b7280;
+    --blocked: #e0553c;
+    --radius: 16px;
+    --radius-sm: 11px;
   }
-  * { box-sizing: border-box; }
-  body { margin: 0; background: var(--bg); color: var(--text); font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
-  header { padding: 16px 20px; border-bottom: 1px solid var(--border); display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px; }
-  header h1 { font-size: 18px; margin: 0; }
-  nav { display: flex; gap: 6px; flex-wrap: wrap; }
-  nav button { background: transparent; color: var(--muted); border: 1px solid var(--border); border-radius: 6px; padding: 6px 12px; cursor: pointer; font-size: 13px; }
-  nav button.active { color: var(--text); border-color: var(--accent); background: rgba(91,140,255,0.12); }
-  main { padding: 20px; max-width: 1100px; margin: 0 auto; }
-  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 12px; margin-bottom: 20px; }
-  .tile { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 14px; }
-  .tile .label { font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.04em; }
-  .tile .value { font-size: 22px; margin-top: 4px; word-break: break-word; }
-  table { width: 100%; border-collapse: collapse; font-size: 13px; }
-  th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--border); }
-  th { color: var(--muted); font-weight: 500; text-transform: uppercase; font-size: 11px; }
-  tr:hover { background: rgba(255,255,255,0.02); }
-  .table-wrap { overflow-x: auto; background: var(--panel); border: 1px solid var(--border); border-radius: 8px; }
-  .badge { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 11px; font-weight: 600; color: #0b0e14; }
-  .badge.VERIFIED { background: var(--verified); }
-  .badge.STRONGLY_SUPPORTED { background: var(--strong); }
-  .badge.PLAUSIBLE { background: var(--plausible); }
-  .badge.UNKNOWN, .badge.INSUFFICIENT_EVIDENCE, .badge.NO_DIRECT_TOPIC_AFFINITY { background: var(--unknown); }
-  .badge.DIRECT_TOPIC_RELEVANCE { background: var(--strong); }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body { max-width: 100%; overflow-x: hidden; }
+  body {
+    margin: 0; background: var(--bg) var(--bg-glow); background-attachment: fixed; color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    -webkit-font-smoothing: antialiased; padding-bottom: 32px;
+  }
+  a { color: var(--accent); }
+  header {
+    position: sticky; top: 0; z-index: 20; padding: 14px 16px 10px;
+    background: rgba(5,7,13,0.88); backdrop-filter: blur(10px); border-bottom: 1px solid var(--border);
+  }
+  .brand-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+  .brand { display: flex; align-items: center; gap: 8px; min-width: 0; }
+  .brand-title { font-size: 16px; font-weight: 800; letter-spacing: -0.01em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .ro-badge {
+    font-size: 10px; font-weight: 700; letter-spacing: 0.05em; color: var(--strong);
+    border: 1px solid rgba(74,159,224,0.4); background: rgba(74,159,224,0.1);
+    border-radius: 999px; padding: 2px 8px; flex-shrink: 0;
+  }
+  .subtitle { font-size: 12.5px; color: var(--muted); margin: 4px 0 10px; line-height: 1.4; }
+  .freshness { display: flex; align-items: center; gap: 6px; font-size: 11px; color: var(--muted-2); margin-bottom: 10px; }
+  .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--muted-2); flex-shrink: 0; }
+  .dot.fresh { background: var(--verified); box-shadow: 0 0 0 3px rgba(53,193,122,0.18); }
+  nav.tabs {
+    display: flex; gap: 6px; overflow-x: auto; scrollbar-width: none; -ms-overflow-style: none;
+    padding-bottom: 2px; margin: 0 -16px; padding-left: 16px; padding-right: 16px;
+  }
+  nav.tabs::-webkit-scrollbar { display: none; }
+  nav.tabs button {
+    flex-shrink: 0; background: transparent; color: var(--muted); border: 1px solid var(--border);
+    border-radius: 999px; padding: 7px 14px; cursor: pointer; font-size: 13px; font-weight: 600;
+    white-space: nowrap; min-height: 32px;
+  }
+  nav.tabs button.active { color: #fff; border-color: transparent; background: linear-gradient(135deg, var(--accent), var(--accent-2)); }
+  main { padding: 16px; max-width: 720px; margin: 0 auto; }
+  .card {
+    background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius);
+    padding: 16px; margin-bottom: 12px; box-shadow: 0 1px 0 rgba(255,255,255,0.02) inset, 0 8px 24px -16px rgba(0,0,0,0.6);
+  }
+  .card.glow { border-color: rgba(109,123,255,0.35); box-shadow: 0 0 0 1px rgba(109,123,255,0.12), 0 10px 30px -18px rgba(109,123,255,0.5); }
+  .card-title { font-size: 12px; font-weight: 800; letter-spacing: 0.06em; color: var(--muted); text-transform: uppercase; margin: 0 0 10px; display: flex; align-items: center; gap: 6px; }
+  .card p { margin: 0; line-height: 1.55; font-size: 13.5px; color: #cfd3e6; }
+  .card p + p { margin-top: 8px; }
+  h2.section-title { font-size: 13px; font-weight: 800; letter-spacing: 0.05em; color: var(--muted); text-transform: uppercase; margin: 22px 2px 10px; }
+  h2.section-title:first-child { margin-top: 4px; }
+
+  .grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; margin-bottom: 4px; }
+  @media (min-width: 480px) { .grid.metrics { grid-template-columns: repeat(4, 1fr); } }
+  .tile { background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 13px; }
+  .tile .m-label { font-size: 10.5px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em; font-weight: 700; }
+  .tile .m-value { font-size: 22px; font-weight: 800; margin: 4px 0 3px; letter-spacing: -0.01em; word-break: break-word; }
+  .tile .m-help { font-size: 11px; color: var(--muted-2); line-height: 1.35; }
+
+  .badge {
+    display: inline-flex; align-items: center; gap: 4px; padding: 3px 9px; border-radius: 999px;
+    font-size: 10.5px; font-weight: 700; letter-spacing: 0.02em; white-space: nowrap; color: #05070d;
+  }
+  .badge.b-verified { background: var(--verified); }
+  .badge.b-strong { background: var(--strong); color: #05070d; }
+  .badge.b-plausible { background: var(--plausible); }
+  .badge.b-unknown { background: var(--unknown); color: #fff; }
+  .badge.b-blocked { background: var(--blocked); color: #fff; }
+  .badge.b-outline { background: transparent; border: 1px solid var(--border); color: var(--muted); }
+
+  .stepper { position: relative; padding-left: 30px; }
+  .step { position: relative; padding-bottom: 18px; }
+  .step:last-child { padding-bottom: 0; }
+  .step::before {
+    content: ""; position: absolute; left: -21px; top: 22px; bottom: -4px; width: 2px; background: var(--border);
+  }
+  .step:last-child::before { display: none; }
+  .step-dot {
+    position: absolute; left: -30px; top: 1px; width: 18px; height: 18px; border-radius: 50%;
+    background: var(--panel-2); border: 2px solid var(--border); display: flex; align-items: center; justify-content: center;
+    font-size: 10px; font-weight: 800; color: var(--muted);
+  }
+  .step-dot.done { border-color: var(--verified); color: var(--verified); }
+  .step-dot.data { border-color: var(--strong); color: var(--strong); }
+  .step-dot.unknown { border-color: var(--unknown); color: var(--unknown); }
+  .step-dot.idle { border-color: var(--border); color: var(--muted-2); }
+  .step-name { font-size: 14px; font-weight: 700; margin-bottom: 3px; }
+  .step-desc { font-size: 12.5px; color: var(--muted); line-height: 1.5; }
+  .step-desc b { color: #cfd3e6; font-weight: 700; }
+
+  .flow { position: relative; padding-left: 30px; }
+  .flow-stage { position: relative; padding-bottom: 20px; }
+  .flow-stage:last-child { padding-bottom: 0; }
+  .flow-stage::before { content: ""; position: absolute; left: -21px; top: 24px; bottom: -6px; width: 2px; background: var(--border); }
+  .flow-stage:last-child::before { display: none; }
+  .flow-num {
+    position: absolute; left: -30px; top: 2px; width: 18px; height: 18px; border-radius: 6px;
+    background: var(--panel-2); border: 1px solid var(--border); display: flex; align-items: center; justify-content: center;
+    font-size: 10px; font-weight: 800; color: var(--muted);
+  }
+  .flow-title { font-size: 13.5px; font-weight: 800; letter-spacing: 0.02em; margin-bottom: 4px; }
+  .flow-desc { font-size: 12.5px; color: var(--muted); line-height: 1.5; margin-bottom: 4px; }
+  .flow-fact { font-size: 12px; color: #cfd3e6; }
+
+  .table-wrap { overflow-x: auto; background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius); }
+  table { width: 100%; border-collapse: collapse; font-size: 12.5px; min-width: 480px; }
+  th, td { text-align: left; padding: 9px 10px; border-bottom: 1px solid var(--border); }
+  th { color: var(--muted); font-weight: 700; text-transform: uppercase; font-size: 10.5px; }
+  tr:last-child td { border-bottom: none; }
+
+  .ev-card, .src-card, .item-card {
+    background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius-sm);
+    padding: 14px; margin-bottom: 10px;
+  }
+  .ev-card:active, .item-card:active { border-color: var(--accent); }
+  .ev-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 10px; }
+  .ev-id { font-size: 11px; color: var(--muted-2); font-weight: 700; }
+  .ev-cat { font-size: 15px; font-weight: 800; }
+  .ev-row { display: flex; justify-content: space-between; align-items: baseline; padding: 5px 0; border-top: 1px solid var(--border); }
+  .ev-row:first-of-type { border-top: none; }
+  .ev-row .k { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.04em; }
+  .ev-row .v { font-size: 13px; font-weight: 700; text-align: right; word-break: break-word; max-width: 60%; }
+  .tap-hint { text-align: center; font-size: 11px; color: var(--accent); font-weight: 700; margin-top: 10px; }
+
+  .empty { padding: 26px 16px; text-align: center; }
+  .empty .headline { font-size: 14px; font-weight: 700; margin-bottom: 6px; }
+  .empty .detail { font-size: 12.5px; color: var(--muted); line-height: 1.5; max-width: 320px; margin: 0 auto; }
+
+  .glossary { display: grid; grid-template-columns: 1fr; gap: 10px; }
+  @media (min-width: 480px) { .glossary { grid-template-columns: 1fr 1fr; } }
+  .gloss-card { background: var(--panel-2); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 12px; }
+  .gloss-title { font-size: 12px; font-weight: 800; letter-spacing: 0.03em; margin-bottom: 4px; }
+  .gloss-desc { font-size: 12px; color: var(--muted); line-height: 1.45; }
+
+  .back { background: none; border: none; color: var(--accent); cursor: pointer; font-size: 13px; font-weight: 700; margin-bottom: 12px; padding: 8px 0; min-height: 44px; display: flex; align-items: center; gap: 4px; }
+  .link-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+  a.article-link { font-size: 12.5px; font-weight: 700; word-break: break-word; }
+
+  .chart-ranges { display: flex; gap: 6px; margin-bottom: 10px; }
+  .chart-ranges button {
+    background: var(--panel-2); border: 1px solid var(--border); color: var(--muted); border-radius: 999px;
+    padding: 5px 12px; font-size: 12px; font-weight: 700; cursor: pointer; min-height: 32px;
+  }
+  .chart-ranges button.active { color: #fff; background: linear-gradient(135deg, var(--accent), var(--accent-2)); border-color: transparent; }
+  .chart-wrap { position: relative; width: 100%; }
+  .chart-wrap svg { width: 100%; height: auto; display: block; touch-action: pan-y; }
+  .chart-tooltip {
+    position: absolute; pointer-events: none; background: #05070d; border: 1px solid var(--border);
+    border-radius: 8px; padding: 6px 9px; font-size: 11px; white-space: nowrap; transform: translate(-50%, -110%);
+    box-shadow: 0 6px 16px rgba(0,0,0,0.4); display: none;
+  }
+  .chart-tooltip .tt-price { font-weight: 800; font-size: 12.5px; }
+  .chart-tooltip .tt-time { color: var(--muted); font-size: 10px; }
+  .chart-axis { font-size: 10px; fill: var(--muted-2); }
+
+  .timeline { display: flex; flex-direction: column; gap: 0; }
+  .tl-item { display: flex; gap: 12px; padding: 10px 0; border-top: 1px solid var(--border); }
+  .tl-item:first-child { border-top: none; }
+  .tl-label { flex-shrink: 0; width: 84px; font-size: 10.5px; font-weight: 800; letter-spacing: 0.04em; color: var(--accent); text-transform: uppercase; padding-top: 1px; }
+  .tl-body { font-size: 12.5px; color: #cfd3e6; line-height: 1.5; }
+
+  .callout { border: 1px solid rgba(224,168,60,0.3); background: rgba(224,168,60,0.08); border-radius: var(--radius-sm); padding: 12px 14px; font-size: 12.5px; line-height: 1.55; color: #f0dcae; }
+  .callout b { color: #ffe9b3; }
+
   .muted { color: var(--muted); }
-  .panel-title { font-size: 14px; color: var(--muted); margin: 24px 0 8px; text-transform: uppercase; letter-spacing: 0.04em; }
-  .empty { padding: 24px; text-align: center; color: var(--muted); }
-  a.link { color: var(--accent); }
-  .clickable { cursor: pointer; }
-  .back { background: none; border: none; color: var(--accent); cursor: pointer; font-size: 13px; margin-bottom: 12px; padding: 0; }
-  @media (max-width: 600px) { main { padding: 12px; } header { padding: 12px; } }
+  .skeleton { padding: 40px 16px; text-align: center; color: var(--muted); font-size: 13px; }
 </style>
 </head>
 <body>
 <header>
-  <h1>CryptoPulse Research Lab <span class="muted" style="font-size:12px;">read-only</span></h1>
-  <nav id="nav"></nav>
+  <div class="brand-row">
+    <div class="brand">
+      <span class="brand-title">CryptoPulse Research Lab</span>
+    </div>
+    <span class="ro-badge">READ-ONLY</span>
+  </div>
+  <p class="subtitle">Observe market events and the evidence collected around them.</p>
+  <div class="freshness" id="freshnessRow"><span class="dot" id="freshDot"></span><span id="freshText">Checking data freshness&hellip;</span></div>
+  <nav class="tabs" id="nav"></nav>
 </header>
 <main id="app"></main>
 <script>
 (function () {
-  const PAGES = ['Dashboard', 'Events', 'Evidence', 'Sources', 'Pipeline'];
-  const nav = document.getElementById('nav');
-  const app = document.getElementById('app');
-  let current = 'Dashboard';
-  let selectedEventId = null;
+  var PAGES = ['Dashboard', 'Events', 'Evidence', 'Sources', 'Pipeline'];
+  var nav = document.getElementById('nav');
+  var app = document.getElementById('app');
+  var current = 'Dashboard';
+  var selectedEventId = null;
+  var chartRange = '7d';
+  var lastDashboard = null;
 
-  function badge(text) {
-    const cls = String(text).replace(/[^A-Za-z]/g, '_').toUpperCase();
-    return '<span class="badge ' + cls + '">' + text + '</span>';
-  }
   function esc(s) {
-    return String(s === null || s === undefined ? '—' : s).replace(/[&<>"']/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+    return String(s === null || s === undefined || s === '' ? String.fromCharCode(8212) : s)
+      .replace(/[&<>"']/g, function (c) { return ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'})[c]; });
   }
-  function fmtTs(ts) { return ts ? new Date(ts).toISOString().replace('T', ' ').replace('Z', ' UTC') : '—'; }
-  function renderNav() {
-    nav.innerHTML = PAGES.map((p) => '<button data-page="' + p + '" class="' + (p === current ? 'active' : '') + '">' + p + '</button>').join('');
-    nav.querySelectorAll('button').forEach((b) => b.addEventListener('click', () => { current = b.dataset.page; selectedEventId = null; render(); }));
+  function fmtTs(ts) {
+    if (!ts) return String.fromCharCode(8212);
+    var d = new Date(ts);
+    return d.toISOString().slice(0, 16).replace('T', ', ') + ' UTC';
+  }
+  function fmtAgo(ts) {
+    if (!ts) return null;
+    var ms = Date.now() - ts;
+    if (ms < 0) return 'moments ago';
+    var m = Math.floor(ms / 60000), h = Math.floor(ms / 3600000), d = Math.floor(ms / 86400000);
+    if (d > 0) return d + 'd ago';
+    if (h > 0) return h + 'h ago';
+    if (m > 0) return m + 'm ago';
+    return 'moments ago';
+  }
+  function badge(text, cls) {
+    return '<span class="badge ' + (cls || 'b-outline') + '">' + esc(text) + '</span>';
+  }
+  function badgeForAffinity(status) {
+    if (status === 'DIRECT_TOPIC_RELEVANCE') return badge('DIRECT TOPIC RELEVANCE', 'b-strong');
+    if (status === 'NO_DIRECT_TOPIC_AFFINITY') return badge('NO DIRECT AFFINITY', 'b-unknown');
+    return badge(status, 'b-unknown');
+  }
+  function badgeForRelation(rel) {
+    if (rel === 'PRE_EVENT') return badge('PRE-EVENT', 'b-strong');
+    if (rel === 'SAME_WINDOW') return badge('SAME WINDOW', 'b-plausible');
+    if (rel === 'POST_EVENT') return badge('POST-EVENT', 'b-outline');
+    return badge(rel || 'UNKNOWN', 'b-unknown');
+  }
+  function tile(label, value, help) {
+    return '<div class="tile"><div class="m-label">' + esc(label) + '</div><div class="m-value">' + value +
+      '</div><div class="m-help">' + esc(help) + '</div></div>';
+  }
+  function emptyState(headline, detail) {
+    return '<div class="empty"><div class="headline">' + esc(headline) + '</div><div class="detail">' + esc(detail) + '</div></div>';
   }
   async function fetchJson(path) {
-    const res = await fetch(path);
+    var res = await fetch(path);
     return res.json();
   }
-  function tile(label, value) {
-    return '<div class="tile"><div class="label">' + esc(label) + '</div><div class="value">' + value + '</div></div>';
+
+  // ---- Next scheduled boundary: purely a client-side calculation from
+  // the PUBLICLY KNOWN, static cron pattern (0 */6 * * * UTC) -- not a
+  // live GitHub Actions query (that remains UNKNOWN throughout this
+  // page). GitHub Actions itself may run a scheduled workflow a little
+  // after this boundary (documented, best-effort behavior), so this is
+  // phrased as the earliest possible time, not a guarantee. ----
+  function nextScheduleBoundary() {
+    var now = new Date();
+    var next = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), Math.floor(now.getUTCHours() / 6) * 6 + 6, 0, 0));
+    return next;
   }
-  function emptyState(msg) { return '<div class="empty">' + esc(msg) + '</div>'; }
+
+  function renderNav() {
+    nav.innerHTML = PAGES.map(function (p) {
+      return '<button data-page="' + p + '" class="' + (p === current ? 'active' : '') + '">' + p + '</button>';
+    }).join('');
+    var btns = nav.querySelectorAll('button');
+    for (var i = 0; i < btns.length; i++) {
+      btns[i].addEventListener('click', function (e) {
+        current = e.currentTarget.dataset.page;
+        if (current !== 'Evidence') selectedEventId = null;
+        render();
+      });
+    }
+  }
+
+  function renderFreshness(dashboard) {
+    var dot = document.getElementById('freshDot');
+    var text = document.getElementById('freshText');
+    if (!dashboard || !dashboard.btc_latest) {
+      dot.className = 'dot';
+      text.textContent = 'No production data available yet';
+      return;
+    }
+    var ago = fmtAgo(dashboard.btc_latest.ts);
+    var ms = Date.now() - dashboard.btc_latest.ts;
+    dot.className = 'dot' + (ms < 6 * 3600000 ? ' fresh' : '');
+    text.textContent = 'BTC price data updated ' + ago;
+  }
+
+  // =====================================================================
+  // Mini SVG line chart -- vanilla, no library, per the project's
+  // no-new-dependency constraint. Descriptive only: shows what BTC price
+  // actually did over the selected window. No prediction, no trend line,
+  // no forecast.
+  // =====================================================================
+  function renderBtcChart(series, range) {
+    if (!series || series.length < 2) {
+      return emptyState('Not enough BTC data yet', 'A chart needs at least two price points in this window.');
+    }
+    var rangeMs = range === '24h' ? 86400000 : range === '30d' ? 2592000000 : 604800000;
+    var maxTs = series[series.length - 1].ts;
+    var pts = series.filter(function (p) { return p.ts >= maxTs - rangeMs; });
+    if (pts.length < 2) pts = series.slice(-2);
+    var w = 320, h = 130, padL = 44, padR = 10, padT = 10, padB = 20;
+    var minP = Math.min.apply(null, pts.map(function (p) { return p.btc_price; }));
+    var maxP = Math.max.apply(null, pts.map(function (p) { return p.btc_price; }));
+    if (minP === maxP) { minP -= 1; maxP += 1; }
+    var minTs = pts[0].ts, maxTs2 = pts[pts.length - 1].ts;
+    function x(ts) { return padL + (maxTs2 === minTs ? 0 : (ts - minTs) / (maxTs2 - minTs)) * (w - padL - padR); }
+    function y(p) { return padT + (1 - (p - minP) / (maxP - minP)) * (h - padT - padB); }
+    var d = pts.map(function (p, i) { return (i === 0 ? 'M' : 'L') + x(p.ts).toFixed(1) + ',' + y(p.btc_price).toFixed(1); }).join(' ');
+    var areaD = d + ' L' + x(pts[pts.length - 1].ts).toFixed(1) + ',' + (h - padB) + ' L' + x(pts[0].ts).toFixed(1) + ',' + (h - padB) + ' Z';
+    var svg = '<svg viewBox="0 0 ' + w + ' ' + h + '" preserveAspectRatio="none" id="btcSvg">' +
+      '<defs><linearGradient id="btcFill" x1="0" y1="0" x2="0" y2="1">' +
+      '<stop offset="0%" stop-color="#6d7bff" stop-opacity="0.35"/>' +
+      '<stop offset="100%" stop-color="#6d7bff" stop-opacity="0"/></linearGradient></defs>' +
+      '<path d="' + areaD + '" fill="url(#btcFill)" stroke="none"></path>' +
+      '<path d="' + d + '" fill="none" stroke="#8b93ff" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"></path>' +
+      '<text class="chart-axis" x="' + padL + '" y="' + (h - 4) + '">' + esc(fmtTs(pts[0].ts).split(',')[0]) + '</text>' +
+      '<text class="chart-axis" x="' + (w - padR) + '" y="' + (h - 4) + '" text-anchor="end">' + esc(fmtTs(pts[pts.length - 1].ts).split(',')[0]) + '</text>' +
+      '<text class="chart-axis" x="2" y="' + (padT + 8) + '">$' + Math.round(maxP).toLocaleString() + '</text>' +
+      '<text class="chart-axis" x="2" y="' + (h - padB) + '">$' + Math.round(minP).toLocaleString() + '</text>' +
+      '<circle id="btcDot" cx="0" cy="0" r="3.5" fill="#fff" stroke="#6d7bff" stroke-width="2" style="display:none"></circle>' +
+      '<line id="btcGuide" x1="0" y1="' + padT + '" x2="0" y2="' + (h - padB) + '" stroke="#374063" stroke-width="1" style="display:none"></line>' +
+      '</svg>';
+    setTimeout(function () {
+      var svgEl = document.getElementById('btcSvg');
+      var tooltip = document.getElementById('btcTooltip');
+      var dotEl = document.getElementById('btcDot');
+      var guideEl = document.getElementById('btcGuide');
+      if (!svgEl) return;
+      function handleMove(clientX) {
+        var rect = svgEl.getBoundingClientRect();
+        var relX = (clientX - rect.left) / rect.width * w;
+        var nearest = pts[0], nd = Infinity;
+        for (var i = 0; i < pts.length; i++) {
+          var dist = Math.abs(x(pts[i].ts) - relX);
+          if (dist < nd) { nd = dist; nearest = pts[i]; }
+        }
+        var px = x(nearest.ts), py = y(nearest.btc_price);
+        dotEl.setAttribute('cx', px); dotEl.setAttribute('cy', py); dotEl.style.display = 'block';
+        guideEl.setAttribute('x1', px); guideEl.setAttribute('x2', px); guideEl.style.display = 'block';
+        if (tooltip) {
+          tooltip.style.display = 'block';
+          tooltip.style.left = (px / w * 100) + '%';
+          tooltip.style.top = (py / h * 100) + '%';
+          tooltip.innerHTML = '<div class="tt-price">$' + Math.round(nearest.btc_price).toLocaleString() + '</div><div class="tt-time">' + esc(fmtTs(nearest.ts)) + '</div>';
+        }
+      }
+      function handleLeave() {
+        dotEl.style.display = 'none'; guideEl.style.display = 'none';
+        if (tooltip) tooltip.style.display = 'none';
+      }
+      svgEl.addEventListener('pointermove', function (e) { handleMove(e.clientX); });
+      svgEl.addEventListener('pointerleave', handleLeave);
+      svgEl.addEventListener('pointerdown', function (e) { handleMove(e.clientX); });
+    }, 0);
+    return '<div class="chart-wrap">' + svg + '<div class="chart-tooltip" id="btcTooltip"></div></div>';
+  }
+
+  function whatIsThisCard() {
+    return '<div class="card">' +
+      '<h2 class="card-title">What is this?</h2>' +
+      '<p>Research Lab is CryptoPulse\\'s observation area. It tracks significant BTC market events and collects public news evidence around them.</p>' +
+      '<p><b>It does not change the trading model.</b> Nothing here writes to, or affects, V1 or V2 predictions.</p>' +
+      '</div>';
+  }
+
+  function whereAreWeCard(d) {
+    var eventsCount = d.research_events_count, evidenceCount = d.research_event_evidence_count;
+    var latestEvidence = d.latest_evidence_collection_ts;
+    var steps = [
+      { name: 'Schedule', dotClass: 'done', dotChar: String.fromCharCode(10003),
+        desc: 'Configured to run automatically <b>every 6 hours</b>.' },
+      { name: 'Run tests', dotClass: 'unknown', dotChar: '?',
+        desc: 'Automated tests must pass before each run touches real data. Whether the most recent run\\'s tests passed is <b>UNKNOWN</b> to this page &mdash; GitHub Actions run history isn\\'t exposed here.' },
+      { name: 'Detect events', dotClass: 'data', dotChar: String(eventsCount),
+        desc: '<b>' + eventsCount + '</b> market event' + (eventsCount === 1 ? '' : 's') + ' recorded so far. Whether detection is running right now is <b>UNKNOWN</b>.' },
+      { name: 'Collect evidence', dotClass: 'data', dotChar: String(evidenceCount),
+        desc: '<b>' + evidenceCount + '</b> evidence row' + (evidenceCount === 1 ? '' : 's') + ' collected so far from public RSS feeds.' },
+      { name: 'Store evidence', dotClass: evidenceCount > 0 ? 'data' : 'idle', dotChar: evidenceCount > 0 ? String.fromCharCode(10003) : String.fromCharCode(9675),
+        desc: latestEvidence ? 'Latest evidence stored: <b>' + esc(fmtTs(latestEvidence)) + '</b>.' : 'No evidence has been stored yet.' },
+      { name: 'Analyse', dotClass: 'idle', dotChar: String.fromCharCode(9675),
+        desc: 'Not started. Meaningful source-level analysis needs far more accumulated evidence than exists today.' },
+    ];
+    var html = '<div class="card glow"><h2 class="card-title">Where are we?</h2><div class="stepper">';
+    for (var i = 0; i < steps.length; i++) {
+      var s = steps[i];
+      html += '<div class="step"><div class="step-dot ' + s.dotClass + '">' + s.dotChar + '</div>' +
+        '<div class="step-name">' + (i + 1) + '. ' + esc(s.name) + '</div>' +
+        '<div class="step-desc">' + s.desc + '</div></div>';
+    }
+    html += '</div></div>';
+    return html;
+  }
+
+  function whatHappensNextCard(d) {
+    var next = nextScheduleBoundary();
+    var nextStr = next.toISOString().slice(0, 16).replace('T', ', ') + ' UTC (earliest possible &mdash; GitHub Actions may run it a little later)';
+    return '<div class="card">' +
+      '<h2 class="card-title">What happens next?</h2>' +
+      '<p>The next scheduled run will check recent BTC data for significant market events. For eligible events, it will attempt to collect public RSS evidence and store it in the research database.</p>' +
+      '<p class="muted" style="font-size:12px;">Next scheduled check: <b style="color:#cfd3e6;">' + nextStr + '</b></p>' +
+      '<p>What to expect:</p>' +
+      '<ul style="margin:6px 0 0; padding-left: 18px; font-size: 12.5px; color: #cfd3e6; line-height: 1.6;">' +
+      '<li>New market events may appear.</li>' +
+      '<li>Evidence rows may begin appearing.</li>' +
+      '<li>Evidence is linked to an event by time window, not by proven causation.</li>' +
+      '<li>Older events may remain without evidence if they fall outside the collection window.</li>' +
+      '<li>Much more evidence is required before drawing any conclusion about source usefulness.</li>' +
+      '</ul></div>';
+  }
+
+  function howToReadCard() {
+    return '<div class="card"><h2 class="card-title">How to read this</h2><div class="glossary">' +
+      '<div class="gloss-card"><div class="gloss-title">BTC Price</div><div class="gloss-desc">Shows what BTC is doing.</div></div>' +
+      '<div class="gloss-card"><div class="gloss-title">V1 Composite</div><div class="gloss-desc">Shows the current V1 sentiment score.</div></div>' +
+      '<div class="gloss-card"><div class="gloss-title">Research Event</div><div class="gloss-desc">Marks a significant market movement detected by the system.</div></div>' +
+      '<div class="gloss-card"><div class="gloss-title">Evidence</div><div class="gloss-desc">Public information collected around an event.</div></div>' +
+      '</div><div class="callout" style="margin-top:12px;"><b>Important:</b> an event tells us <b>WHAT</b> happened in the market. Evidence helps investigate <b>WHY</b> it may have happened. Neither automatically proves that a source caused the move.</div></div>';
+  }
 
   async function renderDashboard() {
-    app.innerHTML = '<div class="empty">Loading…</div>';
-    const d = await fetchJson('/api/research-lab/dashboard');
-    if (!d.ok) { app.innerHTML = emptyState('Failed to load dashboard: ' + esc(d.error)); return; }
-    const btc = d.btc_latest ? '$' + Number(d.btc_latest.btc_price).toLocaleString() : 'No production evidence collected yet.';
-    const v1 = d.v1_composite_latest ? d.v1_composite_latest.v1_composite : 'No production evidence collected yet.';
-    let html = '<div class="grid">';
-    html += tile('BTC price (latest)', esc(btc));
-    html += tile('V1 composite (latest)', esc(v1));
-    html += tile('Research events', d.research_events_count);
-    html += tile('Evidence rows', d.research_event_evidence_count);
-    html += tile('Latest evidence collected', esc(fmtTs(d.latest_evidence_collection_ts)));
-    html += tile('Scheduled run status', badge('UNKNOWN') + '<div class="muted" style="font-size:11px;margin-top:4px;">' + esc(d.latest_scheduled_run_status) + '</div>');
-    html += '</div>';
-    html += '<div class="panel-title">Most recent events</div>';
+    app.innerHTML = '<div class="skeleton">Loading dashboard&hellip;</div>';
+    var d = await fetchJson('/api/research-lab/dashboard');
+    if (!d.ok) { app.innerHTML = emptyState('Could not load dashboard', String(d.error || '')); return; }
+    lastDashboard = d;
+    renderFreshness(d);
+    var btcVal = d.btc_latest ? '$' + Number(d.btc_latest.btc_price).toLocaleString() : String.fromCharCode(8212);
+    var v1Val = d.v1_composite_latest ? String(d.v1_composite_latest.v1_composite) : String.fromCharCode(8212);
+    var html = whatIsThisCard();
+    html += whereAreWeCard(d);
+    html += whatHappensNextCard(d);
+    html += '<h2 class="section-title">Key metrics</h2><div class="grid metrics">' +
+      tile('BTC Price', esc(btcVal), 'Latest observed BTC price') +
+      tile('V1 Composite', esc(v1Val), 'Current V1 sentiment score (0-100)') +
+      tile('Research Events', d.research_events_count, 'Market events detected') +
+      tile('Evidence Rows', d.research_event_evidence_count, 'News/evidence records collected') +
+      '</div>';
+    html += '<h2 class="section-title">Recent BTC movement</h2><div class="card">' +
+      '<div class="chart-ranges" id="rangeButtons">' +
+      ['24h', '7d', '30d'].map(function (r) { return '<button data-range="' + r + '" class="' + (r === chartRange ? 'active' : '') + '">' + r + '</button>'; }).join('') +
+      '</div><div id="chartHost">' + renderBtcChart(d.btc_price_series, chartRange) + '</div>' +
+      '<p class="muted" style="font-size:11px; margin-top:8px;">Descriptive only &mdash; shows past price action, not a prediction.</p></div>';
+    html += '<h2 class="section-title">Recent research events</h2>';
     if (!d.recent_events.length) {
-      html += emptyState('No production evidence collected yet.');
+      html += '<div class="card">' + emptyState('No production evidence collected yet.', 'No market events have been recorded yet. Check back after the pipeline has run.') + '</div>';
     } else {
-      html += '<div class="table-wrap"><table><thead><tr><th>Event ID</th><th>Event TS</th><th>Category</th><th>Direction</th><th>Evidence</th></tr></thead><tbody>';
-      for (const e of d.recent_events) {
-        html += '<tr><td>' + e.event_id + '</td><td>' + esc(fmtTs(e.event_ts)) + '</td><td>' + esc(e.category) + '</td><td>' + esc(e.direction) + '</td><td>' + e.evidence_count + '</td></tr>';
+      for (var i = 0; i < d.recent_events.length; i++) {
+        html += eventCard(d.recent_events[i], true);
       }
-      html += '</tbody></table></div>';
     }
+    html += howToReadCard();
+    html += '<div class="card"><h2 class="card-title">Important notes</h2>' +
+      '<p>Research Lab is <b>read-only</b>. It cannot change V1 weights, V2 predictions, or trigger any trade decision.</p>' +
+      '<p>Where this page cannot verify something (like a live GitHub Actions run), it says <b>UNKNOWN</b> instead of guessing.</p></div>';
     app.innerHTML = html;
+    var rBtns = document.querySelectorAll('#rangeButtons button');
+    for (var j = 0; j < rBtns.length; j++) {
+      rBtns[j].addEventListener('click', function (e) {
+        chartRange = e.currentTarget.dataset.range;
+        document.getElementById('chartHost').innerHTML = renderBtcChart(lastDashboard.btc_price_series, chartRange);
+        var all = document.querySelectorAll('#rangeButtons button');
+        for (var k = 0; k < all.length; k++) all[k].classList.toggle('active', all[k] === e.currentTarget);
+      });
+    }
+  }
+
+  function eventCard(e, clickable) {
+    var html = '<div class="ev-card' + (clickable ? '' : '') + '"' + (clickable ? ' data-event-id="' + e.event_id + '"' : '') + '>' +
+      '<div class="ev-head"><span class="ev-id">Event #' + e.event_id + '</span>' + badge(e.direction || String.fromCharCode(8212), e.direction === 'UP' ? 'b-verified' : 'b-blocked') + '</div>' +
+      '<div class="ev-cat">' + esc(e.category) + '</div>' +
+      '<div class="ev-row"><span class="k">Event time</span><span class="v">' + esc(fmtTs(e.event_ts)) + '</span></div>' +
+      (e.intensity !== undefined ? '<div class="ev-row"><span class="k">Intensity</span><span class="v">' + esc(e.intensity != null ? Number(e.intensity).toFixed(2) : String.fromCharCode(8212)) + '</span></div>' : '') +
+      '<div class="ev-row"><span class="k">Evidence</span><span class="v">' + e.evidence_count + '</span></div>' +
+      (clickable ? '<div class="tap-hint">Tap to inspect &rarr;</div>' : '') +
+      '</div>';
+    return html;
   }
 
   async function renderEvents() {
-    app.innerHTML = '<div class="empty">Loading…</div>';
-    const d = await fetchJson('/api/research-lab/events?limit=50&offset=0');
-    if (!d.ok) { app.innerHTML = emptyState('Failed to load events.'); return; }
-    if (!d.events.length) { app.innerHTML = emptyState('No production evidence collected yet.'); return; }
-    let html = '<div class="table-wrap"><table><thead><tr><th>Event ID</th><th>Event TS</th><th>Detection TS</th><th>Category</th>'
-      + '<th>Direction</th><th>Intensity</th><th>Trigger metric</th><th>Trigger threshold</th><th>Trigger version</th><th>Evidence</th></tr></thead><tbody>';
-    for (const e of d.events) {
-      html += '<tr class="clickable" data-event-id="' + e.event_id + '"><td>' + e.event_id + '</td><td>' + esc(fmtTs(e.event_ts)) + '</td><td>' + esc(fmtTs(e.detection_ts)) + '</td>'
-        + '<td>' + esc(e.category) + '</td><td>' + esc(e.direction) + '</td><td>' + esc(e.intensity) + '</td><td>' + esc(e.trigger_metric) + '</td>'
-        + '<td>' + esc(e.trigger_threshold) + '</td><td>' + esc(e.trigger_version) + '</td><td>' + e.evidence_count + '</td></tr>';
+    app.innerHTML = '<div class="skeleton">Loading events&hellip;</div>';
+    var d = await fetchJson('/api/research-lab/events?limit=50&offset=0');
+    if (!d.ok) { app.innerHTML = emptyState('Could not load events', ''); return; }
+    var html = '<div class="card"><h2 class="card-title">Event explorer</h2>' +
+      '<p>Each event is a significant BTC market movement detected from price data. Tap any event to see details and evidence.</p></div>';
+    if (!d.events.length) {
+      html += emptyState('No production evidence collected yet.', 'No market events have been recorded yet.');
+    } else {
+      for (var i = 0; i < d.events.length; i++) html += eventCard(d.events[i], true);
     }
-    html += '</tbody></table></div><div class="muted" style="margin-top:8px;font-size:12px;">Click a row to open it in Evidence.</div>';
     app.innerHTML = html;
-    app.querySelectorAll('tr[data-event-id]').forEach((tr) => tr.addEventListener('click', () => {
-      selectedEventId = tr.dataset.eventId; current = 'Evidence'; render();
-    }));
+    var cards = document.querySelectorAll('.ev-card[data-event-id]');
+    for (var j = 0; j < cards.length; j++) {
+      cards[j].addEventListener('click', function (e) {
+        selectedEventId = e.currentTarget.dataset.eventId;
+        current = 'Evidence';
+        render();
+      });
+    }
+  }
+
+  function reactionTile(label, r) {
+    if (!r || r.status !== 'OK') {
+      return tile(label + ' reaction', esc(String.fromCharCode(8212)), 'INSUFFICIENT EVIDENCE for this horizon');
+    }
+    var pct = r.return_pct;
+    var shown = (pct >= 0 ? '+' : '') + pct.toFixed(2) + '%';
+    return tile(label + ' reaction', esc(shown), 'Quality: ' + (r.quality || 'UNKNOWN').toLowerCase());
   }
 
   async function renderEvidence() {
-    app.innerHTML = '<div class="empty">Loading…</div>';
+    app.innerHTML = '<div class="skeleton">Loading&hellip;</div>';
     if (!selectedEventId) {
-      const d = await fetchJson('/api/research-lab/events?limit=1&offset=0');
-      if (d.ok && d.events.length) selectedEventId = d.events[0].event_id;
+      var list = await fetchJson('/api/research-lab/events?limit=1&offset=0');
+      if (list.ok && list.events.length) selectedEventId = list.events[0].event_id;
     }
-    if (!selectedEventId) { app.innerHTML = emptyState('No production evidence collected yet.'); return; }
-    const d = await fetchJson('/api/research-lab/event?event_id=' + encodeURIComponent(selectedEventId));
-    if (!d.ok) { app.innerHTML = emptyState('Event not found.'); return; }
-    let html = '<button class="back" id="backBtn">&larr; Back to Events</button>';
-    html += '<div class="grid">';
-    html += tile('Event ID', d.event.event_id);
-    html += tile('Category', esc(d.event.category));
-    html += tile('Direction', esc(d.event.direction));
-    html += tile('Intensity', esc(d.event.intensity));
-    html += tile('Event TS', esc(fmtTs(d.event.event_ts)));
-    html += tile('Detection TS', esc(fmtTs(d.event.detection_ts)));
-    html += tile('Trigger metric', esc(d.event.trigger_metric));
-    html += tile('Trigger threshold', esc(d.event.trigger_threshold));
-    html += tile('Trigger version', esc(d.event.trigger_version));
-    html += '</div>';
-
-    html += '<div class="panel-title">BTC reaction (deterministic, from persisted btc_data)</div><div class="grid">';
-    for (const label of ['6h', '12h', '24h']) {
-      const r = d.btc_reaction[label];
-      const shown = r.status === 'OK' ? (r.return_pct >= 0 ? '+' : '') + r.return_pct.toFixed(2) + '%' : 'INSUFFICIENT EVIDENCE';
-      const q = r.status === 'OK' ? badge(r.quality) : badge('UNKNOWN');
-      html += tile(label + ' reaction', esc(shown) + ' ' + q);
+    if (!selectedEventId) {
+      app.innerHTML = '<div class="card">' + emptyState('No production evidence collected yet.', 'No events exist yet to show evidence for.') + '</div>';
+      return;
     }
-    html += '</div>';
+    var d = await fetchJson('/api/research-lab/event?event_id=' + encodeURIComponent(selectedEventId));
+    if (!d.ok) { app.innerHTML = emptyState('Event not found', ''); return; }
+    var ev = d.event;
+    var html = '<button class="back" id="backBtn">&larr; Back to Events</button>';
 
-    html += '<div class="panel-title">Evidence articles</div>';
+    html += '<div class="card"><h2 class="card-title">What happened</h2>' +
+      '<div class="ev-row"><span class="k">Category</span><span class="v">' + esc(ev.category) + '</span></div>' +
+      '<div class="ev-row"><span class="k">Direction</span><span class="v">' + esc(ev.direction) + '</span></div>' +
+      '<div class="ev-row"><span class="k">Intensity</span><span class="v">' + esc(ev.intensity != null ? Number(ev.intensity).toFixed(2) : String.fromCharCode(8212)) + '</span></div>' +
+      '</div>';
+
+    html += '<div class="card"><h2 class="card-title">When</h2>' +
+      '<div class="ev-row"><span class="k">Event time</span><span class="v">' + esc(fmtTs(ev.event_ts)) + '</span></div>' +
+      '<div class="ev-row"><span class="k">Detected at</span><span class="v">' + esc(fmtTs(ev.detection_ts)) + '</span></div>' +
+      '</div>';
+
+    html += '<div class="card"><h2 class="card-title">Why was it detected?</h2>' +
+      '<div class="ev-row"><span class="k">Trigger metric</span><span class="v">' + esc(ev.trigger_metric) + '</span></div>' +
+      '<div class="ev-row"><span class="k">Threshold</span><span class="v">' + esc(ev.trigger_threshold) + '</span></div>' +
+      '<div class="ev-row"><span class="k">Detector version</span><span class="v">' + esc(ev.trigger_version) + '</span></div>' +
+      '</div>';
+
+    html += '<h2 class="section-title">Observed BTC reaction</h2><div class="grid metrics">' +
+      reactionTile('6h', d.btc_reaction['6h']) + reactionTile('12h', d.btc_reaction['12h']) + reactionTile('24h', d.btc_reaction['24h']) +
+      '</div><div class="callout" style="margin-top:8px; margin-bottom: 16px;">This event was detected from market data. It does not by itself identify the real-world cause of the move.</div>';
+
+    html += '<h2 class="section-title">Evidence</h2>';
     if (!d.evidence.length) {
-      html += emptyState('No production evidence collected yet.');
+      html += '<div class="card">' + emptyState('No production evidence collected yet.', 'What this means: the research pipeline has not yet stored qualifying news evidence for this event.') + '</div>';
     } else {
-      html += '<div class="table-wrap"><table><thead><tr><th>Publisher</th><th>Headline</th><th>Publication TS</th><th>Collection TS</th><th>Relation</th><th>Article</th></tr></thead><tbody>';
-      for (const ev of d.evidence) {
-        html += '<tr><td>' + esc(ev.publisher) + '</td><td>' + esc(ev.headline) + '</td><td>' + esc(fmtTs(ev.publication_ts)) + '</td>'
-          + '<td>' + esc(fmtTs(ev.collection_ts)) + '</td><td>' + badge(ev.evidence_relation) + '</td>'
-          + '<td><a class="link" href="' + esc(ev.article_url) + '" target="_blank" rel="noopener">open</a></td></tr>';
+      html += '<div class="card" style="padding:12px 14px;"><p style="font-size:12px;">Relationship describes when the article was published relative to the detected market event.</p></div>';
+      for (var i = 0; i < d.evidence.length; i++) {
+        var ev2 = d.evidence[i];
+        html += '<div class="item-card">' +
+          '<div class="link-row"><span style="font-weight:800; font-size:13px;">' + esc(ev2.publisher) + '</span>' + badgeForRelation(ev2.evidence_relation) + '</div>' +
+          '<p style="margin-top:8px; font-size:13.5px; font-weight:600;">' + esc(ev2.headline) + '</p>' +
+          '<div class="ev-row"><span class="k">Published</span><span class="v">' + esc(fmtTs(ev2.publication_ts)) + '</span></div>' +
+          '<div class="ev-row"><span class="k">Collected</span><span class="v">' + esc(fmtTs(ev2.collection_ts)) + '</span></div>' +
+          '<div style="margin-top:8px;"><a class="article-link" href="' + esc(ev2.article_url) + '" target="_blank" rel="noopener">Open article &rarr;</a></div>' +
+          '</div>';
       }
-      html += '</tbody></table></div>';
     }
     app.innerHTML = html;
-    const backBtn = document.getElementById('backBtn');
-    if (backBtn) backBtn.addEventListener('click', () => { current = 'Events'; render(); });
+    var backBtn = document.getElementById('backBtn');
+    if (backBtn) backBtn.addEventListener('click', function () { current = 'Events'; render(); });
   }
 
   async function renderSources() {
-    app.innerHTML = '<div class="empty">Loading…</div>';
-    const d = await fetchJson('/api/research-lab/sources');
-    if (!d.ok || !d.sources.length) { app.innerHTML = emptyState('No production evidence collected yet.'); return; }
-    let html = '<div class="muted" style="margin-bottom:12px;font-size:12px;">' + esc(d.note) + '</div>';
-    html += '<div class="table-wrap"><table><thead><tr><th>V1 source key</th><th>Affinity status</th><th>Observed event/source relationship</th></tr></thead><tbody>';
-    for (const s of d.sources) {
-      html += '<tr><td>' + esc(s.source_key) + '</td><td>' + badge(s.affinity_status) + '</td><td>' + badge(s.observed_event_source_relationship) + '</td></tr>';
+    app.innerHTML = '<div class="skeleton">Loading sources&hellip;</div>';
+    var d = await fetchJson('/api/research-lab/sources');
+    var html = '<div class="card"><h2 class="card-title">Sources</h2>' +
+      '<p>Affinity is a predefined topic classification. It is <b>NOT</b> a performance score and does <b>NOT</b> mean this source has been proven useful.</p></div>';
+    if (!d.ok || !d.sources.length) {
+      html += emptyState('No production evidence collected yet.', 'No source data is available yet.');
+      app.innerHTML = html;
+      return;
     }
-    html += '</tbody></table></div>';
+    for (var i = 0; i < d.sources.length; i++) {
+      var s = d.sources[i];
+      html += '<div class="src-card">' +
+        '<div style="font-weight:800; font-size:14px; margin-bottom:8px;">' + esc(s.source_key) + '</div>' +
+        '<div class="ev-row"><span class="k">Affinity</span><span class="v">' + badgeForAffinity(s.affinity_status) + '</span></div>' +
+        '<div class="ev-row"><span class="k">Observed relationship</span><span class="v">' + badge(s.observed_event_source_relationship, 'b-unknown') + '</span></div>' +
+        '</div>';
+    }
     app.innerHTML = html;
   }
 
+  function flowStage(num, title, desc, fact) {
+    return '<div class="flow-stage"><div class="flow-num">' + num + '</div>' +
+      '<div class="flow-title">' + esc(title) + '</div>' +
+      '<div class="flow-desc">' + desc + '</div>' +
+      (fact ? '<div class="flow-fact">' + fact + '</div>' : '') +
+      '</div>';
+  }
+
   async function renderPipeline() {
-    app.innerHTML = '<div class="empty">Loading…</div>';
-    const d = await fetchJson('/api/research-lab/pipeline-health');
-    if (!d.ok) { app.innerHTML = emptyState('Failed to load pipeline health.'); return; }
-    let html = '<div class="grid">';
-    html += tile('Research events', d.research_events_count);
-    html += tile('Evidence rows', d.research_event_evidence_count);
-    html += tile('Latest evidence collected', esc(fmtTs(d.latest_evidence_collection_ts)));
-    html += tile('Events without evidence', d.events_without_evidence.length);
-    html += tile('Feed/pipeline status', badge('UNKNOWN') + '<div class="muted" style="font-size:11px;margin-top:4px;">' + esc(d.feed_pipeline_status) + '</div>');
-    html += '</div>';
+    app.innerHTML = '<div class="skeleton">Loading pipeline health&hellip;</div>';
+    // Market data availability is a BTC-data fact, not an evidence-
+    // collection fact -- pipeline-health has no BTC field at all, so
+    // this also calls the EXISTING dashboard endpoint (no new endpoint)
+    // specifically to get a genuine btc_latest signal for that one
+    // stage, rather than inferring it from an unrelated timestamp.
+    var d = await fetchJson('/api/research-lab/pipeline-health');
+    var dash = await fetchJson('/api/research-lab/dashboard');
+    if (!d.ok) { app.innerHTML = emptyState('Could not load pipeline health', ''); return; }
+    var evCount = d.research_event_evidence_count, evtCount = d.research_events_count;
+    var marketDataBadge = (dash && dash.ok && dash.btc_latest) ? badge('AVAILABLE', 'b-verified') : badge('UNKNOWN', 'b-unknown');
+    var html = '<div class="card glow"><h2 class="card-title">Research flow</h2><div class="flow">' +
+      flowStage(1, 'Market data', 'BTC price and V1 sentiment data collected continuously.', marketDataBadge) +
+      flowStage(2, 'Event detection', 'Scans recent price data for statistically significant moves.', badge(evtCount + ' recorded', 'b-strong') + '&nbsp;' + badge('running now: UNKNOWN', 'b-unknown')) +
+      flowStage(3, 'News / RSS evidence', 'Attempts to fetch public RSS articles near each eligible event.', badge(evCount + ' collected', evCount > 0 ? 'b-strong' : 'b-unknown')) +
+      flowStage(4, 'Temporal matching', 'Articles are tagged by when they were published relative to the event.', badge(evCount + ' matched', evCount > 0 ? 'b-strong' : 'b-unknown')) +
+      flowStage(5, 'D1 research ledger', 'Events and evidence are persisted in the research database.', badge(evtCount + ' events / ' + evCount + ' evidence', 'b-strong')) +
+      flowStage(6, 'Source analysis', 'Would compare accumulated evidence across sources.', badge('NOT STARTED', 'b-unknown')) +
+      flowStage(7, 'V1 / V2 research', 'Would compare findings against V1/V2 model behavior.', badge('NOT STARTED', 'b-unknown')) +
+      flowStage(8, 'Human review', 'Any proposed change would be reviewed by a person before ever being applied.', badge('NOT STARTED', 'b-unknown')) +
+      '</div></div>';
 
-    html += '<div class="panel-title">Events without evidence (retry-eligible or aged out)</div>';
+    html += '<div class="grid metrics">' +
+      tile('Research Events', d.research_events_count, 'Total recorded') +
+      tile('Evidence Rows', d.research_event_evidence_count, 'Total collected') +
+      '</div>';
+
+    html += '<div class="card"><h2 class="card-title">Feed / schedule status</h2>' +
+      '<p>' + badge('UNKNOWN', 'b-unknown') + '&nbsp; ' + esc(d.feed_pipeline_status) + '</p></div>';
+
+    html += '<h2 class="section-title">Events without evidence</h2>';
     if (!d.events_without_evidence.length) {
-      html += emptyState('None — every persisted event currently has at least one evidence row, or none exist yet.');
+      html += '<div class="card">' + emptyState('None right now', 'Every persisted event currently has at least one evidence row, or no events exist yet.') + '</div>';
     } else {
-      html += '<div class="table-wrap"><table><thead><tr><th>Event ID</th><th>Category</th><th>Event TS</th></tr></thead><tbody>';
-      for (const e of d.events_without_evidence) {
-        html += '<tr><td>' + e.event_id + '</td><td>' + esc(e.category) + '</td><td>' + esc(fmtTs(e.event_ts)) + '</td></tr>';
+      for (var i = 0; i < d.events_without_evidence.length; i++) {
+        var e = d.events_without_evidence[i];
+        html += '<div class="item-card"><div class="ev-row"><span class="k">Event #' + e.event_id + '</span><span class="v">' + esc(e.category) + '</span></div>' +
+          '<div class="ev-row"><span class="k">Event time</span><span class="v">' + esc(fmtTs(e.event_ts)) + '</span></div></div>';
+      }
+    }
+
+    html += '<h2 class="section-title">Evidence by publisher</h2>';
+    if (!d.evidence_by_publisher.length) {
+      html += '<div class="card">' + emptyState('No production evidence collected yet.', '') + '</div>';
+    } else {
+      html += '<div class="table-wrap"><table><thead><tr><th>Publisher</th><th>Rows</th></tr></thead><tbody>';
+      for (var j = 0; j < d.evidence_by_publisher.length; j++) {
+        html += '<tr><td>' + esc(d.evidence_by_publisher[j].publisher) + '</td><td>' + d.evidence_by_publisher[j].n + '</td></tr>';
       }
       html += '</tbody></table></div>';
     }
 
-    html += '<div class="panel-title">Evidence by publisher</div>';
-    if (!d.evidence_by_publisher.length) {
-      html += emptyState('No production evidence collected yet.');
-    } else {
-      html += '<div class="table-wrap"><table><thead><tr><th>Publisher</th><th>Evidence rows</th></tr></thead><tbody>';
-      for (const p of d.evidence_by_publisher) {
-        html += '<tr><td>' + esc(p.publisher) + '</td><td>' + p.n + '</td></tr>';
-      }
-      html += '</tbody></table></div>';
-    }
+    html += '<h2 class="section-title">What to expect</h2><div class="card"><div class="timeline">' +
+      '<div class="tl-item"><div class="tl-label">Now</div><div class="tl-body">' + evtCount + ' event' + (evtCount === 1 ? '' : 's') + ' recorded, ' + evCount + ' evidence row' + (evCount === 1 ? '' : 's') + ' collected.</div></div>' +
+      '<div class="tl-item"><div class="tl-label">Next run</div><div class="tl-body">Checks for new eligible events every 6 hours.</div></div>' +
+      '<div class="tl-item"><div class="tl-label">Next few runs</div><div class="tl-body">Potential new events and evidence, if BTC moves significantly and RSS feeds return matching articles.</div></div>' +
+      '<div class="tl-item"><div class="tl-label">Later</div><div class="tl-body">Enough accumulated evidence may eventually allow source-level analysis. Not yet.</div></div>' +
+      '</div></div>';
+
     app.innerHTML = html;
   }
 
   async function render() {
     renderNav();
+    if (lastDashboard) renderFreshness(lastDashboard);
     if (current === 'Dashboard') return renderDashboard();
     if (current === 'Events') return renderEvents();
     if (current === 'Evidence') return renderEvidence();

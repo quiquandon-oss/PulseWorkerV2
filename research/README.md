@@ -1478,3 +1478,83 @@ deterministic reruns, missing-source complete-case handling, no writes,
 no network, no V1/V2/Worker references). 419/419 research tests,
 523/523 Vitest. No `persist_*` function exists in this module. No
 migration applied. All production access read-only.
+
+## Research Hierarchy and Experiment Governance
+
+Core hierarchy:
+
+```
+V1 sentiment coefficients
+        ↓
+V1 composite
+        ↓
+{V2, TimesFM, Chronos} as parallel challengers/probes
+        ↓
+BTC outcome
+        ↓
+research evaluation
+        ↓
+Does the evidence inform the V1 coefficient rework?
+```
+
+**Important:** the objective of experiments is NOT to establish an
+alternative model as an end in itself. Experiments generate evidence that
+may eventually inform the rework of the V1 sentiment coefficients.
+
+### Standing experiment classifications
+
+1. **Coefficient/source research** -- directly evaluates V1 sentiment
+   sources or coefficients.
+2. **Prediction challenger** -- tests an alternative predictive model
+   against the current system.
+3. **Incremental-information experiment** -- tests whether additional
+   information -- such as related assets or the existing V1 composite as
+   a covariate -- improves the current V1/V2 framework.
+4. **Diagnostic/control experiment** -- establishes baselines or
+   explains errors.
+
+### Governance rule
+
+V1/V2 production weights and logic remain untouched by experiments.
+Experimental results may later provide evidence relevant to the V1
+sentiment-coefficient rework, but no coefficient or production change is
+implied by an experiment itself.
+
+### Production feedback loop
+
+```
+Evidence
+  ↓
+V1 source/coefficient hypothesis
+  ↓
+controlled change
+  ↓
+out-of-sample validation
+  ↓
+human approval
+  ↓
+production
+```
+
+No experiment automatically authorizes a production change.
+
+### Foundation-model interpretation
+
+- TimesFM / Chronos are challenger or probe experiments.
+- They do not replace the V1 sentiment-coefficient research.
+- Chronos BTC-only is a prediction challenger.
+- Chronos BTC+ETH+LINK is an incremental-information experiment.
+- Chronos BTC+V1-composite is an incremental-information experiment
+  specifically relevant to the question of whether the existing V1
+  composite carries useful information for prediction.
+- The latter may inform the coefficient rework, but is not itself
+  coefficient/source research.
+
+### Isolation principle
+
+When comparing experiments, vary one causal factor at a time wherever
+possible. Do not simultaneously change model architecture, input
+variables, horizon, and evaluation window when the purpose is to
+attribute an observed difference.
+
+Research evidence must remain separate from production modification.

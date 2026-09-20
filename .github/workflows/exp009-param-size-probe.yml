@@ -1,0 +1,80 @@
+name: EXP-009 Param Size Probe (temporary, read-only, manual only)
+
+# TEMPORARY validation workflow -- confirms whether Cloudflare D1's REST
+# API accepts a bound parameter at the scale EXP-009's real report
+# reaches (~492KB against real production data today, and growing as
+# real-world events accumulate over the 90-day window) -- larger than
+# the ~230KB already verified for EXP-005. Exercises the real,
+# unmodified d1_api_query() from exp009-event-source-evidence/run_
+# experiment.py.
+#
+# READ-ONLY: the only SQL ever sent is `SELECT length(?)` -- no table
+# is read, written, or even referenced. Not part of EXP-009's real
+# automation, and removed from the branch immediately after use.
+#
+# Triggered on push (not workflow_dispatch): confirmed for EXP-005's
+# own probe that GitHub only allows workflow_dispatch for a workflow
+# file already on the default branch, which this temporary,
+# PR-branch-only probe deliberately never touches.
+on:
+  push:
+    branches:
+      - claude/affectionate-fermat-lmouit
+    paths:
+      - .github/workflows/exp009-param-size-probe.yml
+
+concurrency:
+  group: exp009-param-size-probe
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Probe D1 bound-parameter size via the real d1_api_query()
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          python3 - <<'PYEOF'
+          import importlib.util
+
+          spec = importlib.util.spec_from_file_location(
+              "run_experiment", "exp009-event-source-evidence/run_experiment.py"
+          )
+          run_experiment = importlib.util.module_from_spec(spec)
+          spec.loader.exec_module(run_experiment)
+
+          PARAM_SIZE = 600_000  # ~600KB: comfortably above the real ~492KB EXP-009 report
+          payload = "x" * PARAM_SIZE  # generated here, at runtime -- never hand-typed, never printed
+          sql = "SELECT length(?)"
+          expected = len(payload.encode("utf-8"))
+
+          print(f"sql_bytes={len(sql)}")
+          print(f"param_bytes={expected}")
+
+          results = run_experiment.d1_api_query(sql, [payload])
+          if not results:
+              print("returned_length=NONE")
+              raise SystemExit("D1 API returned no result rows")
+
+          returned = list(results[0].values())[0]
+          print(f"returned_length={returned}")
+          exact_match = (returned == expected)
+          print(f"exact_match={exact_match}")
+
+          if not exact_match:
+              raise SystemExit(f"MISMATCH: expected {expected}, got {returned}")
+
+          print("LARGE_PARAMETER_PROBE_RESULT=PASS")
+          PYEOF

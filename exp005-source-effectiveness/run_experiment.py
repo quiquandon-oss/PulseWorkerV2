@@ -13,10 +13,14 @@ RESEARCH ONLY. This script:
      (schema unchanged since PR1 -- .ai/migrations/0005_research_schema.sql),
      tagged with subject='EXP-005:source_effectiveness' so this experiment's
      own rows are unambiguously distinguishable from anything else that
-     table may ever hold. The generated INSERT is written to a private
-     temp file and applied via `wrangler d1 execute --file` (run_d1_file)
-     rather than `--command`, because the full report is too large for a
-     single subprocess argv element -- see run_d1_file's own docstring.
+     table may ever hold. The INSERT is executed via Cloudflare's D1 REST
+     API directly (d1_api_query), with metric_json passed as a BOUND
+     PARAMETER rather than embedded in the SQL text -- see d1_api_query's
+     own docstring for why (D1 enforces a ~100,000-byte maximum SQL
+     STATEMENT length, which the real ~220KB report exceeds regardless of
+     how the statement text reaches D1; a bound parameter's value is
+     transmitted as data, never parsed as SQL grammar, so it is not
+     subject to that limit).
 
 It NEVER writes to history, btc_data, predictions, selection_decisions,
 research_events, research_event_evidence, or experiment_4_timesfm. Its
@@ -52,13 +56,20 @@ import os
 import subprocess
 import sys
 import sqlite3
-import tempfile
+import urllib.error
+import urllib.request
 from datetime import datetime, timezone
 
 sys.path.insert(0, "research")
 import source_analysis as sa  # noqa: E402 -- UNCHANGED, reused as-is
 
 DATABASE_NAME = "sentiment-history"
+# Non-secret identifiers, already committed/used elsewhere in this project
+# (wrangler.toml's own account_id; the same database_id this project's D1
+# tooling already references) -- an account/database ID is not a
+# credential, only CLOUDFLARE_API_TOKEN is.
+CLOUDFLARE_ACCOUNT_ID = "f58e761fbc8e62dc404d8684290af264"
+D1_DATABASE_ID = "f91ca980-b886-423a-bd6f-f3baea46d181"
 SUBJECT = "EXP-005:source_effectiveness"
 HORIZONS = (1, 3, 6, 12, 24)  # source_analysis.py's own default -- reused, not narrowed
 WINDOW_MS = sa.MAX_WINDOW_MS  # 90 days -- the existing bound, never widened for this experiment
@@ -68,8 +79,9 @@ def run_d1(sql: str):
     """Executes a SQL statement against production D1 via wrangler, exactly
     the same mechanism exp004-timesfm/run_experiment.py and
     export-learning-data.yml already use. Only used for this script's two
-    small, fixed-size SELECT fetches -- never for the large generated
-    INSERT (see run_d1_file)."""
+    small, fixed-size SELECT fetches, whose SQL text is always small and
+    fixed-shape (window bounds only) -- never for the large generated
+    INSERT (see d1_api_query)."""
     result = subprocess.run(
         ["wrangler", "d1", "execute", DATABASE_NAME, "--remote", "--json", "--command", sql],
         capture_output=True, text=True, check=True,
@@ -78,52 +90,76 @@ def run_d1(sql: str):
     return parsed[0]["results"] if parsed and parsed[0].get("results") is not None else []
 
 
-def run_d1_file(sql: str):
-    """Executes a SQL statement against production D1 via wrangler's
-    --file mechanism instead of --command.
+def d1_api_query(sql: str, params: list):
+    """Executes a PARAMETERIZED SQL statement against production D1 via
+    Cloudflare's D1 REST API directly (POST .../d1/database/{id}/query),
+    instead of wrangler's --command/--file.
 
-    A full production EXP-005 report (one row per source, plus a
-    per-source-per-horizon test entry -- 21 sources x 5 horizons in the
-    real run) serializes to a multi-hundred-KB INSERT statement.
-    Passing that as a single --command argv element exceeds the OS's
-    execve() argument-list size limit -- confirmed in production:
-    GitHub Actions workflow run 35510891642 failed with `[Errno 7]
-    Argument list too long: 'wrangler'` before wrangler even started,
-    fetching real data (500 history rows, 2070 btc_data rows)
-    successfully but persisting nothing.
+    Both --command and --file embed a value directly as SQL TEXT, which
+    D1 must parse as part of the SQL statement itself -- and D1 enforces
+    a ~100,000-byte maximum SQL STATEMENT length (confirmed empirically:
+    a 99,141-byte statement succeeds, a 100,141-byte statement fails
+    with SQLITE_TOOBIG, using the real wrangler binary against D1). The
+    real EXP-005 report is a ~220,329-byte INSERT once metric_json is
+    embedded as a literal -- more than double that ceiling. This was
+    confirmed to fail in production twice: run 35510891642 (E2BIG from
+    the OS, before wrangler could even start, using --command) and a
+    pre-merge dry run against real production data (SQLITE_TOOBIG from
+    D1 itself, using --file). Neither transport mechanism changes how
+    much SQL TEXT D1 has to parse.
 
-    `wrangler d1 execute --help` documents --file as a first-class,
-    equally-supported alternative to --command ("A .sql file to
-    ingest"), verified against the exact wrangler version this
-    project's workflow installs. Writing sql to a private temp file
-    sidesteps the argv limit entirely -- the file has no size
-    constraint comparable to argv, and the SQL text itself is
-    transported byte-for-byte, unmodified.
+    A bound PARAMETER's value, by contrast, is transmitted as data
+    alongside the statement, never parsed as SQL grammar -- it is not
+    subject to the statement-length limit at all. This function keeps
+    the SQL text itself small and FIXED-SIZE regardless of how large
+    metric_json is; only the params list grows.
 
-    The temp file holds only the generated INSERT text (no
-    credentials) and is always removed -- on both success and
-    failure -- via the finally block; it is never left behind for
-    debugging, and never written into the repository."""
-    fd, path = tempfile.mkstemp(suffix=".sql", prefix="exp005_insert_")
+    Uses the existing CLOUDFLARE_API_TOKEN secret -- the same token
+    wrangler's own --remote execute already authenticates every D1
+    write in this project with -- and the project's existing, non-secret
+    CLOUDFLARE_ACCOUNT_ID/D1_DATABASE_ID. No new secret, no new
+    credential. The token is read once from the environment and used
+    only in the Authorization header; it is never included in any log
+    line, print statement, or exception message this function raises.
+
+    Fails loudly on anything but an unambiguous success: a network
+    error, a non-200 HTTP status, a top-level {"success": false}
+    envelope, or a missing/malformed result shape all raise -- there is
+    no partial-success path, and this function never returns normally
+    without D1 itself having reported success."""
+    token = os.environ["CLOUDFLARE_API_TOKEN"]
+    url = f"https://api.cloudflare.com/client/v4/accounts/{CLOUDFLARE_ACCOUNT_ID}/d1/database/{D1_DATABASE_ID}/query"
+    body = json.dumps({"sql": sql, "params": params}).encode("utf-8")
+    request = urllib.request.Request(
+        url, data=body, method="POST",
+        headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+    )
     try:
-        with os.fdopen(fd, "w") as f:
-            f.write(sql)
-        result = subprocess.run(
-            ["wrangler", "d1", "execute", DATABASE_NAME, "--remote", "--json", "--file", path],
-            capture_output=True, text=True, check=True,
-        )
-        parsed = json.loads(result.stdout)
-        return parsed[0]["results"] if parsed and parsed[0].get("results") is not None else []
-    finally:
-        os.remove(path)
+        with urllib.request.urlopen(request, timeout=60) as response:
+            status = response.status
+            response_body = response.read()
+    except urllib.error.HTTPError as e:
+        raise RuntimeError(f"D1 API request failed: HTTP {e.code} {e.read().decode('utf-8', 'replace')[:2000]}") from e
+    except urllib.error.URLError as e:
+        raise RuntimeError(f"D1 API request failed: {e.reason}") from e
 
+    try:
+        parsed = json.loads(response_body)
+    except json.JSONDecodeError as e:
+        raise RuntimeError(f"D1 API returned non-JSON response (HTTP {status})") from e
 
-def sql_escape(value):
-    if value is None:
-        return "NULL"
-    if isinstance(value, (int, float)):
-        return str(value)
-    return "'" + str(value).replace("'", "''") + "'"
+    if status != 200 or not parsed.get("success"):
+        raise RuntimeError(f"D1 API request did not succeed: HTTP {status} errors={parsed.get('errors')}")
+
+    result = parsed.get("result")
+    if not isinstance(result, list) or not result:
+        raise RuntimeError(f"D1 API response missing expected result list: {parsed}")
+
+    statement_result = result[0]
+    if not statement_result.get("success", True):
+        raise RuntimeError(f"D1 API statement did not succeed: {statement_result}")
+
+    return statement_result.get("results") or []
 
 
 def build_local_mirror(history_rows, btc_rows):
@@ -170,23 +206,32 @@ def make_json_safe(obj):
     return obj
 
 
-def build_insert_analysis_sql(analysis_ts, window_start_ts, window_end_ts, sample_size,
-                               metric_json_obj, multiple_testing_correction, validation_status):
+INSERT_ANALYSIS_SQL = (
+    "INSERT INTO research_analyses "
+    "(analysis_ts, window_start_ts, window_end_ts, sample_size, subject, metric_json, "
+    "multiple_testing_correction, validation_status) VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
+)
+
+
+def build_insert_analysis_params(analysis_ts, window_start_ts, window_end_ts, sample_size,
+                                  metric_json_obj, multiple_testing_correction, validation_status):
     """Mirrors research/source_analysis.py's own persist_analysis() column
     list and order EXACTLY (verified against that function's docstring
-    and INSERT statement) -- built independently here, with explicit
-    string-literal escaping, because persist_analysis() itself operates
-    on a live sqlite3 connection's .execute(), not a D1-over-wrangler
-    text command; this is the same "build the INSERT text separately
-    from the pure-python function that computed the values" pattern
-    research/live_evidence_pipeline.py already uses for
-    build_insert_event_sql/build_insert_evidence_sql."""
-    columns = ["analysis_ts", "window_start_ts", "window_end_ts", "sample_size",
-               "subject", "metric_json", "multiple_testing_correction", "validation_status"]
-    values = [analysis_ts, window_start_ts, window_end_ts, sample_size,
-              SUBJECT, json.dumps(make_json_safe(metric_json_obj)), multiple_testing_correction, validation_status]
-    return (f"INSERT INTO research_analyses ({', '.join(columns)}) VALUES "
-            f"({', '.join(sql_escape(v) for v in values)})")
+    and INSERT statement) -- built independently here because
+    persist_analysis() itself operates on a live sqlite3 connection's
+    .execute(), not D1's REST API.
+
+    Returns the params list for INSERT_ANALYSIS_SQL's ? placeholders, in
+    the same order. INSERT_ANALYSIS_SQL's own text is small and fixed
+    regardless of metric_json's size -- metric_json (however large) is
+    only ever a PARAM value here, never embedded in SQL text, so no
+    string-literal escaping is needed or performed at all (D1 handles
+    parameter binding itself, the same SQL-injection-safe mechanism
+    every other D1 caller in this project already relies on)."""
+    return [
+        analysis_ts, window_start_ts, window_end_ts, sample_size,
+        SUBJECT, json.dumps(make_json_safe(metric_json_obj)), multiple_testing_correction, validation_status,
+    ]
 
 
 def summarize_validation_status(report):
@@ -234,12 +279,12 @@ def main():
     multiple_testing_correction = json.dumps(report["level2"]["multiple_testing_correction"])
     validation_status = summarize_validation_status(report)
 
-    sql = build_insert_analysis_sql(
+    params = build_insert_analysis_params(
         analysis_ts=now_ms, window_start_ts=start_ts, window_end_ts=now_ms,
         sample_size=report["n_history_rows"], metric_json_obj=report,
         multiple_testing_correction=multiple_testing_correction, validation_status=validation_status,
     )
-    run_d1_file(sql)
+    d1_api_query(INSERT_ANALYSIS_SQL, params)
     print(f"[exp005] persisted analysis: sample_size={report['n_history_rows']} "
           f"sources_discovered={report['sources_discovered']} "
           f"sources_eligible={report['sources_eligible_for_level2plus']} "

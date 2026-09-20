@@ -6063,15 +6063,38 @@ async function getResearchLabRegistry(env) {
   const experiments = [];
   for (const row of (rows && rows.results) || []) {
     const provider = row.data_source_table ? LIVE_METRIC_PROVIDERS[row.data_source_table] : null;
-    const live = provider
-      ? await provider(env, row.required_sample)
-      : {
-          current_sample_size: 'NOT_STARTED',
+    let live;
+    if (!provider) {
+      // No live data source registered at all -- this experiment has
+      // genuinely not started accumulating data.
+      live = {
+        current_sample_size: 'NOT_STARTED',
+        current_measured_result: 'NOT_AVAILABLE',
+        oos_result: 'NOT_AVAILABLE',
+        confidence_evidence_maturity: 'UNKNOWN',
+        last_updated: row.updated_ts,
+      };
+    } else {
+      try {
+        live = await provider(env, row.required_sample);
+      } catch (err) {
+        // A live-metric provider failing (transient D1 error, a future
+        // schema mismatch, etc.) must degrade ONLY this one experiment,
+        // never the whole registry response -- see the adversarial audit
+        // that found this endpoint previously returned HTTP 500 for
+        // every experiment when just one provider threw. Deliberately
+        // NOT_AVAILABLE here, not NOT_STARTED: this experiment HAS
+        // started and has a live data source -- the honest claim is
+        // "couldn't be computed right now", never "hasn't begun".
+        live = {
+          current_sample_size: 'NOT_AVAILABLE',
           current_measured_result: 'NOT_AVAILABLE',
           oos_result: 'NOT_AVAILABLE',
           confidence_evidence_maturity: 'UNKNOWN',
           last_updated: row.updated_ts,
         };
+      }
+    }
     experiments.push({ ...row, ...live });
   }
   return { ok: true, experiments };

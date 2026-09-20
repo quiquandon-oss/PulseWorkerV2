@@ -1520,6 +1520,22 @@ Experimental results may later provide evidence relevant to the V1
 sentiment-coefficient rework, but no coefficient or production change is
 implied by an experiment itself.
 
+### Migration governance
+
+A committed migration file (`.ai/migrations/*.sql`) is the reviewed
+source of truth for any schema or seed data change. When a migration
+must be applied to production out-of-band (before or alongside its own
+PR, per this project's established convention — e.g. migration 0002),
+apply the file's own exact content, not a separately re-typed
+equivalent. Two manually-written copies of the same SQL text WILL
+drift, silently, from each other — this happened for real with
+migration 0010's seed data (four of five rows' free-text fields
+differed from the committed file after being re-typed by hand into the
+production tool), and was only caught by a later adversarial audit that
+compared the two byte-for-byte. Before treating an out-of-band migration
+as done, verify production against the committed file's own text, not
+against memory of having typed "the same thing."
+
 ### Production feedback loop
 
 ```

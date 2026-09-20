@@ -369,6 +369,96 @@ describe('Research Lab — read-only research API helpers', () => {
       const result = await scope.getResearchLabRegistry({ DB: db });
       expect(result).toEqual({ ok: true, experiments: [] });
     });
+
+    it('a throwing EXP-004 provider degrades ONLY that experiment -- the registry response still succeeds and other experiments are still returned (adversarial-audit fix)', async () => {
+      // Only ONE response is supplied for TWO expected D1 calls (the
+      // registry SELECT, then EXP-004's own live-metric query) --
+      // makeDb's own fake throws "No fake response configured" on the
+      // second, unconfigured call, exactly simulating a real D1/provider
+      // failure without needing a second fake implementation.
+      const db = makeDb([
+        { all: { results: [
+          registryRow({ experiment_id: 'EXP-004', data_source_table: 'experiment_4_timesfm', required_sample: 30, updated_ts: 42 }),
+          registryRow({ experiment_id: 'EXP-005' }),
+        ] } },
+        // deliberately no second response -> the live provider throws
+      ]);
+      const result = await scope.getResearchLabRegistry({ DB: db });
+      expect(result.ok).toBe(true); // whole-endpoint success preserved
+      expect(result.experiments).toHaveLength(2); // EXP-005 still present
+      const exp004 = result.experiments.find((e) => e.experiment_id === 'EXP-004');
+      const exp005 = result.experiments.find((e) => e.experiment_id === 'EXP-005');
+      // Degraded, truthful, and NOT "NOT_STARTED" -- EXP-004 has genuinely
+      // started; the honest claim is "could not be computed right now".
+      expect(exp004.current_sample_size).toBe('NOT_AVAILABLE');
+      expect(exp004.current_measured_result).toBe('NOT_AVAILABLE');
+      expect(exp004.oos_result).toBe('NOT_AVAILABLE');
+      expect(exp004.confidence_evidence_maturity).toBe('UNKNOWN');
+      expect(exp004.last_updated).toBe(42); // falls back to the row's own metadata, never fabricated
+      // EXP-005 (no data_source_table at all) is completely unaffected by
+      // EXP-004's provider throwing.
+      expect(exp005.current_sample_size).toBe('NOT_STARTED');
+    });
+
+    it('EXP-004 succeeding is unaffected by the try/catch -- normal live metrics still flow through unchanged', async () => {
+      const db = makeDb([
+        { all: { results: [registryRow({ experiment_id: 'EXP-004', data_source_table: 'experiment_4_timesfm', required_sample: 5, updated_ts: 1 })] } },
+        { all: { results: [
+          { horizon_hours: 12, total: 10, resolved: 10, correct: 6, latest_activity_ts: 555 },
+          { horizon_hours: 24, total: 10, resolved: 8, correct: 4, latest_activity_ts: 555 },
+        ] } },
+      ]);
+      const result = await scope.getResearchLabRegistry({ DB: db });
+      const exp = result.experiments[0];
+      expect(exp.confidence_evidence_maturity).toBe('ACCUMULATING');
+      expect(exp.oos_result.combined_correct_of_resolved).toBe('10/18');
+    });
+
+    it('experiment_4_timesfm with zero rows is a safe, honest state, never a crash (empty-data audit finding)', async () => {
+      const db = makeDb([
+        { all: { results: [registryRow({ experiment_id: 'EXP-004', data_source_table: 'experiment_4_timesfm', required_sample: 30, updated_ts: 7 })] } },
+        { all: { results: [] } }, // experiment_4_timesfm genuinely has zero rows
+      ]);
+      const result = await scope.getResearchLabRegistry({ DB: db });
+      expect(result.ok).toBe(true);
+      const exp = result.experiments[0];
+      expect(exp.current_sample_size).toEqual({ total_forecasts: 0, total_resolved: 0, by_horizon: [] });
+      expect(exp.current_measured_result).toBe('NOT_AVAILABLE');
+      expect(exp.oos_result).toBe('INSUFFICIENT_SAMPLE');
+      expect(exp.confidence_evidence_maturity).toBe('INSUFFICIENT_SAMPLE');
+      expect(exp.last_updated).toBe(null);
+    });
+
+    it('a malformed registry row (missing optional fields, garbage data_source_table) never crashes the endpoint, never injects into SQL, and never fabricates a live result', async () => {
+      const db = makeDb([
+        { all: { results: [
+          // Missing required_sample entirely (undefined, not null), and a
+          // data_source_table value shaped like a SQL-injection attempt --
+          // this must be safe because data_source_table is only ever used
+          // as a JS object-property lookup key (LIVE_METRIC_PROVIDERS[...]),
+          // never concatenated into any SQL string (see worker.js).
+          registryRow({
+            experiment_id: 'EXP-999', required_sample: undefined,
+            data_source_table: "experiment_4_timesfm; DROP TABLE research_experiment_registry; --",
+          }),
+        ] } },
+        // No further response is configured -- if the malicious
+        // data_source_table string were EVER used to look up a real
+        // provider (or interpolated into SQL and executed), this test
+        // would fail with "No fake response configured" or a thrown
+        // error; instead the unrecognized key correctly finds no
+        // provider at all and the static fallback below is used, with
+        // ZERO further D1 calls issued.
+      ]);
+      const result = await scope.getResearchLabRegistry({ DB: db });
+      expect(result.ok).toBe(true);
+      const exp = result.experiments[0];
+      expect(exp.current_sample_size).toBe('NOT_STARTED');
+      expect(exp.current_measured_result).toBe('NOT_AVAILABLE');
+      expect(exp.oos_result).toBe('NOT_AVAILABLE');
+      expect(exp.confidence_evidence_maturity).toBe('UNKNOWN');
+      expect(db.calls).toHaveLength(1); // only the registry SELECT itself -- no second call was ever attempted
+    });
   });
 
   describe('affinity classification data integrity', () => {

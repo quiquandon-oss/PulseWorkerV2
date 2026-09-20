@@ -47,15 +47,27 @@ existing redundancy, temporal, or relevance logic)
   computation and the ONLY redundancy threshold in this project. This
   module supplies the correctly-aligned observation matrix that
   function requires; it never recomputes a correlation itself.
-- `evidence_collector.SAME_WINDOW_TOLERANCE_MS` (1 hour) -- the
-  project's one existing "same window" timing tolerance, reused
-  verbatim for DIFFERENT_TIMING rather than inventing a new constant
-  (no other project-defined timing-tolerance constant exists that
-  fits this purpose -- `event_source_relevance.py`'s own PRE_EVENT/
-  SAME_WINDOW/POST_EVENT vocabulary is deliberately NOT reused here,
-  since that is a one-source-vs-one-EVENT classification, while this
-  engine compares two SOURCES against each other with no event
-  required at all -- see Section 10 of the design instructions).
+- Timing tolerance: audit finding F1 (independent audit of commit
+  01cbc70) established that `evidence_collector.SAME_WINDOW_TOLERANCE_MS`
+  answers a DIFFERENT question -- how close an evidence article's
+  publication time is to the ONE EVENT it is about -- from what this
+  engine needs: how close two SOURCES' OWN `information_available_at`
+  values are to EACH OTHER, with no event involved at all. Reusing the
+  same numeric value for a different research question was accepted
+  too readily in the first build and is corrected here: this module
+  now defines its own, distinctly-named `SOURCE_DIALOGUE_TIMING_
+  TOLERANCE_MS`, explicitly marked PROVISIONAL / NOT EMPIRICALLY
+  VALIDATED (see that constant's own docstring). A project-wide search
+  for an existing constant that already matches this exact semantic
+  (source-to-source information-availability gap) found none --
+  `EVIDENCE_MATCH_TOLERANCE_MS` (error_classification.py) is a fuzzy
+  event-ID matching tolerance, not a source-timing one; every other
+  `*_MS` constant in research/ bounds an analysis WINDOW, not a
+  pairwise gap. `event_source_relevance.py`'s own PRE_EVENT/SAME_
+  WINDOW/POST_EVENT vocabulary is still deliberately not reused here
+  either, for the same reason as before -- it is a one-source-vs-one-
+  EVENT classification, while this engine compares two SOURCES with no
+  event required.
 - `REDUNDANCY_UNRESOLVED` / `NO_STRONG_PAIRWISE_REDUNDANCY_DETECTED` --
   the exact terminology `hypothesis_gate.py`'s own v2 correction
   already established (see that module's "Source redundancy caveat"
@@ -107,13 +119,28 @@ Golden rules (same discipline as every other research/ module)
 - A missing `information_available_at` is never guessed at via
   `collection_ts`, `observation_time`, or any other substitute --
   always `INSUFFICIENT_EVIDENCE`.
+- A malformed (non-numeric, or `bool`) `information_available_at`/
+  `observation_time` degrades to `INSUFFICIENT_EVIDENCE`, never an
+  uncaught exception (audit finding F3) -- a single malformed
+  observation from a real future provider must never be able to crash
+  an entire batch comparison run.
+- When a comparison window (`window_start`/`window_end`) is supplied,
+  BOTH observations' own `observation_time` (never
+  `information_available_at`, a different axis entirely -- see
+  `classify_relationship`'s own docstring) must fall inside it,
+  inclusive on both ends, or the result is `INSUFFICIENT_EVIDENCE`
+  (audit finding F2 -- previously accepted but never enforced).
+- A duplicate `observation_time` within one series is rejected
+  (raises) rather than silently resolved by picking one value over the
+  other -- audit finding F4: silently overwriting would change the
+  statistical population fed to `pairwise_source_redundancy()` without
+  any visible trace.
 """
 import sys
 import os
 
 sys.path.insert(0, os.path.dirname(__file__))
 import source_analysis as sa  # noqa: E402 -- UNCHANGED, reused for redundancy only
-from evidence_collector import SAME_WINDOW_TOLERANCE_MS  # noqa: E402 -- UNCHANGED, reused timing tolerance
 
 RELATIONSHIP_LABELS = (
     "INSUFFICIENT_EVIDENCE",
@@ -132,6 +159,36 @@ _VALID_DIRECTIONS = ("UP", "DOWN")
 _SUPPORTING_PAIRS = {("UP", "UP"), ("DOWN", "DOWN")}
 _CONTRADICTING_PAIRS = {("UP", "DOWN"), ("DOWN", "UP")}
 
+# Audit finding F1: NOT the same concept as evidence_collector.SAME_
+# WINDOW_TOLERANCE_MS (an event-anchored evidence-publication
+# tolerance -- see module docstring). This is a distinct, source-to-
+# source information-availability tolerance with its own name.
+#
+# PROVISIONAL / NOT EMPIRICALLY VALIDATED: a project-wide search for an
+# existing constant matching THIS exact semantic (how far apart two
+# independent sources' own publication times can be while still
+# counting as "the same information environment" for a directional
+# comparison) found none. The 1-hour value below is carried over from
+# SAME_WINDOW_TOLERANCE_MS only as a starting placeholder -- it is NOT
+# a discovered or validated figure for this new question, and must not
+# be presented as one. Revisit with real cross-source timing data
+# (e.g. once EIA/GDELT pass primary verification and real observations
+# exist) before this tolerance is treated as settled.
+SOURCE_DIALOGUE_TIMING_TOLERANCE_MS = 1 * 3600000  # PROVISIONAL, see above
+
+
+def _is_valid_timestamp(value):
+    """True only for a real numeric epoch-ms value. `bool` is
+    deliberately excluded despite being an `int` subclass in Python
+    (`isinstance(True, int) is True`) -- a boolean can never be a
+    legitimate timestamp, and silently accepting `True`/`False` as 1/0
+    would be exactly the kind of silent coercion this module must not
+    do (audit finding F3). Negative numeric values are NOT rejected --
+    nothing in this module's contract restricts timestamps to
+    non-negative epoch values, and rejecting them would be inventing a
+    new constraint this engine has no basis to assert."""
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
+
 
 # =====================================================================
 # Temporal eligibility -- the one gate everything else depends on
@@ -139,35 +196,78 @@ _CONTRADICTING_PAIRS = {("UP", "DOWN"), ("DOWN", "UP")}
 
 def is_eligible(information_available_at, information_cutoff):
     """An observation is eligible only if information_available_at is
-    present AND <= information_cutoff (inclusive -- matches this
-    engine's own explicit "as-of" contract; deliberately NOT the same
-    as evidence_temporal.is_predictive_eligible()'s strict `<`, which
-    answers a different question -- prediction-time eligibility, not a
-    general as-of cutoff -- so it is not reused here). Never guesses
-    from collection_ts, observation_time, or any other field when
-    information_available_at itself is missing."""
+    present, a valid numeric timestamp, AND <= information_cutoff
+    (inclusive -- matches this engine's own explicit "as-of" contract;
+    deliberately NOT the same as evidence_temporal.is_predictive_
+    eligible()'s strict `<`, which answers a different question --
+    prediction-time eligibility, not a general as-of cutoff -- so it is
+    not reused here). Never guesses from collection_ts, observation_
+    time, or any other field when information_available_at itself is
+    missing. A malformed (non-numeric, or bool) value is treated as
+    ineligible rather than raising (audit finding F3)."""
     if information_available_at is None or information_cutoff is None:
         return False
+    if not _is_valid_timestamp(information_available_at) or not _is_valid_timestamp(information_cutoff):
+        return False
     return information_available_at <= information_cutoff
+
+
+def _within_window(observation_time, window_start, window_end):
+    """True if observation_time falls inside [window_start, window_end]
+    inclusive -- the audit's own required semantics (F2): window
+    membership is tested against observation_time (the period an
+    observation DESCRIBES), never information_available_at (when it
+    became knowable) -- the two are independent axes, exactly as
+    build_redundancy_matrix already treats them for the redundancy
+    leg. A malformed/missing observation_time, or a malformed/missing
+    window bound, degrades to "not within" (fails closed) rather than
+    raising."""
+    if window_start is None or window_end is None:
+        return True  # no window supplied -- nothing to enforce
+    if not _is_valid_timestamp(observation_time) or not _is_valid_timestamp(window_start) or not _is_valid_timestamp(window_end):
+        return False
+    return window_start <= observation_time <= window_end
 
 
 # =====================================================================
 # 1. Timing/direction relationship -- single pair, single window
 # =====================================================================
 
-def classify_relationship(obs_a, obs_b, information_cutoff, timing_tolerance_ms=SAME_WINDOW_TOLERANCE_MS):
-    """Returns one of RELATIONSHIP_LABELS. Order of checks matters and
-    is exactly the priority the design instructions specify: missing ->
-    ineligible (future or absent timestamp) -> timing -> direction.
-    Never classifies SUPPORTING/CONTRADICTING unless both observations
-    are eligible, temporally aligned within tolerance, AND both carry a
-    valid UP/DOWN direction."""
+def classify_relationship(
+    obs_a, obs_b, information_cutoff,
+    timing_tolerance_ms=SOURCE_DIALOGUE_TIMING_TOLERANCE_MS,
+    window_start=None, window_end=None,
+):
+    """Returns one of RELATIONSHIP_LABELS. Order of checks (audit
+    finding F2 added the window-membership step; everything else
+    unchanged from the first build):
+      1. missing observation -> INSUFFICIENT_EVIDENCE
+      2. temporal eligibility (information_available_at <= cutoff,
+         valid numeric type) -> INSUFFICIENT_EVIDENCE if either fails
+      3. window membership (observation_time inside [window_start,
+         window_end], ONLY when a window is actually supplied) ->
+         INSUFFICIENT_EVIDENCE if either observation falls outside
+      4. timing tolerance (information_available_at gap) ->
+         DIFFERENT_TIMING if it exceeds timing_tolerance_ms
+      5. direction -> SUPPORTING/CONTRADICTING, else INSUFFICIENT_EVIDENCE
+
+    window membership and temporal eligibility are deliberately
+    independent checks over two DIFFERENT fields (observation_time vs.
+    information_available_at) -- an observation can fail one without
+    the other, and either failure alone is enough for INSUFFICIENT_
+    EVIDENCE (see test_f2_* fixtures 7/8 for the two mixed cases this
+    guards against)."""
     if obs_a is None or obs_b is None:
         return "INSUFFICIENT_EVIDENCE"
 
     avail_a = obs_a.get("information_available_at")
     avail_b = obs_b.get("information_available_at")
     if not is_eligible(avail_a, information_cutoff) or not is_eligible(avail_b, information_cutoff):
+        return "INSUFFICIENT_EVIDENCE"
+
+    obs_time_a = obs_a.get("observation_time")
+    obs_time_b = obs_b.get("observation_time")
+    if not _within_window(obs_time_a, window_start, window_end) or not _within_window(obs_time_b, window_start, window_end):
         return "INSUFFICIENT_EVIDENCE"
 
     # Same boundary convention as evidence_collector.classify_relation:
@@ -195,6 +295,30 @@ def classify_relationship(obs_a, obs_b, information_cutoff, timing_tolerance_ms=
 # STRONG_REDUNDANCY_THRESHOLD.
 # =====================================================================
 
+def _index_by_observation_time(series, series_label):
+    """Builds {observation_time: raw_value}, RAISING on a duplicate
+    observation_time within this single series (audit finding F4)
+    rather than silently keeping whichever happened to be last. A
+    series is expected to hold one observation per observation_time;
+    two conflicting values for the same period is malformed input this
+    module has no safe way to resolve on its own -- averaging/
+    interpolation would be inventing a new statistical operation this
+    module has no authorization to perform, so it fails closed
+    instead."""
+    index = {}
+    for obs in series:
+        t = obs.get("observation_time")
+        if t is None:
+            continue
+        if t in index:
+            raise ValueError(
+                f"{series_label}: duplicate observation_time {t} -- "
+                f"a series must have at most one observation per observation_time."
+            )
+        index[t] = obs["raw_value"]
+    return index
+
+
 def build_redundancy_matrix(series_a, series_b, source_key_a, source_key_b):
     """Builds the exact `rows`/`source_keys` shape
     source_analysis.pairwise_source_redundancy() requires, from two
@@ -203,9 +327,11 @@ def build_redundancy_matrix(series_a, series_b, source_key_a, source_key_b):
     information_available_at, which is a publication-timing concept,
     not a comparison-window join key). Pairwise deletion (rows with
     only one side present) is left entirely to pairwise_source_
-    redundancy() itself -- this function only aligns, never filters."""
-    by_time_a = {obs["observation_time"]: obs["raw_value"] for obs in series_a if obs.get("observation_time") is not None}
-    by_time_b = {obs["observation_time"]: obs["raw_value"] for obs in series_b if obs.get("observation_time") is not None}
+    redundancy() itself -- this function only aligns, never filters.
+    Raises on a duplicate observation_time within either series --
+    see _index_by_observation_time()."""
+    by_time_a = _index_by_observation_time(series_a, "series_a")
+    by_time_b = _index_by_observation_time(series_b, "series_b")
     all_times = sorted(set(by_time_a) | set(by_time_b))
     rows = [
         {"sources": {source_key_a: by_time_a.get(t), source_key_b: by_time_b.get(t)}}
@@ -265,13 +391,16 @@ def canonical_pair(source_key_a, source_key_b):
 def build_interaction(
     source_key_a, source_key_b, obs_a, obs_b, information_cutoff,
     window_start, window_end, event_id=None,
-    series_a=None, series_b=None, timing_tolerance_ms=SAME_WINDOW_TOLERANCE_MS,
+    series_a=None, series_b=None, timing_tolerance_ms=SOURCE_DIALOGUE_TIMING_TOLERANCE_MS,
 ):
     """Returns one interaction record:
       {source_key_a, source_key_b} (canonical order),
       event_id (None for a rolling-window comparison),
       window_start, window_end,
-      relationship (RELATIONSHIP_LABELS, from classify_relationship),
+      relationship (RELATIONSHIP_LABELS, from classify_relationship --
+        now ACTUALLY enforcing window_start/window_end against each
+        observation's own observation_time, audit finding F2; the
+        first build stored these two fields but never consulted them),
       redundancy (REDUNDANCY_LABELS, or None if series_a/series_b were
         not supplied -- redundancy requires a historical series, not
         just the single pair being compared this window),
@@ -288,7 +417,10 @@ def build_interaction(
         obs_a, obs_b = obs_b, obs_a
         series_a, series_b = series_b, series_a
 
-    relationship = classify_relationship(obs_a, obs_b, information_cutoff, timing_tolerance_ms)
+    relationship = classify_relationship(
+        obs_a, obs_b, information_cutoff, timing_tolerance_ms,
+        window_start=window_start, window_end=window_end,
+    )
 
     redundancy = None
     redundancy_detail = None

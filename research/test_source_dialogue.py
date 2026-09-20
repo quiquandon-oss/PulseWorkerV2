@@ -5,6 +5,7 @@ no database -- every test runs fully offline against synthetic
 fixtures.
 """
 import re
+from unittest.mock import patch
 
 import pytest
 
@@ -144,7 +145,7 @@ def test_fixture_10_malformed_direction_is_insufficient_evidence():
 
 def test_fixture_11_different_timing_beyond_tolerance():
     a = obs(information_available_at=0, direction="UP")
-    b = obs(information_available_at=sd.SAME_WINDOW_TOLERANCE_MS + 1, direction="UP")
+    b = obs(information_available_at=sd.SOURCE_DIALOGUE_TIMING_TOLERANCE_MS + 1, direction="UP")
     assert sd.classify_relationship(a, b, information_cutoff=10 ** 9) == "DIFFERENT_TIMING"
 
 
@@ -153,7 +154,7 @@ def test_fixture_12_exact_timing_boundary_is_not_different_timing():
     evidence_collector.classify_relation's own inclusive boundary
     convention (strict > only, not >=)."""
     a = obs(information_available_at=0, direction="UP")
-    b = obs(information_available_at=sd.SAME_WINDOW_TOLERANCE_MS, direction="UP")
+    b = obs(information_available_at=sd.SOURCE_DIALOGUE_TIMING_TOLERANCE_MS, direction="UP")
     assert sd.classify_relationship(a, b, information_cutoff=10 ** 9) == "SUPPORTING"
 
 
@@ -161,13 +162,33 @@ def test_timing_checked_before_direction_per_the_specified_priority_order():
     """Even with contradicting directions, a timing gap beyond
     tolerance must report DIFFERENT_TIMING, not CONTRADICTING."""
     a = obs(information_available_at=0, direction="UP")
-    b = obs(information_available_at=sd.SAME_WINDOW_TOLERANCE_MS + 1, direction="DOWN")
+    b = obs(information_available_at=sd.SOURCE_DIALOGUE_TIMING_TOLERANCE_MS + 1, direction="DOWN")
     assert sd.classify_relationship(a, b, information_cutoff=10 ** 9) == "DIFFERENT_TIMING"
 
 
-def test_reuses_the_existing_same_window_tolerance_constant_not_a_new_one():
-    from evidence_collector import SAME_WINDOW_TOLERANCE_MS
-    assert sd.SAME_WINDOW_TOLERANCE_MS == SAME_WINDOW_TOLERANCE_MS
+def test_timing_tolerance_is_its_own_distinct_constant_not_evidence_collectors(caplog=None):
+    """Audit finding F1 correction: this module's timing tolerance must
+    be its OWN, distinctly-named constant -- never imported from, or
+    silently identical-by-coincidence-checked against,
+    evidence_collector.SAME_WINDOW_TOLERANCE_MS, which answers a
+    different research question (event-anchored evidence timing, not
+    source-to-source information availability). The module must no
+    longer import that name at all."""
+    assert not hasattr(sd, "SAME_WINDOW_TOLERANCE_MS")
+    assert "evidence_collector" not in _code_only()
+    assert sd.SOURCE_DIALOGUE_TIMING_TOLERANCE_MS == 1 * 3600000  # the provisional value, stated explicitly
+
+
+def test_timing_tolerance_is_documented_as_provisional_not_validated():
+    """The constant's own preceding comment block must disclose its
+    provisional status -- never presented as a discovered or validated
+    figure."""
+    import inspect
+    module_src = inspect.getsource(sd)
+    idx = module_src.index("SOURCE_DIALOGUE_TIMING_TOLERANCE_MS = 1 * 3600000")
+    preceding_context = module_src[max(0, idx - 1500):idx]
+    assert "PROVISIONAL" in preceding_context
+    assert "NOT EMPIRICALLY VALIDATED" in preceding_context
 
 
 # ---- Fixture 13/14: mirrored / repeated pairs ----
@@ -185,6 +206,179 @@ def test_fixture_14_repeated_identical_pair_is_idempotent():
 def test_canonical_pair_rejects_a_source_paired_with_itself():
     with pytest.raises(ValueError):
         sd.canonical_pair("alpha", "alpha")
+
+
+# ---- F7: self-pairing must also be rejected directly through
+# build_interaction(), not only through canonical_pair() in isolation ----
+
+def test_f7_build_interaction_rejects_self_pairing_directly():
+    a = obs(information_available_at=1000, direction="UP", source_key="alpha")
+    with pytest.raises(ValueError, match="must differ"):
+        sd.build_interaction("alpha", "alpha", a, a, information_cutoff=10000, window_start=0, window_end=2000)
+
+
+def test_f7_build_interaction_self_pairing_rejection_is_deterministic():
+    a = obs(information_available_at=1000, direction="UP", source_key="alpha")
+    for _ in range(3):
+        with pytest.raises(ValueError):
+            sd.build_interaction("alpha", "alpha", a, a, information_cutoff=10000, window_start=0, window_end=2000)
+
+
+# ---- F2: comparison-window enforcement (audit finding) ----
+# observation_time is the window-membership axis; information_available_at
+# is the eligibility axis. The eight cases below are exactly the audit's
+# own required set, proving the two axes are checked independently.
+
+def test_f2_window_case_1_both_observations_inside_window():
+    a = obs(information_available_at=100, observation_time=50, direction="UP")
+    b = obs(information_available_at=100, observation_time=60, direction="UP")
+    result = sd.classify_relationship(a, b, information_cutoff=10000, window_start=0, window_end=100)
+    assert result == "SUPPORTING"
+
+
+def test_f2_window_case_2_source_a_outside_window():
+    a = obs(information_available_at=100, observation_time=9999, direction="UP")  # outside
+    b = obs(information_available_at=100, observation_time=50, direction="UP")
+    result = sd.classify_relationship(a, b, information_cutoff=10000, window_start=0, window_end=100)
+    assert result == "INSUFFICIENT_EVIDENCE"
+
+
+def test_f2_window_case_3_source_b_outside_window():
+    a = obs(information_available_at=100, observation_time=50, direction="UP")
+    b = obs(information_available_at=100, observation_time=9999, direction="UP")  # outside
+    result = sd.classify_relationship(a, b, information_cutoff=10000, window_start=0, window_end=100)
+    assert result == "INSUFFICIENT_EVIDENCE"
+
+
+def test_f2_window_case_4_both_observations_outside_window():
+    a = obs(information_available_at=100, observation_time=-500, direction="UP")
+    b = obs(information_available_at=100, observation_time=9999, direction="UP")
+    result = sd.classify_relationship(a, b, information_cutoff=10000, window_start=0, window_end=100)
+    assert result == "INSUFFICIENT_EVIDENCE"
+
+
+def test_f2_window_case_5_exact_window_start_boundary_is_inside():
+    a = obs(information_available_at=100, observation_time=0, direction="UP")  # == window_start
+    b = obs(information_available_at=100, observation_time=50, direction="UP")
+    result = sd.classify_relationship(a, b, information_cutoff=10000, window_start=0, window_end=100)
+    assert result == "SUPPORTING"
+
+
+def test_f2_window_case_6_exact_window_end_boundary_is_inside():
+    a = obs(information_available_at=100, observation_time=100, direction="UP")  # == window_end
+    b = obs(information_available_at=100, observation_time=50, direction="UP")
+    result = sd.classify_relationship(a, b, information_cutoff=10000, window_start=0, window_end=100)
+    assert result == "SUPPORTING"
+
+
+def test_f2_window_case_7_observation_time_outside_but_information_available_at_inside():
+    """Proves the two temporal dimensions stay independent: a
+    perfectly ELIGIBLE information_available_at cannot rescue an
+    observation whose own observation_time falls outside the window."""
+    a = obs(information_available_at=50, observation_time=9999, direction="UP")  # obs_time outside, avail inside
+    b = obs(information_available_at=50, observation_time=50, direction="UP")
+    result = sd.classify_relationship(a, b, information_cutoff=10000, window_start=0, window_end=100)
+    assert result == "INSUFFICIENT_EVIDENCE"
+
+
+def test_f2_window_case_8_information_available_at_outside_but_observation_time_inside():
+    """The reverse: an observation_time correctly inside the window
+    cannot rescue an information_available_at that is ineligible
+    (future, beyond the cutoff)."""
+    a = obs(information_available_at=99999, observation_time=50, direction="UP")  # avail future, obs_time inside
+    b = obs(information_available_at=50, observation_time=50, direction="UP")
+    result = sd.classify_relationship(a, b, information_cutoff=10000, window_start=0, window_end=100)
+    assert result == "INSUFFICIENT_EVIDENCE"
+
+
+def test_f2_no_window_supplied_skips_enforcement_entirely_backward_compatible():
+    """window_start/window_end default to None in classify_relationship
+    -- omitting them preserves the original (pre-audit) behavior for
+    any caller that only wants the timing/direction relationship with
+    no window concept at all."""
+    a = obs(information_available_at=100, observation_time=999999999, direction="UP")
+    b = obs(information_available_at=100, observation_time=-999999999, direction="UP")
+    result = sd.classify_relationship(a, b, information_cutoff=10000)
+    assert result == "SUPPORTING"
+
+
+def test_f2_build_interaction_actually_enforces_the_window_it_stores():
+    """Regression guard for the exact defect the audit demonstrated:
+    build_interaction() must no longer silently store window_start/
+    window_end without consulting them."""
+    a = obs(information_available_at=500, observation_time=999999999, direction="UP")
+    b = obs(information_available_at=500, observation_time=-999999999, direction="UP")
+    interaction = sd.build_interaction("alpha", "beta", a, b, information_cutoff=10000, window_start=0, window_end=100)
+    assert interaction["relationship"] == "INSUFFICIENT_EVIDENCE"
+
+
+def test_f2_within_window_helper_fails_closed_on_malformed_bounds():
+    assert sd._within_window(50, None, 100) is True  # no window_start -> unenforced
+    assert sd._within_window(50, 0, None) is True  # no window_end -> unenforced
+    assert sd._within_window(None, 0, 100) is False  # missing observation_time -> fails closed
+    assert sd._within_window("50", 0, 100) is False  # malformed observation_time -> fails closed
+
+
+# ---- F3: malformed timestamp types must degrade to INSUFFICIENT_EVIDENCE,
+# never raise ----
+
+def test_f3_string_information_available_at_never_raises():
+    a = obs(information_available_at="1000", direction="UP")
+    b = obs(information_available_at=1000, direction="UP")
+    result = sd.classify_relationship(a, b, information_cutoff=10000)
+    assert result == "INSUFFICIENT_EVIDENCE"
+
+
+def test_f3_string_information_cutoff_never_raises():
+    a = obs(information_available_at=1000, direction="UP")
+    b = obs(information_available_at=1000, direction="UP")
+    result = sd.classify_relationship(a, b, information_cutoff="10000")
+    assert result == "INSUFFICIENT_EVIDENCE"
+
+
+def test_f3_nan_information_available_at_is_ineligible_not_a_crash():
+    a = obs(information_available_at=float("nan"), direction="UP")
+    b = obs(information_available_at=1000, direction="UP")
+    result = sd.classify_relationship(a, b, information_cutoff=10000)
+    assert result == "INSUFFICIENT_EVIDENCE"
+
+
+def test_f3_negative_numeric_timestamp_is_a_valid_ordinary_value():
+    """Negative epoch-ms values (pre-1970 dates) are NOT rejected --
+    nothing in this module's contract restricts timestamps to
+    non-negative values; this is a deliberate design decision, not an
+    oversight."""
+    a = obs(information_available_at=-1000, direction="UP")
+    b = obs(information_available_at=-1000, direction="UP")
+    result = sd.classify_relationship(a, b, information_cutoff=0)
+    assert result == "SUPPORTING"
+
+
+def test_f3_boolean_information_available_at_never_silently_coerced():
+    """bool is an int subclass in Python -- True/False must never be
+    silently treated as 1/0 timestamps."""
+    a = obs(information_available_at=True, direction="UP")
+    b = obs(information_available_at=1000, direction="UP")
+    result = sd.classify_relationship(a, b, information_cutoff=10000)
+    assert result == "INSUFFICIENT_EVIDENCE"
+
+
+def test_f3_boolean_information_cutoff_never_silently_coerced():
+    a = obs(information_available_at=1000, direction="UP")
+    b = obs(information_available_at=1000, direction="UP")
+    result = sd.classify_relationship(a, b, information_cutoff=False)
+    assert result == "INSUFFICIENT_EVIDENCE"
+
+
+def test_f3_is_valid_timestamp_helper_directly():
+    assert sd._is_valid_timestamp(1000) is True
+    assert sd._is_valid_timestamp(1000.5) is True
+    assert sd._is_valid_timestamp(-1000) is True
+    assert sd._is_valid_timestamp(None) is False
+    assert sd._is_valid_timestamp("1000") is False
+    assert sd._is_valid_timestamp(True) is False
+    assert sd._is_valid_timestamp(False) is False
+    assert sd._is_valid_timestamp(float("nan")) is True  # a valid TYPE; comparisons against it are always False
 
 
 # ---- Fixture 15/16: redundancy threshold ----
@@ -210,6 +404,84 @@ def test_fixture_16_below_threshold_correlation():
     assert label == "NO_STRONG_PAIRWISE_REDUNDANCY_DETECTED"
     assert detail["r"] is not None
     assert abs(detail["r"]) < sa.STRONG_REDUNDANCY_THRESHOLD
+
+
+# ---- Exact +-0.7 threshold boundary. Manufacturing a mathematically
+# EXACT r=0.7/-0.7 from a real data series is fragile (floating-point
+# construction of an exact correlation coefficient is not reliable) --
+# per the audit's own guidance, this instead exercises the ACTUAL
+# threshold comparison inside classify_pairwise_redundancy() by
+# controlling what pairwise_source_redundancy() (the reused, unchanged
+# function) returns, rather than approximating the underlying data. ----
+
+def test_exact_positive_threshold_boundary_is_redundancy_unresolved():
+    fake_detail = {"n": 10, "r": sa.STRONG_REDUNDANCY_THRESHOLD, "strong_redundancy": True}
+    with patch.object(sa, "pairwise_source_redundancy", return_value={("alpha", "beta"): fake_detail}):
+        label, detail = sd.classify_pairwise_redundancy(
+            _series("alpha", [1, 2]), _series("beta", [1, 2]), "alpha", "beta"
+        )
+    assert label == "REDUNDANCY_UNRESOLVED"
+    assert detail["r"] == sa.STRONG_REDUNDANCY_THRESHOLD
+
+
+def test_exact_negative_threshold_boundary_is_redundancy_unresolved():
+    fake_detail = {"n": 10, "r": -sa.STRONG_REDUNDANCY_THRESHOLD, "strong_redundancy": True}
+    with patch.object(sa, "pairwise_source_redundancy", return_value={("alpha", "beta"): fake_detail}):
+        label, detail = sd.classify_pairwise_redundancy(
+            _series("alpha", [1, 2]), _series("beta", [1, 2]), "alpha", "beta"
+        )
+    assert label == "REDUNDANCY_UNRESOLVED"
+    assert detail["r"] == -sa.STRONG_REDUNDANCY_THRESHOLD
+
+
+def test_just_below_positive_threshold_is_no_strong_redundancy_detected():
+    fake_detail = {"n": 10, "r": sa.STRONG_REDUNDANCY_THRESHOLD - 1e-9, "strong_redundancy": False}
+    with patch.object(sa, "pairwise_source_redundancy", return_value={("alpha", "beta"): fake_detail}):
+        label, _ = sd.classify_pairwise_redundancy(
+            _series("alpha", [1, 2]), _series("beta", [1, 2]), "alpha", "beta"
+        )
+    assert label == "NO_STRONG_PAIRWISE_REDUNDANCY_DETECTED"
+
+
+def test_negative_strong_redundancy_below_negative_threshold():
+    """Real (not mocked) execution: a perfectly anti-correlated series
+    (r=-1.0) must still be REDUNDANCY_UNRESOLVED -- the |r| >= threshold
+    check is sign-agnostic."""
+    series_a = _series("alpha", [1, 2, 3, 4, 5, 6, 7, 8, 9, 10])
+    series_b = _series("beta", [-1, -2, -3, -4, -5, -6, -7, -8, -9, -10])
+    label, detail = sd.classify_pairwise_redundancy(series_a, series_b, "alpha", "beta")
+    assert label == "REDUNDANCY_UNRESOLVED"
+    assert abs(detail["r"] - (-1.0)) < 1e-9
+
+
+# ---- F4: duplicate observation_time within one series must be
+# rejected (fail-closed), never silently resolved by picking one value ----
+
+def test_f4_duplicate_observation_time_within_series_a_raises():
+    series_a = [obs(observation_time=100, raw_value=1.0), obs(observation_time=100, raw_value=999.0)]
+    series_b = _series("beta", [1, 2])
+    with pytest.raises(ValueError, match="duplicate observation_time"):
+        sd.classify_pairwise_redundancy(series_a, series_b, "alpha", "beta")
+
+
+def test_f4_duplicate_observation_time_within_series_b_raises():
+    series_a = _series("alpha", [1, 2])
+    series_b = [obs(observation_time=200, raw_value=1.0), obs(observation_time=200, raw_value=2.0)]
+    with pytest.raises(ValueError, match="duplicate observation_time"):
+        sd.classify_pairwise_redundancy(series_a, series_b, "alpha", "beta")
+
+
+def test_f4_no_duplicates_does_not_raise():
+    series_a = _series("alpha", [1, 2, 3, 4, 5, 6, 7, 8, 9, 10])
+    series_b = _series("beta", [2, 4, 6, 8, 10, 12, 14, 16, 18, 20])
+    label, _ = sd.classify_pairwise_redundancy(series_a, series_b, "alpha", "beta")
+    assert label == "REDUNDANCY_UNRESOLVED"
+
+
+def test_f4_build_redundancy_matrix_raises_directly():
+    series_a = [obs(observation_time=1, raw_value=1.0), obs(observation_time=1, raw_value=2.0)]
+    with pytest.raises(ValueError):
+        sd.build_redundancy_matrix(series_a, _series("beta", [1]), "alpha", "beta")
 
 
 # ---- Fixture 17: no false complementarity ----

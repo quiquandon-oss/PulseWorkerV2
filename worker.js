@@ -6044,12 +6044,128 @@ async function computeExperiment4TimesFmLiveFields(env, requiredSample) {
   };
 }
 
+// EXP-005's own live-metric provider. Its data_source_table lookup key
+// is deliberately NOT the literal table name (research_analyses is
+// shared, general-purpose infrastructure from PR1 that could hold
+// other subjects' rows in future) -- it is a unique registry-side
+// label that maps here, where the real table name AND the exact
+// subject filter are both hardcoded as literals, never interpolated
+// from the registry row. Same safety property already established for
+// EXP-004: data_source_table is only ever a JS object-property lookup
+// key, never concatenated into SQL.
+const EXP005_SUBJECT = 'EXP-005:source_effectiveness'; // must match exp005-source-effectiveness/run_experiment.py's SUBJECT exactly
+
+// current_sample_size here counts ACCUMULATED INDEPENDENT ANALYSIS RUNS
+// (rows in research_analyses tagged with this experiment's subject),
+// NOT the BTC/history row count within any one run -- that per-run
+// count is already near its 90-day ceiling and cannot itself
+// accumulate further. required_sample instead governs how many
+// separate, weekly, chronologically-shifted windows must be observed
+// before ANY conclusion is drawn -- directly enforcing "do not call
+// this successful because one early run found a positive result."
+async function computeExp005LiveFields(env, requiredSample) {
+  const [countRow, rows] = await Promise.all([
+    env.DB.prepare('SELECT COUNT(*) AS n FROM research_analyses WHERE subject = ?').bind(EXP005_SUBJECT).first(),
+    env.DB.prepare(
+      'SELECT analysis_ts, metric_json, validation_status FROM research_analyses WHERE subject = ? ORDER BY analysis_ts ASC'
+    ).bind(EXP005_SUBJECT).all(),
+  ]);
+  const runs = (rows && rows.results) || [];
+  const sampleCount = countRow ? countRow.n : 0;
+  const threshold = Number.isFinite(requiredSample) ? requiredSample : REQUIRED_SAMPLE_FALLBACK;
+  const insufficientSample = sampleCount === 0 || sampleCount < threshold;
+
+  if (sampleCount === 0) {
+    return {
+      current_sample_size: 0,
+      current_measured_result: 'NOT_AVAILABLE',
+      oos_result: 'NOT_AVAILABLE',
+      confidence_evidence_maturity: 'INSUFFICIENT_SAMPLE',
+      last_updated: null,
+    };
+  }
+
+  // Parse every accumulated run's metric_json (each one the FULL,
+  // unmodified output of research/source_analysis.py's own
+  // build_source_effectiveness_report()) to report descriptive counts
+  // only -- never a single collapsed score (per this experiment's own
+  // A-G decomposition; see exp005-source-effectiveness/run_experiment.py).
+  let parsedRuns = [];
+  try {
+    parsedRuns = runs.map((r) => ({ ts: r.analysis_ts, report: JSON.parse(r.metric_json) }));
+  } catch (err) {
+    // A stored report that fails to parse must degrade this experiment
+    // only, never the whole registry -- getResearchLabRegistry's own
+    // per-provider try/catch already covers a thrown error, but a
+    // malformed JSON string wouldn't throw until here, so this is
+    // handled explicitly rather than relying on that outer catch alone.
+    return {
+      current_sample_size: sampleCount,
+      current_measured_result: 'NOT_AVAILABLE',
+      oos_result: 'NOT_AVAILABLE',
+      confidence_evidence_maturity: 'UNKNOWN',
+      last_updated: runs[runs.length - 1].analysis_ts,
+    };
+  }
+
+  const latest = parsedRuns[parsedRuns.length - 1].report;
+  const significantKeys = Object.entries(latest.evidence_labels || {})
+    .filter(([, label]) => label === 'STATISTICALLY_SIGNIFICANT')
+    .map(([key]) => key);
+  const improvedKeys = Object.entries(latest.level3 || {})
+    .filter(([, v]) => v && v.oos && v.oos.status === 'IMPROVED')
+    .map(([key]) => key);
+
+  const currentMeasuredResult = {
+    latest_run_ts: parsedRuns[parsedRuns.length - 1].ts,
+    sources_discovered: (latest.sources_discovered || []).length,
+    statistically_significant_pairs: significantKeys.length,
+    incremental_beyond_composite_pairs: improvedKeys.length,
+    note: 'Descriptive only, from the most recent single run. See required_sample / oos_result before treating this as evidence of a coefficient recommendation.',
+  };
+
+  let oosResult = 'INSUFFICIENT_SAMPLE';
+  if (!insufficientSample) {
+    // Replication check across ALL accumulated runs (never just the
+    // latest): a (source, horizon) pair only counts as a replicated
+    // candidate if it reached STATISTICALLY_SIGNIFICANT AND IMPROVED in
+    // EVERY accumulated run, not merely the most recent one -- directly
+    // implements "do not call it successful from one early positive
+    // result" at the cross-run level.
+    let replicatedKeys = null;
+    for (const { report } of parsedRuns) {
+      const sig = new Set(Object.entries(report.evidence_labels || {})
+        .filter(([, label]) => label === 'STATISTICALLY_SIGNIFICANT')
+        .map(([key]) => key));
+      const imp = new Set(Object.entries(report.level3 || {})
+        .filter(([, v]) => v && v.oos && v.oos.status === 'IMPROVED')
+        .map(([key]) => key));
+      const runKeys = [...sig].filter((k) => imp.has(k));
+      replicatedKeys = replicatedKeys === null ? new Set(runKeys) : new Set(runKeys.filter((k) => replicatedKeys.has(k)));
+    }
+    oosResult = {
+      runs_considered: parsedRuns.length,
+      replicated_significant_and_incremental_pairs: [...(replicatedKeys || [])],
+      note: 'A pair here reached STATISTICALLY_SIGNIFICANT (Benjamini-Hochberg corrected) AND incremental-beyond-composite OOS improvement in EVERY accumulated run -- a candidate worth a research hypothesis, never itself a coefficient change.',
+    };
+  }
+
+  return {
+    current_sample_size: sampleCount,
+    current_measured_result: currentMeasuredResult,
+    oos_result: oosResult,
+    confidence_evidence_maturity: insufficientSample ? 'INSUFFICIENT_SAMPLE' : 'ACCUMULATING',
+    last_updated: parsedRuns[parsedRuns.length - 1].ts,
+  };
+}
+
 // Maps a registry row's data_source_table to the function that computes
 // its live fields. A table name with no entry here (or a NULL
 // data_source_table) falls back to the static NOT_STARTED/NOT_AVAILABLE
 // values below -- never a guess.
 const LIVE_METRIC_PROVIDERS = {
   experiment_4_timesfm: computeExperiment4TimesFmLiveFields,
+  research_analyses_exp005_source_effectiveness: computeExp005LiveFields,
 };
 
 async function getResearchLabRegistry(env) {

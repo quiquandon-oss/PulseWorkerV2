@@ -10,11 +10,21 @@ name: EXP-005 Param Size Probe (temporary, read-only, manual only)
 # READ-ONLY: the only SQL ever sent is `SELECT length(?)` -- no table
 # is read, written, or even referenced. Does not import, call, or
 # exercise any other function in run_experiment.py (no D1 write path
-# is invoked). Not part of the experiment's real automation -- manual
-# dispatch only, no schedule -- and removed from the branch immediately
-# after use.
+# is invoked). Not part of the experiment's real automation, and
+# removed from the branch immediately after use.
+#
+# Triggered on push rather than workflow_dispatch: GitHub only allows
+# workflow_dispatch for a workflow file that already exists on the
+# default branch (confirmed empirically -- dispatching this exact file
+# from this feature branch 404s), which this temporary, PR-branch-only
+# probe deliberately never touches. Scoped to this one branch and this
+# one file so it does not re-fire on unrelated future commits.
 on:
-  workflow_dispatch: {}
+  push:
+    branches:
+      - claude/affectionate-fermat-lmouit
+    paths:
+      - .github/workflows/exp005-param-size-probe.yml
 
 permissions:
   contents: read

@@ -6589,11 +6589,18 @@ const RESEARCH_LAB_HTML = `<!DOCTYPE html>
 
   async function renderPipeline() {
     app.innerHTML = '<div class="skeleton">Loading pipeline health&hellip;</div>';
+    // Market data availability is a BTC-data fact, not an evidence-
+    // collection fact -- pipeline-health has no BTC field at all, so
+    // this also calls the EXISTING dashboard endpoint (no new endpoint)
+    // specifically to get a genuine btc_latest signal for that one
+    // stage, rather than inferring it from an unrelated timestamp.
     var d = await fetchJson('/api/research-lab/pipeline-health');
+    var dash = await fetchJson('/api/research-lab/dashboard');
     if (!d.ok) { app.innerHTML = emptyState('Could not load pipeline health', ''); return; }
     var evCount = d.research_event_evidence_count, evtCount = d.research_events_count;
+    var marketDataBadge = (dash && dash.ok && dash.btc_latest) ? badge('AVAILABLE', 'b-verified') : badge('UNKNOWN', 'b-unknown');
     var html = '<div class="card glow"><h2 class="card-title">Research flow</h2><div class="flow">' +
-      flowStage(1, 'Market data', 'BTC price and V1 sentiment data collected continuously.', d.latest_evidence_collection_ts !== undefined ? badge('AVAILABLE', 'b-verified') : badge('UNKNOWN', 'b-unknown')) +
+      flowStage(1, 'Market data', 'BTC price and V1 sentiment data collected continuously.', marketDataBadge) +
       flowStage(2, 'Event detection', 'Scans recent price data for statistically significant moves.', badge(evtCount + ' recorded', 'b-strong') + '&nbsp;' + badge('running now: UNKNOWN', 'b-unknown')) +
       flowStage(3, 'News / RSS evidence', 'Attempts to fetch public RSS articles near each eligible event.', badge(evCount + ' collected', evCount > 0 ? 'b-strong' : 'b-unknown')) +
       flowStage(4, 'Temporal matching', 'Articles are tagged by when they were published relative to the event.', badge(evCount + ' matched', evCount > 0 ? 'b-strong' : 'b-unknown')) +

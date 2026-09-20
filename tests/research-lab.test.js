@@ -12,8 +12,10 @@ describe('Research Lab — read-only research API helpers', () => {
   let scope;
   beforeAll(() => {
     scope = evalInScope(
+      extractFunctions('computeExperiment4TimesFmLiveFields', 'getResearchLabRegistry') + '\n' +
       extractConstants('SOURCE_TOPIC_AFFINITY_DISPLAY', 'REACTION_HORIZONS_MS',
-        'REACTION_GOOD_QUALITY_FRACTION', 'REACTION_APPROXIMATE_QUALITY_FRACTION', 'BTC_SERIES_WINDOW_MS') + '\n' +
+        'REACTION_GOOD_QUALITY_FRACTION', 'REACTION_APPROXIMATE_QUALITY_FRACTION', 'BTC_SERIES_WINDOW_MS',
+        'REQUIRED_SAMPLE_FALLBACK', 'LIVE_METRIC_PROVIDERS') + '\n' +
       extractFunctions('resolveBtcReactionAtHorizon', 'getResearchLabDashboard', 'getResearchLabEvents',
         'getResearchLabEventDetail', 'getResearchLabSources', 'getResearchLabPipelineHealth')
     );
@@ -265,6 +267,107 @@ describe('Research Lab — read-only research API helpers', () => {
       expect(q).toBeTruthy();
       expect(q.sql).toMatch(/^SELECT/i);
       expect(q.sql).not.toMatch(/INSERT|UPDATE|DELETE/i);
+    });
+  });
+
+  describe('getResearchLabRegistry — Experiment Registry (Program Foundation)', () => {
+    function registryRow(overrides) {
+      return {
+        experiment_id: 'EXP-999', title: 't', research_question: 'q', purpose: 'p',
+        experiment_type: 'TYPE_2', expected_result: 'e', success_criterion: 's',
+        start_date: null, target_date: null, status: 'PROPOSED', baseline: 'b',
+        required_sample: null, conclusion: null, next_action: 'n', github_refs: null,
+        data_source_table: null, created_ts: 1, updated_ts: 1,
+        ...overrides,
+      };
+    }
+
+    it('a row with no data_source_table gets NOT_STARTED/NOT_AVAILABLE/UNKNOWN, never fabricated data', async () => {
+      const db = makeDb([{ all: { results: [registryRow({})] } }]);
+      const result = await scope.getResearchLabRegistry({ DB: db });
+      expect(result.ok).toBe(true);
+      expect(result.experiments).toHaveLength(1);
+      const exp = result.experiments[0];
+      expect(exp.current_sample_size).toBe('NOT_STARTED');
+      expect(exp.current_measured_result).toBe('NOT_AVAILABLE');
+      expect(exp.oos_result).toBe('NOT_AVAILABLE');
+      expect(exp.confidence_evidence_maturity).toBe('UNKNOWN');
+      expect(exp.last_updated).toBe(1); // falls back to the row's own updated_ts
+    });
+
+    it('a live-linked row (EXP-004) below its required_sample reports INSUFFICIENT_SAMPLE, not a skill claim', async () => {
+      const db = makeDb([
+        { all: { results: [registryRow({ experiment_id: 'EXP-004', data_source_table: 'experiment_4_timesfm', required_sample: 30, updated_ts: 1 })] } },
+        // computeExperiment4TimesFmLiveFields's own single D1 call:
+        { all: { results: [
+          { horizon_hours: 12, total: 15, resolved: 14, correct: 7, latest_activity_ts: 1789819245336 },
+          { horizon_hours: 24, total: 15, resolved: 14, correct: 5, latest_activity_ts: 1789819245336 },
+        ] } },
+      ]);
+      const result = await scope.getResearchLabRegistry({ DB: db });
+      const exp = result.experiments[0];
+      expect(exp.current_sample_size.total_resolved).toBe(28);
+      expect(exp.current_measured_result.combined_correct_of_resolved).toBe('12/28');
+      // 14 resolved per horizon < required_sample 30 -> gated, exactly the
+      // same "do not draw conclusions from current sample size" rule this
+      // session's own audits already established for EXP-004 by hand.
+      expect(exp.oos_result).toBe('INSUFFICIENT_SAMPLE');
+      expect(exp.confidence_evidence_maturity).toBe('INSUFFICIENT_SAMPLE');
+      expect(exp.last_updated).toBe(1789819245336);
+    });
+
+    it('a live-linked row that clears its required_sample reports a real oos_result object, not a string', async () => {
+      const db = makeDb([
+        { all: { results: [registryRow({ experiment_id: 'EXP-004', data_source_table: 'experiment_4_timesfm', required_sample: 5, updated_ts: 1 })] } },
+        { all: { results: [
+          { horizon_hours: 12, total: 10, resolved: 10, correct: 6, latest_activity_ts: 555 },
+          { horizon_hours: 24, total: 10, resolved: 8, correct: 4, latest_activity_ts: 555 },
+        ] } },
+      ]);
+      const result = await scope.getResearchLabRegistry({ DB: db });
+      const exp = result.experiments[0];
+      expect(exp.confidence_evidence_maturity).toBe('ACCUMULATING');
+      expect(exp.oos_result).not.toBe('INSUFFICIENT_SAMPLE');
+      expect(exp.oos_result.combined_correct_of_resolved).toBe('10/18');
+    });
+
+    it('an unknown data_source_table (no provider registered) falls back to the static NOT_STARTED shape, never throws', async () => {
+      const db = makeDb([{ all: { results: [registryRow({ data_source_table: 'some_future_table' })] } }]);
+      const result = await scope.getResearchLabRegistry({ DB: db });
+      expect(result.experiments[0].current_sample_size).toBe('NOT_STARTED');
+    });
+
+    it('every D1 call across the registry path is SELECT-only, never a write', async () => {
+      const db = makeDb([
+        { all: { results: [registryRow({ experiment_id: 'EXP-004', data_source_table: 'experiment_4_timesfm', required_sample: 30 })] } },
+        { all: { results: [] } },
+      ]);
+      await scope.getResearchLabRegistry({ DB: db });
+      for (const call of db.calls) {
+        expect(call.sql).toMatch(/^SELECT/i);
+        // Word-boundary write-statement shapes only -- a plain substring
+        // check would false-positive on the legitimate column name
+        // `updated_ts` (contains "UPDATE").
+        expect(call.sql).not.toMatch(/\bINSERT\s+INTO\b|\bUPDATE\s+\w+\s+SET\b|\bDELETE\s+FROM\b/i);
+      }
+    });
+
+    it('multiple registry rows are all returned, in the order the (already ORDER BY-sorted) query provides', async () => {
+      const db = makeDb([
+        { all: { results: [
+          registryRow({ experiment_id: 'EXP-005' }),
+          registryRow({ experiment_id: 'EXP-006' }),
+          registryRow({ experiment_id: 'EXP-007' }),
+        ] } },
+      ]);
+      const result = await scope.getResearchLabRegistry({ DB: db });
+      expect(result.experiments.map((e) => e.experiment_id)).toEqual(['EXP-005', 'EXP-006', 'EXP-007']);
+    });
+
+    it('empty registry table returns an empty list, never fabricated placeholder experiments', async () => {
+      const db = makeDb([{ all: { results: [] } }]);
+      const result = await scope.getResearchLabRegistry({ DB: db });
+      expect(result).toEqual({ ok: true, experiments: [] });
     });
   });
 

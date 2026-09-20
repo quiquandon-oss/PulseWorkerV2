@@ -5974,6 +5974,109 @@ async function getResearchLabPipelineHealth(env) {
   };
 }
 
+// ---- EXPERIMENT REGISTRY ----
+// Program Foundation build authorization: the shared, cross-repo data
+// contract for the CryptoPulse V1-V4 research program. Administrative
+// metadata (title, research question, status, etc.) lives in the new
+// research_experiment_registry table (see .ai/migrations/0010); this
+// function is the ONLY place that ever joins that static metadata
+// against an experiment's live data table, and it does so at request
+// time so the live fields can never go stale the way a stored snapshot
+// would. Adding a new live-linked experiment in future never requires
+// touching this function's shape -- only the LIVE_METRIC_PROVIDERS map
+// below, keyed by data_source_table.
+//
+// REQUIRED_SAMPLE_FALLBACK mirrors the same "practical heuristic floor,
+// not a proven statistical threshold" already established for EXP-004
+// in this session's own Challenger Evaluation Protocol audit -- reused
+// here, not reinvented, for any future registry row that omits its own
+// required_sample.
+const REQUIRED_SAMPLE_FALLBACK = 30;
+
+// Computes EXP-004's live fields from experiment_4_timesfm. Reuses the
+// EXACT same resolved/correct definitions already established and
+// independently verified (Resolved-Outcome Integrity Audit, this
+// session) -- never a new metric. `oos_result` and
+// `confidence_evidence_maturity` are explicitly gated to
+// INSUFFICIENT_SAMPLE below the row's own required_sample -- current_
+// measured_result still reports the real descriptive counts (labeled
+// as such), per the governance rule that expected/actual results and
+// small-sample caveats must never be silently conflated.
+async function computeExperiment4TimesFmLiveFields(env, requiredSample) {
+  const perHorizon = await env.DB.prepare(
+    `SELECT horizon_hours,
+            COUNT(*) AS total,
+            SUM(CASE WHEN resolved_ts IS NOT NULL THEN 1 ELSE 0 END) AS resolved,
+            SUM(CASE WHEN correct = 1 THEN 1 ELSE 0 END) AS correct,
+            MAX(COALESCE(resolved_ts, ts)) AS latest_activity_ts
+     FROM experiment_4_timesfm GROUP BY horizon_hours`
+  ).all();
+  const rows = (perHorizon && perHorizon.results) || [];
+  const totalResolved = rows.reduce((sum, r) => sum + (r.resolved || 0), 0);
+  const totalCorrect = rows.reduce((sum, r) => sum + (r.correct || 0), 0);
+  const totalForecasts = rows.reduce((sum, r) => sum + (r.total || 0), 0);
+  const minResolvedAcrossHorizons = rows.length ? Math.min(...rows.map((r) => r.resolved || 0)) : 0;
+  const latestActivityTs = rows.reduce((max, r) => Math.max(max, r.latest_activity_ts || 0), 0);
+  const threshold = Number.isFinite(requiredSample) ? requiredSample : REQUIRED_SAMPLE_FALLBACK;
+  const insufficientSample = rows.length === 0 || minResolvedAcrossHorizons < threshold;
+
+  return {
+    current_sample_size: {
+      total_forecasts: totalForecasts,
+      total_resolved: totalResolved,
+      by_horizon: rows.map((r) => ({ horizon_hours: r.horizon_hours, total: r.total, resolved: r.resolved })),
+    },
+    // Descriptive only -- the same raw counts this session's own audits
+    // already reported; never a claim of skill on its own.
+    current_measured_result: totalResolved > 0
+      ? {
+          combined_correct_of_resolved: `${totalCorrect}/${totalResolved}`,
+          by_horizon: rows.map((r) => ({ horizon_hours: r.horizon_hours, correct_of_resolved: `${r.correct}/${r.resolved}` })),
+          note: 'Descriptive only. See required_sample / confidence_evidence_maturity before treating this as evidence of skill.',
+        }
+      : 'NOT_AVAILABLE',
+    oos_result: insufficientSample ? 'INSUFFICIENT_SAMPLE' : {
+      combined_correct_of_resolved: `${totalCorrect}/${totalResolved}`,
+      by_horizon: rows.map((r) => ({ horizon_hours: r.horizon_hours, correct_of_resolved: `${r.correct}/${r.resolved}` })),
+    },
+    confidence_evidence_maturity: insufficientSample ? 'INSUFFICIENT_SAMPLE' : 'ACCUMULATING',
+    last_updated: latestActivityTs || null,
+  };
+}
+
+// Maps a registry row's data_source_table to the function that computes
+// its live fields. A table name with no entry here (or a NULL
+// data_source_table) falls back to the static NOT_STARTED/NOT_AVAILABLE
+// values below -- never a guess.
+const LIVE_METRIC_PROVIDERS = {
+  experiment_4_timesfm: computeExperiment4TimesFmLiveFields,
+};
+
+async function getResearchLabRegistry(env) {
+  const rows = await env.DB.prepare(
+    `SELECT experiment_id, title, research_question, purpose, experiment_type,
+            expected_result, success_criterion, start_date, target_date, status,
+            baseline, required_sample, conclusion, next_action, github_refs,
+            data_source_table, created_ts, updated_ts
+     FROM research_experiment_registry ORDER BY experiment_id ASC`
+  ).all();
+  const experiments = [];
+  for (const row of (rows && rows.results) || []) {
+    const provider = row.data_source_table ? LIVE_METRIC_PROVIDERS[row.data_source_table] : null;
+    const live = provider
+      ? await provider(env, row.required_sample)
+      : {
+          current_sample_size: 'NOT_STARTED',
+          current_measured_result: 'NOT_AVAILABLE',
+          oos_result: 'NOT_AVAILABLE',
+          confidence_evidence_maturity: 'UNKNOWN',
+          last_updated: row.updated_ts,
+        };
+    experiments.push({ ...row, ...live });
+  }
+  return { ok: true, experiments };
+}
+
 // Self-contained static page (vanilla HTML/CSS/JS, no build step, no
 // framework, no CDN dependency) -- this Worker has no existing static-
 // asset pipeline or [assets] binding, so embedding the page as a
@@ -7384,6 +7487,15 @@ export default {
     if (url.pathname === '/api/research-lab/pipeline-health' && request.method === 'GET') {
       try {
         const result = await getResearchLabPipelineHealth(env);
+        return new Response(JSON.stringify(result), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+      } catch (err) {
+        return new Response(JSON.stringify({ ok: false, error: String(err) }), { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+      }
+    }
+
+    if (url.pathname === '/api/research-lab/registry' && request.method === 'GET') {
+      try {
+        const result = await getResearchLabRegistry(env);
         return new Response(JSON.stringify(result), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
       } catch (err) {
         return new Response(JSON.stringify({ ok: false, error: String(err) }), { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });

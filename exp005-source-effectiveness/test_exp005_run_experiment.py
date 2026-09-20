@@ -138,6 +138,79 @@ def test_local_mirror_is_actually_usable_by_the_real_source_analysis_module():
     assert report["sources_discovered"] == ["fng"]
 
 
+def test_real_multi_source_report_is_actually_json_serializable_via_build_insert_analysis_sql():
+    """Regression test for a real bug found against production data:
+    report["level2"]["tests"] and report["redundancy"]["pairwise"] are
+    natively keyed by tuples (e.g. ('fng', 1), ('fng', 'yield10y')),
+    which raises TypeError from a bare json.dumps(report) -- main()'s
+    only write path (build_insert_analysis_sql) must never hit this,
+    or every real run silently fails and writes nothing. Uses >=2
+    sources so both level2.tests and redundancy.pairwise are populated
+    with real tuple keys, matching what the actual production report
+    looks like."""
+    history_rows = [
+        {
+            "ts": 1000 + i * 3600000,
+            "score": 50 + (i % 5),
+            "sources_json": json.dumps({"fng": 40 + (i % 7), "yield10y": 30 + (i % 9)}),
+            "gold_regime": "chop",
+        }
+        for i in range(60)
+    ]
+    btc_rows = [{"ts": 1000 + i * 3600000, "btc_price": 50000.0 + i * 10} for i in range(60)]
+    conn = run_experiment.build_local_mirror(history_rows, btc_rows)
+    report = sa.build_source_effectiveness_report(conn, 1000, 1000 + 59 * 3600000, horizons=(1, 3))
+    conn.close()
+
+    assert any(isinstance(k, tuple) for k in report["level2"]["tests"])
+    assert any(isinstance(k, tuple) for k in report["redundancy"]["pairwise"])
+
+    sql = run_experiment.build_insert_analysis_sql(
+        analysis_ts=1, window_start_ts=1, window_end_ts=1, sample_size=report["n_history_rows"],
+        metric_json_obj=report, multiple_testing_correction=json.dumps(report["level2"]["multiple_testing_correction"]),
+        validation_status="observation",
+    )
+    assert sql.startswith("INSERT INTO research_analyses (")
+
+
+# ---- make_json_safe ----
+
+def test_make_json_safe_rewrites_2tuple_keys_to_pipe_joined_strings():
+    original = {("fng", 1): {"effect_size_r": 0.1}, ("fng", 3): {"effect_size_r": 0.2}}
+    safe = run_experiment.make_json_safe(original)
+    assert safe == {"fng|1": {"effect_size_r": 0.1}, "fng|3": {"effect_size_r": 0.2}}
+    json.dumps(safe)  # must not raise
+
+
+def test_make_json_safe_rewrites_string_pair_tuple_keys():
+    original = {("fng", "yield10y"): 0.42}
+    assert run_experiment.make_json_safe(original) == {"fng|yield10y": 0.42}
+
+
+def test_make_json_safe_leaves_string_keyed_dicts_lists_and_scalars_unchanged():
+    original = {"level3": {"fng|1h": {"oos": {"status": "IMPROVED"}}}, "n": 5, "tags": ["a", "b"], "flag": None}
+    assert run_experiment.make_json_safe(original) == original
+
+
+def test_make_json_safe_recurses_into_nested_tuple_keys_inside_lists_and_dicts():
+    original = {"outer": [{("a", 1): "x"}, {"plain": {("b", 2): "y"}}]}
+    safe = run_experiment.make_json_safe(original)
+    assert safe == {"outer": [{"a|1": "x"}, {"plain": {"b|2": "y"}}]}
+    json.dumps(safe)  # must not raise
+
+
+def test_make_json_safe_is_the_one_used_before_json_dumps_in_build_insert_analysis_sql():
+    """Static check that build_insert_analysis_sql actually calls
+    make_json_safe before json.dumps -- the whole point of this fix is
+    that main()'s only write path goes through it, not just that the
+    helper function exists and works in isolation."""
+    with open(os.path.join(_HERE, "run_experiment.py")) as f:
+        src = f.read()
+    fn_start = src.index("def build_insert_analysis_sql(")
+    fn_src = src[fn_start:src.index("\n\n\n", fn_start)]
+    assert "json.dumps(make_json_safe(" in fn_src
+
+
 # ---- build_insert_analysis_sql ----
 
 def test_insert_sql_targets_research_analyses_with_correct_columns():

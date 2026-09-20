@@ -102,6 +102,27 @@ def build_local_mirror(history_rows, btc_rows):
     return conn
 
 
+def make_json_safe(obj):
+    """report["level2"]["tests"] and report["redundancy"]["pairwise"] are
+    natively keyed by tuples (e.g. ('cryptonews', 1) or
+    ('cryptonews', 'etfflows')) -- valid Python dict keys but not valid
+    JSON object keys, so json.dumps(report) raises TypeError as-is.
+    Recursively rewrites every tuple key to the pipe-joined string
+    "|".join(str(part) for part in key) (e.g. "cryptonews|1"), leaving
+    every value, and every already-string-keyed dict (report["level3"]'s
+    keys are already native strings like "cryptonews|1h"), unchanged.
+    This is a serialization fix only -- it does not touch
+    research/source_analysis.py or alter any computed value."""
+    if isinstance(obj, dict):
+        return {
+            ("|".join(str(part) for part in k) if isinstance(k, tuple) else k): make_json_safe(v)
+            for k, v in obj.items()
+        }
+    if isinstance(obj, list):
+        return [make_json_safe(v) for v in obj]
+    return obj
+
+
 def build_insert_analysis_sql(analysis_ts, window_start_ts, window_end_ts, sample_size,
                                metric_json_obj, multiple_testing_correction, validation_status):
     """Mirrors research/source_analysis.py's own persist_analysis() column
@@ -116,7 +137,7 @@ def build_insert_analysis_sql(analysis_ts, window_start_ts, window_end_ts, sampl
     columns = ["analysis_ts", "window_start_ts", "window_end_ts", "sample_size",
                "subject", "metric_json", "multiple_testing_correction", "validation_status"]
     values = [analysis_ts, window_start_ts, window_end_ts, sample_size,
-              SUBJECT, json.dumps(metric_json_obj), multiple_testing_correction, validation_status]
+              SUBJECT, json.dumps(make_json_safe(metric_json_obj)), multiple_testing_correction, validation_status]
     return (f"INSERT INTO research_analyses ({', '.join(columns)}) VALUES "
             f"({', '.join(sql_escape(v) for v in values)})")
 

@@ -13,7 +13,7 @@ describe('Research Lab — read-only research API helpers', () => {
   beforeAll(() => {
     scope = evalInScope(
       extractConstants('SOURCE_TOPIC_AFFINITY_DISPLAY', 'REACTION_HORIZONS_MS',
-        'REACTION_GOOD_QUALITY_FRACTION', 'REACTION_APPROXIMATE_QUALITY_FRACTION') + '\n' +
+        'REACTION_GOOD_QUALITY_FRACTION', 'REACTION_APPROXIMATE_QUALITY_FRACTION', 'BTC_SERIES_WINDOW_MS') + '\n' +
       extractFunctions('resolveBtcReactionAtHorizon', 'getResearchLabDashboard', 'getResearchLabEvents',
         'getResearchLabEventDetail', 'getResearchLabSources', 'getResearchLabPipelineHealth')
     );
@@ -57,10 +57,12 @@ describe('Research Lab — read-only research API helpers', () => {
         { first: { n: 0 } }, // evidence count
         { first: { latest: null } }, // latest evidence ts
         { all: { results: [] } }, // recent events
+        { all: { results: [] } }, // btc price series
       ]);
       const result = await scope.getResearchLabDashboard({ DB: db });
       expect(result.ok).toBe(true);
       expect(result.btc_latest).toBeNull();
+      expect(result.btc_price_series).toEqual([]);
       expect(result.v1_composite_latest).toBeNull();
       expect(result.research_events_count).toBe(0);
       expect(result.research_event_evidence_count).toBe(0);
@@ -72,6 +74,7 @@ describe('Research Lab — read-only research API helpers', () => {
     });
 
     it('populated tables: real values pass through unmodified', async () => {
+      const seriesRows = [{ ts: 900, btc_price: 49000 }, { ts: 1000, btc_price: 50000 }];
       const db = makeDb([
         { first: { ts: 1000, btc_price: 50000 } },
         { first: { ts: 900, score: 55 } },
@@ -79,9 +82,11 @@ describe('Research Lab — read-only research API helpers', () => {
         { first: { n: 0 } },
         { first: { latest: null } },
         { all: { results: [{ event_id: 1, event_ts: 1000, category: 'LARGE_MOVE', direction: 'UP', evidence_count: 0 }] } },
+        { all: { results: seriesRows } },
       ]);
       const result = await scope.getResearchLabDashboard({ DB: db });
       expect(result.btc_latest).toEqual({ ts: 1000, btc_price: 50000 });
+      expect(result.btc_price_series).toEqual(seriesRows);
       expect(result.v1_composite_latest).toEqual({ ts: 900, v1_composite: 55 });
       expect(result.research_events_count).toBe(3);
       expect(result.recent_events).toHaveLength(1);
@@ -90,13 +95,25 @@ describe('Research Lab — read-only research API helpers', () => {
     it('never issues a write-shaped query (no INSERT/UPDATE/DELETE anywhere)', async () => {
       const db = makeDb([
         { first: null }, { first: null }, { first: { n: 0 } }, { first: { n: 0 } },
-        { first: { latest: null } }, { all: { results: [] } },
+        { first: { latest: null } }, { all: { results: [] } }, { all: { results: [] } },
       ]);
       await scope.getResearchLabDashboard({ DB: db });
       for (const call of db.calls) {
         expect(call.sql).not.toMatch(/INSERT|UPDATE|DELETE/i);
         expect(call.sql).toMatch(/^SELECT/i);
       }
+    });
+
+    it('BTC price series query is bounded to BTC_SERIES_WINDOW_MS, never an unbounded full-table scan', async () => {
+      const db = makeDb([
+        { first: null }, { first: null }, { first: { n: 0 } }, { first: { n: 0 } },
+        { first: { latest: null } }, { all: { results: [] } }, { all: { results: [] } },
+      ]);
+      await scope.getResearchLabDashboard({ DB: db });
+      const seriesQuery = db.calls.find((c) => /FROM btc_data WHERE ts >=/.test(c.sql));
+      expect(seriesQuery).toBeTruthy();
+      expect(seriesQuery.sql).toContain(String(scope.BTC_SERIES_WINDOW_MS));
+      expect(seriesQuery.sql).toMatch(/ORDER BY ts ASC/);
     });
   });
 

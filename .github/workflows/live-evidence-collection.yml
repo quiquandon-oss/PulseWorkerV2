@@ -63,6 +63,14 @@ jobs:
         with:
           python-version: '3.11'
 
+      # Root cause of this workflow's first-ever scheduled run failing
+      # before ever reaching production logic: actions/setup-python@v5
+      # installs the interpreter only, not pytest -- this step was
+      # simply missing. Matches the exact, already-established
+      # convention test.yml uses for the same runner image.
+      - name: Install pytest
+        run: pip install pytest --break-system-packages
+
       - name: Run research/ tests (never run this pipeline against production on red tests)
         run: python3 -m pytest research/ -v
 

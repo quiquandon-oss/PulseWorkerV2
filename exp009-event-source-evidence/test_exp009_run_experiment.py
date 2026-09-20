@@ -21,6 +21,7 @@ import re
 import sqlite3
 import sys
 import urllib.error
+from datetime import datetime, timezone
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -230,6 +231,76 @@ def test_main_filters_internal_model_events_out_of_persisted_results_but_disclos
     main_src = src[main_start:src.index("\nif __name__")]
     assert "is_internal_model_event" in main_src
     assert "n_internal_model_events_excluded_from_results" in main_src
+
+
+def test_main_persists_sample_size_equal_to_len_of_its_own_persisted_results():
+    """Regression guard (PR #67 audit finding): sample_size must describe
+    the ACTUAL persisted payload (report["results"], i.e. real-world-only
+    rows) -- never dataset["results"] pre-filter, which still includes
+    internal-model-event rows that main() deliberately excludes from what
+    gets persisted. This fixture is built to produce BOTH a real-world
+    event (a large BTC move) AND an internal-model event (a V2_FAILURE_
+    CLUSTER, from 5 consecutive incorrect predictions) in the same
+    window, so pre-filter and post-filter counts are proven to actually
+    differ here -- a fixture with zero internal-model events would let a
+    trivial equality pass without exercising the bug this test guards
+    against."""
+    now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+    day = 24 * 3600000
+    base_ts = now_ms - 30 * day  # comfortably inside the 90-day window, with room before AND after
+
+    # One clean day-aligned btc_data reading per day (event_detector's
+    # own _resample_daily keeps only the first reading per UTC calendar
+    # day -- see research/test_event_source_evidence_join.py's own
+    # fixture for the same technique/rationale), then a >4% jump to
+    # trigger a real LARGE_MOVE event.
+    btc_rows = [{"ts": base_ts + i * day, "btc_price": 50000.0} for i in range(9)]
+    btc_rows.append({"ts": base_ts + 9 * day, "btc_price": 50000.0 * 1.05})
+
+    history_rows = [
+        {"ts": base_ts + i * 6 * 3600000, "score": 50,
+         "sources_json": json.dumps({"geopolitics": 20}), "gold_regime": "chop"}
+        for i in range(40)
+    ]
+
+    # 5 consecutive INCORRECT horizon=12 predictions -> one real
+    # V2_FAILURE_CLUSTER (internal-model) event at the 5th row's ts.
+    predictions_rows = [
+        {"ts": base_ts + 2 * day + i * 3600000, "horizon_hours": 12, "p_up": 0.9, "realized_up": 0}
+        for i in range(5)
+    ]
+
+    call_order = ["history", "btc", "predictions", "research_events", "research_event_evidence"]
+    fixtures = {
+        "history": history_rows, "btc": btc_rows, "predictions": predictions_rows,
+        "research_events": [], "research_event_evidence": [],
+    }
+    call_index = {"i": 0}
+
+    def fake_run_d1(sql):
+        key = call_order[call_index["i"]]
+        call_index["i"] += 1
+        return fixtures[key]
+
+    captured = {}
+
+    def fake_d1_api_query(sql, params):
+        captured["sql"] = sql
+        captured["params"] = params
+        return []
+
+    with patch.object(run_experiment, "run_d1", side_effect=fake_run_d1):
+        with patch.object(run_experiment, "d1_api_query", side_effect=fake_d1_api_query):
+            run_experiment.main()
+
+    sample_size = captured["params"][3]
+    report = json.loads(captured["params"][5])
+
+    # The fixture must actually exercise pre-filter != post-filter --
+    # otherwise this would trivially pass even with the old, buggy code.
+    assert report["n_internal_model_events_excluded_from_results"] > 0
+
+    assert sample_size == len(report["results"])
 
 
 # ---- summarize_validation_status ----

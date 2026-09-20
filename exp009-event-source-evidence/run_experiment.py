@@ -321,14 +321,24 @@ def main():
     }
     validation_status = summarize_validation_status(evidence_coverage)
 
+    # sample_size describes the actual persisted observation payload
+    # (report["results"], i.e. real_world_results) -- NOT dataset["results"]
+    # pre-filter, which still includes internal-model-event rows that are
+    # deliberately excluded from what gets persisted (see the filtering
+    # above). A sample_size that counted rows this analysis never actually
+    # persisted would silently overstate the size of this observation --
+    # research_analyses.sample_size must always equal len(the report's own
+    # "results" array), the same contract EXP-005's own sample_size
+    # (report["n_history_rows"], itself embedded in its own metric_json)
+    # already upholds.
     params = [
-        now_ms, start_ts, now_ms, len(dataset["results"]),
+        now_ms, start_ts, now_ms, len(real_world_results),
         SUBJECT, json.dumps(report), NOT_A_HYPOTHESIS_TEST_NOTE, validation_status,
     ]
     d1_api_query(INSERT_ANALYSIS_SQL, params)
     print(f"[exp009] persisted analysis: n_events={len(dataset['events'])} "
           f"n_real_world_events_with_evidence={evidence_coverage['n_real_world_events_with_any_evidence']} "
-          f"n_event_source_rows={len(dataset['results'])} validation_status={validation_status}")
+          f"n_event_source_rows={len(real_world_results)} validation_status={validation_status}")
 
 
 if __name__ == "__main__":

@@ -6252,6 +6252,77 @@ async function computeExp009LiveFields(env, requiredSample) {
   };
 }
 
+// EXP-010's own live-metric provider. Same data_source_table-as-lookup-
+// key convention as EXP-004/005/009 above -- never the literal
+// research_analyses table name, and never interpolated into SQL.
+const EXP010_SUBJECT = 'EXP-010:source_dialogue_validation'; // must match exp010-source-dialogue-validation/run_experiment.py's SUBJECT exactly
+
+// Like EXP-009, this experiment defines no statistical hypothesis test
+// (see its own registry row's success_criterion): it validates the
+// locked Source Dialogue Engine (PR #68) against real V1/V2 data. The
+// persisted report is summary counts only (relationship_summary /
+// redundancy_summary) -- never the full per-(event, pair) join, per
+// this experiment's own proactive payload-size discipline.
+async function computeExp010LiveFields(env, requiredSample) {
+  const [countRow, rows] = await Promise.all([
+    env.DB.prepare('SELECT COUNT(*) AS n FROM research_analyses WHERE subject = ?').bind(EXP010_SUBJECT).first(),
+    env.DB.prepare(
+      'SELECT analysis_ts, metric_json, validation_status FROM research_analyses WHERE subject = ? ORDER BY analysis_ts ASC'
+    ).bind(EXP010_SUBJECT).all(),
+  ]);
+  const runs = (rows && rows.results) || [];
+  const sampleCount = countRow ? countRow.n : 0;
+  const threshold = Number.isFinite(requiredSample) ? requiredSample : REQUIRED_SAMPLE_FALLBACK;
+  const insufficientSample = sampleCount === 0 || sampleCount < threshold;
+
+  if (sampleCount === 0) {
+    return {
+      current_sample_size: 0,
+      current_measured_result: 'NOT_AVAILABLE',
+      oos_result: 'NOT_AVAILABLE',
+      confidence_evidence_maturity: 'INSUFFICIENT_SAMPLE',
+      last_updated: null,
+    };
+  }
+
+  let parsedRuns = [];
+  try {
+    parsedRuns = runs.map((r) => ({ ts: r.analysis_ts, report: JSON.parse(r.metric_json) }));
+  } catch (err) {
+    return {
+      current_sample_size: sampleCount,
+      current_measured_result: 'NOT_AVAILABLE',
+      oos_result: 'NOT_AVAILABLE',
+      confidence_evidence_maturity: 'UNKNOWN',
+      last_updated: runs[runs.length - 1].analysis_ts,
+    };
+  }
+
+  const latest = parsedRuns[parsedRuns.length - 1].report;
+  const currentMeasuredResult = {
+    latest_run_ts: parsedRuns[parsedRuns.length - 1].ts,
+    relationship_summary: latest.relationship_summary || null,
+    redundancy_summary: latest.redundancy_summary || null,
+    note: "Descriptive only, from the most recent single run. This experiment defines no statistical success threshold -- see the registry row's own success_criterion (validation/diagnostic milestone, not a hypothesis test).",
+  };
+
+  const oosResult = insufficientSample
+    ? 'INSUFFICIENT_SAMPLE'
+    : {
+        milestone: `${parsedRuns.length} of ${threshold} required independent weekly runs accumulated`,
+        runs_considered: parsedRuns.length,
+        note: "This experiment defines no statistical hypothesis test -- reaching required_sample marks only that enough independent runs exist to assess the locked Source Dialogue Engine's output stability against real data, never a coefficient or production recommendation.",
+      };
+
+  return {
+    current_sample_size: sampleCount,
+    current_measured_result: currentMeasuredResult,
+    oos_result: oosResult,
+    confidence_evidence_maturity: insufficientSample ? 'INSUFFICIENT_SAMPLE' : 'ACCUMULATING',
+    last_updated: parsedRuns[parsedRuns.length - 1].ts,
+  };
+}
+
 // Maps a registry row's data_source_table to the function that computes
 // its live fields. A table name with no entry here (or a NULL
 // data_source_table) falls back to the static NOT_STARTED/NOT_AVAILABLE
@@ -6260,6 +6331,7 @@ const LIVE_METRIC_PROVIDERS = {
   experiment_4_timesfm: computeExperiment4TimesFmLiveFields,
   research_analyses_exp005_source_effectiveness: computeExp005LiveFields,
   research_analyses_exp009_event_source_evidence: computeExp009LiveFields,
+  research_analyses_exp010_source_dialogue_validation: computeExp010LiveFields,
 };
 
 async function getResearchLabRegistry(env) {

@@ -12,10 +12,10 @@ describe('Research Lab — read-only research API helpers', () => {
   let scope;
   beforeAll(() => {
     scope = evalInScope(
-      extractFunctions('computeExperiment4TimesFmLiveFields', 'computeExp005LiveFields', 'computeExp009LiveFields', 'getResearchLabRegistry') + '\n' +
+      extractFunctions('computeExperiment4TimesFmLiveFields', 'computeExp005LiveFields', 'computeExp009LiveFields', 'computeExp010LiveFields', 'getResearchLabRegistry') + '\n' +
       extractConstants('SOURCE_TOPIC_AFFINITY_DISPLAY', 'REACTION_HORIZONS_MS',
         'REACTION_GOOD_QUALITY_FRACTION', 'REACTION_APPROXIMATE_QUALITY_FRACTION', 'BTC_SERIES_WINDOW_MS',
-        'REQUIRED_SAMPLE_FALLBACK', 'EXP005_SUBJECT', 'EXP009_SUBJECT', 'LIVE_METRIC_PROVIDERS') + '\n' +
+        'REQUIRED_SAMPLE_FALLBACK', 'EXP005_SUBJECT', 'EXP009_SUBJECT', 'EXP010_SUBJECT', 'LIVE_METRIC_PROVIDERS') + '\n' +
       extractFunctions('resolveBtcReactionAtHorizon', 'getResearchLabDashboard', 'getResearchLabEvents',
         'getResearchLabEventDetail', 'getResearchLabSources', 'getResearchLabPipelineHealth')
     );
@@ -727,6 +727,124 @@ describe('Research Lab — read-only research API helpers', () => {
       expect(exp005.current_sample_size).toBe(0);
       expect(exp009.current_sample_size).toBe(0);
       expect(exp009.confidence_evidence_maturity).toBe('INSUFFICIENT_SAMPLE');
+    });
+  });
+
+  describe('computeExp010LiveFields — EXP-010 Source Dialogue Validation', () => {
+    function makeReport(overrides) {
+      return {
+        window: { start_ts: 1, end_ts: 2 },
+        source_keys: ['alpha', 'beta'],
+        relationship_summary: {
+          n_events_used: 2, n_internal_model_events_excluded: 0, n_source_pair_observations: 4,
+          by_relationship: { INSUFFICIENT_EVIDENCE: 1, DIFFERENT_TIMING: 0, SUPPORTING: 2, CONTRADICTING: 1 },
+        },
+        redundancy_summary: {
+          n_source_pairs: 1,
+          by_redundancy: { REDUNDANCY_UNRESOLVED: 0, NO_STRONG_PAIRWISE_REDUNDANCY_DETECTED: 1, INSUFFICIENT_EVIDENCE: 0 },
+        },
+        ...overrides,
+      };
+    }
+
+    it('zero accumulated runs -> honest zero, never fabricated data', async () => {
+      const db = makeDb([
+        { first: { n: 0 } },
+        { all: { results: [] } },
+      ]);
+      const result = await scope.computeExp010LiveFields({ DB: db }, 4);
+      expect(result.current_sample_size).toBe(0);
+      expect(result.current_measured_result).toBe('NOT_AVAILABLE');
+      expect(result.oos_result).toBe('NOT_AVAILABLE');
+      expect(result.confidence_evidence_maturity).toBe('INSUFFICIENT_SAMPLE');
+      expect(result.last_updated).toBe(null);
+    });
+
+    it('below required_sample: reports real descriptive summaries from the latest run, but oos_result is gated INSUFFICIENT_SAMPLE', async () => {
+      const db = makeDb([
+        { first: { n: 1 } },
+        { all: { results: [{ analysis_ts: 1000, metric_json: JSON.stringify(makeReport({})), validation_status: 'comparable_pairs_observed' }] } },
+      ]);
+      const result = await scope.computeExp010LiveFields({ DB: db }, 4);
+      expect(result.current_sample_size).toBe(1);
+      expect(result.current_measured_result.relationship_summary).toEqual(makeReport({}).relationship_summary);
+      expect(result.current_measured_result.redundancy_summary).toEqual(makeReport({}).redundancy_summary);
+      expect(result.oos_result).toBe('INSUFFICIENT_SAMPLE');
+      expect(result.confidence_evidence_maturity).toBe('INSUFFICIENT_SAMPLE');
+      expect(result.last_updated).toBe(1000);
+    });
+
+    it('at required_sample: oos_result reports milestone progress, never a coefficient/significance verdict', async () => {
+      const runs = [1000, 2000, 3000, 4000].map((ts) => ({ analysis_ts: ts, metric_json: JSON.stringify(makeReport({})) }));
+      const db = makeDb([
+        { first: { n: 4 } },
+        { all: { results: runs } },
+      ]);
+      const result = await scope.computeExp010LiveFields({ DB: db }, 4);
+      expect(result.current_sample_size).toBe(4);
+      expect(result.confidence_evidence_maturity).toBe('ACCUMULATING');
+      expect(result.oos_result.runs_considered).toBe(4);
+      expect(result.oos_result.milestone).toMatch(/4 of 4/);
+      expect(result.oos_result.replicated_significant_and_incremental_pairs).toBeUndefined();
+    });
+
+    it('malformed metric_json (unparseable) degrades gracefully, never crashes, never fabricates', async () => {
+      const db = makeDb([
+        { first: { n: 1 } },
+        { all: { results: [{ analysis_ts: 999, metric_json: 'not valid json{{{' }] } },
+      ]);
+      const result = await scope.computeExp010LiveFields({ DB: db }, 4);
+      expect(result.current_sample_size).toBe(1);
+      expect(result.current_measured_result).toBe('NOT_AVAILABLE');
+      expect(result.confidence_evidence_maturity).toBe('UNKNOWN');
+      expect(result.last_updated).toBe(999);
+    });
+
+    it('every D1 call is SELECT-only, filtered by the exact EXP-010 subject, never a write', async () => {
+      const db = makeDb([
+        { first: { n: 1 } },
+        { all: { results: [{ analysis_ts: 1, metric_json: JSON.stringify(makeReport({})) }] } },
+      ]);
+      await scope.computeExp010LiveFields({ DB: db }, 4);
+      for (const call of db.calls) {
+        expect(call.sql).toMatch(/^SELECT/i);
+        expect(call.sql).not.toMatch(/\bINSERT\s+INTO\b|\bUPDATE\s+\w+\s+SET\b|\bDELETE\s+FROM\b/i);
+        expect(call.args).toEqual([scope.EXP010_SUBJECT]);
+      }
+    });
+
+    it('is wired into LIVE_METRIC_PROVIDERS under a dedicated lookup key, not the literal shared table name', () => {
+      expect(scope.LIVE_METRIC_PROVIDERS.research_analyses_exp010_source_dialogue_validation).toBe(scope.computeExp010LiveFields);
+    });
+
+    it('end-to-end via getResearchLabRegistry: EXP-010 wired correctly alongside EXP-009, each using its own provider', async () => {
+      const db = makeDb([
+        { all: { results: [
+          {
+            experiment_id: 'EXP-009', title: 't', research_question: 'q', purpose: 'p', experiment_type: 'TYPE_1',
+            expected_result: 'e', success_criterion: 's', start_date: null, target_date: null, status: 'PROPOSED',
+            baseline: 'b', required_sample: 4, conclusion: null, next_action: 'n', github_refs: null,
+            data_source_table: 'research_analyses_exp009_event_source_evidence', created_ts: 1, updated_ts: 1,
+          },
+          {
+            experiment_id: 'EXP-010', title: 't2', research_question: 'q2', purpose: 'p2', experiment_type: 'TYPE_1',
+            expected_result: 'e2', success_criterion: 's2', start_date: null, target_date: null, status: 'PROPOSED',
+            baseline: 'b2', required_sample: 4, conclusion: null, next_action: 'n2', github_refs: null,
+            data_source_table: 'research_analyses_exp010_source_dialogue_validation', created_ts: 2, updated_ts: 2,
+          },
+        ] } },
+        { first: { n: 0 } },      // EXP-009's COUNT query
+        { all: { results: [] } }, // EXP-009's rows query
+        { first: { n: 0 } },      // EXP-010's COUNT query
+        { all: { results: [] } }, // EXP-010's rows query
+      ]);
+      const result = await scope.getResearchLabRegistry({ DB: db });
+      expect(result.ok).toBe(true);
+      const exp009 = result.experiments.find((e) => e.experiment_id === 'EXP-009');
+      const exp010 = result.experiments.find((e) => e.experiment_id === 'EXP-010');
+      expect(exp009.current_sample_size).toBe(0);
+      expect(exp010.current_sample_size).toBe(0);
+      expect(exp010.confidence_evidence_maturity).toBe('INSUFFICIENT_SAMPLE');
     });
   });
 

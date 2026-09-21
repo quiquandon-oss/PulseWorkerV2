@@ -1,0 +1,72 @@
+name: Experiment 10 - Source Dialogue Validation (research only)
+
+# EXP-010: Source Dialogue Validation. Validates the merged, independently-
+# audited Source Dialogue Engine (research/source_dialogue.py, PR #68)
+# against real V1/V2 historical data ONLY -- no EIA, no GDELT (both remain
+# PRIMARY VERIFICATION BLOCKED and are never referenced by this workflow).
+# Runs research/exp010_source_dialogue_validation.py's own
+# build_relationship_dataset()/build_redundancy_dataset() -- UNCHANGED,
+# reused not reimplemented -- and persists a size-safe SUMMARY report
+# (descriptive counts only, never the full per-pair-per-event join) into
+# the EXISTING research_analyses table, tagged
+# subject='EXP-010:source_dialogue_validation'.
+#
+# Weekly, not daily, matching EXP-005/EXP-009's own reasoning: a
+# meaningfully NEW chronological window needs real time to pass for the
+# underlying V1/V2 data to change. Offset one hour after EXP-009's own
+# Monday run (which is itself one hour after EXP-005's) purely to avoid
+# three large research jobs starting at the exact same instant; the three
+# experiments are otherwise fully independent and this has no bearing on
+# any of their methodologies.
+#
+# $0: GitHub Actions `schedule:` only -- does NOT add a new Cloudflare Cron
+# Trigger (same reasoning as every other experiment's own workflow; the
+# account's 5-Cron-Trigger budget is already fully committed).
+#
+# Writes ONLY research_analyses (INSERT only, never UPDATE/DELETE). No
+# V1/V2/Worker file is touched. No migration beyond the registry row
+# already added in .ai/migrations/0013_exp010_activation.sql
+# (research_analyses already exists). No production prediction/selection/
+# coefficient logic is read, written, or influenced by this workflow.
+on:
+  schedule:
+    - cron: '0 11 * * 1'
+  workflow_dispatch: {}
+
+concurrency:
+  group: exp010-source-dialogue-validation
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  analyze:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node (for wrangler)
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install wrangler
+        run: npm install -g wrangler
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install pytest
+        run: pip install pytest --break-system-packages
+
+      - name: Run research/ tests (never run this pipeline against production on red tests)
+        run: python3 -m pytest research/ exp010-source-dialogue-validation/ -v
+
+      - name: Run source-dialogue-validation analysis
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: python3 exp010-source-dialogue-validation/run_experiment.py

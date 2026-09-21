@@ -33,6 +33,7 @@ run_experiment = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(run_experiment)
 
 import source_analysis as sa  # noqa: E402
+import evidence_quality  # noqa: E402
 
 
 class FakeHTTPResponse:
@@ -212,6 +213,70 @@ def test_real_multi_source_report_produces_valid_params_via_build_insert_analysi
     )
     assert len(params) == 8
     json.loads(params[5])  # metric_json param must itself be valid, parseable JSON
+
+
+# ---- Research Evidence Quality Layer integration (additive) ----
+
+def test_build_history_observations_uses_row_ts_for_both_timestamp_axes():
+    """V1 history rows have no distinct publication-lag concept -- both
+    information_available_at and observation_time must be the row's own
+    real ts, same documented design decision as exp010's own
+    build_v1_observation()."""
+    rows = [{"ts": 1000, "score": 50, "sources_json": "{}", "gold_regime": "chop"}]
+    obs = run_experiment.build_history_observations(rows)
+    assert obs == [{"information_available_at": 1000, "observation_time": 1000, "provider": "V1", "dataset": "history"}]
+
+
+def test_build_history_observations_one_per_row_provider_agnostic_of_sources_json_content():
+    rows = [{"ts": i * 1000, "score": 1, "sources_json": None, "gold_regime": None} for i in range(5)]
+    obs = run_experiment.build_history_observations(rows)
+    assert len(obs) == 5
+    assert [o["observation_time"] for o in obs] == [0, 1000, 2000, 3000, 4000]
+
+
+def test_main_report_carries_an_additive_evidence_quality_key_never_replacing_existing_keys():
+    """The Evidence Quality Layer integration must be purely additive:
+    every key build_source_effectiveness_report() itself produces must
+    remain present and untouched, with evidence_quality as one new
+    sibling key."""
+    history_rows = [
+        {"ts": 1000 + i * 3600000, "score": 50 + (i % 5), "sources_json": json.dumps({"fng": 40 + (i % 7)}), "gold_regime": "chop"}
+        for i in range(50)
+    ]
+    btc_rows = [{"ts": 1000 + i * 3600000, "btc_price": 50000.0 + i * 10} for i in range(60)]
+    conn = run_experiment.build_local_mirror(history_rows, btc_rows)
+    report = sa.build_source_effectiveness_report(conn, 1000, 1000 + 49 * 3600000, horizons=(1, 3))
+    conn.close()
+    original_keys = set(report.keys())
+
+    now_ms = 1000 + 49 * 3600000
+    report["evidence_quality"] = evidence_quality.assess_evidence_quality(
+        run_experiment.build_history_observations(history_rows),
+        information_cutoff=now_ms, window_start=1000, window_end=now_ms,
+    )
+
+    assert original_keys.issubset(report.keys())
+    assert report["evidence_quality"]["OVERALL_STATUS"] in evidence_quality.OVERALL_STATUSES
+    assert report["evidence_quality"]["n_observations_supplied"] == 50
+    # No numeric score anywhere in the new key either.
+    assert "score" not in json.dumps(report["evidence_quality"])
+
+    # Must still survive the exact same serialization path main() uses.
+    params = run_experiment.build_insert_analysis_params(
+        analysis_ts=1, window_start_ts=1, window_end_ts=1, sample_size=report["n_history_rows"],
+        metric_json_obj=report, multiple_testing_correction=json.dumps(report["level2"]["multiple_testing_correction"]),
+        validation_status="observation",
+    )
+    parsed = json.loads(params[5])
+    assert "evidence_quality" in parsed
+
+
+def test_main_calls_evidence_quality_exactly_once():
+    with open(os.path.join(_HERE, "run_experiment.py")) as f:
+        src = f.read()
+    main_start = src.index("def main():")
+    main_src = src[main_start:src.index("\nif __name__")]
+    assert main_src.count("eq.assess_evidence_quality(") == 1
 
 
 # ---- make_json_safe ----

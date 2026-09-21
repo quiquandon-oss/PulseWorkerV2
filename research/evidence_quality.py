@@ -90,6 +90,46 @@ to that same real timestamp explicitly, exactly as that module already
 does; this layer never infers or defaults one from the other.
 
 =====================================================================
+RAW INPUT DIAGNOSTICS vs. HISTORICAL ELIGIBLE-POPULATION VALIDITY
+(corrective fix, post-audit)
+=====================================================================
+
+An independent adversarial audit of this module found a real blocker:
+`TIMESTAMP_VALIDITY` was (by design) computed over the FULL raw
+supplied list, for honest disclosure of how much of the caller's input
+was malformed -- but the OVERALL_STATUS rollup used that SAME raw-list
+status in its hard-fail branch. The result: a single malformed
+observation that had nothing to do with the requested historical
+assessment at all (e.g. a garbage `information_available_at` on an
+observation whose own `observation_time` was already in the future)
+could flip an otherwise perfectly clean historical `SUFFICIENT`
+verdict to `INVALID`, even though every eligible-population-scoped
+dimension (`SAMPLE_DEPTH`/`CADENCE`/`DUPLICATE_QUALITY`/`PROVENANCE`)
+was completely unaffected. This violated this module's own central
+promise: the layer itself must never let future/irrelevant information
+influence a historical verdict.
+
+The fix keeps BOTH signals, deliberately separate and both visible in
+the returned report:
+
+- `TIMESTAMP_VALIDITY` -- a RAW INPUT DIAGNOSTIC. Unchanged in
+  behavior. Inspects every supplied observation regardless of
+  relevance. Useful for "how messy was what I was handed," never fed
+  into OVERALL_STATUS.
+- `HISTORICAL_TIMESTAMP_VALIDITY` -- the HISTORICAL ELIGIBLE-POPULATION
+  VALIDITY signal that actually feeds OVERALL_STATUS. Scopes the same
+  per-observation validity check to only those observations whose OWN
+  `observation_time` plausibly places them inside the requested
+  historical scope (`_plausibly_historical()`) -- judged using
+  `observation_time` alone, deliberately never `information_available_
+  at`, so this placement judgement still works even when `information_
+  available_at` itself is the malformed field. A malformed observation
+  that genuinely falls inside the historical scope still fails closed,
+  exactly as before -- this fix narrows WHICH rows can trigger a hard
+  failure, it never weakens what happens once a row is confirmed
+  historical.
+
+=====================================================================
 Observation contract
 =====================================================================
 
@@ -126,11 +166,22 @@ import statistics
 
 AS_OF_SAFETY_STATUSES = ("PASS", "FAIL", "INSUFFICIENT_EVIDENCE")
 TIMESTAMP_VALIDITY_STATUSES = ("PASS", "FAIL", "INSUFFICIENT_EVIDENCE")
+# HISTORICAL_TIMESTAMP_VALIDITY_STATUSES: the eligible-population-scoped
+# sibling of TIMESTAMP_VALIDITY_STATUSES -- see _assess_historical_
+# timestamp_validity()'s own docstring for why a second, differently-
+# scoped validity dimension exists.
+HISTORICAL_TIMESTAMP_VALIDITY_STATUSES = ("PASS", "FAIL", "INSUFFICIENT_EVIDENCE")
 SAMPLE_DEPTH_STATUSES = ("PASS", "INSUFFICIENT_EVIDENCE")
 CADENCE_STATUSES = ("PASS", "WARNING", "FAIL", "INSUFFICIENT_EVIDENCE")
 DUPLICATE_STATUSES = ("PASS", "FAIL", "INSUFFICIENT_EVIDENCE")
 PROVENANCE_STATUSES = ("VERIFIED", "PARTIAL", "UNKNOWN")
-WINDOW_CONFORMANCE_STATUSES = ("PASS", "FAIL", "INSUFFICIENT_EVIDENCE")
+# FAIL is deliberately NOT part of this vocabulary (audit finding,
+# corrective fix): _assess_window_conformance() can only ever report
+# that at least one observation falls inside the window (PASS) or that
+# none do (INSUFFICIENT_EVIDENCE) -- there is no code path that
+# produces a hard FAIL for this dimension, so declaring FAIL here would
+# be dead, misleading vocabulary.
+WINDOW_CONFORMANCE_STATUSES = ("PASS", "INSUFFICIENT_EVIDENCE")
 OVERALL_STATUSES = ("SUFFICIENT", "LIMITED", "INSUFFICIENT", "INVALID")
 
 PROVENANCE_FIELDS = (
@@ -164,6 +215,22 @@ def _is_valid_timestamp(value):
     return True
 
 
+def _safe_get(obs, field):
+    """obs.get(field), but never raises when `obs` itself is not a
+    dict (corrective fix, audit finding: a stray string/None/list/int
+    entry in the observations list previously raised an unhandled
+    AttributeError). A non-dict entry is treated as an observation with
+    every field missing -- it is never silently discarded from the
+    population counts (n_total/n_invalid etc. still count it), it is
+    just diagnosed as malformed through the SAME missing-field paths
+    every dimension already has, rather than crashing the whole
+    assessment. This never fabricates a value: a missing field stays
+    None, exactly as if the caller had passed `{}`."""
+    if not isinstance(obs, dict):
+        return None
+    return obs.get(field)
+
+
 def _as_of_eligible(information_available_at, information_cutoff):
     """information_available_at <= information_cutoff, inclusive --
     matches this layer's own explicit as-of contract (Section 3: an
@@ -190,8 +257,8 @@ def _eligible_population(observations, information_cutoff, window_start, window_
     raw population was excluded and why."""
     return [
         obs for obs in observations
-        if _as_of_eligible(obs.get("information_available_at"), information_cutoff)
-        and _within_window(obs.get("observation_time"), window_start, window_end)
+        if _as_of_eligible(_safe_get(obs, "information_available_at"), information_cutoff)
+        and _within_window(_safe_get(obs, "observation_time"), window_start, window_end)
     ]
 
 
@@ -215,6 +282,40 @@ def _within_window(observation_time, window_start, window_end):
     return True
 
 
+def _plausibly_historical(observation_time, information_cutoff, window_start, window_end):
+    """Corrective-fix primitive (audit blocker): decides whether an
+    observation's own DESCRIBED time places it inside the scope of the
+    requested historical assessment, using ONLY observation_time --
+    deliberately never information_available_at, since the whole point
+    is to make this determination even when information_available_at
+    itself is malformed.
+
+    This is NOT the same test as _within_window(): _within_window()
+    returns True when no window is supplied at all (nothing to
+    enforce), which is the right behavior for WINDOW_CONFORMANCE
+    itself, but wrong here -- absent an explicit window, "historical"
+    still means at-or-before the cutoff, so this falls back to
+    observation_time <= information_cutoff (the same as-of notion
+    AS_OF_SAFETY already applies to information_available_at, applied
+    here to observation_time instead) rather than treating every
+    observation as automatically in-scope.
+
+    A malformed/missing observation_time cannot be placed in time at
+    all and is therefore conservatively treated as NOT plausibly
+    historical -- an observation this function cannot show belongs to
+    the historical population must never be assumed to belong to it
+    (see _assess_historical_timestamp_validity()'s own docstring for
+    why this direction of fail-closed, not the other, is correct
+    here)."""
+    if not _is_valid_timestamp(observation_time):
+        return False
+    if window_start is not None or window_end is not None:
+        return _within_window(observation_time, window_start, window_end)
+    if not _is_valid_timestamp(information_cutoff):
+        return False
+    return observation_time <= information_cutoff
+
+
 # =====================================================================
 # A. AS_OF_SAFETY
 # =====================================================================
@@ -230,7 +331,7 @@ def _assess_as_of_safety(observations, information_cutoff):
     n_eligible = 0
     n_ineligible = 0
     for obs in observations:
-        if _as_of_eligible(obs.get("information_available_at"), information_cutoff):
+        if _as_of_eligible(_safe_get(obs, "information_available_at"), information_cutoff):
             n_eligible += 1
         else:
             n_ineligible += 1
@@ -244,10 +345,21 @@ def _assess_as_of_safety(observations, information_cutoff):
 
 
 # =====================================================================
-# B. TIMESTAMP_VALIDITY
+# B. TIMESTAMP_VALIDITY -- RAW INPUT DIAGNOSTIC, not the OVERALL_STATUS
+# signal (see _assess_historical_timestamp_validity() immediately below
+# for the eligible-population-scoped sibling that actually feeds the
+# rollup -- corrective fix, audit blocker)
 # =====================================================================
 
 def _assess_timestamp_validity(observations):
+    """Diagnoses the FULL raw supplied list, exactly as before this
+    corrective fix -- this is intentionally NOT scoped to the historical
+    population, because its whole purpose is to disclose how much of
+    whatever the caller passed in was malformed, including rows that
+    have nothing to do with the requested historical assessment at all.
+    Precisely BECAUSE it is raw-list-scoped, this dimension's status
+    must never by itself be allowed to flip OVERALL_STATUS -- see
+    _assess_historical_timestamp_validity()."""
     if not observations:
         return {"status": "INSUFFICIENT_EVIDENCE", "reason": "no observations supplied",
                 "n_total": 0, "n_valid": 0, "n_invalid": 0}
@@ -255,7 +367,7 @@ def _assess_timestamp_validity(observations):
     n_valid = 0
     n_invalid = 0
     for obs in observations:
-        if _is_valid_timestamp(obs.get("information_available_at")) and _is_valid_timestamp(obs.get("observation_time")):
+        if _is_valid_timestamp(_safe_get(obs, "information_available_at")) and _is_valid_timestamp(_safe_get(obs, "observation_time")):
             n_valid += 1
         else:
             n_invalid += 1
@@ -268,6 +380,65 @@ def _assess_timestamp_validity(observations):
                 "n_total": len(observations), "n_valid": n_valid, "n_invalid": n_invalid}
     return {"status": "PASS", "reason": "all observations have valid numeric timestamps",
             "n_total": len(observations), "n_valid": n_valid, "n_invalid": 0}
+
+
+# =====================================================================
+# B2. HISTORICAL_TIMESTAMP_VALIDITY -- corrective fix (audit blocker):
+# the eligible-population-scoped validity signal that actually feeds
+# OVERALL_STATUS. See module docstring's "RAW INPUT DIAGNOSTICS vs.
+# HISTORICAL ELIGIBLE-POPULATION VALIDITY" section.
+# =====================================================================
+
+def _assess_historical_timestamp_validity(observations, information_cutoff, window_start, window_end):
+    """Scopes the SAME per-observation validity check TIMESTAMP_
+    VALIDITY performs to only those observations _plausibly_historical()
+    finds plausibly part of the requested historical population (judged
+    from observation_time alone, which -- unlike information_available_
+    at -- this function does not require to already be malformed-free
+    just to make that placement judgement).
+
+    This is the fix for the audited blocker: a malformed observation
+    whose OWN observation_time places it outside the historical scope
+    (a future/out-of-window row, however malformed its other fields)
+    must never be able to invalidate an otherwise-clean historical
+    assessment -- it was never going to be used by any real historical
+    calculation regardless of the layer's own diagnostics. A malformed
+    observation that DOES fall inside the historical scope still fails
+    closed exactly as TIMESTAMP_VALIDITY always has -- this fix
+    narrows WHICH rows can trigger a hard failure, it does not weaken
+    what happens once a row is confirmed to be historical.
+
+    An observation whose own observation_time cannot be placed in time
+    at all (missing/malformed) is conservatively excluded from
+    "historical" here (see _plausibly_historical()'s own docstring) --
+    it already cannot enter `eligible` either (WINDOW_CONFORMANCE's
+    _within_window() fails closed on it the same way), so excluding it
+    here keeps this dimension consistent with what the rest of the
+    layer already does with such a row."""
+    historical = [
+        obs for obs in observations
+        if _plausibly_historical(_safe_get(obs, "observation_time"), information_cutoff, window_start, window_end)
+    ]
+    if not historical:
+        return {"status": "INSUFFICIENT_EVIDENCE",
+                "reason": "no observation is plausibly part of the requested historical population",
+                "n_historical": 0, "n_valid": 0, "n_invalid": 0}
+
+    n_valid = 0
+    n_invalid = 0
+    for obs in historical:
+        if _is_valid_timestamp(_safe_get(obs, "information_available_at")) and _is_valid_timestamp(_safe_get(obs, "observation_time")):
+            n_valid += 1
+        else:
+            n_invalid += 1
+
+    if n_invalid > 0:
+        return {"status": "FAIL",
+                "reason": f"{n_invalid} of {len(historical)} observations plausibly within the historical "
+                          "population have a missing/malformed timestamp",
+                "n_historical": len(historical), "n_valid": n_valid, "n_invalid": n_invalid}
+    return {"status": "PASS", "reason": "all observations within the historical population have valid timestamps",
+            "n_historical": len(historical), "n_valid": n_valid, "n_invalid": 0}
 
 
 # =====================================================================
@@ -293,27 +464,46 @@ def _assess_sample_depth(observations, min_observations):
 # =====================================================================
 
 def _assess_cadence(observations, expected_cadence_ms, gap_threshold_ms):
-    valid_times = sorted(
-        obs["observation_time"] for obs in observations
-        if _is_valid_timestamp(obs.get("observation_time"))
-    )
-    n = len(valid_times)
+    """Corrective fix (audit finding, MEDIUM): gaps are computed from
+    UNIQUE observation_time values only. A duplicate observation_time
+    sorts adjacent to its twin and previously produced an artificial
+    0ms gap, which could materially skew median_gap_ms (confirmed in
+    audit: an 8h historical gap was reported as 4h once a single
+    duplicate was added) even though DUPLICATE_QUALITY already
+    correctly FAILs for the same population. Deduplicating here does
+    NOT make duplicate quality pass -- DUPLICATE_QUALITY is computed
+    completely independently (see _assess_duplicates()) and this
+    function's own `duplicate_timestamps_excluded` field discloses
+    exactly how many raw valid timestamps were collapsed into unique
+    ones, so a reader of CADENCE alone still sees that something was
+    excluded rather than a silently-clean-looking series. CADENCE's
+    own gap numbers remain diagnostic only when DUPLICATE_QUALITY has
+    FAILed for the same population -- read them together, never
+    CADENCE alone, whenever duplicate_timestamps_excluded > 0."""
+    valid_times = [
+        _safe_get(obs, "observation_time") for obs in observations
+        if _is_valid_timestamp(_safe_get(obs, "observation_time"))
+    ]
+    unique_times = sorted(set(valid_times))
+    n_unique = len(unique_times)
     diagnostic = {
-        "observation_count": n,
-        "first_observation": valid_times[0] if n else None,
-        "last_observation": valid_times[-1] if n else None,
+        "observation_count": len(valid_times),
+        "n_unique_observation_times": n_unique,
+        "duplicate_timestamps_excluded": len(valid_times) - n_unique,
+        "first_observation": unique_times[0] if n_unique else None,
+        "last_observation": unique_times[-1] if n_unique else None,
         "expected_cadence_ms": expected_cadence_ms,
         "gap_threshold_ms": gap_threshold_ms,
         "largest_gap_ms": None,
         "median_gap_ms": None,
         "n_gaps_exceeding_threshold": None,
     }
-    if n < 2:
+    if n_unique < 2:
         diagnostic["status"] = "INSUFFICIENT_EVIDENCE"
-        diagnostic["reason"] = "fewer than 2 valid observation_time values -- no gap can be computed"
+        diagnostic["reason"] = "fewer than 2 unique valid observation_time values -- no gap can be computed"
         return diagnostic
 
-    gaps = [b - a for a, b in zip(valid_times, valid_times[1:])]
+    gaps = [b - a for a, b in zip(unique_times, unique_times[1:])]
     diagnostic["largest_gap_ms"] = max(gaps)
     diagnostic["median_gap_ms"] = statistics.median(gaps)
 
@@ -349,7 +539,7 @@ def _assess_duplicates(observations):
 
     seen = {}
     for obs in observations:
-        t = obs.get("observation_time")
+        t = _safe_get(obs, "observation_time")
         if not _is_valid_timestamp(t):
             continue
         seen[t] = seen.get(t, 0) + 1
@@ -376,7 +566,7 @@ def _assess_provenance(observations):
     present_counts = {field: 0 for field in PROVENANCE_FIELDS}
     for obs in observations:
         for field in PROVENANCE_FIELDS:
-            if obs.get(field) is not None:
+            if _safe_get(obs, field) is not None:
                 present_counts[field] += 1
 
     n = len(observations)
@@ -420,7 +610,7 @@ def _assess_window_conformance(observations, window_start, window_end):
     n_within = 0
     n_outside = 0
     for obs in observations:
-        if _within_window(obs.get("observation_time"), window_start, window_end):
+        if _within_window(_safe_get(obs, "observation_time"), window_start, window_end):
             n_within += 1
         else:
             n_outside += 1
@@ -437,32 +627,47 @@ def _assess_window_conformance(observations, window_start, window_end):
 # H. OVERALL EVIDENCE STATUS -- deterministic categorical rollup only
 # =====================================================================
 
-def _overall_status(as_of, timestamp_validity, sample_depth, cadence, duplicates, window_conformance):
+def _overall_status(as_of, historical_timestamp_validity, sample_depth, cadence, duplicates, window_conformance):
     """Deterministic precedence, never a weighted/numeric combination:
 
-    1. Any hard FAIL among AS_OF_SAFETY / TIMESTAMP_VALIDITY /
-       DUPLICATE_QUALITY / WINDOW_CONFORMANCE / CADENCE -> INVALID.
-       These five all describe the evidence population itself being
-       wrong/corrupted/out-of-bounds, not merely thin.
-    2. Any INSUFFICIENT_EVIDENCE among AS_OF_SAFETY / TIMESTAMP_
-       VALIDITY / SAMPLE_DEPTH / DUPLICATE_QUALITY / WINDOW_CONFORMANCE
-       -> INSUFFICIENT. (CADENCE's own INSUFFICIENT_EVIDENCE, e.g. from
-       fewer than 2 points, is already implied by an insufficient
-       sample elsewhere and does not need its own branch here.)
+    1. Any hard FAIL among AS_OF_SAFETY / HISTORICAL_TIMESTAMP_VALIDITY
+       / DUPLICATE_QUALITY / CADENCE -> INVALID. These describe the
+       HISTORICAL/ELIGIBLE evidence population itself being wrong/
+       corrupted/out-of-bounds, not merely thin.
+    2. Any INSUFFICIENT_EVIDENCE among AS_OF_SAFETY / HISTORICAL_
+       TIMESTAMP_VALIDITY / SAMPLE_DEPTH / DUPLICATE_QUALITY /
+       WINDOW_CONFORMANCE -> INSUFFICIENT. (CADENCE's own INSUFFICIENT_
+       EVIDENCE, e.g. from fewer than 2 points, is already implied by
+       an insufficient sample elsewhere and does not need its own
+       branch here.)
     3. CADENCE == WARNING (and nothing above fired) -> LIMITED.
     4. Otherwise -> SUFFICIENT.
 
-    PROVENANCE is intentionally excluded from this rollup: an UNKNOWN
-    or PARTIAL provenance describes AUDITABILITY of the evidence, not
-    whether the evidence itself is temporally/statistically valid --
-    folding it in would conflate two different questions (Section 18).
+    Corrective fix (audit blocker): this rollup uses HISTORICAL_
+    TIMESTAMP_VALIDITY, the eligible-population-scoped sibling of
+    TIMESTAMP_VALIDITY -- NOT the raw-list-scoped TIMESTAMP_VALIDITY
+    itself. TIMESTAMP_VALIDITY remains a genuinely useful diagnostic
+    (how much of what the caller handed in was malformed, regardless
+    of relevance), but it must never by itself flip this rollup: a
+    malformed observation that plays no part in the requested
+    historical population (e.g. a garbage future row) can never make
+    an otherwise-clean historical assessment INVALID. WINDOW_
+    CONFORMANCE is also deliberately excluded from the hard-FAIL set
+    (it has no FAIL state in its own vocabulary -- see
+    _assess_window_conformance()) but remains in the INSUFFICIENT set.
+
+    PROVENANCE is intentionally excluded from this rollup entirely: an
+    UNKNOWN or PARTIAL provenance describes AUDITABILITY of the
+    evidence, not whether the evidence itself is temporally/
+    statistically valid -- folding it in would conflate two different
+    questions (Section 18).
     """
-    hard_fail_statuses = (as_of["status"], timestamp_validity["status"], duplicates["status"],
-                          window_conformance["status"], cadence["status"])
+    hard_fail_statuses = (as_of["status"], historical_timestamp_validity["status"],
+                          duplicates["status"], cadence["status"])
     if "FAIL" in hard_fail_statuses:
         return "INVALID"
 
-    insufficient_statuses = (as_of["status"], timestamp_validity["status"], sample_depth["status"],
+    insufficient_statuses = (as_of["status"], historical_timestamp_validity["status"], sample_depth["status"],
                              duplicates["status"], window_conformance["status"])
     if "INSUFFICIENT_EVIDENCE" in insufficient_statuses:
         return "INSUFFICIENT"
@@ -501,17 +706,32 @@ def assess_evidence_quality(observations, information_cutoff,
     ever CLASSIFIED (WARNING/FAIL) when `gap_threshold_ms` is supplied.
 
     Returns a plain dict:
-      {"AS_OF_SAFETY", "TIMESTAMP_VALIDITY", "SAMPLE_DEPTH", "CADENCE",
-       "DUPLICATE_QUALITY", "PROVENANCE", "WINDOW_CONFORMANCE",
-       "OVERALL_STATUS", "n_observations_supplied"}
+      {"AS_OF_SAFETY", "TIMESTAMP_VALIDITY", "HISTORICAL_TIMESTAMP_
+       VALIDITY", "SAMPLE_DEPTH", "CADENCE", "DUPLICATE_QUALITY",
+       "PROVENANCE", "WINDOW_CONFORMANCE", "OVERALL_STATUS",
+       "n_observations_supplied"}
     each dimension (except OVERALL_STATUS/n_observations_supplied) is
     itself a dict with at least {"status", "reason", ...diagnostic
-    detail}."""
+    detail}.
+
+    TIMESTAMP_VALIDITY is a RAW INPUT DIAGNOSTIC -- it inspects every
+    supplied observation, whether or not it has anything to do with the
+    requested historical assessment, and exists purely so a caller can
+    see how much of what they handed in was malformed. HISTORICAL_
+    TIMESTAMP_VALIDITY is the HISTORICAL ELIGIBLE-POPULATION VALIDITY
+    signal that actually feeds OVERALL_STATUS -- see _assess_
+    historical_timestamp_validity()'s own docstring. Never conflate the
+    two: a caller reading only TIMESTAMP_VALIDITY could see FAIL while
+    OVERALL_STATUS is still SUFFICIENT, correctly, because the
+    malformed rows TIMESTAMP_VALIDITY found were never part of the
+    historical population at all."""
     observations = list(observations or [])
     eligible = _eligible_population(observations, information_cutoff, window_start, window_end)
 
     as_of = _assess_as_of_safety(observations, information_cutoff)
     timestamp_validity = _assess_timestamp_validity(observations)
+    historical_timestamp_validity = _assess_historical_timestamp_validity(
+        observations, information_cutoff, window_start, window_end)
     window_conformance = _assess_window_conformance(observations, window_start, window_end)
 
     # Sample depth / cadence / duplicates / provenance describe the
@@ -522,12 +742,13 @@ def assess_evidence_quality(observations, information_cutoff,
     duplicates = _assess_duplicates(eligible)
     provenance = _assess_provenance(eligible)
 
-    overall = _overall_status(as_of, timestamp_validity, sample_depth, cadence, duplicates, window_conformance)
+    overall = _overall_status(as_of, historical_timestamp_validity, sample_depth, cadence, duplicates, window_conformance)
 
     return {
         "n_observations_supplied": len(observations),
         "AS_OF_SAFETY": as_of,
         "TIMESTAMP_VALIDITY": timestamp_validity,
+        "HISTORICAL_TIMESTAMP_VALIDITY": historical_timestamp_validity,
         "SAMPLE_DEPTH": sample_depth,
         "CADENCE": cadence,
         "DUPLICATE_QUALITY": duplicates,

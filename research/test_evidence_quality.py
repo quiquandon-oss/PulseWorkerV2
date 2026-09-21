@@ -10,6 +10,8 @@ diagnostic detail.
 """
 import math
 
+import pytest
+
 import evidence_quality as eq
 
 HOUR = 3_600_000
@@ -409,6 +411,188 @@ def test_J_extreme_post_cutoff_observations_never_change_the_historical_assessme
 
 
 # =====================================================================
+# CORRECTIVE FIX REGRESSION TESTS (post-audit)
+# =====================================================================
+# The independent adversarial audit of the first version of this module
+# found one BLOCKER (OVERALL_STATUS not cutoff-safe against a malformed
+# future observation), one MEDIUM finding (CADENCE gap statistics
+# contaminated by duplicate-induced zero-length gaps), and two LOW
+# findings (unreachable WINDOW_CONFORMANCE "FAIL" vocabulary; a crash
+# on a non-dict observation entry). This section is the exact
+# regression matrix the corrective-fix authorization required.
+
+def _t(i, hour=HOUR):
+    return i * hour
+
+
+def test_corrective_A_B_C_D_malformed_future_cannot_invalidate_clean_history():
+    """The exact A/B/C/D matrix from the corrective-fix authorization.
+
+    A: historical population T-4h..T, all valid -> SUFFICIENT.
+    B: A + well-formed future observations -> still SUFFICIENT.
+    C: A + one MALFORMED future observation -> still SUFFICIENT (this
+       is the blocker: previously flipped to INVALID).
+    D: A + one malformed observation that IS inside the historical
+       population -> must fail closed (INVALID), unlike C.
+    """
+    T = 100 * HOUR
+    historical = [_obs(T - i * HOUR, T - i * HOUR, source_key="alpha") for i in range(5)]  # T-4h..T
+
+    A = eq.assess_evidence_quality(historical, information_cutoff=T, min_observations=5)
+    assert A["OVERALL_STATUS"] == "SUFFICIENT"
+
+    future_well_formed = [_obs(T + i * HOUR, T + i * HOUR) for i in range(1, 5)]
+    B = eq.assess_evidence_quality(historical + future_well_formed, information_cutoff=T, min_observations=5)
+    assert B["OVERALL_STATUS"] == "SUFFICIENT"
+    for dim in ("SAMPLE_DEPTH", "CADENCE", "DUPLICATE_QUALITY", "PROVENANCE", "HISTORICAL_TIMESTAMP_VALIDITY"):
+        assert A[dim] == B[dim], dim
+
+    malformed_future = [{"information_available_at": "garbage", "observation_time": T + HOUR}]
+    C = eq.assess_evidence_quality(historical + malformed_future, information_cutoff=T, min_observations=5)
+    assert C["OVERALL_STATUS"] == "SUFFICIENT", "BLOCKER REGRESSION: malformed future observation invalidated clean history"
+    assert C["TIMESTAMP_VALIDITY"]["status"] == "FAIL"  # raw diagnostic still honestly discloses it
+    assert C["HISTORICAL_TIMESTAMP_VALIDITY"]["status"] == "PASS"  # but it never touches the rollup-feeding signal
+    for dim in ("SAMPLE_DEPTH", "CADENCE", "DUPLICATE_QUALITY", "PROVENANCE"):
+        assert A[dim] == C[dim], dim
+
+    malformed_historical = [{"information_available_at": "garbage", "observation_time": T - 2 * HOUR}]
+    D = eq.assess_evidence_quality(historical + malformed_historical, information_cutoff=T, min_observations=5)
+    assert D["OVERALL_STATUS"] == "INVALID", "a malformed observation actually inside the historical population must still fail closed"
+    assert D["HISTORICAL_TIMESTAMP_VALIDITY"]["status"] == "FAIL"
+
+
+def test_corrective_malformed_observation_outside_an_explicit_window_cannot_invalidate():
+    """Same C/D distinction, but with an explicit window (not just a
+    bare cutoff) -- the fallback-to-cutoff path in _plausibly_historical
+    is exercised by test_corrective_A_B_C_D above (no window supplied);
+    this exercises the _within_window() delegation path instead."""
+    T = 100 * HOUR
+    historical = [_obs(T - i * HOUR, T - i * HOUR) for i in range(5)]
+    window_start, window_end = T - 5 * HOUR, T
+
+    outside_window_malformed = [{"information_available_at": T - 2 * HOUR, "observation_time": T + 50 * HOUR}]
+    r = eq.assess_evidence_quality(historical + outside_window_malformed, information_cutoff=T,
+                                    window_start=window_start, window_end=window_end, min_observations=5)
+    assert r["OVERALL_STATUS"] == "SUFFICIENT"
+    assert r["HISTORICAL_TIMESTAMP_VALIDITY"]["status"] == "PASS"
+
+    inside_window_malformed = [{"information_available_at": "garbage", "observation_time": T - 1 * HOUR}]
+    r2 = eq.assess_evidence_quality(historical + inside_window_malformed, information_cutoff=T,
+                                     window_start=window_start, window_end=window_end, min_observations=5)
+    assert r2["OVERALL_STATUS"] == "INVALID"
+    assert r2["HISTORICAL_TIMESTAMP_VALIDITY"]["status"] == "FAIL"
+
+
+def test_corrective_historical_timestamp_validity_insufficient_when_nothing_is_plausibly_historical():
+    """An observation whose own observation_time cannot be placed in
+    time at all is conservatively excluded from the historical
+    population -- with nothing left, HISTORICAL_TIMESTAMP_VALIDITY
+    reports INSUFFICIENT_EVIDENCE, never a fabricated PASS."""
+    r = eq.assess_evidence_quality([{"information_available_at": 1, "observation_time": None}], information_cutoff=1000)
+    assert r["HISTORICAL_TIMESTAMP_VALIDITY"]["status"] == "INSUFFICIENT_EVIDENCE"
+    assert r["HISTORICAL_TIMESTAMP_VALIDITY"]["n_historical"] == 0
+
+
+# ---- MEDIUM: CADENCE duplicate-contamination fix ----
+
+def test_corrective_cadence_median_gap_no_longer_corrupted_by_a_duplicate():
+    """Reproduces the exact audited fixture: a single duplicate
+    observation_time previously turned an 8h median gap into 4h."""
+    dup_series = [
+        _obs(1 * HOUR, 1 * HOUR),
+        _obs(1 * HOUR, 1 * HOUR),  # duplicate
+        _obs(9 * HOUR, 9 * HOUR),
+    ]
+    result = eq.assess_evidence_quality(dup_series, information_cutoff=10 * HOUR)
+    assert result["CADENCE"]["median_gap_ms"] == 8 * HOUR, "REGRESSION: duplicate still corrupting median_gap_ms"
+    assert result["CADENCE"]["largest_gap_ms"] == 8 * HOUR
+    assert result["CADENCE"]["duplicate_timestamps_excluded"] == 1
+    assert result["CADENCE"]["n_unique_observation_times"] == 2
+    assert result["CADENCE"]["observation_count"] == 3
+    # Duplicate quality must NOT be silently made to pass by this fix.
+    assert result["DUPLICATE_QUALITY"]["status"] == "FAIL"
+
+
+def test_corrective_cadence_two_identical_timestamps_only():
+    """All observations share one timestamp -- zero unique gaps exist,
+    never a fabricated zero-length one."""
+    obs = [_obs(5 * HOUR, 5 * HOUR), _obs(5 * HOUR, 5 * HOUR)]
+    result = eq.assess_evidence_quality(obs, information_cutoff=10 * HOUR)
+    assert result["CADENCE"]["status"] == "INSUFFICIENT_EVIDENCE"
+    assert result["CADENCE"]["n_unique_observation_times"] == 1
+    assert result["CADENCE"]["largest_gap_ms"] is None
+
+
+def test_corrective_cadence_multiple_duplicates_all_excluded_from_gaps():
+    obs = [
+        _obs(1 * HOUR, 1 * HOUR), _obs(1 * HOUR, 1 * HOUR), _obs(1 * HOUR, 1 * HOUR),
+        _obs(5 * HOUR, 5 * HOUR), _obs(5 * HOUR, 5 * HOUR),
+        _obs(9 * HOUR, 9 * HOUR),
+    ]
+    result = eq.assess_evidence_quality(obs, information_cutoff=10 * HOUR)
+    assert result["CADENCE"]["n_unique_observation_times"] == 3
+    assert result["CADENCE"]["duplicate_timestamps_excluded"] == 3
+    assert result["CADENCE"]["largest_gap_ms"] == 4 * HOUR
+    assert result["CADENCE"]["median_gap_ms"] == 4 * HOUR
+
+
+def test_corrective_cadence_duplicate_at_cutoff_still_excluded_from_gaps():
+    cutoff = 10 * HOUR
+    obs = [_obs(1 * HOUR, 1 * HOUR), _obs(cutoff, cutoff), _obs(cutoff, cutoff)]
+    result = eq.assess_evidence_quality(obs, information_cutoff=cutoff)
+    assert result["CADENCE"]["n_unique_observation_times"] == 2
+    assert result["CADENCE"]["duplicate_timestamps_excluded"] == 1
+    assert result["CADENCE"]["largest_gap_ms"] == cutoff - HOUR
+
+
+def test_corrective_cadence_future_duplicate_outside_historical_population_never_appears():
+    """A duplicate that lives entirely in the future must not appear in
+    CADENCE at all (it's excluded before cadence ever sees it, via the
+    eligible population) -- the historical cadence stays exactly as if
+    the future duplicate never existed."""
+    cutoff = 10 * HOUR
+    historical = [_obs(1 * HOUR, 1 * HOUR), _obs(9 * HOUR, 9 * HOUR)]
+    future_dup = [_obs(100 * HOUR, 100 * HOUR), _obs(100 * HOUR, 100 * HOUR)]
+    r_hist = eq.assess_evidence_quality(historical, information_cutoff=cutoff)
+    r_with_future_dup = eq.assess_evidence_quality(historical + future_dup, information_cutoff=cutoff)
+    assert r_hist["CADENCE"] == r_with_future_dup["CADENCE"]
+    assert r_with_future_dup["CADENCE"]["duplicate_timestamps_excluded"] == 0
+
+
+# ---- LOW: malformed (non-dict) observation objects fail closed ----
+
+@pytest.mark.parametrize("bad_entry", ["a-string", None, [1, 2, 3], 42, 3.14, True])
+def test_corrective_non_dict_observation_entries_fail_closed_never_crash(bad_entry):
+    good = _obs(1, 1)
+    result = eq.assess_evidence_quality([bad_entry, good], information_cutoff=1000)
+    assert result["OVERALL_STATUS"] in eq.OVERALL_STATUSES
+    assert result["n_observations_supplied"] == 2
+    assert result["TIMESTAMP_VALIDITY"]["n_invalid"] == 1
+    assert result["TIMESTAMP_VALIDITY"]["n_valid"] == 1
+
+
+def test_corrective_empty_dict_observation_fails_closed_never_crashes():
+    result = eq.assess_evidence_quality([{}], information_cutoff=1000)
+    assert result["OVERALL_STATUS"] in eq.OVERALL_STATUSES
+    assert result["TIMESTAMP_VALIDITY"]["n_invalid"] == 1
+
+
+def test_corrective_dict_missing_required_timestamp_fields_fails_closed_never_crashes():
+    result = eq.assess_evidence_quality([{"source_key": "alpha"}], information_cutoff=1000)
+    assert result["OVERALL_STATUS"] in eq.OVERALL_STATUSES
+    assert result["TIMESTAMP_VALIDITY"]["n_invalid"] == 1
+    # Provenance is still read from a malformed-timestamp observation --
+    # a bad timestamp must not suppress an otherwise-real provenance field.
+    assert "source_key" not in result["PROVENANCE"]["fields_missing"] or result["PROVENANCE"]["status"] == "UNKNOWN"
+
+
+def test_corrective_all_malformed_entries_never_crashes_and_reports_insufficient_or_invalid():
+    result = eq.assess_evidence_quality(["bad", None, [], 1, {}], information_cutoff=1000)
+    assert result["OVERALL_STATUS"] in ("INSUFFICIENT", "INVALID")
+    assert result["n_observations_supplied"] == 5
+
+
+# =====================================================================
 # Overall-status precedence, and the vocabulary invariants themselves
 # =====================================================================
 
@@ -448,7 +632,18 @@ def test_no_numeric_score_anywhere_in_the_contract():
 
 def test_vocabulary_constants_match_the_contract_exactly():
     assert eq.AS_OF_SAFETY_STATUSES == ("PASS", "FAIL", "INSUFFICIENT_EVIDENCE")
+    assert eq.HISTORICAL_TIMESTAMP_VALIDITY_STATUSES == ("PASS", "FAIL", "INSUFFICIENT_EVIDENCE")
     assert eq.SAMPLE_DEPTH_STATUSES == ("PASS", "INSUFFICIENT_EVIDENCE")
     assert eq.CADENCE_STATUSES == ("PASS", "WARNING", "FAIL", "INSUFFICIENT_EVIDENCE")
     assert eq.PROVENANCE_STATUSES == ("VERIFIED", "PARTIAL", "UNKNOWN")
     assert eq.OVERALL_STATUSES == ("SUFFICIENT", "LIMITED", "INSUFFICIENT", "INVALID")
+
+
+def test_window_conformance_vocabulary_no_longer_declares_the_unreachable_fail_status():
+    """Corrective fix (audit finding, LOW): _assess_window_conformance()
+    has never been able to return FAIL -- only PASS or INSUFFICIENT_
+    EVIDENCE. Declaring FAIL in its vocabulary was dead, misleading
+    vocabulary; removed rather than adding a code path that would need
+    to invent a NEW way for a window check to hard-fail."""
+    assert eq.WINDOW_CONFORMANCE_STATUSES == ("PASS", "INSUFFICIENT_EVIDENCE")
+    assert "FAIL" not in eq.WINDOW_CONFORMANCE_STATUSES

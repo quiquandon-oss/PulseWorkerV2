@@ -150,6 +150,119 @@ def test_different_timing_at_the_observation_and_wiring_level():
     assert result == "DIFFERENT_TIMING"
 
 
+# ---- Temporal-leakage fix regression tests (post-audit) ----
+# TEST A-E per the independent audit's exact required list: the
+# as-of-safe direction reference (compute_asof_source_medians()) must
+# never be influenced by observations after event_ts, must fail closed
+# to INSUFFICIENT_EVIDENCE (via direction=None) when there isn't enough
+# as-of history, must include an observation exactly AT event_ts,
+# exclude one strictly after, and be deterministic.
+
+def _build_asof_leak_fixture(with_future_alpha_rows):
+    """Sparse (3 pre-event rows, not the dense 6h cadence other tests
+    use) so that a handful of future rows is enough to swing a
+    whole-window median -- proving TEST A would fail without the fix."""
+    conn = _build_fixture_conn()
+    start_ts, _, event_ts = _seed_one_large_move_event(conn)
+    end_ts = event_ts + 10 * HOUR
+    for i in range(3):
+        _insert_history(conn, start_ts + i * 3 * DAY, {"alpha": 20, "beta": 20})
+    _insert_history(conn, event_ts, {"alpha": 90, "beta": 85})
+    if with_future_alpha_rows:
+        # Only alpha gets extreme future values -- if they leaked into
+        # a whole-window median, alpha's direction would flip to DOWN
+        # (median pulled to 999) while beta (no future rows) stays UP,
+        # turning SUPPORTING into CONTRADICTING. The fix must prevent this.
+        for i in range(1, 6):
+            _insert_history(conn, event_ts + i * HOUR, {"alpha": 999})
+    conn.commit()
+    return conn, start_ts, end_ts, event_ts
+
+
+def test_A_future_observations_never_change_the_events_own_direction():
+    conn_a, s_a, e_a, _ = _build_asof_leak_fixture(with_future_alpha_rows=False)
+    dataset_a = ev.build_relationship_dataset(conn_a, s_a, e_a)
+    conn_a.close()
+
+    conn_b, s_b, e_b, _ = _build_asof_leak_fixture(with_future_alpha_rows=True)
+    dataset_b = ev.build_relationship_dataset(conn_b, s_b, e_b)
+    conn_b.close()
+
+    row_a = next(r for r in dataset_a["results"] if {r["source_key_a"], r["source_key_b"]} == {"alpha", "beta"})
+    row_b = next(r for r in dataset_b["results"] if {r["source_key_a"], r["source_key_b"]} == {"alpha", "beta"})
+    assert row_a["relationship"] == "SUPPORTING"
+    assert row_b["relationship"] == "SUPPORTING", (
+        "future alpha observations must never change this event's own relationship"
+    )
+
+
+def test_B_insufficient_preevent_history_yields_insufficient_evidence_not_future_data():
+    conn = _build_fixture_conn()
+    start_ts, _, event_ts = _seed_one_large_move_event(conn)
+    end_ts = event_ts + 10 * HOUR
+    # alpha: only ONE pre-event row + the at-event row = 2 as-of
+    # observations, below EXP010_MIN_ASOF_HISTORY_FOR_MEDIAN (3).
+    _insert_history(conn, start_ts, {"alpha": 20, "beta": 20})
+    for i in range(1, 3):
+        _insert_history(conn, start_ts + i * 3 * DAY, {"beta": 20})
+    _insert_history(conn, event_ts, {"alpha": 90, "beta": 85})
+    # Plenty of future data that must NOT be used as a substitute.
+    for i in range(1, 10):
+        _insert_history(conn, event_ts + i * HOUR, {"alpha": 999})
+    conn.commit()
+
+    dataset = ev.build_relationship_dataset(conn, start_ts, end_ts)
+    conn.close()
+    row = next(r for r in dataset["results"] if {r["source_key_a"], r["source_key_b"]} == {"alpha", "beta"})
+    assert row["relationship"] == "INSUFFICIENT_EVIDENCE"
+
+
+def test_C_observation_exactly_at_event_ts_is_included_in_the_asof_reference():
+    conn = _build_fixture_conn()
+    _insert_history(conn, 0, {"alpha": 10})
+    _insert_history(conn, HOUR, {"alpha": 20})
+    _insert_history(conn, 2 * HOUR, {"alpha": 30})  # exactly at event_ts
+    conn.commit()
+    medians = ev.compute_asof_source_medians(conn, 0, 2 * HOUR, ["alpha"])
+    conn.close()
+    assert medians["alpha"] == 20  # median of [10, 20, 30] -- the 2h row counted
+
+
+def test_D_observation_strictly_after_event_ts_is_never_eligible():
+    conn = _build_fixture_conn()
+    _insert_history(conn, 0, {"alpha": 10})
+    _insert_history(conn, HOUR, {"alpha": 20})
+    _insert_history(conn, 2 * HOUR, {"alpha": 30})
+    _insert_history(conn, 3 * HOUR, {"alpha": 999999})  # strictly after event_ts=2h
+    conn.commit()
+    medians = ev.compute_asof_source_medians(conn, 0, 2 * HOUR, ["alpha"])
+    conn.close()
+    assert medians["alpha"] == 20  # unaffected by the row at 3h
+
+
+def test_E_asof_median_is_deterministic_across_repeated_calls():
+    conn = _build_fixture_conn()
+    for i in range(5):
+        _insert_history(conn, i * HOUR, {"alpha": i * 10})
+    conn.commit()
+    m1 = ev.compute_asof_source_medians(conn, 0, 4 * HOUR, ["alpha"])
+    m2 = ev.compute_asof_source_medians(conn, 0, 4 * HOUR, ["alpha"])
+    conn.close()
+    assert m1 == m2
+
+
+def test_asof_median_handles_event_ts_equal_to_start_ts_without_crashing():
+    """Edge case guard: extract_source_matrix()'s own _validate_bounds()
+    requires a strictly positive window, so event_ts <= start_ts must be
+    resolved to INSUFFICIENT_EVIDENCE (None) without ever calling it."""
+    conn = _build_fixture_conn()
+    _insert_history(conn, 1000, {"alpha": 10})
+    conn.commit()
+    medians = ev.compute_asof_source_medians(conn, 1000, 1000, ["alpha"])
+    conn.close()
+    assert medians["alpha"] is None
+
+
 # ---- 1. as-of exclusion (future data must never leak backward) ----
 
 def test_asof_exclusion_a_future_history_row_never_affects_the_result():

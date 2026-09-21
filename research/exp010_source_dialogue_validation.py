@@ -23,15 +23,17 @@ relevance, redundancy, or classification logic
   already used by EXP-009. Never reimplemented here.
 - `event_source_relevance.snapshot_v1_source()` -- the SAME as-of V1
   source snapshot (most recent history row at or before event_ts).
-- `event_source_reaction.compute_source_medians()` -- the SAME batch,
-  whole-window median PR57 already uses to self-normalize a source's
-  direction. Explicitly disclosed there as "NEVER information
-  available at any single event_ts" -- it is a post-hoc NORMALIZATION
-  reference, not a predictive input, exactly as PR57 already
-  established.
 - `source_analysis.discover_sources()` / `extract_source_matrix()` --
   the SAME dynamic (never hard-coded) V1 source enumeration EXP-005
-  already uses.
+  already uses. `extract_source_matrix()` is also the data-fetch this
+  module's OWN `compute_asof_source_medians()` reuses (see the
+  "temporal-leakage correction" section below) -- bounded per-event to
+  `[start_ts, event_ts]` rather than the whole run window.
+
+`event_source_reaction.compute_source_medians()` is deliberately NOT
+reused for direction (see the temporal-leakage correction section
+below) -- it remains untouched and is still the correct choice for
+PR57's own post-hoc use, just not for this module's as-of need.
 - `source_dialogue.classify_relationship()` / `classify_pairwise_
   redundancy()` / `canonical_pair()` -- the LOCKED, independently-
   audited engine (PR #68). This module never recomputes a
@@ -57,14 +59,73 @@ inventing a timestamp, it is using the only one that genuinely exists,
 and it is stated here explicitly rather than left implicit.
 
 =====================================================================
-Direction: reuses PR57's own self-normalizing convention, not a new one
+Direction: reuses PR57's own COMPARISON RULE, but NOT its whole-window
+statistic (temporal-leakage correction -- see next section)
 =====================================================================
 
 `classify_direction_vs_median(value, median)`: `value > median` -> UP,
 `value < median` -> DOWN, `value == median` -> None (no directional
 signal) -- the EXACT comparison `event_source_reaction.classify_
 alignment()` already performs (`source_implies_up = source_value >
-source_median`). No new threshold, no new statistic.
+source_median`). No new threshold, no new comparison rule -- only the
+`median` fed into it is computed differently, per below.
+
+=====================================================================
+Temporal-leakage correction (post-audit): the reference median MUST be
+as-of-safe, not a whole-window batch statistic
+=====================================================================
+
+An earlier version of this module fed `classify_direction_vs_median()`
+the SAME whole-window median `event_source_reaction.compute_source_
+medians()` computes for PR57's own post-hoc use. That function's own
+docstring is explicit: "BATCH descriptive statistic over the whole
+analysis window -- NEVER information available at any single
+event_ts." Reusing it here was a genuine methodological bug (found by
+independent audit, not by this module's own build): the direction
+assigned to an event at `event_ts` could depend on source observations
+that occurred AFTER `event_ts` (whichever the whole run's `end_ts`
+happened to be), which directly violates this experiment's own stated
+"strict temporal as-of rules" research question -- even though the
+locked Source Dialogue Engine's own `information_available_at <=
+information_cutoff` gate is itself correct and was never at fault; the
+leak was entirely in what fed the engine's `direction` field before
+the engine ever saw it.
+
+The fix is `compute_asof_source_medians()` below -- a NEW function,
+LOCAL to this module (never added to `event_source_reaction.py`, which
+remains completely unchanged and is still the right choice for PR57's
+own whole-window, post-hoc use). It reuses `source_analysis.
+extract_source_matrix()` -- the SAME data-fetching function PR57's own
+`compute_source_medians()` itself calls -- but bounds it to
+`[start_ts, event_ts]` PER EVENT (inclusive of event_ts itself, since
+the required semantics are `observation_time <= event_ts`) instead of
+the whole run's `[start_ts, end_ts]`. No interpolation, no forward
+filling, no external fixed threshold: if fewer than
+`EXP010_MIN_ASOF_HISTORY_FOR_MEDIAN` distinct as-of observations exist
+for a source at a given event, its median is `None`, which
+`classify_direction_vs_median()` already turns into `direction=None`,
+which the locked engine already turns into `INSUFFICIENT_EVIDENCE` --
+no new fallback path was invented; the existing "missing input"
+handling at every layer was simply given a genuinely as-of-safe input.
+
+`EXP010_MIN_ASOF_HISTORY_FOR_MEDIAN` is PROVISIONAL / NOT EMPIRICALLY
+VALIDATED. A project-wide search for an existing minimum-sample
+constant that could legitimately be cited instead found none that
+matches this exact question ("how many strictly-as-of prior
+observations of a single source justify trusting a median as a
+directional reference"): `source_analysis.MIN_SAMPLE_PER_REGIME` (10)
+gates a regime-bucketed aggregate report, not a per-event per-source
+statistic; `MIN_SAMPLE_FOR_LEVEL2`/`MIN_SAMPLE_FOR_CONTRADICTED` (30)
+and `MIN_SAMPLE_FOR_LEVEL3` (40) gate whole-run discrimination/
+robustness levels; `stats_utils.MIN_N_FOR_FISHER_Z` (6) gates a
+correlation z-transform's own validity, an unrelated statistic. None
+of these answer "how many points make a single as-of median
+trustworthy," so a new, small, explicitly-provisional floor is used
+instead: 3 (the minimum count for which a median is a genuine middle
+value rather than just an average of the only two points available,
+or the single point itself). This has not been empirically validated
+against real EXP-010 data and must be revisited once real accumulated
+runs exist.
 
 =====================================================================
 Event types: market-derived vs. internal-model (explicit, never
@@ -123,15 +184,21 @@ exists to prepare for.
 """
 import sys
 import os
+import statistics
 
 sys.path.insert(0, os.path.dirname(__file__))
 import event_source_relevance as esrel  # noqa: E402 -- UNCHANGED, reused as-is
-import event_source_reaction as esr  # noqa: E402 -- UNCHANGED, reused as-is
+import event_source_reaction as esr  # noqa: E402 -- UNCHANGED, reused as-is (window constant only, see below)
 import source_analysis as sa  # noqa: E402 -- UNCHANGED, reused as-is
 import source_dialogue as sd  # noqa: E402 -- UNCHANGED, LOCKED contract (PR #68)
 
 WINDOW_LOOKBACK_MS = esr.PRE_EVENT_LOOKBACK_MS  # 24h, PR57's own reused bound
 PROVIDER = "V1"
+
+# PROVISIONAL / NOT EMPIRICALLY VALIDATED -- see module docstring's
+# "Temporal-leakage correction" section for why this exists and why no
+# existing project minimum-sample constant was reused instead.
+EXP010_MIN_ASOF_HISTORY_FOR_MEDIAN = 3
 
 
 def classify_direction_vs_median(value, median):
@@ -147,6 +214,46 @@ def classify_direction_vs_median(value, median):
     if value < median:
         return "DOWN"
     return None
+
+
+def compute_asof_source_medians(conn, start_ts, event_ts, source_keys,
+                                 min_history=EXP010_MIN_ASOF_HISTORY_FOR_MEDIAN):
+    """AS-OF-SAFE replacement for feeding classify_direction_vs_median()
+    -- see module docstring's "Temporal-leakage correction" section for
+    why this exists as a NEW, LOCAL function rather than a modification
+    of event_source_reaction.compute_source_medians() (which remains
+    completely unchanged).
+
+    Reuses source_analysis.extract_source_matrix() -- the SAME
+    data-fetching function PR57's own compute_source_medians() itself
+    calls -- but bounded to [start_ts, event_ts] (inclusive of
+    event_ts: the required semantics are observation_time <= event_ts,
+    never <) instead of the whole run's [start_ts, end_ts]. No future
+    observation (ts > event_ts) can ever enter this computation.
+
+    Returns {source_key: median_or_None}. A source's median is None
+    (never interpolated, never forward-filled, never a fixed external
+    threshold) whenever fewer than `min_history` distinct as-of
+    observations of that source exist at or before event_ts -- this
+    degrades downstream to direction=None -> INSUFFICIENT_EVIDENCE via
+    the SAME existing missing-input handling every other layer already
+    has, not a new fallback path.
+
+    Guards against event_ts <= start_ts (e.g. an event at the very
+    start of the analysis window) without calling extract_source_
+    matrix() at all -- that function's own _validate_bounds() requires
+    a strictly positive window and would otherwise raise for a
+    legitimate edge case this function must instead resolve to
+    INSUFFICIENT_EVIDENCE."""
+    if event_ts is None or start_ts is None or event_ts <= start_ts:
+        return {key: None for key in source_keys}
+
+    _, matrix_rows, _ = sa.extract_source_matrix(conn, start_ts, event_ts)
+    medians = {}
+    for key in source_keys:
+        values = [row["sources"].get(key) for row in matrix_rows if row["sources"].get(key) is not None]
+        medians[key] = statistics.median(values) if len(values) >= min_history else None
+    return medians
 
 
 def build_v1_observation(source_key, value, observation_ts, median):
@@ -165,7 +272,7 @@ def build_v1_observation(source_key, value, observation_ts, median):
         "observation_time": observation_ts,
         "direction": classify_direction_vs_median(value, median),
         "raw_value": value,
-        "reference_value": {"source_median": median, "rule": "value>median=>UP, value<median=>DOWN, per event_source_reaction.classify_alignment()"},
+        "reference_value": {"source_median": median, "rule": "value>median=>UP, value<median=>DOWN (comparison reused from event_source_reaction.classify_alignment()); median itself is this module's own AS-OF-SAFE compute_asof_source_medians(), never the whole-window statistic"},
         "evidence_reference": f"history snapshot as of ts={observation_ts}",
     }
 
@@ -189,7 +296,6 @@ def build_relationship_dataset(conn, start_ts, end_ts):
     events = esrel.collect_events(conn, start_ts, end_ts)
     real_events = [e for e in events if not e["is_internal_model_event"]]
     source_keys = sa.discover_sources(conn, start_ts, end_ts)
-    medians = esr.compute_source_medians(conn, start_ts, end_ts, source_keys)
 
     results = []
     for event in real_events:
@@ -197,10 +303,17 @@ def build_relationship_dataset(conn, start_ts, end_ts):
         window_start = event_ts - WINDOW_LOOKBACK_MS
         window_end = event_ts
 
+        # AS-OF-SAFE per event -- see compute_asof_source_medians()'s own
+        # docstring and the module docstring's "Temporal-leakage
+        # correction" section. Deliberately recomputed per event (never
+        # hoisted out of this loop): a whole-run-hoisted median is
+        # exactly the bug this replaces.
+        asof_medians = compute_asof_source_medians(conn, start_ts, event_ts, source_keys)
+
         snapshots = {}
         for key in source_keys:
             snap = esrel.snapshot_v1_source(conn, event_ts, key)
-            obs = build_v1_observation(key, snap["source_value"], snap["source_observation_ts"], medians.get(key))
+            obs = build_v1_observation(key, snap["source_value"], snap["source_observation_ts"], asof_medians.get(key))
             snapshots[key] = obs
 
         for i, key_a in enumerate(source_keys):

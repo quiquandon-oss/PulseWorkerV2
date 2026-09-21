@@ -344,3 +344,71 @@ def test_not_a_hypothesis_test_note_is_valid_json_and_explicit():
     parsed = json.loads(run_experiment.NOT_A_HYPOTHESIS_TEST_NOTE)
     assert parsed["applicable"] is False
     assert "reason" in parsed
+
+
+# ---- Research Evidence Quality Layer integration (additive) ----
+
+def test_build_history_observations_uses_row_ts_for_both_timestamp_axes():
+    rows = [{"ts": 5000, "score": 50, "sources_json": "{}", "gold_regime": "chop"}]
+    obs = run_experiment.build_history_observations(rows)
+    assert obs == [{"information_available_at": 5000, "observation_time": 5000, "provider": "V1", "dataset": "history"}]
+
+
+def test_persisted_report_carries_an_additive_evidence_quality_key():
+    with open(os.path.join(_HERE, "run_experiment.py")) as f:
+        src = f.read()
+    main_start = src.index("def main():")
+    main_src = src[main_start:src.index("\nif __name__")]
+    assert '"evidence_quality"' in main_src
+    assert main_src.count("eq.assess_evidence_quality(") == 1
+
+
+def test_main_end_to_end_persists_evidence_quality_alongside_the_existing_summaries():
+    """The Evidence Quality Layer integration must be purely additive:
+    relationship_summary/redundancy_summary and the disclosed
+    sample_size must remain exactly as before, with evidence_quality as
+    one new sibling key."""
+    from datetime import datetime, timezone
+    day = 24 * 3600000
+    now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+    start_ts = now_ms - run_experiment.WINDOW_MS
+    anchor = start_ts + 20 * day
+
+    btc_rows = [{"ts": anchor + i * day, "btc_price": 50000.0} for i in range(9)]
+    btc_rows.append({"ts": anchor + 9 * day, "btc_price": 50000.0 * 1.05})
+    history_rows = [
+        {"ts": anchor + i * 6 * 3600000, "score": 50, "sources_json": json.dumps({"alpha": 20, "beta": 80}), "gold_regime": "chop"}
+        for i in range(36)
+    ]
+    history_rows.append({"ts": anchor + 9 * day, "score": 50, "sources_json": json.dumps({"alpha": 90, "beta": 10}), "gold_regime": "chop"})
+
+    call_order = ["history", "btc", "predictions"]
+    fixtures = {"history": history_rows, "btc": btc_rows, "predictions": []}
+    call_index = {"i": 0}
+
+    def fake_run_d1(sql):
+        key = call_order[call_index["i"]]
+        call_index["i"] += 1
+        return fixtures[key]
+
+    captured = {}
+
+    def fake_d1_api_query(sql, params):
+        captured["params"] = params
+        return []
+
+    with patch.object(run_experiment, "run_d1", side_effect=fake_run_d1):
+        with patch.object(run_experiment, "d1_api_query", side_effect=fake_d1_api_query):
+            run_experiment.main()
+
+    report = json.loads(captured["params"][5])
+    assert "relationship_summary" in report
+    assert "redundancy_summary" in report
+    assert "evidence_quality" in report
+    assert report["evidence_quality"]["OVERALL_STATUS"] in (
+        "SUFFICIENT", "LIMITED", "INSUFFICIENT", "INVALID",
+    )
+    assert report["evidence_quality"]["n_observations_supplied"] == len(history_rows)
+    # sample_size (params[3]) must still describe relationship_summary's
+    # own disclosed count, never the evidence_quality population.
+    assert captured["params"][3] == report["relationship_summary"]["n_source_pair_observations"]

@@ -63,6 +63,7 @@ from datetime import datetime, timezone
 sys.path.insert(0, "research")
 import event_detector as ed  # noqa: E402 -- UNCHANGED, reused as-is
 import exp010_source_dialogue_validation as join_module  # noqa: E402 -- UNCHANGED, reused as-is
+import evidence_quality as eq  # noqa: E402 -- UNCHANGED, reused as-is (research-only integration point)
 
 DATABASE_NAME = "sentiment-history"
 CLOUDFLARE_ACCOUNT_ID = "f58e761fbc8e62dc404d8684290af264"
@@ -169,6 +170,29 @@ def build_local_mirror(history_rows, btc_rows, predictions_rows):
     return conn
 
 
+def build_history_observations(history_rows):
+    """Research Evidence Quality Layer integration point (research-only
+    -- see research/evidence_quality.py's own module docstring).
+    Duplicated deliberately from exp005-source-effectiveness/run_
+    experiment.py's own identical helper rather than imported -- same
+    "each experiment script is self-contained" convention this file's
+    own d1_api_query() docstring already states. Built from the SAME
+    history_rows this script already fetched -- no new D1 read. This is
+    purely additive: it does not feed into, and is never read by,
+    join_module.build_relationship_dataset()/build_redundancy_dataset()
+    or the locked Source Dialogue Engine, all of which remain
+    completely unchanged."""
+    return [
+        {
+            "information_available_at": r["ts"],
+            "observation_time": r["ts"],
+            "provider": "V1",
+            "dataset": "history",
+        }
+        for r in history_rows
+    ]
+
+
 INSERT_ANALYSIS_SQL = (
     "INSERT INTO research_analyses "
     "(analysis_ts, window_start_ts, window_end_ts, sample_size, subject, metric_json, "
@@ -235,11 +259,23 @@ def main():
     # per-(event, pair) join -- that full detail was computed above
     # (and is fully testable/auditable in build_relationship_dataset's
     # own return value) but is never itself persisted.
+    # Research Evidence Quality Layer (research-only integration point,
+    # additive): assesses the SAME history_rows already fetched above,
+    # never feeds into or alters the locked Source Dialogue Engine's
+    # own classifications, or exp010_source_dialogue_validation.py's
+    # own as-of-safe direction logic. information_cutoff=now_ms is this
+    # live run's real as-of boundary.
+    evidence_quality_report = eq.assess_evidence_quality(
+        build_history_observations(history_rows),
+        information_cutoff=now_ms, window_start=start_ts, window_end=now_ms,
+    )
+
     report = {
         "window": relationship_dataset["window"],
         "source_keys": relationship_dataset["source_keys"],
         "relationship_summary": relationship_summary,
         "redundancy_summary": redundancy_summary,
+        "evidence_quality": evidence_quality_report,
     }
     validation_status = summarize_validation_status(relationship_summary)
 

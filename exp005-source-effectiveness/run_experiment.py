@@ -62,6 +62,7 @@ from datetime import datetime, timezone
 
 sys.path.insert(0, "research")
 import source_analysis as sa  # noqa: E402 -- UNCHANGED, reused as-is
+import evidence_quality as eq  # noqa: E402 -- UNCHANGED, reused as-is (research-only integration point)
 
 DATABASE_NAME = "sentiment-history"
 # Non-secret identifiers, already committed/used elsewhere in this project
@@ -234,6 +235,29 @@ def build_insert_analysis_params(analysis_ts, window_start_ts, window_end_ts, sa
     ]
 
 
+def build_history_observations(history_rows):
+    """Research Evidence Quality Layer integration point (research-only
+    -- see research/evidence_quality.py's own module docstring). Builds
+    the plain observation list the layer's contract requires from the
+    SAME history_rows this script already fetched for
+    sa.build_source_effectiveness_report() -- no new data fetch, no new
+    D1 read. V1 history rows have no distinct publication-lag concept
+    (the same documented design decision exp010_source_dialogue_
+    validation.py already made for the same reason): information_
+    available_at and observation_time are both the row's own real
+    history.ts. This is purely additive -- it does not feed into, and
+    is never read by, sa.build_source_effectiveness_report() itself."""
+    return [
+        {
+            "information_available_at": r["ts"],
+            "observation_time": r["ts"],
+            "provider": "V1",
+            "dataset": "history",
+        }
+        for r in history_rows
+    ]
+
+
 def summarize_validation_status(report):
     """A single coarse validation_status label for the research_analyses
     row itself -- descriptive bookkeeping only (did this run find ANY
@@ -271,6 +295,20 @@ def main():
     mirror = build_local_mirror(history_rows, btc_rows)
     report = sa.build_source_effectiveness_report(mirror, start_ts, now_ms, horizons=HORIZONS)
     mirror.close()
+
+    # Research Evidence Quality Layer (research-only integration point,
+    # additive): assesses the SAME history_rows already fetched above,
+    # never feeds into or alters any statistical calculation this
+    # experiment's own gates already perform. information_cutoff=now_ms
+    # is the real as-of boundary for this run (this is a live scheduled
+    # run, not a historical replay) -- no future row can exist in
+    # history_rows by construction (the SELECT above already bounds
+    # ts <= now_ms), so this also serves as an independent, run-time
+    # confirmation that the fetch itself introduced no lookahead.
+    report["evidence_quality"] = eq.assess_evidence_quality(
+        build_history_observations(history_rows),
+        information_cutoff=now_ms, window_start=start_ts, window_end=now_ms,
+    )
 
     # report["level2"]["multiple_testing_correction"] is itself a dict
     # ({"method": "benjamini_hochberg", "alpha": ..., "n_tests": ...})

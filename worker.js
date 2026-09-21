@@ -6082,6 +6082,7 @@ async function computeExp005LiveFields(env, requiredSample) {
       oos_result: 'NOT_AVAILABLE',
       confidence_evidence_maturity: 'INSUFFICIENT_SAMPLE',
       last_updated: null,
+      evidence_quality: null,
     };
   }
 
@@ -6105,6 +6106,7 @@ async function computeExp005LiveFields(env, requiredSample) {
       oos_result: 'NOT_AVAILABLE',
       confidence_evidence_maturity: 'UNKNOWN',
       last_updated: runs[runs.length - 1].analysis_ts,
+      evidence_quality: null,
     };
   }
 
@@ -6156,6 +6158,11 @@ async function computeExp005LiveFields(env, requiredSample) {
     oos_result: oosResult,
     confidence_evidence_maturity: insufficientSample ? 'INSUFFICIENT_SAMPLE' : 'ACCUMULATING',
     last_updated: parsedRuns[parsedRuns.length - 1].ts,
+    // Research Evidence Quality Layer (PR #70, additive): the latest
+    // run's own report already carries this key unchanged -- passed
+    // through exactly as persisted, never recomputed/summarized/scored
+    // here. null for any run/report predating PR #70.
+    evidence_quality: latest.evidence_quality || null,
   };
 }
 
@@ -6192,6 +6199,7 @@ async function computeExp009LiveFields(env, requiredSample) {
       oos_result: 'NOT_AVAILABLE',
       confidence_evidence_maturity: 'INSUFFICIENT_SAMPLE',
       last_updated: null,
+      evidence_quality: null,
     };
   }
 
@@ -6214,6 +6222,7 @@ async function computeExp009LiveFields(env, requiredSample) {
       oos_result: 'NOT_AVAILABLE',
       confidence_evidence_maturity: 'UNKNOWN',
       last_updated: runs[runs.length - 1].analysis_ts,
+      evidence_quality: null,
     };
   }
 
@@ -6249,6 +6258,11 @@ async function computeExp009LiveFields(env, requiredSample) {
     oos_result: oosResult,
     confidence_evidence_maturity: insufficientSample ? 'INSUFFICIENT_SAMPLE' : 'ACCUMULATING',
     last_updated: parsedRuns[parsedRuns.length - 1].ts,
+    // Research Evidence Quality Layer (PR #70, additive): passed through
+    // exactly as persisted in the latest run's own report, never
+    // recomputed/summarized/scored here. null for any run/report
+    // predating PR #70.
+    evidence_quality: latest.evidence_quality || null,
   };
 }
 
@@ -6282,6 +6296,7 @@ async function computeExp010LiveFields(env, requiredSample) {
       oos_result: 'NOT_AVAILABLE',
       confidence_evidence_maturity: 'INSUFFICIENT_SAMPLE',
       last_updated: null,
+      evidence_quality: null,
     };
   }
 
@@ -6295,6 +6310,7 @@ async function computeExp010LiveFields(env, requiredSample) {
       oos_result: 'NOT_AVAILABLE',
       confidence_evidence_maturity: 'UNKNOWN',
       last_updated: runs[runs.length - 1].analysis_ts,
+      evidence_quality: null,
     };
   }
 
@@ -6320,6 +6336,11 @@ async function computeExp010LiveFields(env, requiredSample) {
     oos_result: oosResult,
     confidence_evidence_maturity: insufficientSample ? 'INSUFFICIENT_SAMPLE' : 'ACCUMULATING',
     last_updated: parsedRuns[parsedRuns.length - 1].ts,
+    // Research Evidence Quality Layer (PR #70, additive): passed through
+    // exactly as persisted in the latest run's own report, never
+    // recomputed/summarized/scored here. null for any run/report
+    // predating PR #70.
+    evidence_quality: latest.evidence_quality || null,
   };
 }
 

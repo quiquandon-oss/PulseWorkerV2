@@ -482,6 +482,7 @@ describe('Research Lab — read-only research API helpers', () => {
       expect(result.oos_result).toBe('NOT_AVAILABLE');
       expect(result.confidence_evidence_maturity).toBe('INSUFFICIENT_SAMPLE');
       expect(result.last_updated).toBe(null);
+      expect(result.evidence_quality).toBe(null);
     });
 
     it('below required_sample: reports real descriptive counts from the latest run, but oos_result is gated INSUFFICIENT_SAMPLE -- never a conclusion from one early run', async () => {
@@ -497,6 +498,40 @@ describe('Research Lab — read-only research API helpers', () => {
       // The gate: even though this one run found a significant+improved
       // pair, oos_result must NOT report it as replicated -- exactly
       // "do not call it successful from an early positive result".
+      expect(result.oos_result).toBe('INSUFFICIENT_SAMPLE');
+      expect(result.confidence_evidence_maturity).toBe('INSUFFICIENT_SAMPLE');
+      expect(result.last_updated).toBe(1000);
+      // This run's stored report predates the Evidence Quality Layer
+      // (no evidence_quality key at all) -- must degrade to null, never
+      // crash, and must never change any of the assertions above.
+      expect(result.evidence_quality).toBe(null);
+    });
+
+    it('exposes a persisted evidence_quality object from the latest run exactly unchanged -- no recomputation, renaming, or scoring', async () => {
+      const evidenceQuality = {
+        n_observations_supplied: 42,
+        AS_OF_SAFETY: { status: 'PASS', reason: 'all observations as-of eligible', n_total: 42, n_eligible: 42, n_ineligible: 0 },
+        TIMESTAMP_VALIDITY: { status: 'PASS', reason: 'all observations have valid numeric timestamps', n_total: 42, n_valid: 42, n_invalid: 0 },
+        HISTORICAL_TIMESTAMP_VALIDITY: { status: 'PASS', reason: 'all observations within the historical population have valid timestamps', n_historical: 42, n_valid: 42, n_invalid: 0 },
+        SAMPLE_DEPTH: { status: 'PASS', reason: 'sample depth threshold met', n_eligible: 42, min_observations: 30 },
+        CADENCE: { status: 'PASS', reason: 'no gap exceeds gap_threshold_ms', observation_count: 42, n_unique_observation_times: 42, duplicate_timestamps_excluded: 0 },
+        DUPLICATE_QUALITY: { status: 'PASS', reason: 'no duplicate observation_time values', n_total: 42, n_duplicate_timestamps: 0, duplicate_timestamps: [] },
+        PROVENANCE: { status: 'VERIFIED', fields_present: ['source_key', 'provider'], fields_missing: [] },
+        WINDOW_CONFORMANCE: { status: 'PASS', n_within: 42, n_outside: 0 },
+        OVERALL_STATUS: 'SUFFICIENT',
+      };
+      const db = makeDb([
+        { first: { n: 1 } },
+        { all: { results: [{ analysis_ts: 1000, metric_json: JSON.stringify(makeReport({ evidence_quality: evidenceQuality })), validation_status: 'candidate_signal_observed' }] } },
+      ]);
+      const result = await scope.computeExp005LiveFields({ DB: db }, 4);
+      // Byte-for-byte pass-through: no field renamed, dropped, added, or
+      // reshaped -- and definitely no numeric score derived from it.
+      expect(result.evidence_quality).toEqual(evidenceQuality);
+      expect(Object.keys(result.evidence_quality).sort()).toEqual(Object.keys(evidenceQuality).sort());
+      // Adding evidence_quality to the stored report must not perturb
+      // any of the fields this provider already computed.
+      expect(result.current_measured_result.sources_discovered).toBe(2);
       expect(result.oos_result).toBe('INSUFFICIENT_SAMPLE');
       expect(result.confidence_evidence_maturity).toBe('INSUFFICIENT_SAMPLE');
       expect(result.last_updated).toBe(1000);
@@ -545,6 +580,7 @@ describe('Research Lab — read-only research API helpers', () => {
       expect(result.current_measured_result).toBe('NOT_AVAILABLE');
       expect(result.confidence_evidence_maturity).toBe('UNKNOWN');
       expect(result.last_updated).toBe(999);
+      expect(result.evidence_quality).toBe(null);
     });
 
     it('every D1 call is SELECT-only, filtered by the exact EXP-005 subject, never a write', async () => {
@@ -631,6 +667,7 @@ describe('Research Lab — read-only research API helpers', () => {
       expect(result.oos_result).toBe('NOT_AVAILABLE');
       expect(result.confidence_evidence_maturity).toBe('INSUFFICIENT_SAMPLE');
       expect(result.last_updated).toBe(null);
+      expect(result.evidence_quality).toBe(null);
     });
 
     it('below required_sample: reports real descriptive counts from the latest run, but oos_result is gated INSUFFICIENT_SAMPLE', async () => {
@@ -653,6 +690,33 @@ describe('Research Lab — read-only research API helpers', () => {
       expect(result.oos_result).toBe('INSUFFICIENT_SAMPLE');
       expect(result.confidence_evidence_maturity).toBe('INSUFFICIENT_SAMPLE');
       expect(result.last_updated).toBe(1000);
+      // This run's stored report predates the Evidence Quality Layer --
+      // must degrade to null, never crash.
+      expect(result.evidence_quality).toBe(null);
+    });
+
+    it('exposes a persisted evidence_quality object from the latest run exactly unchanged -- no recomputation, renaming, or scoring', async () => {
+      const evidenceQuality = {
+        n_observations_supplied: 10,
+        AS_OF_SAFETY: { status: 'PASS', reason: 'all observations as-of eligible', n_total: 10, n_eligible: 10, n_ineligible: 0 },
+        TIMESTAMP_VALIDITY: { status: 'PASS', reason: 'all observations have valid numeric timestamps', n_total: 10, n_valid: 10, n_invalid: 0 },
+        HISTORICAL_TIMESTAMP_VALIDITY: { status: 'PASS', reason: 'all observations within the historical population have valid timestamps', n_historical: 10, n_valid: 10, n_invalid: 0 },
+        SAMPLE_DEPTH: { status: 'INSUFFICIENT_EVIDENCE', reason: 'below min_observations', n_eligible: 10, min_observations: 30 },
+        CADENCE: { status: 'WARNING', reason: '1 of 9 gaps exceed gap_threshold_ms', observation_count: 10, n_unique_observation_times: 10, duplicate_timestamps_excluded: 0 },
+        DUPLICATE_QUALITY: { status: 'PASS', reason: 'no duplicate observation_time values', n_total: 10, n_duplicate_timestamps: 0, duplicate_timestamps: [] },
+        PROVENANCE: { status: 'UNKNOWN', fields_present: [], fields_missing: ['source_key'] },
+        WINDOW_CONFORMANCE: { status: 'PASS', n_within: 10, n_outside: 0 },
+        OVERALL_STATUS: 'INSUFFICIENT',
+      };
+      const db = makeDb([
+        { first: { n: 1 } },
+        { all: { results: [{ analysis_ts: 1000, metric_json: JSON.stringify(makeReport({ evidence_quality: evidenceQuality })) }] } },
+      ]);
+      const result = await scope.computeExp009LiveFields({ DB: db }, 4);
+      expect(result.evidence_quality).toEqual(evidenceQuality);
+      expect(Object.keys(result.evidence_quality).sort()).toEqual(Object.keys(evidenceQuality).sort());
+      expect(result.current_measured_result.n_real_world_events).toBe(1);
+      expect(result.oos_result).toBe('INSUFFICIENT_SAMPLE');
     });
 
     it('at required_sample: oos_result reports milestone progress, never a coefficient/significance verdict', async () => {
@@ -680,6 +744,7 @@ describe('Research Lab — read-only research API helpers', () => {
       expect(result.current_measured_result).toBe('NOT_AVAILABLE');
       expect(result.confidence_evidence_maturity).toBe('UNKNOWN');
       expect(result.last_updated).toBe(999);
+      expect(result.evidence_quality).toBe(null);
     });
 
     it('every D1 call is SELECT-only, filtered by the exact EXP-009 subject, never a write', async () => {
@@ -758,6 +823,7 @@ describe('Research Lab — read-only research API helpers', () => {
       expect(result.oos_result).toBe('NOT_AVAILABLE');
       expect(result.confidence_evidence_maturity).toBe('INSUFFICIENT_SAMPLE');
       expect(result.last_updated).toBe(null);
+      expect(result.evidence_quality).toBe(null);
     });
 
     it('below required_sample: reports real descriptive summaries from the latest run, but oos_result is gated INSUFFICIENT_SAMPLE', async () => {
@@ -772,6 +838,35 @@ describe('Research Lab — read-only research API helpers', () => {
       expect(result.oos_result).toBe('INSUFFICIENT_SAMPLE');
       expect(result.confidence_evidence_maturity).toBe('INSUFFICIENT_SAMPLE');
       expect(result.last_updated).toBe(1000);
+      expect(result.evidence_quality).toBe(null);
+    });
+
+    it('exposes a persisted evidence_quality object from the latest run exactly unchanged -- no recomputation, renaming, or scoring', async () => {
+      const evidenceQuality = {
+        n_observations_supplied: 8,
+        AS_OF_SAFETY: { status: 'PASS', reason: 'all observations as-of eligible', n_total: 8, n_eligible: 8, n_ineligible: 0 },
+        TIMESTAMP_VALIDITY: { status: 'PASS', reason: 'all observations have valid numeric timestamps', n_total: 8, n_valid: 8, n_invalid: 0 },
+        HISTORICAL_TIMESTAMP_VALIDITY: { status: 'FAIL', reason: '1 of 8 observations plausibly within the historical population have a missing/malformed timestamp', n_historical: 8, n_valid: 7, n_invalid: 1 },
+        SAMPLE_DEPTH: { status: 'PASS', reason: 'sample depth threshold met', n_eligible: 8, min_observations: 4 },
+        CADENCE: { status: 'PASS', reason: 'no gap exceeds gap_threshold_ms', observation_count: 8, n_unique_observation_times: 8, duplicate_timestamps_excluded: 0 },
+        DUPLICATE_QUALITY: { status: 'PASS', reason: 'no duplicate observation_time values', n_total: 8, n_duplicate_timestamps: 0, duplicate_timestamps: [] },
+        PROVENANCE: { status: 'PARTIAL', fields_present: ['source_key'], fields_missing: ['provider'] },
+        WINDOW_CONFORMANCE: { status: 'PASS', n_within: 8, n_outside: 0 },
+        OVERALL_STATUS: 'INVALID',
+      };
+      const db = makeDb([
+        { first: { n: 1 } },
+        { all: { results: [{ analysis_ts: 1000, metric_json: JSON.stringify(makeReport({ evidence_quality: evidenceQuality })) }] } },
+      ]);
+      const result = await scope.computeExp010LiveFields({ DB: db }, 4);
+      expect(result.evidence_quality).toEqual(evidenceQuality);
+      expect(Object.keys(result.evidence_quality).sort()).toEqual(Object.keys(evidenceQuality).sort());
+      // An OVERALL_STATUS of INVALID is not itself reinterpreted as a
+      // measured-result/oos_result verdict -- those stay exactly as
+      // this provider already computed them from relationship_summary/
+      // redundancy_summary, untouched by evidence_quality's contents.
+      expect(result.current_measured_result.relationship_summary).toEqual(makeReport({}).relationship_summary);
+      expect(result.oos_result).toBe('INSUFFICIENT_SAMPLE');
     });
 
     it('at required_sample: oos_result reports milestone progress, never a coefficient/significance verdict', async () => {
@@ -798,6 +893,7 @@ describe('Research Lab — read-only research API helpers', () => {
       expect(result.current_measured_result).toBe('NOT_AVAILABLE');
       expect(result.confidence_evidence_maturity).toBe('UNKNOWN');
       expect(result.last_updated).toBe(999);
+      expect(result.evidence_quality).toBe(null);
     });
 
     it('every D1 call is SELECT-only, filtered by the exact EXP-010 subject, never a write', async () => {
@@ -845,6 +941,104 @@ describe('Research Lab — read-only research API helpers', () => {
       expect(exp009.current_sample_size).toBe(0);
       expect(exp010.current_sample_size).toBe(0);
       expect(exp010.confidence_evidence_maturity).toBe('INSUFFICIENT_SAMPLE');
+    });
+  });
+
+  // Additive API-exposure change (follow-up to PR #70): the Evidence
+  // Quality Layer's output already lives, unmodified, in each of
+  // EXP-005/EXP-009/EXP-010's own persisted metric_json -- these prove
+  // getResearchLabRegistry's full end-to-end response now carries it
+  // through unchanged, that its absence never breaks the endpoint, and
+  // that every field the registry already returned is untouched by
+  // this change.
+  describe('getResearchLabRegistry — evidence_quality pass-through (additive, PR #70 follow-up)', () => {
+    function registryRowFor(id, dataSourceTable, requiredSample) {
+      return {
+        experiment_id: id, title: `title-${id}`, research_question: `q-${id}`, purpose: `p-${id}`,
+        experiment_type: 'TYPE_1', expected_result: `e-${id}`, success_criterion: `s-${id}`,
+        start_date: null, target_date: null, status: 'ACCUMULATING', baseline: `b-${id}`,
+        required_sample: requiredSample, conclusion: null, next_action: `n-${id}`, github_refs: null,
+        data_source_table: dataSourceTable, created_ts: 1, updated_ts: 1,
+      };
+    }
+
+    it('EXP-005 registry entry exposes the persisted evidence_quality object unchanged', async () => {
+      const evidenceQuality = { OVERALL_STATUS: 'SUFFICIENT', AS_OF_SAFETY: { status: 'PASS' } };
+      const db = makeDb([
+        { all: { results: [registryRowFor('EXP-005', 'research_analyses_exp005_source_effectiveness', 1)] } },
+        { first: { n: 1 } },
+        { all: { results: [{ analysis_ts: 1000, metric_json: JSON.stringify({
+          sources_discovered: [], evidence_labels: {}, level3: {}, evidence_quality: evidenceQuality,
+        }) }] } },
+      ]);
+      const result = await scope.getResearchLabRegistry({ DB: db });
+      const exp005 = result.experiments.find((e) => e.experiment_id === 'EXP-005');
+      expect(exp005.evidence_quality).toEqual(evidenceQuality);
+    });
+
+    it('EXP-009 registry entry exposes the persisted evidence_quality object unchanged', async () => {
+      const evidenceQuality = { OVERALL_STATUS: 'LIMITED', CADENCE: { status: 'WARNING' } };
+      const db = makeDb([
+        { all: { results: [registryRowFor('EXP-009', 'research_analyses_exp009_event_source_evidence', 1)] } },
+        { first: { n: 1 } },
+        { all: { results: [{ analysis_ts: 1000, metric_json: JSON.stringify({
+          events: [], results: [], by_source_interpretation: {}, evidence_quality: evidenceQuality,
+        }) }] } },
+      ]);
+      const result = await scope.getResearchLabRegistry({ DB: db });
+      const exp009 = result.experiments.find((e) => e.experiment_id === 'EXP-009');
+      expect(exp009.evidence_quality).toEqual(evidenceQuality);
+    });
+
+    it('EXP-010 registry entry exposes the persisted evidence_quality object unchanged', async () => {
+      const evidenceQuality = { OVERALL_STATUS: 'INVALID', DUPLICATE_QUALITY: { status: 'FAIL' } };
+      const db = makeDb([
+        { all: { results: [registryRowFor('EXP-010', 'research_analyses_exp010_source_dialogue_validation', 1)] } },
+        { first: { n: 1 } },
+        { all: { results: [{ analysis_ts: 1000, metric_json: JSON.stringify({
+          relationship_summary: null, redundancy_summary: null, evidence_quality: evidenceQuality,
+        }) }] } },
+      ]);
+      const result = await scope.getResearchLabRegistry({ DB: db });
+      const exp010 = result.experiments.find((e) => e.experiment_id === 'EXP-010');
+      expect(exp010.evidence_quality).toEqual(evidenceQuality);
+    });
+
+    it('a report predating the Evidence Quality Layer (no evidence_quality key at all) exposes null, never fabricated, never a crash', async () => {
+      const db = makeDb([
+        { all: { results: [registryRowFor('EXP-005', 'research_analyses_exp005_source_effectiveness', 1)] } },
+        { first: { n: 1 } },
+        { all: { results: [{ analysis_ts: 1000, metric_json: JSON.stringify({ sources_discovered: [], evidence_labels: {}, level3: {} }) }] } },
+      ]);
+      const result = await scope.getResearchLabRegistry({ DB: db });
+      const exp005 = result.experiments.find((e) => e.experiment_id === 'EXP-005');
+      expect(exp005.evidence_quality).toBe(null);
+    });
+
+    it('EXP-004 (predates PR #70 entirely, different report shape) is completely unaffected -- endpoint still succeeds, all its existing fields unchanged', async () => {
+      const db = makeDb([
+        { all: { results: [registryRowFor('EXP-004', 'experiment_4_timesfm', 30)] } },
+        // computeExperiment4TimesFmLiveFields's own single D1 call:
+        { all: { results: [{ horizon_hours: 12, total: 40, resolved: 35, correct: 20, latest_activity_ts: 500 }] } },
+      ]);
+      const result = await scope.getResearchLabRegistry({ DB: db });
+      expect(result.ok).toBe(true);
+      const exp004 = result.experiments.find((e) => e.experiment_id === 'EXP-004');
+      // EXP-004's own provider was never touched by this change -- its
+      // report shape has no evidence_quality concept at all, so the key
+      // is simply absent (not fabricated as null), and every field it
+      // already computed is untouched.
+      expect(exp004.evidence_quality).toBeUndefined();
+      expect(exp004.current_sample_size.total_resolved).toBe(35);
+      expect(exp004.confidence_evidence_maturity).toBe('ACCUMULATING');
+    });
+
+    it('a registry row with no data_source_table (NOT_STARTED) is unaffected by this change', async () => {
+      const db = makeDb([{ all: { results: [registryRowFor('EXP-999', null, null)] } }]);
+      const result = await scope.getResearchLabRegistry({ DB: db });
+      const exp999 = result.experiments.find((e) => e.experiment_id === 'EXP-999');
+      expect(exp999.current_sample_size).toBe('NOT_STARTED');
+      expect(exp999.evidence_quality).toBeUndefined();
     });
   });
 

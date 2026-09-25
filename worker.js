@@ -4058,6 +4058,293 @@ async function computeFullAnomalyGateAudit(env) {
   };
 }
 
+// =====================================================================
+// ---- Learning Roadmap §3, Experiment 3 read side: p_up_momentum /
+// selection_decisions_momentum evaluation (research-only, read-only) ----
+//
+// Two genuinely separate populations, per the LR-3 gap analysis -- do not
+// conflate them:
+//   1. challenger_predictions.p_up_momentum/momentum_triggered -- written
+//      for ALL THREE coins on every challenger prediction (see
+//      computeMomentumBlend's call site above), resolved via the same
+//      realized_up column as p_up_flat/p_up_tilted. Falls back to
+//      p_up_flat unchanged when not triggered, so this population is the
+//      SAME SIZE as flat/tilted's own resolved population.
+//   2. selection_decisions_momentum -- BTC-only (MOMENTUM_EXPERIMENT_COINS),
+//      written only once momentum itself clears its own 50+ resolved-row
+//      eligibility bar (SELECTION_MIN_HISTORY), by logMomentumSelectionExperiment.
+//      As of the last data export this table has zero rows.
+// Never calls selectBestVariant, decideSelection, computeLcaScore, or
+// logMomentumSelectionExperiment -- only .all() reads against env.DB, no
+// .run() anywhere in this section, exactly the same read-only contract
+// computeAnomalyGateReport already established for Experiment 2.
+// =====================================================================
+
+// Read-only, part 1: p_up_momentum's own resolved-outcome accuracy.
+// Deliberately mirrors getChallengerCalibration()'s exact metric set and
+// n<5 sample-size convention (not getCalibration()'s n<20 -- that
+// threshold belongs to a different table/context) rather than inventing
+// a new LR-3-specific methodology. accuracy_momentum/brier_momentum are
+// computed over ALL resolved rows, including untriggered ones where
+// p_up_momentum == p_up_flat by construction; triggered_only breaks out
+// the subset where momentum_triggered=1, since that is the only subset
+// where momentum's behavior actually differs from the already-evaluated
+// flat variant.
+async function getMomentumCalibration(env, coin, horizonHours) {
+  // Population-labeling note (post-implementation audit, IMPORTANT #1):
+  // p_up_momentum is written for all 3 coins by the shared challenger
+  // prediction path, but the LR-3 selection EXPERIMENT itself (its
+  // episode-audit/promotion-gate framework, selection_decisions_momentum)
+  // is scoped to BTC only (MOMENTUM_EXPERIMENT_COINS). This function only
+  // ever evaluates the raw signal for whichever coin it's called with --
+  // that is correct and unchanged -- but the response must say so
+  // explicitly rather than let a reader infer "LR-3 experiment" from the
+  // surrounding endpoint/section naming. Computed once, reused in every
+  // return branch below (including the n<5 branch) so the caveat is
+  // present regardless of sample size. No success/failure/promotion
+  // language, by design.
+  const populationScopeNote = coin === 'BTC'
+    ? 'This evaluates p_up_momentum -- the raw momentum signal -- for BTC. It is not itself the LR-3 selection experiment: that is the separate selection_evaluation section (selection_decisions_momentum), which compares momentum\'s LCA rank against production\'s actual pick that cycle. This section alone is not a promotion signal either way.'
+    : `p_up_momentum exists in the shared challenger prediction population for all 3 coins (the momentum blend runs inside the general challenger-prediction path, not gated by MOMENTUM_EXPERIMENT_COINS). This evaluates the raw momentum signal for ${coin} specifically. The LR-3 selection experiment itself (selection_decisions_momentum, the LCA-vs-production comparison with its own episode-audit/promotion gate) is scoped to BTC only (MOMENTUM_EXPERIMENT_COINS) and never runs for ${coin} -- these numbers describe the signal only and must not be read as an LR-3 selection-experiment result for this coin.`;
+
+  const { results: rows } = await env.DB.prepare(
+    'SELECT * FROM challenger_predictions WHERE coin=? AND horizon_hours=? AND resolved_ts IS NOT NULL AND p_up_momentum IS NOT NULL ORDER BY ts ASC'
+  ).bind(coin, horizonHours).all();
+  const n = rows.length;
+  if (n < 5) {
+    return {
+      ok: true, coin, horizon_hours: horizonHours, n_resolved: n,
+      population_scope_note: populationScopeNote,
+      note: 'Not enough resolved p_up_momentum observations yet — check back once more have accumulated (same n<5 convention as getChallengerCalibration).',
+    };
+  }
+
+  const priceTable = coin === 'LINK' ? 'link_data' : coin === 'ETH' ? 'eth_data' : 'btc_data';
+  const priceCol = coin === 'LINK' ? 'link_price' : coin === 'ETH' ? 'eth_price' : 'btc_price';
+  const { results: allPrices } = await env.DB.prepare(
+    `SELECT ts, ${priceCol} as price FROM ${priceTable} ORDER BY ts ASC`
+  ).all();
+
+  // Identical to getChallengerCalibration's own helper -- duplicated
+  // rather than shared because that function is not exported/module-
+  // scoped in a way this section can import from in isolation; same
+  // exact semantics (trailing 20-point MA at prediction time).
+  function maCrossoverPrediction(predTs, priceAtPred) {
+    const priorRows = allPrices.filter(r => r.ts <= predTs).slice(-20);
+    if (priorRows.length < 10 || !priceAtPred) return null;
+    const ma = priorRows.reduce((s, r) => s + r.price, 0) / priorRows.length;
+    return priceAtPred > ma ? 1 : 0;
+  }
+
+  let accMomentum = 0, accMa = 0, upCount = 0;
+  let brierMomentum = 0;
+  let maCount = 0;
+  let triggeredN = 0, triggeredCorrect = 0, triggeredBrier = 0;
+  for (const r of rows) {
+    const actual = r.realized_up;
+    if (actual === 1) upCount++;
+    if ((r.p_up_momentum > 0.5) === (actual === 1)) accMomentum++;
+    brierMomentum += (r.p_up_momentum - actual) ** 2;
+    const maPred = maCrossoverPrediction(r.ts, r.price_at_prediction);
+    if (maPred != null) { maCount++; if (maPred === actual) accMa++; }
+    if (r.momentum_triggered) {
+      triggeredN++;
+      if ((r.p_up_momentum > 0.5) === (actual === 1)) triggeredCorrect++;
+      triggeredBrier += (r.p_up_momentum - actual) ** 2;
+    }
+  }
+  const upRate = upCount / n;
+  const naiveBest = Math.max(upRate, 1 - upRate);
+  const maAcc = maCount >= 5 ? accMa / maCount : null;
+
+  return {
+    ok: true, coin, horizon_hours: horizonHours, n_resolved: n,
+    population_scope_note: populationScopeNote,
+    historical_up_rate: Number(upRate.toFixed(3)),
+    accuracy_momentum: Number((accMomentum / n).toFixed(3)),
+    brier_momentum: Number((brierMomentum / n).toFixed(3)),
+    naive_baseline_accuracy: Number(naiveBest.toFixed(3)),
+    brier_baseline_5050: 0.25,
+    brier_baseline_up_rate: Number((upRate * (1 - upRate)).toFixed(3)),
+    ma_crossover_baseline: maAcc != null ? { n: maCount, accuracy: Number(maAcc.toFixed(3)) } : { n: maCount, note: 'not enough trailing price history yet' },
+    beats_naive_momentum: (accMomentum / n) > naiveBest,
+    beats_ma_crossover_momentum: maAcc != null ? (accMomentum / n) > maAcc : null,
+    triggered_only: triggeredN >= 5
+      ? { n: triggeredN, accuracy_momentum: Number((triggeredCorrect / triggeredN).toFixed(3)), brier_momentum: Number((triggeredBrier / triggeredN).toFixed(3)) }
+      : { n: triggeredN, note: 'Fewer than 5 resolved momentum_triggered=1 rows — not enough to evaluate the momentum overlay\'s triggered behavior separately from its untriggered p_up_flat fallback.' },
+    note: 'beats_naive alone is a low bar (matches getChallengerCalibration\'s own established convention) — beats_ma_crossover is the more meaningful claim. accuracy_momentum/brier_momentum are computed over ALL resolved rows including untriggered fallback ones (p_up_momentum==p_up_flat there); see triggered_only for the overlay\'s behavior specifically when momentum_triggered=1.',
+  };
+}
+
+// Read-only, part 2: groups selection_decisions_momentum rows into
+// episodes using the exact same time-adjacency rule as
+// groupAnomalyGateEpisodes (consecutive prediction_ts within
+// ANOMALY_AUDIT_MAX_GAP_MS belong to one episode) -- reused, not
+// reinvented, because correlated/non-independent successive cycles is
+// exactly the same risk LR-2's grouping exists to guard against.
+//
+// groupAnomalyGateEpisodes itself is NOT reused directly: it also tracks
+// n_resolved per episode from a `resolved` field that has no persisted
+// equivalent on selection_decisions_momentum (that table stores no
+// realized-outcome column at all -- see getMomentumSelectionReport's own
+// comment below for why that is not fabricated here). Tracking only what
+// is actually persisted instead: cycle count, and how many of those
+// cycles saw momentum's own LCA outrank what production actually chose.
+//
+// Caveat, documented rather than papered over: ANOMALY_AUDIT_MAX_GAP_MS
+// (6h) was tuned for the ~3h predictAndLog cadence LR-1/LR-2 were
+// originally built against. logMomentumSelectionExperiment (like
+// logAnomalyGateExperiment) now runs once per coin/horizon from the
+// daily 07:00 UTC cron only (see the cron-dispatch tests), so consecutive
+// selection_decisions_momentum rows are typically ~24h apart -- well
+// outside a 6h gap. Under that cadence this grouping will usually yield
+// one-cycle episodes, which is expected given current write frequency,
+// not a defect in the grouping logic; it makes the episode-count gate
+// track the row-count gate closely, which is the stricter direction, not
+// a loosened one. Reusing the existing constant unchanged (rather than
+// inventing a new LR-3-specific gap value) is deliberate per this task's
+// "do not invent a new threshold" instruction.
+function groupMomentumEpisodes(rows) {
+  const episodes = [];
+  for (const r of rows) {
+    const last = episodes[episodes.length - 1];
+    const withinGap = last && (r.prediction_ts - last.end_ts) <= ANOMALY_AUDIT_MAX_GAP_MS;
+    if (last && withinGap) {
+      last.end_ts = r.prediction_ts;
+      last.n_cycles++;
+      if (r.momentum_outranks_production) last.n_momentum_outranks_production++;
+    } else {
+      episodes.push({ start_ts: r.prediction_ts, end_ts: r.prediction_ts, n_cycles: 1, n_momentum_outranks_production: r.momentum_outranks_production ? 1 : 0 });
+    }
+  }
+  return episodes;
+}
+
+// Read-only, part 2 (continued): aggregate over selection_decisions_momentum
+// rows. Deliberately does NOT reuse computeAnomalyGateAggregate's exact
+// field names/terminology (production_accuracy, anomaly_gate_accuracy,
+// agreement_rate) -- that function measures resolved-outcome-based
+// accuracy (each variant's chosen_p_up scored against realized_up), and
+// selection_decisions_momentum persists no realized-outcome column at
+// all. Fabricating one by joining back to the core prediction table was
+// considered and rejected: the task this function serves is strictly
+// "how did momentum's own logged LCA compare to what production actually
+// chose that cycle", and every field that answers that question
+// (momentum_lca, production_chosen_lca, momentum_rank, total_scored) is
+// already persisted on the row as-is, read here and never recomputed.
+// Outcome-based accuracy for momentum is a separate, already-answered
+// question -- see getMomentumCalibration above.
+function computeMomentumSelectionAggregate(rows, episodes) {
+  if (rows.length === 0) {
+    return {
+      available: false,
+      reason: 'no_resolved_observations',
+      note: 'No selection_decisions_momentum rows yet — momentum (BTC-only) has not yet reached its own 50+ resolved-prediction eligibility bar (SELECTION_MIN_HISTORY) at this horizon. This is not a failure or a success signal for momentum; there is simply nothing logged yet to evaluate.',
+    };
+  }
+  const withProduction = rows.filter(r => r.production_chosen_lca != null);
+  const outranks = withProduction.filter(r => r.momentum_lca > r.production_chosen_lca).length;
+  const rank1 = rows.filter(r => r.momentum_rank === 1).length;
+  const episodeCount = episodes.length;
+  const insufficientSample = rows.length < ANOMALY_AUDIT_MIN_SAMPLE_N || episodeCount < ANOMALY_AUDIT_MIN_EPISODES;
+  return {
+    available: true,
+    n_observations: rows.length,
+    episode_count: episodeCount,
+    min_sample_n: ANOMALY_AUDIT_MIN_SAMPLE_N,
+    min_episodes: ANOMALY_AUDIT_MIN_EPISODES,
+    insufficient_sample: insufficientSample,
+    n_scored_with_production_comparison: withProduction.length,
+    momentum_outranks_production_lca_count: outranks,
+    momentum_outranks_production_lca_rate: withProduction.length ? Number((outranks / withProduction.length).toFixed(3)) : null,
+    momentum_rank1_count: rank1,
+    momentum_rank1_rate: Number((rank1 / rows.length).toFixed(3)),
+    outcome_based_accuracy_note: 'unavailable from this table — selection_decisions_momentum persists no realized-outcome column; see this endpoint\'s prediction_evaluation section (p_up_momentum vs realized_up on challenger_predictions) for outcome-based accuracy.',
+    note: insufficientSample
+      ? 'insufficient_sample=true — do not treat momentum_outranks_production_lca_rate or momentum_rank1_rate as a finding regardless of how the raw rate looks. Too few logged cycles and/or independent episodes (episode-level, not row-level, is the significance unit here, same convention as Learning Roadmap §3 Experiment 2).'
+      : 'Episode-level sample size requirement met. This describes within-cycle LCA ranking only, not real-world outcome accuracy, and does not itself constitute a promotion decision — requires ChatGPT audit before any promotion discussion, same as Experiment 2.',
+  };
+}
+
+// Read-only, part 2 (continued): the report itself, joining nothing --
+// selection_decisions_momentum already stores production_chosen_variant/
+// production_chosen_p_up/production_chosen_lca inline at write time (read,
+// never recomputed, by logMomentumSelectionExperiment), unlike
+// selection_decisions_anomaly which needed a live join in
+// computeAnomalyGateReport to get production's decision. So this function
+// needs no join to selection_decisions or any core prediction table.
+async function getMomentumSelectionReport(env, coin, horizonHours) {
+  const { results: momentumRows } = await env.DB.prepare(
+    `SELECT ts, coin, horizon_hours, prediction_ts, momentum_p_up, momentum_lca, momentum_n_matched,
+            momentum_rank, total_scored, production_chosen_variant, production_chosen_p_up,
+            production_chosen_lca, k_sel, scores_json
+     FROM selection_decisions_momentum WHERE coin=? AND horizon_hours=? ORDER BY prediction_ts ASC`
+  ).bind(coin, horizonHours).all();
+
+  if (!momentumRows.length) {
+    return {
+      ok: true, coin, horizon_hours: horizonHours, generated_at: Date.now(),
+      raw_observation_count: 0, rows: [], episodes: [],
+      aggregate: { available: false, reason: 'no_resolved_observations', note: 'No selection_decisions_momentum rows yet for this coin/horizon — Learning Roadmap §3 Experiment 3 has not logged a momentum-eligible cycle here yet. This is not an error; there is simply nothing to evaluate until momentum clears its own 50+ resolved-prediction bar.' },
+      note: 'No selection_decisions_momentum rows yet for this coin/horizon.',
+    };
+  }
+
+  const rows = momentumRows.map(r => ({
+    ...r,
+    momentum_outranks_production: r.production_chosen_lca != null ? (r.momentum_lca > r.production_chosen_lca) : null,
+  }));
+  const episodes = groupMomentumEpisodes(rows);
+  const aggregate = computeMomentumSelectionAggregate(rows, episodes);
+
+  return {
+    ok: true, coin, horizon_hours: horizonHours, generated_at: Date.now(),
+    raw_observation_count: rows.length,
+    rows,
+    episodes,
+    aggregate,
+    note: 'Read-only research report (Learning Roadmap §3 Experiment 3) over selection_decisions_momentum — does not feed into any prediction, selection, or calibration logic, and never calls selectBestVariant, decideSelection, computeLcaScore, or logMomentumSelectionExperiment. production_chosen_variant/production_chosen_p_up/production_chosen_lca are the actual live decision that was served, read as persisted; momentum_lca is the logged-only alternative from the momentum experiment and never replaces it.',
+  };
+}
+
+// Read-only, part 3: orchestrates both evaluations across BTC x [12,24] --
+// the only coin/horizon combinations selection_decisions_momentum can ever
+// contain (MOMENTUM_EXPERIMENT_COINS). prediction_evaluation is still
+// reported per-coin for all 3 coins, since p_up_momentum itself is NOT
+// coin-restricted (see this section's header comment) -- conflating the
+// two would misrepresent which population is actually BTC-only.
+async function computeFullMomentumAudit(env) {
+  const coins = ['BTC', 'ETH', 'LINK'];
+  const horizons = [12, 24];
+  const predictionEvaluation = {};
+  for (const coin of coins) {
+    predictionEvaluation[coin] = {};
+    for (const h of horizons) {
+      try {
+        predictionEvaluation[coin][h] = await getMomentumCalibration(env, coin, h);
+      } catch (err) {
+        predictionEvaluation[coin][h] = { ok: false, coin, horizon_hours: h, error: String(err) };
+      }
+    }
+  }
+  const selectionEvaluation = { BTC: {} };
+  for (const h of horizons) {
+    try {
+      selectionEvaluation.BTC[h] = await getMomentumSelectionReport(env, 'BTC', h);
+    } catch (err) {
+      selectionEvaluation.BTC[h] = { ok: false, coin: 'BTC', horizon_hours: h, error: String(err) };
+    }
+  }
+  return {
+    ok: true, generated_at: Date.now(),
+    min_sample_n: ANOMALY_AUDIT_MIN_SAMPLE_N,
+    min_episodes: ANOMALY_AUDIT_MIN_EPISODES,
+    prediction_evaluation: predictionEvaluation,
+    selection_evaluation: selectionEvaluation,
+    note: 'Read-only research report (Learning Roadmap §3 Experiment 3) — prediction_evaluation covers all 3 coins (p_up_momentum is written for all of them); selection_evaluation covers BTC only (selection_decisions_momentum is BTC-only, MOMENTUM_EXPERIMENT_COINS). Neither feeds into any prediction, selection, or calibration logic.',
+  };
+}
+
 // Calibration for the challenger: both variants (flat/tilted) against BOTH
 // naive-baseline (low bar — always guess the historically-more-common
 // direction) AND a real MA-crossover momentum strategy (higher bar — price
@@ -7430,6 +7717,41 @@ export default {
           return new Response(JSON.stringify(report), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
         }
         const fullAudit = await computeFullAnomalyGateAudit(env);
+        return new Response(JSON.stringify(fullAudit), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+      } catch (err) {
+        return new Response(JSON.stringify({ ok: false, error: String(err) }), { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+      }
+    }
+
+    // ---- GET /research/momentum?coin=&horizon= -- Learning Roadmap §3
+    // Experiment 3, read side. Read-only, zero writes, no effect on any
+    // production/selection/calibration logic; never calls selectBestVariant,
+    // decideSelection, computeLcaScore, or logMomentumSelectionExperiment. A
+    // sibling of /research/anomaly-gate above, not a modification of it.
+    // Exposes both halves of the LR-3 evaluation in one response:
+    // prediction_evaluation (p_up_momentum vs realized_up, all 3 coins) and
+    // selection_evaluation (selection_decisions_momentum, BTC only --
+    // MOMENTUM_EXPERIMENT_COINS). If both coin and horizon are given and
+    // valid, returns that single combination's evaluations (selection_
+    // evaluation is reported unavailable for coin != BTC, never fabricated).
+    // Otherwise returns the full audit across all coins/horizons -- no
+    // default coin/horizon is ever guessed. See getMomentumCalibration /
+    // getMomentumSelectionReport / computeFullMomentumAudit for full
+    // methodology. ----
+    if (url.pathname === '/research/momentum' && request.method === 'GET') {
+      try {
+        const coinParam = url.searchParams.get('coin');
+        const horizonParam = parseInt(url.searchParams.get('horizon'), 10);
+        const hasValidCoin = ['BTC', 'LINK', 'ETH'].includes(coinParam);
+        const hasValidHorizon = [12, 24].includes(horizonParam);
+        if (hasValidCoin && hasValidHorizon) {
+          const prediction_evaluation = await getMomentumCalibration(env, coinParam, horizonParam);
+          const selection_evaluation = coinParam === 'BTC'
+            ? await getMomentumSelectionReport(env, 'BTC', horizonParam)
+            : { available: false, reason: 'coin_not_in_experiment', note: 'selection_decisions_momentum (Learning Roadmap §3 Experiment 3\'s LCA-vs-production comparison) is BTC-only (MOMENTUM_EXPERIMENT_COINS). prediction_evaluation above still applies to this coin, since p_up_momentum is computed for all 3 coins on challenger_predictions.' };
+          return new Response(JSON.stringify({ ok: true, coin: coinParam, horizon_hours: horizonParam, prediction_evaluation, selection_evaluation }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+        }
+        const fullAudit = await computeFullMomentumAudit(env);
         return new Response(JSON.stringify(fullAudit), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
       } catch (err) {
         return new Response(JSON.stringify({ ok: false, error: String(err) }), { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });

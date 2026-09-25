@@ -1,0 +1,52 @@
+-- Phase 1 Research Governance Correction (Task 1): flips EXP-005,
+-- EXP-009, and EXP-010 from PROPOSED to ACCUMULATING in the Experiment
+-- Registry seeded by migration 0010 and activated by migrations
+-- 0011/0012/0013. Purely a `status` column UPDATE on three existing
+-- rows -- no schema change, no other column touched, no other row
+-- touched (EXP-004/006/007/008 are not referenced anywhere in this
+-- file).
+--
+-- This is the "separate, later step" each activation migration's own
+-- trailing comment explicitly deferred: "status remains PROPOSED (not
+-- ACCUMULATING) as committed here -- it is only updated to
+-- ACCUMULATING, in a SEPARATE, later step, after a real
+-- workflow_dispatch/scheduled run has actually produced at least one
+-- real research_analyses row, so the registry never claims
+-- accumulation before any data genuinely exists." (0011, 0012, 0013,
+-- each verbatim for its own experiment_id).
+--
+-- Verified true immediately before writing this migration (live D1
+-- query against research_analyses, sentiment-history database):
+--   EXP-005:source_effectiveness   -> 2 persisted rows
+--   EXP-009:event_source_evidence  -> 1 persisted row
+--   EXP-010:source_dialogue_validation -> 1 persisted row
+-- All three genuinely have real, persisted research data today; none
+-- of the three's own registry row has ever had this status flip
+-- applied. This matches EXP-004's own precedent in migration 0010,
+-- which was seeded directly as ACCUMULATING because a real prior D1
+-- audit had already confirmed real accumulated data existed at that
+-- time -- the same documented rule, applied here for the three
+-- experiments whose own follow-up step was simply never executed.
+--
+-- `status` has no application code writer anywhere in this repository
+-- (confirmed: research_experiment_registry is never the target of an
+-- UPDATE/INSERT/DELETE outside a committed migration file) -- it is
+-- purely administrative metadata, always changed by a reviewed
+-- migration, never derived automatically from live data. This
+-- migration does not change that; it does not add any status-deriving
+-- code, and it does not touch data_source_table, required_sample,
+-- current_measured_result, or any other field -- those remain exactly
+-- as already computed live, at request time, by getResearchLabRegistry
+-- in worker.js.
+--
+-- Applied directly to production D1 (sentiment-history) via the
+-- Cloudflare D1 MCP tool in this same session, using this file's own
+-- exact text -- per the migration-governance rule documented in
+-- research/README.md (see the drift incident that rule itself records
+-- for migration 0010's own seed data).
+UPDATE research_experiment_registry SET status = 'ACCUMULATING' WHERE experiment_id = 'EXP-005';
+UPDATE research_experiment_registry SET status = 'ACCUMULATING' WHERE experiment_id = 'EXP-009';
+UPDATE research_experiment_registry SET status = 'ACCUMULATING' WHERE experiment_id = 'EXP-010';
+
+-- EXP-004, EXP-006, EXP-007, and EXP-008 are not referenced anywhere in
+-- this file and are left completely untouched.

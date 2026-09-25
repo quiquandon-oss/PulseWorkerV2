@@ -75,6 +75,7 @@ from datetime import datetime, timezone
 sys.path.insert(0, "research")
 import event_detector as ed  # noqa: E402 -- UNCHANGED, reused as-is
 import event_source_evidence_join as join_module  # noqa: E402 -- UNCHANGED, reused as-is
+import evidence_quality as eq  # noqa: E402 -- UNCHANGED, reused as-is (research-only integration point)
 
 DATABASE_NAME = "sentiment-history"
 # Same non-secret identifiers exp005-source-effectiveness/run_experiment.py
@@ -242,6 +243,39 @@ NOT_A_HYPOTHESIS_TEST_NOTE = json.dumps({
 })
 
 
+def build_history_observations(history_rows):
+    """Research Evidence Quality Layer integration point (research-only
+    -- see research/evidence_quality.py's own module docstring).
+    Duplicated verbatim: exp005-source-effectiveness/run_experiment.py's
+    own build_history_observations() function (not imported -- each experiment
+    script is self-contained and independently auditable, matching this
+    project's established per-experiment convention already documented
+    in this file's own d1_api_query docstring; EXP-005's file is never
+    imported by, or modified for, this experiment).
+
+    Builds the plain observation list the layer's contract requires
+    from the SAME history_rows this script already fetched above -- no
+    new data fetch, no new D1 read. V1 history rows have no distinct
+    publication-lag concept (the same documented design decision
+    exp005_run_experiment.py and exp010_source_dialogue_validation.py
+    already made for the same reason): information_available_at and
+    observation_time are both the row's own real history.ts.
+
+    This is purely additive -- it does not feed into, and is never read
+    by, event_source_evidence_join.build_event_source_evidence_dataset()
+    itself, which is called (and completes) entirely independently of
+    this function."""
+    return [
+        {
+            "information_available_at": r["ts"],
+            "observation_time": r["ts"],
+            "provider": "V1",
+            "dataset": "history",
+        }
+        for r in history_rows
+    ]
+
+
 def summarize_validation_status(evidence_coverage):
     """A single coarse validation_status label for the research_analyses
     row itself -- descriptive bookkeeping only, mirroring EXP-005's own
@@ -319,6 +353,28 @@ def main():
         "by_source_interpretation": by_source_interpretation,
         "btc_outcome_coverage": btc_outcome_coverage,
     }
+
+    # Research Evidence Quality Layer (research-only integration point,
+    # additive): assesses the SAME history_rows already fetched above,
+    # never feeds into or alters event_source_evidence_join.py's own
+    # classification logic (already fully computed into `dataset` above,
+    # entirely independently of this call). information_cutoff=now_ms is
+    # this live run's real as-of boundary. window_start/window_end are
+    # this experiment's own actual analysis window [start_ts, now_ms] --
+    # deliberately narrower than [fetch_start_ts, now_ms], the range
+    # history_rows was fetched over: fetch_start_ts only exists to give
+    # event_detector.py's own rolling statistics a trailing buffer, so
+    # any history_rows in [fetch_start_ts, start_ts) are genuinely
+    # outside this experiment's own analysis window and are correctly
+    # reported as such by WINDOW_CONFORMANCE, not silently absorbed into
+    # the assessed population -- the same [start_ts, now_ms] window
+    # convention exp005-source-effectiveness/run_experiment.py already
+    # uses for the identical history_rows shape.
+    report["evidence_quality"] = eq.assess_evidence_quality(
+        build_history_observations(history_rows),
+        information_cutoff=now_ms, window_start=start_ts, window_end=now_ms,
+    )
+
     validation_status = summarize_validation_status(evidence_coverage)
 
     # sample_size describes the actual persisted observation payload

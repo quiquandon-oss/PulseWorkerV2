@@ -303,6 +303,178 @@ def test_main_persists_sample_size_equal_to_len_of_its_own_persisted_results():
     assert sample_size == len(report["results"])
 
 
+# ---- Evidence Quality Layer integration (Phase 1 Research Governance Correction) ----
+# Additive follow-up mirroring exp005-source-effectiveness/run_experiment.py's
+# own already-proven integration. research/evidence_quality.py itself is
+# NOT modified or re-tested here (see research/test_evidence_quality.py's
+# own exhaustive adversarial suite) -- these tests prove only that THIS
+# call site wires it correctly: same history_rows, same information_
+# cutoff/window semantics, purely additive, never touching
+# event_source_evidence_join.py's own classification logic.
+
+def _clean_evidence_quality_fixture():
+    """A clean, minimal fixture with a real LARGE_MOVE event but no
+    internal-model event -- same base shape as
+    test_local_mirror_is_actually_usable_by_the_real_join_module, reused
+    here so every Evidence Quality integration test starts from an
+    identical, independently-understood baseline."""
+    now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+    day = 24 * 3600000
+    base_ts = now_ms - 30 * day
+    btc_rows = [{"ts": base_ts + i * day, "btc_price": 50000.0} for i in range(9)]
+    btc_rows.append({"ts": base_ts + 9 * day, "btc_price": 50000.0 * 1.05})
+    history_rows = [
+        {"ts": base_ts + i * 6 * 3600000, "score": 50,
+         "sources_json": json.dumps({"geopolitics": 20}), "gold_regime": "chop"}
+        for i in range(40)
+    ]
+    return history_rows, btc_rows
+
+
+def _run_main_with_fixtures(history_rows, btc_rows, predictions_rows=None,
+                             research_events_rows=None, research_event_evidence_rows=None):
+    call_order = ["history", "btc", "predictions", "research_events", "research_event_evidence"]
+    fixtures = {
+        "history": history_rows, "btc": btc_rows,
+        "predictions": predictions_rows or [], "research_events": research_events_rows or [],
+        "research_event_evidence": research_event_evidence_rows or [],
+    }
+    call_index = {"i": 0}
+
+    def fake_run_d1(sql):
+        key = call_order[call_index["i"]]
+        call_index["i"] += 1
+        return fixtures[key]
+
+    captured = {}
+
+    def fake_d1_api_query(sql, params):
+        captured["sql"] = sql
+        captured["params"] = params
+        return []
+
+    with patch.object(run_experiment, "run_d1", side_effect=fake_run_d1):
+        with patch.object(run_experiment, "d1_api_query", side_effect=fake_d1_api_query):
+            run_experiment.main()
+    return json.loads(captured["params"][5])
+
+
+def test_evidence_quality_present_in_persisted_report_and_purely_categorical():
+    history_rows, btc_rows = _clean_evidence_quality_fixture()
+    report = _run_main_with_fixtures(history_rows, btc_rows)
+    assert "evidence_quality" in report
+    eqr = report["evidence_quality"]
+    assert eqr["OVERALL_STATUS"] in run_experiment.eq.OVERALL_STATUSES
+    # Categorical-only contract, same as EXP-005/EXP-010's own already-
+    # proven integration -- no numeric score, weight, or confidence
+    # percentage anywhere.
+    for dim in ("AS_OF_SAFETY", "TIMESTAMP_VALIDITY", "SAMPLE_DEPTH", "CADENCE",
+                "DUPLICATE_QUALITY", "PROVENANCE", "WINDOW_CONFORMANCE"):
+        assert dim in eqr
+        assert "score" not in eqr[dim]
+        assert "confidence" not in eqr[dim]
+
+
+def test_evidence_quality_integration_does_not_alter_existing_classification_output():
+    """Byte/value-equivalent check: everything main() already persisted
+    before this integration (events, results, evidence_coverage,
+    by_source_interpretation, btc_outcome_coverage) must be reproducible
+    by an INDEPENDENT, fresh call to the real, unchanged join_module
+    functions over the exact same window -- proving the new
+    evidence_quality call is additive-only and never feeds back into
+    event_source_evidence_join.py's own classification logic."""
+    history_rows, btc_rows = _clean_evidence_quality_fixture()
+    report = _run_main_with_fixtures(history_rows, btc_rows)
+
+    # Recompute independently using the EXACT window main() actually used
+    # for this run (report["window"], set by event_source_evidence_join.py
+    # itself) -- never a freshly-recomputed now_ms, which could differ
+    # from the original call by real wall-clock drift.
+    window = report["window"]
+    mirror2 = run_experiment.build_local_mirror(history_rows, btc_rows, [], [], [])
+    dataset2 = join_module.build_event_source_evidence_dataset(mirror2, window["start_ts"], window["end_ts"])
+    mirror2.close()
+
+    real_world_events2 = [e for e in dataset2["events"] if not e["is_internal_model_event"]]
+    real_world_results2 = [r for r in dataset2["results"] if not r["is_internal_model_event"]]
+
+    assert report["events"] == real_world_events2
+    assert report["results"] == real_world_results2
+    assert report["evidence_coverage"] == join_module.summarize_evidence_coverage(dataset2)
+    assert report["by_source_interpretation"] == join_module.summarize_by_source_interpretation(dataset2)
+    assert report["btc_outcome_coverage"] == join_module.summarize_btc_outcome_coverage(dataset2)
+
+    # evidence_quality is the ONLY key added relative to the pre-
+    # integration report shape.
+    assert set(report.keys()) - {
+        "window", "events", "n_internal_model_events_excluded_from_results",
+        "source_keys", "results", "evidence_coverage", "by_source_interpretation",
+        "btc_outcome_coverage",
+    } == {"evidence_quality"}
+
+
+def test_evidence_quality_malformed_and_future_history_rows_cannot_contaminate_historical_assessment():
+    """Integration-level confirmation (not a re-test of
+    research/evidence_quality.py's own unit-level guarantee, already
+    independently adversarially audited elsewhere): appending a
+    malformed-timestamp row and a well-formed FUTURE-timestamp row to
+    history_rows must not change HISTORICAL_TIMESTAMP_VALIDITY or
+    OVERALL_STATUS relative to the clean baseline -- proving this call
+    site wires information_cutoff/window_end correctly (both = now_ms),
+    which is what makes that guarantee apply here at all."""
+    history_rows, btc_rows = _clean_evidence_quality_fixture()
+    clean_report = _run_main_with_fixtures(history_rows, btc_rows)
+    clean_eq = clean_report["evidence_quality"]
+
+    # A non-numeric ts (rather than None/NULL, which build_local_mirror's
+    # own pre-existing, UNCHANGED schema already rejects with a NOT NULL
+    # constraint before evidence_quality ever sees it) -- still a genuine
+    # malformed timestamp for _is_valid_timestamp()'s own purposes, and
+    # one build_local_mirror's TEXT-affinity-free `ts` column accepts
+    # without complaint (SQLite has no static column typing).
+    now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+    contaminated_history_rows = history_rows + [
+        {"ts": "not-a-timestamp", "score": 50, "sources_json": json.dumps({"geopolitics": 20}), "gold_regime": "chop"},
+        {"ts": now_ms + 3600000, "score": 50, "sources_json": json.dumps({"geopolitics": 20}), "gold_regime": "chop"},
+    ]
+    contaminated_report = _run_main_with_fixtures(contaminated_history_rows, btc_rows)
+    contaminated_eq = contaminated_report["evidence_quality"]
+
+    assert contaminated_eq["HISTORICAL_TIMESTAMP_VALIDITY"]["status"] == clean_eq["HISTORICAL_TIMESTAMP_VALIDITY"]["status"]
+    assert contaminated_eq["OVERALL_STATUS"] == clean_eq["OVERALL_STATUS"]
+    # The raw diagnostic IS allowed to change (it inspects the full raw
+    # list, by design) -- confirms it actually noticed the malformed row,
+    # so this test isn't accidentally exercising a no-op path.
+    assert contaminated_eq["TIMESTAMP_VALIDITY"]["n_invalid"] >= 1
+
+    # main() must never crash on a malformed history row reaching this
+    # call site -- already implicitly proven by reaching this line, but
+    # asserted explicitly for clarity.
+    assert contaminated_report["evidence_quality"]["OVERALL_STATUS"] in run_experiment.eq.OVERALL_STATUSES
+
+
+def test_exp009_analysis_window_matches_window_ms_and_excludes_the_lookback_buffer():
+    """Temporal-safety wiring check, specific to EXP-009: WINDOW_MS (90
+    days) is this experiment's own actual analysis window; the wider
+    fetch range (using LOOKBACK_BUFFER_MS) exists only to give event_
+    detector's own rolling statistics a trailing buffer. The window
+    passed to assess_evidence_quality must be the narrower
+    [start_ts, now_ms], not [fetch_start_ts, now_ms] -- confirmed here
+    both by exact window width and by a history row placed strictly
+    before this run's own start_ts being disclosed by WINDOW_CONFORMANCE
+    as outside the window, never silently absorbed as historical."""
+    history_rows, btc_rows = _clean_evidence_quality_fixture()
+    buffer_row_ts = history_rows[0]["ts"] - run_experiment.WINDOW_MS  # comfortably before this run's own start_ts
+    history_with_buffer_row = [
+        {"ts": buffer_row_ts, "score": 50, "sources_json": json.dumps({"geopolitics": 20}), "gold_regime": "chop"}
+    ] + history_rows
+    report = _run_main_with_fixtures(history_with_buffer_row, btc_rows)
+
+    window = report["window"]
+    assert window["end_ts"] - window["start_ts"] == run_experiment.WINDOW_MS
+    assert report["evidence_quality"]["WINDOW_CONFORMANCE"]["n_outside"] >= 1
+
+
 # ---- summarize_validation_status ----
 
 def test_summarize_validation_status_evidence_observed():

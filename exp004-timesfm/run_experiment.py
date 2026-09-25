@@ -139,9 +139,24 @@ def fetch_price_history():
     per real cron tick -- same table PulseWorkerV2's own runPrediction
     reads from (btc_data). No WHERE clause needed since we want
     everything available AS OF NOW; input_end_ts is recorded explicitly
-    below to prove exactly what was actually used."""
+    below to prove exactly what was actually used.
+
+    Defensive sort (Phase 1 Research Governance Correction / EXP-004
+    Resolution Integrity Investigation, defect 3): the SQL's own
+    `ORDER BY ts ASC` is trusted, but dedupe_near_simultaneous() itself
+    REQUIRES already-ascending input (its own docstring) and has no
+    defense of its own -- confirmed by adversarial test that an
+    out-of-order point is silently DROPPED (treated as a near-duplicate
+    of a wrongly-larger running max), not merely misplaced. Sorting here
+    makes input_end_ts/context_prices robust to fetch/transport order
+    regardless of whether that SQL guarantee ever holds, without
+    changing dedupe_near_simultaneous()'s own near-simultaneous
+    semantics at all -- ties (near-identical timestamps) still resolve
+    the same way Python's stable sort already preserved before this
+    change for genuinely-already-sorted input."""
     rows = run_d1("SELECT ts, btc_price FROM btc_data ORDER BY ts ASC")
     raw = [(int(r["ts"]), float(r["btc_price"])) for r in rows if r.get("btc_price") is not None]
+    raw.sort(key=lambda point: point[0])
     return dedupe_near_simultaneous(raw)
 
 
@@ -251,11 +266,28 @@ def resolve_pending():
         return
 
     for row in pending:
+        # Fail-closed guards (Phase 1 Research Governance Correction /
+        # EXP-004 Resolution Integrity Investigation, defects 1 and 2):
+        # typeof(ts) IN ('integer','real') excludes a malformed
+        # (non-numeric) btc_data.ts from ever qualifying as a resolution
+        # candidate -- SQLite/D1 otherwise compare TEXT as greater than
+        # any INTEGER regardless of value, so a malformed row could
+        # satisfy `ts >= target_ts` and be selected. btc_price IS NOT
+        # NULL excludes a row with no real price at all. Neither guard
+        # changes what "the nearest actual price at/after target_ts"
+        # MEANS -- both simply make explicit that a row failing either
+        # check was never a valid candidate in the first place. With
+        # both malformed and NULL candidates excluded here, the existing
+        # `if not actual_rows: continue` below already does exactly the
+        # right thing (never fabricates a value, tries again next run)
+        # without any new control flow.
         actual_rows = run_d1(
-            f"SELECT btc_price FROM btc_data WHERE ts >= {row['target_ts']} ORDER BY ts ASC LIMIT 1"
+            f"SELECT btc_price FROM btc_data WHERE ts >= {row['target_ts']} "
+            f"AND typeof(ts) IN ('integer', 'real') AND btc_price IS NOT NULL "
+            f"ORDER BY ts ASC LIMIT 1"
         )
         if not actual_rows:
-            continue  # not resolvable yet -- no price data at/after target_ts; try again next run
+            continue  # not resolvable yet -- no valid price data at/after target_ts; try again next run
         actual_price = float(actual_rows[0]["btc_price"])
         price_then = float(row["price_at_prediction"])
         actual_return_pct = (actual_price - price_then) / price_then * 100

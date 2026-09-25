@@ -178,7 +178,12 @@ def test_target_ts_uses_horizon_hours_consistently_with_pulseworkerv2():
 
 def test_resolution_uses_nearest_price_at_or_after_target_ts_not_before():
     src = open(os.path.join(os.path.dirname(__file__), "run_experiment.py")).read()
-    assert "WHERE ts >= {row['target_ts']} ORDER BY ts ASC LIMIT 1" in src
+    assert "WHERE ts >= {row['target_ts']} " in src
+    assert "ORDER BY ts ASC LIMIT 1" in src
+    # Updated for the EXP-004 Resolution Integrity Investigation fix:
+    # both fail-closed guards must remain part of this same query.
+    assert "typeof(ts) IN ('integer', 'real')" in src
+    assert "btc_price IS NOT NULL" in src
 
 
 # ---- Model integrity ----
@@ -379,17 +384,17 @@ def test_resolve_pending_duplicate_btc_data_timestamps_resolve_deterministically
     assert row[0] == 11.0  # (111-100)/100*100 -- the first-inserted duplicate, confirmed empirically, not assumed
 
 
-def test_resolve_pending_malformed_btc_data_timestamp_is_NOT_excluded_when_it_is_the_only_qualifying_row(monkeypatch):
-    """ADVERSARIAL FIXTURE, DOCUMENTING A REAL GAP -- not a passing
-    'safety' test. SQLite/D1 compare TEXT as greater than any INTEGER
-    regardless of value, so a malformed (non-numeric) ts in btc_data
-    satisfies `ts >= target_ts` whenever no genuinely valid numeric row
-    also does, and -- because it is the only row `ORDER BY ts ASC LIMIT 1`
-    can return -- resolve_pending() resolves using ITS price, uncritically,
-    even though its timestamp is meaningless. This does NOT fail closed.
-    Confirmed by real execution; NOT fixed here per this task's explicit
-    instruction not to modify production behavior -- reported as a
-    finding only."""
+def test_resolve_pending_malformed_btc_data_timestamp_is_excluded_and_fails_closed(monkeypatch):
+    """REGRESSION GUARD (EXP-004 Resolution Integrity Investigation,
+    defect 1, now fixed). A malformed (non-numeric) btc_data.ts must
+    never become a valid resolution candidate, even when it is the ONLY
+    row that would otherwise satisfy `ts >= target_ts` (SQLite/D1
+    compare TEXT as greater than any INTEGER, so it would win
+    `ORDER BY ts ASC LIMIT 1` if not explicitly excluded). The fix adds
+    `typeof(ts) IN ('integer','real')` to the query -- confirmed here
+    that the row is excluded, the forecast is left UNRESOLVED (never
+    coerced/fabricated), and the malformed row's obviously-wrong price
+    (999999.0) is never used."""
     conn = _fresh_resolve_db()
     conn.execute("INSERT INTO experiment_4_timesfm (id, target_ts, price_at_prediction, predicted_return_pct, direction) "
                  "VALUES (1, 2000, 100.0, 5.0, 'UP')")
@@ -398,40 +403,71 @@ def test_resolve_pending_malformed_btc_data_timestamp_is_NOT_excluded_when_it_is
     monkeypatch.setattr(run_experiment, "run_d1", _sqlite_run_d1(conn))
     run_experiment.resolve_pending()
     row = conn.execute("SELECT actual_return_pct, resolved_ts FROM experiment_4_timesfm WHERE id=1").fetchone()
-    # Documents the actual (undesirable) current behavior: the malformed
-    # row's obviously-wrong price (999999.0) was used to resolve a real
-    # forecast. A future corrective PR should add an explicit numeric-
-    # timestamp guard to this query or its result handling.
-    assert row[1] is not None, "expected the row to actually get (mis-)resolved, confirming the gap this test documents"
-    assert row[0] == pytest.approx((999999.0 - 100.0) / 100.0 * 100.0)
+    assert row[1] is None, "the malformed-timestamp row must never resolve this forecast"
+    assert row[0] is None, "no return_pct must be persisted -- not fabricated from the malformed row's price"
 
 
-def test_resolve_pending_missing_btc_price_raises_instead_of_leaving_that_row_gracefully_unresolved(monkeypatch):
-    """ADVERSARIAL FIXTURE, DOCUMENTING A REAL GAP -- not a passing
-    'safety' test. The nearest-price query has no `AND btc_price IS NOT
-    NULL` guard (unlike fetch_price_history's own upfront filter on the
-    prediction side). When the nearest qualifying btc_data row has a NULL
-    price, float(None) raises TypeError, UNCAUGHT inside resolve_pending()'s
-    own loop -- this is NOT the same as the documented 'no rows at all ->
-    continue to next run' path (`if not actual_rows: continue`), which DOES
-    already handle the genuinely-no-data case gracefully. A NULL-price row
-    that DOES exist and DOES satisfy the WHERE clause instead aborts the
-    entire resolution pass (including any still-pending rows after this
-    one in the same batch), rather than skipping just this one row.
-    Confirmed by real execution; NOT fixed here per this task's explicit
-    instruction not to modify production behavior."""
+def test_resolve_pending_malformed_timestamp_cannot_determine_resolution_price_even_when_a_valid_row_also_qualifies(monkeypatch):
+    """REGRESSION GUARD, complementary to the above: when a GENUINELY
+    valid, qualifying btc_data row ALSO exists alongside a malformed-ts
+    row, resolution must use the valid row's price, never the malformed
+    one's -- proving the exclusion, not merely the absence of a
+    candidate, is what drives correctness here."""
+    conn = _fresh_resolve_db()
+    conn.execute("INSERT INTO experiment_4_timesfm (id, target_ts, price_at_prediction, predicted_return_pct, direction) "
+                 "VALUES (1, 2000, 100.0, 5.0, 'UP')")
+    conn.execute("INSERT INTO btc_data (ts, btc_price) VALUES ('not-a-timestamp', 999999.0)")
+    conn.execute("INSERT INTO btc_data (ts, btc_price) VALUES (2500, 130.0)")  # genuinely valid, qualifies
+    monkeypatch.setattr(run_experiment, "run_d1", _sqlite_run_d1(conn))
+    run_experiment.resolve_pending()
+    row = conn.execute("SELECT actual_return_pct, resolved_ts FROM experiment_4_timesfm WHERE id=1").fetchone()
+    assert row[1] is not None
+    assert row[0] == pytest.approx((130.0 - 100.0) / 100.0 * 100.0)  # the VALID row's price, never 999999.0
+
+
+def test_resolve_pending_null_btc_price_does_not_crash_the_batch(monkeypatch):
+    """REGRESSION GUARD (EXP-004 Resolution Integrity Investigation,
+    defect 2, now fixed). The fix adds `btc_price IS NOT NULL` to the
+    same query -- a NULL-price row can no longer be selected as "the
+    nearest price at/after target_ts" at all, so the pre-existing
+    `if not actual_rows: continue` path (already correct for the
+    genuinely-no-data-yet case) now also correctly covers this case:
+    no crash, no fabricated price, the row is simply left unresolved
+    for a future run once real price data exists."""
     conn = _fresh_resolve_db()
     conn.execute("INSERT INTO experiment_4_timesfm (id, target_ts, price_at_prediction, predicted_return_pct, direction) "
                  "VALUES (1, 2000, 100.0, 5.0, 'UP')")
     conn.execute("INSERT INTO btc_data (ts, btc_price) VALUES (2000, NULL)")
     monkeypatch.setattr(run_experiment, "run_d1", _sqlite_run_d1(conn))
-    with pytest.raises(TypeError):
-        run_experiment.resolve_pending()
-    # The row remains unresolved (never committed) -- at least no
-    # FABRICATED result was persisted -- but the run as a whole still
-    # crashes rather than gracefully continuing past just this one row.
-    row = conn.execute("SELECT resolved_ts FROM experiment_4_timesfm WHERE id=1").fetchone()
+    run_experiment.resolve_pending()  # must NOT raise
+    row = conn.execute("SELECT resolved_ts, actual_return_pct FROM experiment_4_timesfm WHERE id=1").fetchone()
     assert row[0] is None
+    assert row[1] is None
+
+
+def test_resolve_pending_null_price_row_does_not_prevent_another_pending_forecast_from_resolving(monkeypatch):
+    """REGRESSION GUARD: a NULL-price row for ONE pending forecast must
+    not abort resolution of a DIFFERENT pending forecast in the same
+    batch. id=1's target_ts (8000) is LATER than id=2's own valid price
+    row (ts=2000, deliberately too early to satisfy id=1's own
+    `ts >= 8000`), so id=1's ONLY qualifying candidate is its own
+    NULL-price row at ts=8000 -- must stay unresolved, no crash. id=2's
+    target_ts (2000) is satisfied by that SAME early, valid row -- must
+    resolve normally, unaffected by id=1's bad data."""
+    conn = _fresh_resolve_db()
+    conn.execute("INSERT INTO experiment_4_timesfm (id, target_ts, price_at_prediction, predicted_return_pct, direction) "
+                 "VALUES (1, 8000, 100.0, 5.0, 'UP')")
+    conn.execute("INSERT INTO experiment_4_timesfm (id, target_ts, price_at_prediction, predicted_return_pct, direction) "
+                 "VALUES (2, 2000, 200.0, 5.0, 'UP')")
+    conn.execute("INSERT INTO btc_data (ts, btc_price) VALUES (2000, 220.0)")  # satisfies id=2 only (2000 < 8000)
+    conn.execute("INSERT INTO btc_data (ts, btc_price) VALUES (8000, NULL)")   # id=1's only candidate -- invalid
+    monkeypatch.setattr(run_experiment, "run_d1", _sqlite_run_d1(conn))
+    run_experiment.resolve_pending()  # must NOT raise
+    row1 = conn.execute("SELECT resolved_ts FROM experiment_4_timesfm WHERE id=1").fetchone()
+    row2 = conn.execute("SELECT resolved_ts, actual_return_pct FROM experiment_4_timesfm WHERE id=2").fetchone()
+    assert row1[0] is None, "id=1 must remain unresolved (its only qualifying row has a NULL price)"
+    assert row2[0] is not None, "id=2 must still resolve normally, unaffected by id=1's bad data"
+    assert row2[1] == 10.0  # (220-200)/200*100
 
 
 def test_resolve_pending_duplicate_forecast_rows_sharing_target_ts_are_each_resolved_independently_not_double_counted(monkeypatch):
@@ -457,39 +493,54 @@ def test_resolve_pending_duplicate_forecast_rows_sharing_target_ts_are_each_reso
     assert row1[0] != row2[0]
 
 
-def test_fetch_price_history_out_of_order_rows_are_silently_dropped_not_just_misordered(monkeypatch):
-    """ADVERSARIAL FIXTURE, DOCUMENTING A REAL GAP -- not a passing safety
-    test, and a more severe finding than a simple wrong-last-element risk.
-    fetch_price_history() performs NO Python-level sort of its own -- it
-    passes whatever run_d1() returns straight into
-    dedupe_near_simultaneous(), which computes `ts - result[-1][0]` on the
-    assumption of already-ascending input (per that function's own
-    docstring). Empirically confirmed here: when run_d1() returns rows out
-    of order, dedupe_near_simultaneous() does NOT merely risk picking the
-    wrong 'last' point for input_end_ts -- an out-of-order point whose ts
-    is LESS than (or within DEDUP_TOLERANCE_MS of) the running max is
-    silently DISCARDED entirely, as if it were a near-duplicate, even
-    though it is a genuinely different, non-duplicate observation. In this
-    fixture, 2 of 3 fetched points are dropped this way. Confirmed by real
-    execution; NOT fixed here per this task's explicit instruction not to
-    modify production behavior -- this guarantee currently depends
-    entirely on D1's own `ORDER BY ts ASC` never being violated, not on
-    anything in this script."""
-    out_of_order_rows = [
-        {"ts": 3000, "btc_price": 100.0},
-        {"ts": 1000, "btc_price": 90.0},   # earlier ts fetched AFTER a later one
-        {"ts": 2000, "btc_price": 95.0},
+def test_fetch_price_history_out_of_order_input_produces_the_same_result_as_sorted_input(monkeypatch):
+    """REGRESSION GUARD (EXP-004 Resolution Integrity Investigation,
+    defect 3, now fixed). fetch_price_history() now defensively sorts
+    before deduplication, so it must be independent of the order run_d1()
+    happens to return rows in. Before this fix, this exact fixture lost
+    2 of 3 points (an out-of-order point was silently treated as a
+    near-duplicate of a wrongly-larger running max and discarded) --
+    confirmed here that all 3 genuinely distinct points now survive,
+    and that a scrambled fetch order yields the IDENTICAL result to the
+    already-sorted order. Points are spaced 1 real hour apart (well
+    beyond DEDUP_TOLERANCE_MS=60s) so none of them collapse via the
+    EXISTING, unchanged near-simultaneous dedup semantics -- this test
+    is about fetch-order independence, not dedup behavior (see the
+    dedicated dedup-semantics test below)."""
+    hour = 3600000
+    points = [
+        {"ts": 1000, "btc_price": 90.0},
+        {"ts": 1000 + hour, "btc_price": 95.0},
+        {"ts": 1000 + 2 * hour, "btc_price": 100.0},
     ]
-    monkeypatch.setattr(run_experiment, "run_d1", lambda sql: out_of_order_rows)
-    price_history = run_experiment.fetch_price_history()
-    # The two genuinely out-of-order points (ts=1000, ts=2000) are wrongly
-    # treated as "too close to the running max" and dropped -- only the
-    # first-seen point survives, not because it is legitimately the only
-    # unique observation, but as a side effect of trusting fetch order.
-    assert price_history == [(3000, 100.0)], (
-        f"expected out-of-order points to be silently dropped by "
-        f"dedupe_near_simultaneous's own ascending-order assumption, got {price_history}"
+    scrambled = [points[2], points[0], points[1]]  # deliberately out of order
+
+    monkeypatch.setattr(run_experiment, "run_d1", lambda sql: points)
+    sorted_result = run_experiment.fetch_price_history()
+
+    monkeypatch.setattr(run_experiment, "run_d1", lambda sql: scrambled)
+    scrambled_result = run_experiment.fetch_price_history()
+
+    assert sorted_result == [(1000, 90.0), (1000 + hour, 95.0), (1000 + 2 * hour, 100.0)]
+    assert scrambled_result == sorted_result, (
+        "fetch_price_history() must be independent of fetch/insertion order"
     )
+
+
+def test_fetch_price_history_defensive_sort_preserves_near_simultaneous_dedup_semantics(monkeypatch):
+    """Confirms the fix does not alter dedupe_near_simultaneous()'s own
+    near-simultaneous collapsing semantics: two points within
+    DEDUP_TOLERANCE_MS of each other must still collapse to one, exactly
+    as before this fix, even when fetched out of order."""
+    points = [
+        {"ts": 1000, "btc_price": 50.0},
+        {"ts": 1000 + run_experiment.DEDUP_TOLERANCE_MS - 1, "btc_price": 50.0},  # near-duplicate of the first
+        {"ts": 1000 + run_experiment.DEDUP_TOLERANCE_MS + 3600000, "btc_price": 60.0},  # a real, later tick
+    ]
+    scrambled = [points[2], points[0], points[1]]
+    monkeypatch.setattr(run_experiment, "run_d1", lambda sql: scrambled)
+    result = run_experiment.fetch_price_history()
+    assert len(result) == 2  # the near-duplicate pair collapsed to one point, as before
 
 
 @pytest.mark.skip(reason=(

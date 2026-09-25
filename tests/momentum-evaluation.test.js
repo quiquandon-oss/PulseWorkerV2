@@ -17,7 +17,15 @@ function evalSource() {
 // attempt (INSERT/UPDATE/DELETE via .run()) throws immediately, which is
 // itself the read-only regression test, same convention as
 // anomaly-gate-report.test.js's makeFakeDb.
-function makeFakeDb({ challengerRows = [], priceRows = [], momentumRows = [] } = {}) {
+//
+// bindCalls (post-implementation audit, IMPORTANT #2): optional array the
+// caller can pass in and inspect afterward. Every .bind(...args) call
+// pushes { sql, args } onto it. Previously bind's args were captured but
+// never used, meaning a coin/horizon binding regression (hardcoded coin,
+// swapped argument order, a dropped horizon filter) would pass silently --
+// this is the minimal, additive fix: same fake, same routing-by-table-name
+// behavior, just now optionally observable.
+function makeFakeDb({ challengerRows = [], priceRows = [], momentumRows = [], bindCalls = [] } = {}) {
   const resolve = (sql) => {
     if (sql.includes('FROM challenger_predictions')) return { results: challengerRows };
     if (sql.includes('FROM selection_decisions_momentum')) return { results: momentumRows };
@@ -31,9 +39,10 @@ function makeFakeDb({ challengerRows = [], priceRows = [], momentumRows = [] } =
         // own price query does the same, so this fake must support both
         // call shapes, not just the bind().all() one.
         all: async () => resolve(sql),
-        bind: (...args) => ({
-          all: async () => resolve(sql),
-        }),
+        bind: (...args) => {
+          bindCalls.push({ sql, args });
+          return { all: async () => resolve(sql) };
+        },
       };
     },
   };
@@ -109,6 +118,31 @@ describe('getMomentumCalibration — accuracy / Brier / baseline correctness', (
     expect(result.beats_ma_crossover_momentum).toBeNull();
   });
 
+  // Post-implementation audit, ADDITIONAL LOW-COST TEST GAPS / A: the
+  // positive branch (maCount >= 5, an actual computed accuracy) was
+  // previously untested -- only the "not enough history" branch was.
+  // Hand-computable fixture: 10 flat price points at 100 (so the trailing
+  // MA is exactly 100 for any prediction at/after ts=9000), then 5
+  // challenger rows whose price_at_prediction is deliberately above/below
+  // that MA so the MA-crossover call (priceAtPred > ma ? 1 : 0) is known
+  // in advance and can be hand-verified against realized_up.
+  it('ma_crossover_baseline computes a correct accuracy once maCount >= 5 (positive branch)', async () => {
+    const priceRows = Array.from({ length: 10 }, (_, i) => ({ ts: i * 1000, price: 100 }));
+    const maRows = [
+      challengerRow({ ts: 9000, p_up_momentum: 0.6, realized_up: 1, price_at_prediction: 110 }), // maPred=1(>100), actual=1 -> correct
+      challengerRow({ ts: 9001, p_up_momentum: 0.6, realized_up: 0, price_at_prediction: 90 }),  // maPred=0(<100), actual=0 -> correct
+      challengerRow({ ts: 9002, p_up_momentum: 0.6, realized_up: 0, price_at_prediction: 110 }), // maPred=1, actual=0 -> wrong
+      challengerRow({ ts: 9003, p_up_momentum: 0.6, realized_up: 1, price_at_prediction: 90 }),  // maPred=0, actual=1 -> wrong
+      challengerRow({ ts: 9004, p_up_momentum: 0.6, realized_up: 1, price_at_prediction: 110 }), // maPred=1, actual=1 -> correct
+    ];
+    const db = makeFakeDb({ challengerRows: maRows, priceRows });
+    const result = await scope.getMomentumCalibration({ DB: db }, 'BTC', 24);
+    // 3 correct (rows 1, 2, 5) out of 5 MA-eligible rows -> 0.6, hand-computed above.
+    expect(result.ma_crossover_baseline.n).toBe(5);
+    expect(result.ma_crossover_baseline.accuracy).toBeCloseTo(0.6, 5);
+    expect(result.beats_ma_crossover_momentum).not.toBeNull();
+  });
+
   it('unresolved rows are excluded by construction (query filters resolved_ts IS NOT NULL) — asserted on the SQL itself, matching getChallengerCalibration\'s own convention', () => {
     const src = extractFunctions('getMomentumCalibration');
     expect(src).toContain('resolved_ts IS NOT NULL');
@@ -130,6 +164,89 @@ describe('getMomentumCalibration — accuracy / Brier / baseline correctness', (
   it('NULL realized_up would break correctness silently if ever selected — confirms the query never selects unresolved rows in the first place (defense-in-depth check, mirrors resolve_pending-style fail-closed philosophy)', () => {
     const src = extractFunctions('getMomentumCalibration');
     expect(src).toMatch(/WHERE coin=\? AND horizon_hours=\? AND resolved_ts IS NOT NULL AND p_up_momentum IS NOT NULL/);
+  });
+});
+
+// Post-implementation audit, IMPORTANT #2: the fake DB's bind(...args) was
+// previously captured but never inspected, so a coin/horizon binding
+// regression (hardcoded coin, swapped argument order, a dropped horizon
+// filter) would have passed every test above silently. bindCalls (added to
+// the existing fake, not a redesign of it) makes those arguments
+// observable without changing how any other test's fixtures behave.
+describe('getMomentumCalibration — SQL bind arguments actually carry coin/horizon', () => {
+  let scope;
+  beforeAll(() => { scope = evalInScope(evalSource()); });
+
+  it('binds (coin, horizon_hours) in that exact order to the challenger_predictions query, for the exact values passed in', async () => {
+    const bindCalls = [];
+    const db = makeFakeDb({ challengerRows: [], bindCalls });
+    await scope.getMomentumCalibration({ DB: db }, 'LINK', 12);
+    const challengerCall = bindCalls.find(c => c.sql.includes('FROM challenger_predictions'));
+    expect(challengerCall).toBeDefined();
+    expect(challengerCall.args).toEqual(['LINK', 12]);
+  });
+
+  it('a different coin/horizon pair binds different values -- not a hardcoded BTC/24, and not swapped', async () => {
+    const bindCalls = [];
+    const db = makeFakeDb({ challengerRows: [], bindCalls });
+    await scope.getMomentumCalibration({ DB: db }, 'ETH', 24);
+    const challengerCall = bindCalls.find(c => c.sql.includes('FROM challenger_predictions'));
+    expect(challengerCall.args).toEqual(['ETH', 24]);
+    expect(challengerCall.args).not.toEqual(['BTC', 24]);
+    expect(challengerCall.args).not.toEqual([24, 'ETH']); // argument order, not just values
+  });
+
+  it('getMomentumSelectionReport likewise binds the exact (coin, horizon_hours) it was called with', async () => {
+    const bindCalls = [];
+    const db = makeFakeDb({ momentumRows: [], bindCalls });
+    await scope.getMomentumSelectionReport({ DB: db }, 'BTC', 12);
+    const momentumCall = bindCalls.find(c => c.sql.includes('FROM selection_decisions_momentum'));
+    expect(momentumCall).toBeDefined();
+    expect(momentumCall.args).toEqual(['BTC', 12]);
+  });
+});
+
+// Post-implementation audit, IMPORTANT #1: prediction_evaluation for a
+// non-BTC coin must explicitly say it describes the raw momentum signal,
+// not the LR-3 (BTC-only) selection experiment. Present regardless of
+// sample size, and carries no success/failure/promotion language either way.
+describe('getMomentumCalibration — population_scope_note (raw signal vs LR-3 BTC experiment)', () => {
+  let scope;
+  beforeAll(() => { scope = evalInScope(evalSource()); });
+
+  it('is present even on the insufficient-sample (n<5) branch, for both BTC and a non-BTC coin', async () => {
+    const dbBtc = makeFakeDb({ challengerRows: [] });
+    const btcResult = await scope.getMomentumCalibration({ DB: dbBtc }, 'BTC', 24);
+    expect(btcResult.population_scope_note).toBeDefined();
+
+    const dbLink = makeFakeDb({ challengerRows: [] });
+    const linkResult = await scope.getMomentumCalibration({ DB: dbLink }, 'LINK', 24);
+    expect(linkResult.population_scope_note).toBeDefined();
+  });
+
+  it('the non-BTC note explicitly names the coin, references MOMENTUM_EXPERIMENT_COINS, and says the LR-3 selection experiment never runs for that coin', async () => {
+    const rows = [0, 1, 2, 3, 4].map(i => challengerRow({ ts: i * 1000, p_up_momentum: 0.6, realized_up: 1 }));
+    const db = makeFakeDb({ challengerRows: rows, priceRows: [] });
+    const result = await scope.getMomentumCalibration({ DB: db }, 'ETH', 24);
+    expect(result.population_scope_note).toContain('ETH');
+    expect(result.population_scope_note).toMatch(/MOMENTUM_EXPERIMENT_COINS/);
+    expect(result.population_scope_note.toLowerCase()).toMatch(/never runs for eth|must not be read as an lr-3 selection-experiment result/);
+  });
+
+  it('the BTC note is different from the non-BTC note (BTC is in-scope for the actual experiment, so the caveat differs) and neither implies success/failure/promotion', async () => {
+    const rows = [0, 1, 2, 3, 4].map(i => challengerRow({ ts: i * 1000, p_up_momentum: 0.6, realized_up: 1 }));
+    const dbBtc = makeFakeDb({ challengerRows: rows, priceRows: [] });
+    const btcResult = await scope.getMomentumCalibration({ DB: dbBtc }, 'BTC', 24);
+    const dbEth = makeFakeDb({ challengerRows: rows, priceRows: [] });
+    const ethResult = await scope.getMomentumCalibration({ DB: dbEth }, 'ETH', 24);
+    expect(btcResult.population_scope_note).not.toBe(ethResult.population_scope_note);
+    // Explicitly disclaiming a promotion/success/failure implication (e.g.
+    // "not a promotion signal") is the correct, established repo idiom
+    // (computeAnomalyGateAggregate's own note does the same) -- what must
+    // never appear is an AFFIRMATIVE claim of one.
+    for (const note of [btcResult.population_scope_note, ethResult.population_scope_note]) {
+      expect(note.toLowerCase()).not.toMatch(/\b(has succeeded|has failed|is superior|is inferior|recommend(s|ed)? promotion)\b/);
+    }
   });
 });
 
@@ -241,6 +358,25 @@ describe('groupMomentumEpisodes — adjacency grouping and insufficient-sample i
     const episodes = scope.groupMomentumEpisodes(rows);
     expect(episodes).toHaveLength(2);
     expect(episodes.every(e => e.n_cycles === 1)).toBe(true);
+  });
+
+  // Post-implementation audit, ADDITIONAL LOW-COST TEST GAPS / B: the exact
+  // boundary (gap === ANOMALY_AUDIT_MAX_GAP_MS, neither strictly inside nor
+  // strictly outside) was previously untested. groupMomentumEpisodes uses
+  // "<=" (worker.js), the identical comparison groupAnomalyGateEpisodes
+  // (LR-2) uses for the same constant -- so a gap exactly equal to the
+  // threshold is INCLUSIVE (same episode) under the established LR-2
+  // semantics this function deliberately mirrors. This test confirms the
+  // current implementation matches that, not the reverse.
+  it('a gap exactly equal to ANOMALY_AUDIT_MAX_GAP_MS is inclusive -- same episode, matching groupAnomalyGateEpisodes\'s own "<=" boundary semantics', () => {
+    const gap = scope.ANOMALY_AUDIT_MAX_GAP_MS;
+    const rows = [
+      { prediction_ts: 1000, momentum_outranks_production: false },
+      { prediction_ts: 1000 + gap, momentum_outranks_production: true }, // exactly at the boundary
+    ];
+    const episodes = scope.groupMomentumEpisodes(rows);
+    expect(episodes).toHaveLength(1);
+    expect(episodes[0].n_cycles).toBe(2);
   });
 
   it('insufficient_sample is set once either the row-count or episode-count minimum is not met', async () => {

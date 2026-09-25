@@ -4091,6 +4091,22 @@ async function computeFullAnomalyGateAudit(env) {
 // where momentum's behavior actually differs from the already-evaluated
 // flat variant.
 async function getMomentumCalibration(env, coin, horizonHours) {
+  // Population-labeling note (post-implementation audit, IMPORTANT #1):
+  // p_up_momentum is written for all 3 coins by the shared challenger
+  // prediction path, but the LR-3 selection EXPERIMENT itself (its
+  // episode-audit/promotion-gate framework, selection_decisions_momentum)
+  // is scoped to BTC only (MOMENTUM_EXPERIMENT_COINS). This function only
+  // ever evaluates the raw signal for whichever coin it's called with --
+  // that is correct and unchanged -- but the response must say so
+  // explicitly rather than let a reader infer "LR-3 experiment" from the
+  // surrounding endpoint/section naming. Computed once, reused in every
+  // return branch below (including the n<5 branch) so the caveat is
+  // present regardless of sample size. No success/failure/promotion
+  // language, by design.
+  const populationScopeNote = coin === 'BTC'
+    ? 'This evaluates p_up_momentum -- the raw momentum signal -- for BTC. It is not itself the LR-3 selection experiment: that is the separate selection_evaluation section (selection_decisions_momentum), which compares momentum\'s LCA rank against production\'s actual pick that cycle. This section alone is not a promotion signal either way.'
+    : `p_up_momentum exists in the shared challenger prediction population for all 3 coins (the momentum blend runs inside the general challenger-prediction path, not gated by MOMENTUM_EXPERIMENT_COINS). This evaluates the raw momentum signal for ${coin} specifically. The LR-3 selection experiment itself (selection_decisions_momentum, the LCA-vs-production comparison with its own episode-audit/promotion gate) is scoped to BTC only (MOMENTUM_EXPERIMENT_COINS) and never runs for ${coin} -- these numbers describe the signal only and must not be read as an LR-3 selection-experiment result for this coin.`;
+
   const { results: rows } = await env.DB.prepare(
     'SELECT * FROM challenger_predictions WHERE coin=? AND horizon_hours=? AND resolved_ts IS NOT NULL AND p_up_momentum IS NOT NULL ORDER BY ts ASC'
   ).bind(coin, horizonHours).all();
@@ -4098,6 +4114,7 @@ async function getMomentumCalibration(env, coin, horizonHours) {
   if (n < 5) {
     return {
       ok: true, coin, horizon_hours: horizonHours, n_resolved: n,
+      population_scope_note: populationScopeNote,
       note: 'Not enough resolved p_up_momentum observations yet — check back once more have accumulated (same n<5 convention as getChallengerCalibration).',
     };
   }
@@ -4142,6 +4159,7 @@ async function getMomentumCalibration(env, coin, horizonHours) {
 
   return {
     ok: true, coin, horizon_hours: horizonHours, n_resolved: n,
+    population_scope_note: populationScopeNote,
     historical_up_rate: Number(upRate.toFixed(3)),
     accuracy_momentum: Number((accMomentum / n).toFixed(3)),
     brier_momentum: Number((brierMomentum / n).toFixed(3)),

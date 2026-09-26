@@ -207,14 +207,16 @@ class TestPendingDecisionReplayOrdering:
         pending_id = d1.conn.execute("SELECT hypothesis_id FROM research_hypotheses").fetchone()[0]
         assert pending_id == 1  # sanity: this is the id that used to collide with the fresh local mirror's own autoincrement
 
-        # A "future" price strictly between the pending decision's anchor
-        # (0) and the new decision's anchor (4h) below -- resolves the
-        # pending decision (future_ts=2h > 0) without also resolving the
-        # brand-new one (future_ts=2h is NOT > 4h), isolating this test to
-        # exactly the collision scenario, per outcome_engine's own
-        # "future_ts must be strictly after anchor_ts" resolution rule.
+        # A price at the pending decision's own 24h target (anchor 0 +
+        # target_horizon_hours) -- close enough to resolve it under
+        # EXPERIMENT5_HORIZON_TOLERANCE_MS. The brand-new same-cycle
+        # decision (anchor 4h) is never resolved in this same run
+        # regardless of this price's placement: its own eligible_ts
+        # (4h + 24h = 28h) is still ahead of now_ts (25h) below, so the
+        # eligibility gate alone keeps this test isolated to exactly the
+        # collision scenario.
         insert_btc(d1, 0, 100.0)
-        insert_btc(d1, 2 * HOUR, 110.0)
+        insert_btc(d1, 24 * HOUR, 110.0)
 
         # History that makes THIS SAME cycle's run_agent_cycle create a
         # brand-new decision (a reversal on a DIFFERENT source than the
@@ -291,7 +293,11 @@ class TestPendingDecisionReplayOrdering:
         # path here, which evaluate_pending_decisions treats identically.
         insert_history(d1, anchor_a, 60, {"fng": 60})
         insert_btc(d1, anchor_a, 100.0)
-        insert_btc(d1, anchor_a + 2 * HOUR, 110.0)  # resolves A (future_ts=2h > anchor_a=0); never > anchor_b=20h
+        # A price at A's own 24h target -- resolves A under
+        # EXPERIMENT5_HORIZON_TOLERANCE_MS. B (anchor_b=20h) is never
+        # resolved in this same run regardless: its own eligible_ts
+        # (20h + 24h = 44h) is still ahead of now_ts (25h) below.
+        insert_btc(d1, anchor_a + 24 * HOUR, 110.0)
 
         result = ep.run_pipeline(d1.query, d1.execute, now_ts=anchor_a + 25 * HOUR)
 

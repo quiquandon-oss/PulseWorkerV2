@@ -101,6 +101,37 @@ EXPERIMENT5_TARGET_HORIZON_HOURS = 24
 # that could silently drift between the run that created a decision and
 # the run that later evaluates it.
 
+EXPERIMENT5_HORIZON_TOLERANCE_MS = 6 * 3600000
+# How far the price outcome_engine actually matches may fall SHORT of a
+# decision's own declared target (anchor_ts + target_horizon_hours) and
+# still count as a valid resolution of that horizon -- not "any price
+# after eligible_ts" (the bug a post-build audit asked this module to
+# rule out). outcome_engine.compute_forward_returns_from_history's own
+# resolution rule picks the NEAREST available btc_data row at or before
+# the target, which is correct and UNCHANGED here (this constant, and
+# the check built from it below, live entirely in THIS module -- see
+# evaluate_pending_decisions) -- but "nearest at or before" can still be
+# far short of the target if btc_data has a genuine collection gap
+# spanning it. A gap wider than this tolerance means the matched price
+# is not a reasonable stand-in for "the price at ~24h" and this module
+# refuses to call the decision resolved off it, leaving it pending
+# instead (never fabricated, never forced) until either a closer price
+# arrives on some later run or the gap simply never closes -- the same
+# "no silent interpolation" discipline outcome_engine.py's own docstring
+# already states for UNRESOLVED_NO_FUTURE_PRICE_POINT, applied here to a
+# price that technically resolves but is too stale to trust.
+#
+# 6h matches source_dynamics.CONFIRMATION_WINDOW_MS's own precedent
+# exactly (chosen there for the identical reason: btc_data's real
+# cadence is irregular, not tuned to any statistical target). This does
+# NOT change outcome_engine.py, so source_analysis.py/hypothesis_gate.py/
+# source_family_discrimination.py/fng_24h_robustness.py -- all of which
+# call that shared engine directly, over fully-elapsed historical
+# windows where a gap this wide is rare and is absorbed into their own
+# much larger aggregate samples rather than gating a single live
+# decision -- are structurally unaffected by this constant, which
+# Experiment 5's own evaluate_pending_decisions is the only reader of.
+
 
 def observe(conn, as_of_ts, window_ms=DEFAULT_OBSERVE_WINDOW_MS):
     """The literal no-lookahead enforcement point: reads archive rows
@@ -333,6 +364,16 @@ def evaluate_pending_decisions(conn, as_of_ts, horizon_hours=EXPERIMENT5_TARGET_
             continue  # eligible, but no qualifying price point resolved yet -- left pending, never forced
 
         outcome = outcomes[0]
+        # Horizon-tolerance check: outcome_engine matched SOME price at or
+        # before the target (anchor_ts + horizon), but "at or before" can
+        # still be far short of it if btc_data has a genuine gap spanning
+        # the target -- see EXPERIMENT5_HORIZON_TOLERANCE_MS. This is
+        # deliberately checked here, not inside outcome_engine.py, so the
+        # shared engine's behavior for every other caller is untouched.
+        target_ts = anchor_ts + OUTCOME_HORIZON_MS[decision_horizon_hours]
+        realized_future_ts = outcome["realized_future_ts"]
+        if target_ts - realized_future_ts > EXPERIMENT5_HORIZON_TOLERANCE_MS:
+            continue  # nearest available price is too far short of the declared horizon -- left pending, never resolved off a stale price
         realized_direction = outcome["realized_direction"]  # "UP"/"DOWN"/"FLAT"/None
         agent_direction_raw = decision.get("direction")  # +1/-1/0/None
         agent_direction = _direction_to_up_down(agent_direction_raw)

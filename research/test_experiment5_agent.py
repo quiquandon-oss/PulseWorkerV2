@@ -358,6 +358,78 @@ class TestOutcomeEvaluation:
         result = agent.evaluate_pending_decisions(conn, as_of_ts=eligible_ts, horizon_hours=24)
         assert result["n_evaluated"] == 1  # at >= eligible_ts, not just strictly after
 
+    def test_delayed_execution_with_no_price_at_the_exact_target_resolves_using_the_nearest_within_tolerance_price(self):
+        """Regression test for the outcome-horizon-correctness finding: a
+        delayed pipeline run with no btc_data row at the exact 24h target
+        timestamp must still resolve, using the nearest available price,
+        PROVIDED that price is close enough to the declared horizon
+        (within EXPERIMENT5_HORIZON_TOLERANCE_MS) to be a reasonable
+        stand-in for it -- not "any price after eligible_ts" regardless
+        of how far short of the target it falls."""
+        conn = fresh_db()
+        anchor_ts = 0
+        eligible_ts = anchor_ts + 24 * HOUR
+        seed(conn, anchor_ts, {"fng": 70}, score=60, btc_price=100.0)
+        # No price at exactly 24h -- the nearest is 2h short of it, well
+        # within the 6h tolerance.
+        near_target_ts = eligible_ts - 2 * HOUR
+        seed(conn, near_target_ts, {"fng": 70}, score=60, btc_price=110.0)
+        record = {
+            "subject": "experiment5:reversal:fng", "statement": "x", "lifecycle_status": "OBSERVATION",
+            "decision": {
+                "anchor_ts": anchor_ts, "cycle_ts": anchor_ts, "primary_source": "fng", "direction": 1,
+                "classifications": {}, "confirmation": {"classification": "NO_CONFIRMATION", "confirming_sources": []},
+                "target_horizon_hours": 24, "eligible_ts": eligible_ts,
+            },
+        }
+        agent.persist_experiment5_decision(conn, anchor_ts, record)
+        # Pipeline runs 10 days late -- well past eligible_ts, but the
+        # only price available is still the one 2h short of the target.
+        result = agent.evaluate_pending_decisions(conn, as_of_ts=eligible_ts + 10 * DAY, horizon_hours=24)
+        assert result["n_evaluated"] == 1
+        assert result["results"][0]["realized_direction"] == "UP"
+        row = conn.execute("SELECT out_of_sample_status FROM research_hypotheses").fetchone()
+        assert row[0] == "PASSED_HOLDOUT"
+
+    def test_a_stale_price_far_short_of_the_declared_horizon_never_resolves_the_decision(self):
+        """The core outcome-horizon-correctness guarantee: even long after
+        eligible_ts has passed, a decision must NOT be resolved off a
+        price that only technically satisfies "at or before the target"
+        but is actually far short of it (e.g. a real collection gap
+        spanning the entire target window) -- that is not a valid read of
+        the declared 24h horizon, and this module must never fabricate
+        one. The decision stays honestly pending, exactly like the
+        no-future-price-point case, rather than closing the loop early or
+        forever holding it hostage to a rule that fires the instant ANY
+        later price exists."""
+        conn = fresh_db()
+        anchor_ts = 0
+        eligible_ts = anchor_ts + 24 * HOUR
+        seed(conn, anchor_ts, {"fng": 70}, score=60, btc_price=100.0)
+        # The only "future" price at all is 22h short of the 24h target
+        # (a real, already-elapsed price, but nowhere near the declared
+        # horizon) -- outcome_engine's own "nearest at or before" rule
+        # would technically call this RESOLVED; the tolerance check must
+        # refuse it anyway.
+        seed(conn, anchor_ts + 2 * HOUR, {"fng": 70}, score=60, btc_price=110.0)
+        record = {
+            "subject": "experiment5:reversal:fng", "statement": "x", "lifecycle_status": "OBSERVATION",
+            "decision": {
+                "anchor_ts": anchor_ts, "cycle_ts": anchor_ts, "primary_source": "fng", "direction": 1,
+                "classifications": {}, "confirmation": {"classification": "NO_CONFIRMATION", "confirming_sources": []},
+                "target_horizon_hours": 24, "eligible_ts": eligible_ts,
+            },
+        }
+        agent.persist_experiment5_decision(conn, anchor_ts, record)
+        # Pipeline runs 10 days late -- eligible_ts is long past, but the
+        # only ever-available price remains stuck 22h short of the target.
+        result = agent.evaluate_pending_decisions(conn, as_of_ts=eligible_ts + 10 * DAY, horizon_hours=24)
+        assert result["n_evaluated"] == 0
+        row = conn.execute("SELECT out_of_sample_status, evidence_summary_json FROM research_hypotheses").fetchone()
+        assert row[0] is None  # still honestly pending, never fabricated
+        payload = json.loads(row[1])
+        assert "outcome" not in payload  # no outcome key was ever added off the stale price
+
     def test_decision_key_never_rewritten_by_evaluation(self):
         conn = fresh_db()
         anchor_ts = 1000

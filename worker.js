@@ -6786,10 +6786,18 @@ async function getResearchLabExperiment5Overview(env) {
   };
 }
 
+// Single source of truth for the /api/research-lab/experiment5-decisions
+// `status` filter's valid values -- read by the route handler (to
+// reject an unrecognized value with a 400, same convention as
+// /research/timesfm-recent's own `horizon must be 12 or 24`) and by
+// getResearchLabExperiment5Decisions itself (to build the WHERE
+// clause), so the two can never drift out of sync.
+const EXPERIMENT5_DECISION_STATUS_FILTERS = ['pending', 'resolved', 'passed', 'failed'];
+
 async function getResearchLabExperiment5Decisions(env, opts) {
   const limit = Math.max(1, Math.min(100, (opts && opts.limit) || 25));
   const offset = Math.max(0, (opts && opts.offset) || 0);
-  const statusFilter = opts && opts.status; // 'pending' | 'resolved' | 'passed' | 'failed' | undefined (all)
+  const statusFilter = opts && opts.status; // one of EXPERIMENT5_DECISION_STATUS_FILTERS, or undefined (all)
   let whereExtra = '';
   if (statusFilter === 'pending') whereExtra = ' AND out_of_sample_status IS NULL';
   else if (statusFilter === 'resolved') whereExtra = ' AND out_of_sample_status IS NOT NULL';
@@ -8815,9 +8823,14 @@ export default {
     }
     if (url.pathname === '/api/research-lab/experiment5-decisions' && request.method === 'GET') {
       try {
+        const status = url.searchParams.get('status') || undefined;
+        if (status !== undefined && !EXPERIMENT5_DECISION_STATUS_FILTERS.includes(status)) {
+          return new Response(JSON.stringify({
+            ok: false, error: `status must be one of ${EXPERIMENT5_DECISION_STATUS_FILTERS.join(', ')}`,
+          }), { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+        }
         const limit = parseInt(url.searchParams.get('limit') || '25', 10);
         const offset = parseInt(url.searchParams.get('offset') || '0', 10);
-        const status = url.searchParams.get('status') || undefined;
         const result = await getResearchLabExperiment5Decisions(env, {
           limit: Number.isFinite(limit) ? limit : 25,
           offset: Number.isFinite(offset) ? offset : 0,

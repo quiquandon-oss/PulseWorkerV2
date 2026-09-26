@@ -7452,6 +7452,49 @@ const RESEARCH_LAB_HTML = `<!DOCTYPE html>
 
   .muted { color: var(--muted); }
   .skeleton { padding: 40px 16px; text-align: center; color: var(--muted); font-size: 13px; }
+
+  /* ---- Source Effectiveness (EXP-005) mobile-first redesign ---- */
+  .src-compact-row { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+  .caveat-box {
+    border: 1px solid rgba(224,85,60,0.3); background: rgba(224,85,60,0.08); border-radius: var(--radius-sm);
+    padding: 12px 14px; font-size: 12.5px; line-height: 1.55; color: #f4c7ba; margin-top: 10px;
+  }
+  .caveat-box b { color: #ffd9cc; }
+
+  /* A real table on wider screens; collapses to a bordered, labeled
+     stacked list below 640px so per-horizon detail never needs
+     horizontal scrolling on a phone. min-width is reset to 0 here
+     because the generic "table" rule above sets min-width:480px, which
+     would otherwise force overflow even after switching to display:block. */
+  .tbl-responsive { width: 100%; min-width: 0; border-collapse: collapse; font-size: 12.5px; }
+  .tbl-responsive th, .tbl-responsive td { text-align: left; padding: 8px; border-bottom: 1px solid var(--border); vertical-align: top; }
+  .tbl-responsive th { color: var(--muted); font-weight: 700; text-transform: uppercase; font-size: 10px; letter-spacing: 0.03em; }
+  .tbl-responsive tr:last-child td { border-bottom: none; }
+  @media (max-width: 640px) {
+    .tbl-responsive thead { display: none; }
+    .tbl-responsive, .tbl-responsive tbody, .tbl-responsive tr, .tbl-responsive td { display: block; width: 100%; }
+    .tbl-responsive tr { border: 1px solid var(--border); border-radius: var(--radius-sm); margin-bottom: 8px; }
+    .tbl-responsive tr:last-child { margin-bottom: 0; }
+    /* Label ABOVE value (a column, not a label-left/value-right row): a
+       row like Significant can hold a long evidence-label badge (e.g.
+       STATISTICALLY_NON_SIGNIFICANT_BUT_STABLE) that a side-by-side
+       flex row can't shrink (nowrap text has no compressible min-width),
+       which silently overflowed into .table-wrap's own horizontal
+       scrollbar -- invisible without scrolling, never full-page
+       overflow, but effectively hidden content on a phone either way. */
+    .tbl-responsive td {
+      display: flex; flex-direction: column; align-items: flex-start; gap: 4px;
+      border-bottom: 1px solid var(--border); padding: 7px 10px;
+    }
+    .tbl-responsive td:last-child { border-bottom: none; }
+    .tbl-responsive td::before {
+      content: attr(data-label); font-size: 10.5px; color: var(--muted); text-transform: uppercase;
+      letter-spacing: 0.03em; font-weight: 700;
+    }
+    /* Even stacked, a single very long enum value must be able to wrap
+       internally rather than force the row wider than the screen. */
+    .tbl-responsive .badge { white-space: normal; text-align: center; }
+  }
 </style>
 </head>
 <body>
@@ -7476,6 +7519,10 @@ const RESEARCH_LAB_HTML = `<!DOCTYPE html>
   var selectedEventId = null;
   var chartRange = '7d';
   var lastDashboard = null;
+  // Which source_key's per-horizon detail is expanded in the Source
+  // Effectiveness (EXP-005) section of the Sources tab. Presentation
+  // state only -- never affects which sources are fetched or shown.
+  var sourceEffExpandedKey = null;
 
   function esc(s) {
     return String(s === null || s === undefined || s === '' ? String.fromCharCode(8212) : s)
@@ -7851,73 +7898,234 @@ const RESEARCH_LAB_HTML = `<!DOCTYPE html>
     return badge(reason, reason === 'NO_SIGNIFICANT_HORIZON' ? 'b-plausible' : 'b-blocked');
   }
 
+  // Formats a p-value for display without ever implying it equals
+  // exactly zero (floating-point underflow on a tiny real p-value, or a
+  // genuinely extreme result, both round to "< 0.001", never "0.000").
+  // Returns plain text (a real "<" character) -- callers must esc() it
+  // before insertion, exactly like every other computed string here.
+  function fmtPValue(p) {
+    if (typeof p !== 'number' || isNaN(p)) return String.fromCharCode(8212);
+    if (p < 0.001) return '< 0.001';
+    return p.toFixed(3);
+  }
+  // Null-safe correlation/effect-size formatter. Returns plain text.
+  function fmtEffectSize(r) {
+    if (typeof r !== 'number' || isNaN(r)) return String.fromCharCode(8212);
+    return (r > 0 ? '+' : '') + r.toFixed(3);
+  }
+
+  // Derives ONLY summary counts from the latest persisted EXP-005
+  // report's own per-source array (se.sources) -- every number here is
+  // a live tally over that array, never a hardcoded figure, and it
+  // recomputes honestly from whatever the backend actually returns
+  // (e.g. level5_computed would reflect reality if hypothesis_gate.py
+  // is ever wired in and starts reporting computed:true).
+  function deriveSourceEffectivenessSummary(se) {
+    if (!se || !Array.isArray(se.sources)) return null;
+    var total = se.sources.length, discovered = 0, observed = 0, eligible = 0,
+      anySignificant = 0, oosImproved = 0, level5Computed = 0;
+    for (var i = 0; i < se.sources.length; i++) {
+      var s = se.sources[i];
+      if (s.level1_discovered) discovered++;
+      if (s.level1_observed) observed++;
+      if (s.level4_eligible_for_level2plus) eligible++;
+      if (s.any_significant_horizon) anySignificant++;
+      if (s.horizons && s.horizons.some(function (h) { return h.level3 && h.level3.oos_status === 'IMPROVED'; })) oosImproved++;
+      if (s.level5_hypothesis_gate && s.level5_hypothesis_gate.computed) level5Computed++;
+    }
+    return {
+      total: total, discovered: discovered, observed: observed, eligible: eligible,
+      any_significant: anySignificant, oos_improved: oosImproved, level5_computed: level5Computed,
+    };
+  }
+
+  function renderSourceEffectivenessSummary(se, summary) {
+    return '<div class="card glow"><h2 class="card-title">Source Effectiveness (EXP-005) &mdash; Summary</h2>' +
+      '<p>Statistical coverage/association/incremental-information results for all 21 known V1 sources, ' +
+      'read directly from the weekly <code>exp005-source-effectiveness.yml</code> analysis -- computed ' +
+      'entirely in research/source_analysis.py, never recomputed here.</p>' +
+      '<div class="grid metrics" style="margin-top:10px;">' +
+        tile('Discovered', summary.discovered + ' / ' + summary.total, summary.observed + ' with data present') +
+        tile('Eligible', summary.eligible + ' / ' + summary.total, 'Passed Level 1 coverage + variation checks') +
+        tile('1+ significant', summary.any_significant + ' / ' + summary.total, 'BH-adjusted p < 0.05, at least 1 horizon') +
+        tile('OOS improved', summary.oos_improved + ' / ' + summary.total, 'Beat the V1-composite-only baseline, out-of-sample') +
+      '</div>' +
+      '<div class="ev-row" style="margin-top:2px;"><span class="k">Level 5 -- hypothesis gate</span><span class="v">' +
+        badge(summary.level5_computed + ' / ' + summary.total + ' COMPUTED', summary.level5_computed > 0 ? 'b-strong' : 'b-unknown') + '</span></div>' +
+      '<p style="font-size:12px; color:var(--muted); margin-top:6px;">research/hypothesis_gate.py’s BUILD_REQUEST/signal-family ' +
+      'pipeline is not wired into any scheduled job and has never persisted a result against production data -- reaching Level 2/3 ' +
+      'significance above is reported as exactly that, never as passing that separate, stricter gate.</p>' +
+      '<div class="ev-row"><span class="k">Analysis age</span><span class="v">' +
+        esc(se.analysis.age_hours + 'h old') + '</span></div>' +
+      '<div class="ev-row"><span class="k">Configured window vs. observed range</span><span class="v">' +
+        esc(se.data_window.configured_max_window_days + 'd ceiling requested, ' +
+          (se.data_window.observed_data_range ? se.data_window.observed_data_range.span_days + 'd actually observed' : 'observed range unknown')) +
+        '</span></div>' +
+      '<div class="caveat-box"><b>Not proof of predictive value.</b> A significant or OOS-improved result above means a source cleared ' +
+      'a research threshold against historical data -- it is not causal evidence, and on its own it does not authorize any change to ' +
+      'production sentiment weights or source selection. Any such change would still require the separate Level 5 hypothesis gate below, ' +
+      'which is not currently computed.</div>' +
+      '</div>';
+  }
+
+  function renderSourceEffectivenessGlossary() {
+    return '<div class="card"><h2 class="card-title">Terms used below</h2><div class="glossary">' +
+      '<div class="gloss-card"><div class="gloss-title">Effect size (r)</div><div class="gloss-desc">Pearson correlation between this ' +
+      'source and BTC’s forward return at that horizon. A correlation is not causation and is not the same as predictive value.</div></div>' +
+      '<div class="gloss-card"><div class="gloss-title">BH-adjusted p</div><div class="gloss-desc">The p-value after Benjamini-Hochberg ' +
+      'correction for testing many sources and horizons at once, so it accounts for chance findings across all of them together.</div></div>' +
+      '<div class="gloss-card"><div class="gloss-title">Redundancy</div><div class="gloss-desc">Correlation with the existing V1 composite ' +
+      'score. High redundancy means this source likely duplicates information the composite already captures.</div></div>' +
+      '<div class="gloss-card"><div class="gloss-title">OOS result</div><div class="gloss-desc">Out-of-sample: whether adding this source ' +
+      'reduced forecast error beyond the V1 composite alone, using only data available at each historical evaluation point (a chronological, ' +
+      'not random, train/test split).</div></div>' +
+      '</div></div>';
+  }
+
+  // A compact, always-visible summary of a single horizon's OOS outcome
+  // for this source -- distinct from any individual horizon's own
+  // status, which remains fully visible in the per-horizon table below.
+  function oosSummaryForSource(s) {
+    if (!s.horizons || !s.horizons.length) return { text: 'OOS NOT COMPUTED', cls: 'b-unknown' };
+    if (s.horizons.some(function (h) { return h.level3 && h.level3.status === 'OK' && h.level3.oos_status === 'IMPROVED'; })) {
+      return { text: 'OOS IMPROVED (>=1 horizon)', cls: 'b-strong' };
+    }
+    if (s.horizons.some(function (h) { return h.level3 && h.level3.status === 'OK'; })) {
+      return { text: 'OOS NOT IMPROVED', cls: 'b-unknown' };
+    }
+    if (s.horizons.some(function (h) { return h.level3 && h.level3.status === 'INSUFFICIENT_DATA'; })) {
+      return { text: 'OOS INSUFFICIENT DATA', cls: 'b-plausible' };
+    }
+    return { text: 'OOS NOT COMPUTED', cls: 'b-unknown' };
+  }
+  function significantHorizonCount(s) {
+    if (!s.horizons) return 0;
+    var c = 0;
+    for (var i = 0; i < s.horizons.length; i++) if (s.horizons[i].evidence_label === 'STATISTICALLY_SIGNIFICANT') c++;
+    return c;
+  }
+  function redundancyChip(s) {
+    var r = s.redundancy_vs_composite;
+    if (!r) return badge('REDUNDANCY N/A', 'b-unknown');
+    if (r.strong_redundancy) return badge('STRONG REDUNDANCY (r=' + fmtEffectSize(r.r) + ')', 'b-blocked');
+    return badge('redundancy r=' + fmtEffectSize(r.r), 'b-outline');
+  }
+
+  // Renders one source's per-horizon detail as a real <table> on wider
+  // screens and a labeled stacked list on narrow ones (see .tbl-responsive
+  // in <style>) -- never a fixed-width table that would force horizontal
+  // scrolling on a phone.
+  function renderSourceHorizonTable(s) {
+    var rows = '';
+    for (var j = 0; j < s.horizons.length; j++) {
+      var h = s.horizons[j], l2 = h.level2, l3 = h.level3;
+      var sigCell = l2
+        ? (badge(h.evidence_label || (l2.significant ? 'SIGNIFICANT' : 'NOT SIGNIFICANT'), h.evidence_label === 'STATISTICALLY_SIGNIFICANT' ? 'b-strong' : 'b-unknown') +
+           (l2.sample_size_status === 'SMALL_SAMPLE_CAUTION' ? '&nbsp;' + badge('SMALL SAMPLE', 'b-plausible') : ''))
+        : badge('NOT COMPUTED', 'b-unknown');
+      var oosCell = l3
+        ? (l3.status === 'OK'
+            ? badge(l3.oos_status || 'UNKNOWN', l3.oos_status === 'IMPROVED' ? 'b-strong' : 'b-unknown')
+            : badge(l3.status === 'INSUFFICIENT_DATA' ? 'INSUFFICIENT DATA' : (l3.status || 'UNKNOWN'), 'b-plausible'))
+        : badge('NOT COMPUTED', 'b-unknown');
+      rows += '<tr>' +
+        '<td data-label="Horizon">' + esc(h.horizon_hours + 'h') + '</td>' +
+        '<td data-label="Sample size (n)">' + esc(l2 ? l2.n : null) + '</td>' +
+        '<td data-label="Effect size (r)">' + esc(l2 ? fmtEffectSize(l2.effect_size_r) : null) + '</td>' +
+        '<td data-label="BH-adj. p">' + esc(l2 ? fmtPValue(l2.p_corrected) : null) + '</td>' +
+        '<td data-label="Significant">' + sigCell + '</td>' +
+        '<td data-label="OOS result">' + oosCell + '</td>' +
+        '</tr>';
+    }
+    return '<div class="table-wrap"><table class="tbl-responsive"><thead><tr>' +
+      '<th>Horizon</th>' +
+      '<th title="Number of paired observations used at this horizon">n</th>' +
+      '<th title="Pearson correlation between this source and BTC forward return, at this horizon">Effect size (r)</th>' +
+      '<th title="p-value after Benjamini-Hochberg correction across all sources and horizons tested together">BH-adj. p</th>' +
+      '<th title="Whether this horizon cleared the BH-corrected significance threshold (alpha=0.05)">Significant</th>' +
+      '<th title="Out-of-sample: did adding this source reduce forecast error beyond the V1 composite alone, on a chronological held-out split?">OOS result</th>' +
+      '</tr></thead><tbody>' + rows + '</tbody></table></div>';
+  }
+
+  // The Level 5 (hypothesis gate) block is deliberately its own visually
+  // distinct section, never merged into the Level 2/3 significance
+  // badges above it -- reaching significance here is explicitly NOT the
+  // same claim as clearing that separate, currently-uncomputed gate.
+  function renderSourceExpandedDetail(s) {
+    var html = '<div style="margin-top:10px; border-top:1px solid var(--border); padding-top:10px;">';
+    if (s.coverage) {
+      html += '<div class="ev-row"><span class="k">Coverage</span><span class="v">' +
+        esc(s.coverage.present + '/' + (s.coverage.present + s.coverage.missing) + ' rows (' + s.coverage.coverage_pct + '%), ' +
+          s.coverage.distinct_values + ' distinct values') + '</span></div>';
+    }
+    html += '<div class="ev-row"><span class="k">Not advanced further because</span><span class="v">' + badgeForNotAdvanced(s.not_advanced_reason) + '</span></div>';
+    if (s.horizons && s.horizons.length && s.horizons.some(function (h) { return h.level2; })) {
+      html += '<div style="margin:10px 0 6px; font-size:12px; color:var(--muted);">Per-horizon detail -- adjacent horizons overlap and are NOT independent confirmations of each other:</div>';
+      html += renderSourceHorizonTable(s);
+    } else {
+      html += '<p style="font-size:12.5px; color:var(--muted); margin-top:6px;">No horizon-level results -- this source did not clear Level 1 eligibility.</p>';
+    }
+    html += '<div class="ev-row" style="margin-top:10px;"><span class="k">Level 5 -- hypothesis gate</span><span class="v">' + badge('NOT COMPUTED', 'b-unknown') + '</span></div>' +
+      '<p style="font-size:11.5px; color:var(--muted); margin-top:4px;">' +
+      esc((s.level5_hypothesis_gate && s.level5_hypothesis_gate.reason) || 'Not available.') + '</p>' +
+      '</div>';
+    return html;
+  }
+
+  function renderSourceCompactCard(s, expanded) {
+    var sigCount = significantHorizonCount(s);
+    var totalHorizons = (s.horizons && s.horizons.length) || 0;
+    var oos = oosSummaryForSource(s);
+    var eligible = s.level4_eligible_for_level2plus;
+    var html = '<div class="src-card" data-src-key="' + esc(s.source_key) + '">' +
+      '<div style="font-weight:800; font-size:14px; margin-bottom:2px; display:flex; justify-content:space-between; align-items:baseline; gap:8px;">' +
+        '<span>' + esc(s.source_key) + '</span>' +
+        (s.level1_discovered ? badgeForLevel1(s.level1_status) : badge('NOT DISCOVERED', 'b-unknown')) +
+      '</div>' +
+      '<div class="src-compact-row">' +
+        (s.coverage ? badge(s.coverage.coverage_pct + '% coverage', 'b-outline') : badge('coverage N/A', 'b-unknown')) +
+        badge(eligible ? 'ELIGIBLE' : 'NOT ELIGIBLE', eligible ? 'b-strong' : 'b-blocked') +
+        badge(sigCount + '/' + totalHorizons + ' significant', sigCount > 0 ? 'b-strong' : 'b-unknown') +
+        badge(oos.text, oos.cls) +
+        redundancyChip(s) +
+      '</div>' +
+      '<div class="tap-hint">' + (expanded ? 'Tap to collapse' : 'Tap for per-horizon detail') + '</div>';
+    if (expanded) html += renderSourceExpandedDetail(s);
+    html += '</div>';
+    return html;
+  }
+
   // Renders research/source_analysis.py's own EXP-005 statistical report
   // (via getResearchLabSourceEffectiveness) as an ADDITIONAL section on
   // this SAME Sources tab -- deliberately not a separate tab, and
   // deliberately never merged into the affinity/event-relationship cards
   // above, which answer a completely different question (topical/textual
   // match to a news feed, not a statistical association with BTC).
-  function renderSourceEffectivenessSection(se) {
+  // expandedKey selects which single source's per-horizon detail (if
+  // any) is currently shown expanded -- presentation state only.
+  function renderSourceEffectivenessSection(se, expandedKey) {
     if (!se || !se.ok || !se.activated) {
       return '<div class="card"><h2 class="card-title">Source Effectiveness (EXP-005)</h2>' +
         emptyState('Not yet available.', (se && se.reason) || 'No EXP-005 analysis has been persisted yet.') +
         '</div>';
     }
-    var html = '<div class="card"><h2 class="card-title">Source Effectiveness (EXP-005)</h2>' +
-      '<p>Statistical coverage/association/incremental-information results for all 21 known V1 sources, ' +
-      'read directly from the weekly <code>exp005-source-effectiveness.yml</code> analysis -- computed ' +
-      'entirely in research/source_analysis.py, never recomputed here.</p>' +
-      '<div class="ev-row"><span class="k">Analysis age</span><span class="v">' +
-        esc(se.analysis.age_hours + 'h old') + ' &mdash; ' + esc(se.analysis.freshness_note) + '</span></div>' +
-      '<div class="ev-row"><span class="k">Configured max window</span><span class="v">' +
-        esc(se.data_window.configured_max_window_days + ' days (ceiling this analysis ever requests)') + '</span></div>' +
-      '<div class="ev-row"><span class="k">Actually observed data range</span><span class="v">' +
-        (se.data_window.observed_data_range
-          ? esc(se.data_window.observed_data_range.span_days + ' days (' + fmtTs(se.data_window.observed_data_range.earliest_ts) + ' to ' + fmtTs(se.data_window.observed_data_range.latest_ts) + ')')
-          : String.fromCharCode(8212)) + '</span></div>' +
-      '<p style="font-size:12.5px; color:var(--muted);">' + esc(se.data_window.note) + '</p>' +
-      '<p style="font-size:12.5px; color:var(--muted);">' + esc(se.horizon_independence_note) + '</p>' +
-      '</div>';
-
-    for (var i = 0; i < se.sources.length; i++) {
-      var s = se.sources[i];
-      html += '<div class="src-card">' +
-        '<div style="font-weight:800; font-size:14px; margin-bottom:8px;">' + esc(s.source_key) + '</div>' +
-        '<div class="ev-row"><span class="k">Level 1 (discovered/observed)</span><span class="v">' +
-          (s.level1_discovered ? badgeForLevel1(s.level1_status) : badge('NOT DISCOVERED', 'b-unknown')) + '</span></div>';
-      if (s.coverage) {
-        html += '<div class="ev-row"><span class="k">Coverage</span><span class="v">' +
-          esc(s.coverage.present + '/' + (s.coverage.present + s.coverage.missing) + ' rows (' + s.coverage.coverage_pct + '%), ' + s.coverage.distinct_values + ' distinct values') + '</span></div>';
-      }
-      html += '<div class="ev-row"><span class="k">Level 4 (eligible for Level 2/3)</span><span class="v">' +
-          badge(s.level4_eligible_for_level2plus ? 'ELIGIBLE' : 'NOT ELIGIBLE', s.level4_eligible_for_level2plus ? 'b-strong' : 'b-blocked') + '</span></div>';
-      if (s.horizons && s.horizons.some(function (h) { return h.level2; })) {
-        html += '<div style="margin:6px 0; font-size:12px; color:var(--muted);">Horizon-specific results (adjacent horizons are NOT independent -- see note above):</div>';
-        for (var j = 0; j < s.horizons.length; j++) {
-          var h = s.horizons[j];
-          if (!h.level2) {
-            html += '<div class="ev-row"><span class="k">' + h.horizon_hours + 'h</span><span class="v">' + badge('NOT COMPUTED (ineligible)', 'b-unknown') + '</span></div>';
-            continue;
-          }
-          html += '<div class="ev-row"><span class="k">' + h.horizon_hours + 'h</span><span class="v">' +
-            'n=' + esc(h.level2.n) + ', r=' + esc(h.level2.effect_size_r != null ? h.level2.effect_size_r.toFixed(3) : String.fromCharCode(8212)) +
-            ', p(corr)=' + esc(h.level2.p_corrected != null ? h.level2.p_corrected.toExponential(2) : String.fromCharCode(8212)) + ' ' +
-            badge(h.evidence_label || (h.level2.significant ? 'SIGNIFICANT' : 'NOT SIGNIFICANT'), h.evidence_label === 'STATISTICALLY_SIGNIFICANT' ? 'b-strong' : 'b-unknown') +
-            (h.level2.sample_size_status === 'SMALL_SAMPLE_CAUTION' ? '&nbsp;' + badge('SMALL SAMPLE', 'b-plausible') : '') +
-            (h.level3 && h.level3.status === 'OK' ? '&nbsp;OOS: ' + badge(h.level3.oos_status || 'UNKNOWN', h.level3.oos_status === 'IMPROVED' ? 'b-strong' : 'b-unknown') : '') +
-            (h.level3 && h.level3.status === 'INSUFFICIENT_DATA' ? '&nbsp;' + badge('LEVEL 3: INSUFFICIENT DATA', 'b-plausible') : '') +
-            '</span></div>';
-        }
-      }
-      if (s.redundancy_vs_composite) {
-        html += '<div class="ev-row"><span class="k">Redundancy vs. V1 composite</span><span class="v">r=' +
-          esc(s.redundancy_vs_composite.r != null ? s.redundancy_vs_composite.r.toFixed(3) : String.fromCharCode(8212)) +
-          (s.redundancy_vs_composite.strong_redundancy ? '&nbsp;' + badge('STRONG REDUNDANCY', 'b-blocked') : '') + '</span></div>';
-      }
-      html += '<div class="ev-row"><span class="k">Not advanced further because</span><span class="v">' + badgeForNotAdvanced(s.not_advanced_reason) + '</span></div>' +
-        '<div class="ev-row"><span class="k">Level 5 (hypothesis gate / BUILD_REQUEST)</span><span class="v">' + badge('NOT COMPUTED', 'b-unknown') + '</span></div>' +
-        '<p style="font-size:11.5px; color:var(--muted); margin-top:4px;">' + esc(s.level5_hypothesis_gate.reason) + '</p>' +
+    var summary = deriveSourceEffectivenessSummary(se);
+    if (!summary) {
+      return '<div class="card"><h2 class="card-title">Source Effectiveness (EXP-005)</h2>' +
+        emptyState('Malformed analysis payload.', 'The latest persisted analysis did not include a usable sources list.') +
         '</div>';
+    }
+    var html = renderSourceEffectivenessSummary(se, summary) + renderSourceEffectivenessGlossary();
+    if (!se.sources.length) {
+      html += '<div class="card">' + emptyState('No sources in this analysis.', 'The latest persisted analysis did not include any source keys.') + '</div>';
+      return html;
+    }
+    for (var i = 0; i < se.sources.length; i++) {
+      try {
+        html += renderSourceCompactCard(se.sources[i], se.sources[i].source_key === expandedKey);
+      } catch (err) {
+        html += '<div class="src-card">' + emptyState('Could not render this source', String((se.sources[i] && se.sources[i].source_key) || 'unknown')) + '</div>';
+      }
     }
     return html;
   }
@@ -7928,7 +8136,7 @@ const RESEARCH_LAB_HTML = `<!DOCTYPE html>
     var se = await fetchJson('/api/research-lab/source-effectiveness');
     var html = '<div class="card"><h2 class="card-title">Sources</h2>' +
       '<p>Affinity is a predefined topic classification. It is <b>NOT</b> a performance score and does <b>NOT</b> mean this source has been proven useful. ' +
-      '"Observed relationship" below is a separate, currently-uncomputed placeholder -- see the Source Effectiveness section for the real, computed statistical results.</p></div>';
+      '"Observed relationship" below is a separate, currently-uncomputed placeholder -- see the Source Effectiveness section below for the real, computed statistical results.</p></div>';
     if (!d.ok || !d.sources.length) {
       html += emptyState('No production evidence collected yet.', 'No source data is available yet.');
     } else {
@@ -7941,8 +8149,17 @@ const RESEARCH_LAB_HTML = `<!DOCTYPE html>
           '</div>';
       }
     }
-    html += renderSourceEffectivenessSection(se);
+    html += renderSourceEffectivenessSection(se, sourceEffExpandedKey);
     app.innerHTML = html;
+
+    var srcCards = app.querySelectorAll('[data-src-key]');
+    for (var ci = 0; ci < srcCards.length; ci++) {
+      srcCards[ci].addEventListener('click', function (e) {
+        var key = e.currentTarget.dataset.srcKey;
+        sourceEffExpandedKey = (sourceEffExpandedKey === key) ? null : key;
+        renderSources();
+      });
+    }
   }
 
   function flowStage(num, title, desc, fact) {

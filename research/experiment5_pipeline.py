@@ -38,6 +38,29 @@ building an archive INSERT for any ts already covered -- the real
 idempotency guarantee lives at this layer, not inside the throwaway
 mirror.
 
+Steady-state observation window (fix: mirror must also carry history,
+not just this cycle's delta)
+------------------------------------------------------------------------
+agent.run_agent_cycle() observes the mirror's OWN
+research_sentiment_archive table over agent.DEFAULT_OBSERVE_WINDOW_MS
+(14 days) -- but until this fix, the mirror only ever received rows
+this exact run newly archived (see the loop below), never rows a PRIOR
+run already archived into real D1. In steady state (once the initial
+backlog is archived and newly_archived is usually 0-few rows per
+cycle), that left the agent observing only this cycle's tiny fresh
+delta instead of the intended 14-day rolling window -- confirmed
+directly against two real, unmasked production runs (the first
+archived 422 rows and classified normally; 89 minutes later, the
+second archived 0 new rows and returned INSUFFICIENT_ARCHIVE_DATA
+despite 422 real rows sitting in production). The fix: also replay the
+real, already-archived rows within the observe window (a second
+bounded, indexed D1 read -- see historical_archive_rows below) into the
+mirror verbatim, exactly like history_rows/btc_rows already are. This
+changes only what the agent OBSERVES; it does not touch confirmation
+criteria, classification, candidate-source rules, decision creation,
+eligibility timing, outcome resolution, or the horizon tolerance in
+experiment5_agent.py, none of which are modified by this change.
+
 Migration status, stated plainly
 -----------------------------------
 research_sentiment_archive (migration 0015) and research_hypotheses
@@ -67,6 +90,14 @@ BTC_DATA_WINDOW_MS = agent.DEFAULT_OBSERVE_WINDOW_MS + (25 * 3600000)
 # has enough trailing btc_data to resolve a 24h-horizon outcome for a
 # decision anchored near the observe window's own start.
 
+ARCHIVE_COLUMNS = ["observation_ts", "sources_json", "score", "technical_score", "btc_price",
+                    "gold_regime", "source_weights_version", "schema_version", "written_by",
+                    "content_hash", "archived_ts"]
+# The single source of truth for research_sentiment_archive's own
+# (non-archive_id) column list, shared by build_insert_archive_sql, the
+# historical-replay read, and the newly-archived read below -- so the
+# three can never silently drift apart.
+
 
 def _sql_literal(value):
     if value is None:
@@ -83,11 +114,8 @@ def build_insert_archive_sql(archive_row):
     own output (from the LOCAL mirror, where archive_observation() has
     already computed content_hash etc). Builds the literal INSERT this
     module replicates to real D1."""
-    columns = ["observation_ts", "sources_json", "score", "technical_score", "btc_price",
-               "gold_regime", "source_weights_version", "schema_version", "written_by",
-               "content_hash", "archived_ts"]
-    values = [archive_row[c] for c in columns]
-    return (f"INSERT INTO research_sentiment_archive ({', '.join(columns)}) VALUES "
+    values = [archive_row[c] for c in ARCHIVE_COLUMNS]
+    return (f"INSERT INTO research_sentiment_archive ({', '.join(ARCHIVE_COLUMNS)}) VALUES "
             f"({', '.join(_sql_literal(v) for v in values)})")
 
 
@@ -111,7 +139,8 @@ def build_update_decision_outcome_sql(hypothesis_id, evidence_summary_json, out_
     )
 
 
-def _build_local_mirror(history_rows, btc_rows, archived_observation_ts, now_ts):
+def _build_local_mirror(history_rows, btc_rows, archived_observation_ts, now_ts,
+                         historical_archive_rows=()):
     """A fresh, throwaway in-memory sqlite3 mirror -- never the real D1
     connection. history_rows/btc_rows are already-fetched real
     production rows (list[dict], from d1_query_fn); archived_observation_ts
@@ -124,7 +153,22 @@ def _build_local_mirror(history_rows, btc_rows, archived_observation_ts, now_ts)
     observation itself occurred). Conflating the two would make
     archived_ts a mere copy of observation_ts, losing its purpose: a
     later backfill/catch-up run archiving an old observation should
-    record TODAY as archived_ts, not the old observation's own moment."""
+    record TODAY as archived_ts, not the old observation's own moment.
+
+    historical_archive_rows: real rows already present in
+    research_sentiment_archive within the agent's observe window (see
+    module docstring "Steady-state observation window"), replayed
+    verbatim -- same "copied, never mutated" discipline as
+    history_rows/btc_rows. Every row here is, by construction of its own
+    caller (run_pipeline), one whose observation_ts IS in
+    archived_observation_ts, so the loop below (which only archives a
+    history row when its ts is NOT in archived_observation_ts) can never
+    target the same ts -- the two sets are structurally disjoint. The
+    mirror's own UNIQUE index on observation_ts is kept as a hard
+    backstop regardless: if that invariant were ever violated, this
+    raises sqlite3.IntegrityError rather than silently duplicating a
+    row, matching sentiment_archive.archive_observation()'s own
+    "never silently overwrite" discipline."""
     conn = sqlite3.connect(":memory:")
     conn.execute("""CREATE TABLE research_sentiment_archive (
         archive_id INTEGER PRIMARY KEY AUTOINCREMENT, observation_ts INTEGER NOT NULL,
@@ -146,6 +190,13 @@ def _build_local_mirror(history_rows, btc_rows, archived_observation_ts, now_ts)
         source_analysis_ids TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'OBSERVATION',
         evidence_summary_json TEXT, out_of_sample_status TEXT
     )""")
+
+    for row in historical_archive_rows:
+        conn.execute(
+            f"INSERT INTO research_sentiment_archive ({', '.join(ARCHIVE_COLUMNS)}) VALUES "
+            f"({', '.join('?' for _ in ARCHIVE_COLUMNS)})",
+            [row[c] for c in ARCHIVE_COLUMNS],
+        )
 
     for row in history_rows:
         conn.execute("INSERT INTO history (ts, score, sources_json, technical_score, gold_regime) VALUES (?, ?, ?, ?, ?)",
@@ -182,23 +233,37 @@ def run_pipeline(d1_query_fn, d1_execute_fn, now_ts):
         f"SELECT observation_ts FROM research_sentiment_archive WHERE observation_ts >= {now_ts - ARCHIVE_WINDOW_MS}"
     )
     archived_observation_ts = {r["observation_ts"] for r in archived_ts_rows}
+    # Bounded to the agent's own observe window (14 days), narrower than
+    # ARCHIVE_WINDOW_MS above (30 days) -- this is the fix for the
+    # steady-state gap documented in the module docstring: without this,
+    # run_agent_cycle's mirror only ever contains this cycle's fresh
+    # delta, never the real history already sitting in production.
+    historical_archive_rows = d1_query_fn(
+        f"SELECT {', '.join(ARCHIVE_COLUMNS)} FROM research_sentiment_archive "
+        f"WHERE observation_ts >= {now_ts - agent.DEFAULT_OBSERVE_WINDOW_MS} AND observation_ts <= {now_ts} "
+        f"ORDER BY observation_ts ASC"
+    )
     pending_decision_rows = d1_query_fn(
         "SELECT hypothesis_id, evidence_summary_json FROM research_hypotheses "
         "WHERE subject LIKE 'experiment5:%' AND out_of_sample_status IS NULL"
     )
 
-    local_conn = _build_local_mirror(history_rows, btc_rows, archived_observation_ts, now_ts)
+    local_conn = _build_local_mirror(
+        history_rows, btc_rows, archived_observation_ts, now_ts,
+        historical_archive_rows=historical_archive_rows,
+    )
 
+    # Iterates every mirror archive row -- both the historical replay
+    # above and whatever this cycle newly archived. Only a row whose ts
+    # is NOT already in archived_observation_ts is genuinely new and
+    # gets written back to real D1; every historical row is, by
+    # construction, already in that set, so it is read here (confirming
+    # it round-tripped correctly) but never re-written.
     newly_archived = 0
     for row in local_conn.execute(
-        "SELECT observation_ts, sources_json, score, technical_score, btc_price, gold_regime, "
-        "source_weights_version, schema_version, written_by, content_hash, archived_ts "
-        "FROM research_sentiment_archive"
+        f"SELECT {', '.join(ARCHIVE_COLUMNS)} FROM research_sentiment_archive"
     ).fetchall():
-        columns = ["observation_ts", "sources_json", "score", "technical_score", "btc_price",
-                   "gold_regime", "source_weights_version", "schema_version", "written_by",
-                   "content_hash", "archived_ts"]
-        archive_row = dict(zip(columns, row))
+        archive_row = dict(zip(ARCHIVE_COLUMNS, row))
         if archive_row["observation_ts"] not in archived_observation_ts:
             d1_execute_fn(build_insert_archive_sql(archive_row))
             newly_archived += 1

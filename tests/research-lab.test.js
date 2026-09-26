@@ -15,9 +15,13 @@ describe('Research Lab — read-only research API helpers', () => {
       extractFunctions('computeExperiment4TimesFmLiveFields', 'computeExp005LiveFields', 'computeExp009LiveFields', 'computeExp010LiveFields', 'getResearchLabRegistry') + '\n' +
       extractConstants('SOURCE_TOPIC_AFFINITY_DISPLAY', 'REACTION_HORIZONS_MS',
         'REACTION_GOOD_QUALITY_FRACTION', 'REACTION_APPROXIMATE_QUALITY_FRACTION', 'BTC_SERIES_WINDOW_MS',
-        'REQUIRED_SAMPLE_FALLBACK', 'EXP005_SUBJECT', 'EXP009_SUBJECT', 'EXP010_SUBJECT', 'LIVE_METRIC_PROVIDERS') + '\n' +
+        'REQUIRED_SAMPLE_FALLBACK', 'EXP005_SUBJECT', 'EXP009_SUBJECT', 'EXP010_SUBJECT', 'LIVE_METRIC_PROVIDERS',
+        'EXPERIMENT5_KNOWN_V1_SOURCE_IDS', 'SOURCE_EFFECTIVENESS_SUBJECT', 'SOURCE_EFFECTIVENESS_HORIZONS',
+        'SOURCE_EFFECTIVENESS_MIN_SAMPLE_LEVEL2', 'SOURCE_EFFECTIVENESS_MIN_SAMPLE_LEVEL3',
+        'SOURCE_EFFECTIVENESS_CONFIGURED_WINDOW_DAYS') + '\n' +
       extractFunctions('resolveBtcReactionAtHorizon', 'getResearchLabDashboard', 'getResearchLabEvents',
-        'getResearchLabEventDetail', 'getResearchLabSources', 'getResearchLabPipelineHealth')
+        'getResearchLabEventDetail', 'getResearchLabSources', 'getResearchLabPipelineHealth',
+        '_seLevel2Key', '_seLevel3Key', 'getResearchLabSourceEffectiveness')
     );
   });
 
@@ -204,7 +208,7 @@ describe('Research Lab — read-only research API helpers', () => {
       expect(result.sources).toEqual([]);
     });
 
-    it('never ranks, scores, or recommends -- only affinity_status and an honest INSUFFICIENT_EVIDENCE relationship', async () => {
+    it('never ranks, scores, or recommends -- only affinity_status and an honest NOT_COMPUTED relationship (never the real INSUFFICIENT_EVIDENCE verdict label)', async () => {
       const db = makeDb([
         { all: { results: [{ sources_json: JSON.stringify({ geopolitics: 50, fng: 60 }) }] } },
       ]);
@@ -213,7 +217,11 @@ describe('Research Lab — read-only research API helpers', () => {
       expect(byKey.geopolitics.affinity_status).toBe('DIRECT_TOPIC_RELEVANCE');
       expect(byKey.fng.affinity_status).toBe('NO_DIRECT_TOPIC_AFFINITY');
       for (const s of result.sources) {
-        expect(s.observed_event_source_relationship).toBe('INSUFFICIENT_EVIDENCE');
+        expect(s.observed_event_source_relationship).toBe('NOT_COMPUTED');
+        // Must never emit any of event_source_relevance.py's own real,
+        // computed verdict labels here -- this placeholder is not one of them.
+        expect(['RELEVANT', 'POSSIBLY_RELEVANT', 'NOT_ESTABLISHED', 'INSUFFICIENT_EVIDENCE'])
+          .not.toContain(s.observed_event_source_relationship);
         expect(s).not.toHaveProperty('rank');
         expect(s).not.toHaveProperty('score');
         expect(s).not.toHaveProperty('recommended_weight');
@@ -230,6 +238,252 @@ describe('Research Lab — read-only research API helpers', () => {
       const result = await scope.getResearchLabSources({ DB: db });
       expect(result.ok).toBe(true);
       expect(result.sources.map((s) => s.source_key)).toEqual(['regulatory']);
+    });
+  });
+
+  describe('getResearchLabSourceEffectiveness', () => {
+    // Mirrors research/source_intelligence.py's KNOWN_V1_SOURCE_IDS exactly
+    // (same 21 ids as EXPERIMENT5_KNOWN_V1_SOURCE_IDS above) -- a local
+    // copy here only so this test file states its own expectation
+    // explicitly, never relying on the production constant to prove
+    // itself correct.
+    const ALL_21 = [
+      'fng', 'funding', 'longshort', 'global', 'cryptonews', 'macrogeo',
+      'geopolitics', 'regulatory', 'sosovalue', 'onchain', 'oil', 'yield10y',
+      'usd', 'nasdaq', 'sp500', 'ninemag', 'foufi', 'etfflows', 'hypefunding',
+      'gold', 'strc',
+    ];
+    const HORIZONS = [1, 3, 6, 12, 24];
+    const level2Key = (key, h) => `${key}|${h}`;
+    const level3Key = (key, h) => `${key}|${h}h`;
+
+    function defaultLevel1(overrides = {}) {
+      return {
+        present: 500, missing: 0, coverage_pct: 100, distinct_values: 20,
+        min: 1, max: 99, mean: 50, stddev: 10,
+        first_ts_present: 1000000000000, last_ts_present: 1000000000000 + 30 * 86400000,
+        non_numeric_value_count: 0, level1_status: 'OK',
+        ...overrides,
+      };
+    }
+    function defaultLevel2(overrides = {}) {
+      return {
+        n: 200, status: 'OK', sample_size_status: 'OK',
+        effect_size_r: 0.1, p_raw: 0.5, p_corrected: 0.6, significant: false,
+        ...overrides,
+      };
+    }
+    function defaultLevel3(overrides = {}) {
+      return {
+        status: 'OK', n: 150, partial_correlation: 0.05,
+        oos: {
+          baseline_rmse_composite_only: 1, full_model_rmse_composite_plus_source: 0.99,
+          rmse_reduction_pct: 1, status: 'IMPROVED',
+        },
+        ...overrides,
+      };
+    }
+
+    // Builds a full 21-source fixture shaped like a real, persisted
+    // build_source_effectiveness_report() output. Every key gets a
+    // uniform, unremarkable "OK, not significant" shape by default;
+    // perSourceOverrides lets one test change exactly the ONE key/field
+    // it is actually exercising, so each assertion is unambiguous about
+    // what triggered it.
+    function buildReport(perSourceOverrides = {}) {
+      const sourcesDiscovered = [];
+      const sourcesEligible = [];
+      const level1 = {};
+      const level2Tests = {};
+      const level3 = {};
+      const evidenceLabels = {};
+      const redundancyVsComposite = {};
+
+      for (const key of ALL_21) {
+        const ov = perSourceOverrides[key] || {};
+        if (ov.notDiscovered) continue; // absent everywhere -- a real "not in this window" shape
+
+        sourcesDiscovered.push(key);
+        level1[key] = defaultLevel1(ov.level1);
+        if (level1[key].level1_status !== 'OK') continue; // mirrors the real Python eligibility gate exactly
+
+        sourcesEligible.push(key);
+        redundancyVsComposite[key] = ov.redundancy || { n: 480, r: 0.1, strong_redundancy: false };
+
+        for (const h of HORIZONS) {
+          level2Tests[level2Key(key, h)] = defaultLevel2((ov.level2 && ov.level2[h]) || {});
+          level3[level3Key(key, h)] = defaultLevel3((ov.level3 && ov.level3[h]) || {});
+          evidenceLabels[level3Key(key, h)] = (ov.evidenceLabel && ov.evidenceLabel[h]) || 'INCONCLUSIVE';
+        }
+      }
+
+      return {
+        sources_discovered: sourcesDiscovered,
+        sources_eligible_for_level2plus: sourcesEligible,
+        level1,
+        level2: {
+          tests: level2Tests,
+          multiple_testing_correction: {
+            method: 'benjamini_hochberg', alpha: 0.05, n_tests: sourcesEligible.length * HORIZONS.length,
+          },
+        },
+        level3,
+        evidence_labels: evidenceLabels,
+        redundancy: { vs_composite: redundancyVsComposite },
+      };
+    }
+
+    function makeAnalysisRow(report, overrides = {}) {
+      return {
+        analysis_id: 2,
+        analysis_ts: Date.now() - 3600000,
+        window_start_ts: Date.now() - 90 * 86400000,
+        window_end_ts: Date.now(),
+        sample_size: 500,
+        metric_json: JSON.stringify(report),
+        ...overrides,
+      };
+    }
+
+    it('no persisted EXP-005 analysis yet: activated:false, never fabricated', async () => {
+      const db = makeDb([{ first: null }]);
+      const result = await scope.getResearchLabSourceEffectiveness({ DB: db });
+      expect(result.ok).toBe(true);
+      expect(result.activated).toBe(false);
+    });
+
+    it('all 21 known source keys appear exactly once, regardless of report contents', async () => {
+      const report = buildReport();
+      const db = makeDb([{ first: makeAnalysisRow(report) }]);
+      const result = await scope.getResearchLabSourceEffectiveness({ DB: db });
+      expect(result.activated).toBe(true);
+      const keys = result.sources.map((s) => s.source_key);
+      expect(keys.length).toBe(21);
+      expect(new Set(keys).size).toBe(21);
+      for (const k of ALL_21) expect(keys).toContain(k);
+    });
+
+    it('a source missing from this window entirely: NOT_DISCOVERED_IN_WINDOW, still listed, never fabricated', async () => {
+      const report = buildReport({ sosovalue: { notDiscovered: true } });
+      const db = makeDb([{ first: makeAnalysisRow(report) }]);
+      const result = await scope.getResearchLabSourceEffectiveness({ DB: db });
+      const keys = result.sources.map((s) => s.source_key);
+      expect(keys).toContain('sosovalue'); // never silently dropped from the 21-key list
+      const s = result.sources.find((x) => x.source_key === 'sosovalue');
+      expect(s.level1_discovered).toBe(false);
+      expect(s.level1_observed).toBe(false);
+      expect(s.coverage).toBeNull();
+      expect(s.not_advanced_reason).toBe('NOT_DISCOVERED_IN_WINDOW');
+    });
+
+    it('NO_VARIATION at Level 1: observed but not eligible, reason discloses the real Level-1 status verbatim', async () => {
+      const report = buildReport({
+        foufi: { level1: { present: 350, missing: 150, coverage_pct: 70, distinct_values: 1, level1_status: 'NO_VARIATION' } },
+      });
+      const db = makeDb([{ first: makeAnalysisRow(report) }]);
+      const result = await scope.getResearchLabSourceEffectiveness({ DB: db });
+      const s = result.sources.find((x) => x.source_key === 'foufi');
+      expect(s.level1_discovered).toBe(true);
+      expect(s.level1_observed).toBe(true);
+      expect(s.level1_status).toBe('NO_VARIATION');
+      expect(s.level4_eligible_for_level2plus).toBe(false);
+      expect(s.not_advanced_reason).toBe('NO_VARIATION');
+      // Never invents Level 2/3 results for an ineligible source.
+      expect(s.horizons.every((h) => h.level2 === null && h.level3 === null)).toBe(true);
+    });
+
+    it('insufficient sample at a horizon: level2 SMALL_SAMPLE_CAUTION and level3 INSUFFICIENT_DATA both preserved per-horizon, never hidden', async () => {
+      const report = buildReport({
+        oil: {
+          level2: { 1: { n: 12, sample_size_status: 'SMALL_SAMPLE_CAUTION', p_raw: 0.3, p_corrected: 0.4, significant: false } },
+          level3: { 1: { status: 'INSUFFICIENT_DATA', n: 12, partial_correlation: null, oos: null } },
+        },
+      });
+      const db = makeDb([{ first: makeAnalysisRow(report) }]);
+      const result = await scope.getResearchLabSourceEffectiveness({ DB: db });
+      const s = result.sources.find((x) => x.source_key === 'oil');
+      const h1 = s.horizons.find((h) => h.horizon_hours === 1);
+      const h3 = s.horizons.find((h) => h.horizon_hours === 3);
+      expect(h1.level2.sample_size_status).toBe('SMALL_SAMPLE_CAUTION');
+      expect(h1.level3.status).toBe('INSUFFICIENT_DATA');
+      expect(h3.level2.sample_size_status).toBe('OK'); // untouched horizons keep their own real result
+      expect(result.sample_sufficiency_thresholds.min_sample_level2).toBe(30);
+      expect(result.sample_sufficiency_thresholds.min_sample_level3).toBe(40);
+    });
+
+    it('no significant horizon anywhere: NO_SIGNIFICANT_HORIZON, distinct from ineligibility', async () => {
+      const report = buildReport(); // default fixture: every horizon INCONCLUSIVE
+      const db = makeDb([{ first: makeAnalysisRow(report) }]);
+      const result = await scope.getResearchLabSourceEffectiveness({ DB: db });
+      const s = result.sources.find((x) => x.source_key === 'global');
+      expect(s.level4_eligible_for_level2plus).toBe(true);
+      expect(s.any_significant_horizon).toBe(false);
+      expect(s.not_advanced_reason).toBe('NO_SIGNIFICANT_HORIZON');
+    });
+
+    it('a significant horizon is reported, but is explicitly distinguished from passing the final hypothesis gate', async () => {
+      const report = buildReport({
+        fng: {
+          evidenceLabel: { 6: 'STATISTICALLY_SIGNIFICANT' },
+          level2: { 6: { significant: true, p_corrected: 0.01 } },
+        },
+      });
+      const db = makeDb([{ first: makeAnalysisRow(report) }]);
+      const result = await scope.getResearchLabSourceEffectiveness({ DB: db });
+      const s = result.sources.find((x) => x.source_key === 'fng');
+      expect(s.any_significant_horizon).toBe(true);
+      expect(s.not_advanced_reason).toBeNull();
+      // The stricter, separate gate is explicitly reported as uncomputed --
+      // NEVER inferred or approximated from level2/level3 significance.
+      expect(s.level5_hypothesis_gate.computed).toBe(false);
+      expect(s.level5_hypothesis_gate.reason).toMatch(/BUILD_REQUEST|hypothesis_gate/);
+    });
+
+    it('strong redundancy vs. the V1 composite is surfaced per source, never used to silently drop it', async () => {
+      const report = buildReport({
+        etfflows: { redundancy: { n: 497, r: 0.75, strong_redundancy: true } },
+      });
+      const db = makeDb([{ first: makeAnalysisRow(report) }]);
+      const result = await scope.getResearchLabSourceEffectiveness({ DB: db });
+      const s = result.sources.find((x) => x.source_key === 'etfflows');
+      expect(s.redundancy_vs_composite.strong_redundancy).toBe(true);
+      expect(s.redundancy_vs_composite.r).toBe(0.75);
+      expect(s.horizons.length).toBe(5); // disclosed, not silently excluded
+    });
+
+    it('window/freshness: the configured 90-day ceiling is never presented as the observed data range', async () => {
+      const report = buildReport();
+      // Mirror history's own 500-row retention cap: real per-source data
+      // spans far less than the 90-day window this analysis requested.
+      for (const key of Object.keys(report.level1)) {
+        report.level1[key].first_ts_present = 1000000000000;
+        report.level1[key].last_ts_present = 1000000000000 + 20 * 86400000; // 20 real days
+      }
+      const row = makeAnalysisRow(report, {
+        window_start_ts: 900000000000, // the CONFIGURED request, always 90 days wide
+        window_end_ts: 900000000000 + 90 * 86400000,
+      });
+      const db = makeDb([{ first: row }]);
+      const result = await scope.getResearchLabSourceEffectiveness({ DB: db });
+      expect(result.data_window.configured_max_window_days).toBe(90);
+      expect(result.data_window.observed_data_range.span_days).toBeCloseTo(20, 1);
+      expect(result.data_window.observed_data_range.span_days).not.toBe(90);
+      expect(result.data_window.note).toMatch(/never described as 90 days/);
+    });
+
+    it('multiple-testing correction metadata and the horizon-independence disclosure are always present', async () => {
+      const report = buildReport();
+      const db = makeDb([{ first: makeAnalysisRow(report) }]);
+      const result = await scope.getResearchLabSourceEffectiveness({ DB: db });
+      expect(result.multiple_testing_correction.method).toBe('benjamini_hochberg');
+      expect(result.horizon_independence_note).toMatch(/not independent/i);
+    });
+
+    it('malformed metric_json: activated:false, never a crash or fabricated data', async () => {
+      const db = makeDb([{ first: makeAnalysisRow({}, { metric_json: '{not valid json' }) }]);
+      const result = await scope.getResearchLabSourceEffectiveness({ DB: db });
+      expect(result.ok).toBe(true);
+      expect(result.activated).toBe(false);
     });
   });
 

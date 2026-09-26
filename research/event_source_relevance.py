@@ -99,7 +99,13 @@ exact matching, never NLP, never invented labels) finds:
 
   NO DIRECT topical/textual match to any PR4 evidence category (17 of 21):
     fng, funding, longshort, global, gold, hypefunding, nasdaq,
-    ninemag, oil, onchain, sosovalue, sp500, strc, usd, yield10y.
+    ninemag, oil, onchain, sosovalue, sp500, strc, usd, yield10y,
+    etfflows, foufi.
+  (This list previously omitted etfflows/foufi by a documentation error
+  -- the code's own SOURCE_TOPIC_AFFINITY dict below was always correct;
+  see test_event_source_relevance.py's own regression test asserting
+  this list matches that dict exactly, so the two can never drift apart
+  silently again.)
   By their own naming these are quantitative/market-derived indicators
   (fear-greed index, funding rate, long/short positioning ratio,
   global market cap, spot commodity/FX/equity-index prices, on-chain

@@ -14,8 +14,11 @@ import os
 import sqlite3
 import sys
 
+import pytest
+
 sys.path.insert(0, os.path.dirname(__file__))
 import experiment5_pipeline as ep  # noqa: E402
+import sentiment_archive as sa  # noqa: E402
 
 HOUR = 3600000
 DAY = 24 * HOUR
@@ -72,6 +75,22 @@ def insert_history(d1, ts, score, sources, technical_score=None, gold_regime=Non
 
 def insert_btc(d1, ts, price):
     d1.conn.execute("INSERT INTO btc_data (ts, btc_price) VALUES (?, ?)", (ts, price))
+    d1.conn.commit()
+
+
+def seed_archive(d1, observation_ts, score, sources, archived_ts, technical_score=None,
+                  btc_price=None, gold_regime=None):
+    """Writes directly into the FakeD1's real research_sentiment_archive
+    table via sentiment_archive.archive_observation() -- simulating an
+    observation a PRIOR pipeline run already archived, exactly as real
+    production D1 holds after a backfill. Never goes through
+    run_pipeline/the mirror -- this is what "already there before this
+    run started" means for these tests."""
+    sa.archive_observation(
+        d1.conn, observation_ts, sources, score, technical_score=technical_score,
+        btc_price=btc_price, gold_regime=gold_regime, source_weights_version="v1-unversioned",
+        written_by="prior-run", archived_ts=archived_ts,
+    )
     d1.conn.commit()
 
 
@@ -363,3 +382,220 @@ class TestSqlBuilders:
 
     def test_sql_literal_null_for_none(self):
         assert ep._sql_literal(None) == "NULL"
+
+
+class TestHistoricalObservationWindow:
+    """Regression coverage for the steady-state observation-window
+    defect found by the production audit: two real, unmasked runs 89
+    minutes apart on 2026-09-26 showed the first archiving 422
+    observations and the agent classifying normally, then the second
+    archiving 0 new rows and returning INSUFFICIENT_ARCHIVE_DATA despite
+    422 real rows still sitting in production D1. Root cause:
+    _build_local_mirror only ever populated the mirror's
+    research_sentiment_archive table with rows THIS run newly archived,
+    never with rows a prior run already archived into real D1 -- so
+    agent.run_agent_cycle's 14-day observe() window collapsed to "this
+    cycle's fresh delta" in steady state. See experiment5_pipeline.py's
+    own module docstring, "Steady-state observation window"."""
+
+    def test_historical_archive_populates_mirror_when_nothing_newly_archived(self):
+        # No history rows at all -- isolates the historical-replay path
+        # from the newly-archived path entirely. Reproduces run #28's
+        # exact real-world shape: newly_archived == 0, real archive
+        # non-empty.
+        d1 = FakeD1()
+        seed_archive(d1, 0, 50, {"fng": 50}, archived_ts=0)
+        seed_archive(d1, HOUR, 55, {"fng": 55}, archived_ts=0)
+        result = ep.run_pipeline(d1.query, d1.execute, now_ts=2 * HOUR)
+        assert result["newly_archived"] == 0
+        assert result["agent_cycle"]["status"] == "OK"  # not INSUFFICIENT_ARCHIVE_DATA
+        assert result["agent_cycle"]["n_archive_rows"] == 2
+
+    def test_only_rows_within_the_14_day_observe_window_are_observed(self):
+        d1 = FakeD1()
+        window = ep.agent.DEFAULT_OBSERVE_WINDOW_MS
+        now_ts = 20 * DAY
+        seed_archive(d1, now_ts - window - HOUR, 50, {"fng": 50}, archived_ts=0)  # just outside
+        seed_archive(d1, now_ts - window + HOUR, 51, {"fng": 51}, archived_ts=0)  # just inside
+        seed_archive(d1, now_ts - HOUR, 52, {"fng": 52}, archived_ts=0)           # well inside
+        result = ep.run_pipeline(d1.query, d1.execute, now_ts=now_ts)
+        assert result["agent_cycle"]["n_archive_rows"] == 2  # the too-old row is excluded
+
+    def test_defensive_backstop_holds_under_a_hypothetical_caller_mismatch(self):
+        # NOT the mainline Case A/B scenario (see TestDuplicateHandlingContract
+        # below for those, exercised via real run_pipeline paths). This is a
+        # SEPARATE, defensive check: deliberately inconsistent inputs at the
+        # _build_local_mirror level, where this ts is claimed already-archived
+        # (present in historical_archive_rows) but NOT reflected in
+        # archived_observation_ts (the idempotency set the newly-archived loop
+        # actually checks). run_pipeline itself can never produce this exact
+        # mismatch (both sets come from the same real D1 read, and the 14-day
+        # historical window is always a subset of the 30-day
+        # archived_observation_ts window), but archive_observation()'s own
+        # existing-row check happens to still catch it here -- this test only
+        # proves that incidental fact, not a designed contract for this
+        # specific mismatch shape.
+        ts = 5 * HOUR
+        sources_json_text = '{"fng":60}'
+        historical_row = {
+            "observation_ts": ts, "sources_json": sources_json_text, "score": 60.0,
+            "technical_score": None, "btc_price": None, "gold_regime": None,
+            "source_weights_version": "v1-unversioned", "schema_version": sa.SCHEMA_VERSION,
+            "written_by": "prior-run",
+            "content_hash": sa.compute_content_hash(
+                ts, sources_json_text, 60.0, None, None, None, "v1-unversioned", sa.SCHEMA_VERSION,
+            ),
+            "archived_ts": 0,
+        }
+        history_rows = [{"ts": ts, "score": 60.0, "sources_json": sources_json_text,
+                          "technical_score": None, "gold_regime": None}]
+        conn = ep._build_local_mirror(
+            history_rows=history_rows, btc_rows=[], archived_observation_ts=set(),
+            now_ts=ts, historical_archive_rows=[historical_row],
+        )
+        count = conn.execute(
+            "SELECT COUNT(*) FROM research_sentiment_archive WHERE observation_ts = ?", (ts,)
+        ).fetchone()[0]
+        assert count == 1  # never duplicated, even though archived_observation_ts disagreed
+
+    def test_repeat_run_after_backfill_still_observes_historical_data_and_stays_idempotent(self):
+        d1 = FakeD1()
+        for i in range(4):
+            insert_history(d1, i * HOUR, 50, {"fng": 50 + i * 5, "etfflows": 40 + i * 5})
+        first = ep.run_pipeline(d1.query, d1.execute, now_ts=3 * HOUR)
+        assert first["newly_archived"] == 4
+        archive_count_after_first = d1.query("SELECT COUNT(*) as n FROM research_sentiment_archive")[0]["n"]
+
+        # A second run 10 minutes later, no new history at all -- exactly
+        # run #28's real production shape.
+        sql_count_before_second = len(d1.executed_sql)
+        second = ep.run_pipeline(d1.query, d1.execute, now_ts=3 * HOUR + 10 * 60000)
+        assert second["newly_archived"] == 0
+        # The agent sees the SAME historical rows, not an empty archive.
+        assert second["agent_cycle"]["n_archive_rows"] == first["agent_cycle"]["n_archive_rows"]
+        archive_count_after_second = d1.query("SELECT COUNT(*) as n FROM research_sentiment_archive")[0]["n"]
+        assert archive_count_after_second == archive_count_after_first  # no duplicates written
+        # Not one of the 4 already-historical rows was fed back through
+        # the newly-archived write path on the second run.
+        new_sql = d1.executed_sql[sql_count_before_second:]
+        assert not any(sql.startswith("INSERT INTO research_sentiment_archive") for sql in new_sql)
+
+    def test_insufficient_archive_data_still_reported_when_genuinely_insufficient(self):
+        # Only 1 real archived row and no history at all -- the fix must
+        # not fabricate a second observation to force an "OK" status.
+        d1 = FakeD1()
+        seed_archive(d1, 0, 50, {"fng": 50}, archived_ts=0)
+        result = ep.run_pipeline(d1.query, d1.execute, now_ts=HOUR)
+        assert result["newly_archived"] == 0
+        assert result["agent_cycle"]["status"] == "INSUFFICIENT_ARCHIVE_DATA"
+        assert result["agent_cycle"]["n_archive_rows"] == 1
+
+
+class TestDuplicateHandlingContract:
+    """Verifies, separately and via the actual reachable code paths, the
+    three duplicate-handling claims made for the historical-observation-
+    window fix. Read _build_local_mirror's own history_rows loop first:
+    a history row is only ever passed to sentiment_archive.archive_observation()
+    when its ts is NOT in archived_observation_ts. Since archived_observation_ts
+    and historical_archive_rows are both read from the SAME real D1 archive
+    table (one ts-only over 30 days, the other full-row over 14 days, the
+    narrower always a subset of the wider), a ts already covered by
+    historical_archive_rows is ALWAYS also in archived_observation_ts --
+    so it is skipped, never re-offered to archive_observation. This means
+    the only way archive_observation's own conflict/no-op check is ever
+    reached in a REAL run_pipeline call is a genuine duplicate ts WITHIN
+    the `history` table itself (not yet archived at all), not any
+    interaction between the historical and newly-archived paths -- Cases
+    A and B below test exactly that, the actually-reachable shape.
+    sentiment_archive.archive_observation()'s own no-op/conflict contract
+    already has direct unit coverage in test_sentiment_archive.py; these
+    tests instead verify how experiment5_pipeline.py's own run_pipeline
+    integrates with that contract."""
+
+    def test_case_a_identical_duplicate_within_history_is_idempotent_noop(self):
+        # Two history rows, same ts, BYTE-IDENTICAL content -- the only
+        # path through which a duplicate ts within a single run reaches
+        # archive_observation() at all. Expected, explicit contract: an
+        # idempotent no-op (one archive row, not two), never a raised
+        # error -- this is NOT the same code path as the mirror's own
+        # UNIQUE-index hard-fail (see
+        # test_case_a_mirror_level_bare_insert_hard_fails_on_any_duplicate
+        # below), so the two are deliberately tested separately rather
+        # than assumed interchangeable.
+        d1 = FakeD1()
+        ts = 2 * HOUR
+        insert_history(d1, ts, 60, {"fng": 60})
+        insert_history(d1, ts, 60, {"fng": 60})  # exact duplicate row
+        result = ep.run_pipeline(d1.query, d1.execute, now_ts=ts + HOUR)
+        assert result["newly_archived"] == 1  # counted once, never twice
+        rows = d1.query("SELECT COUNT(*) as n FROM research_sentiment_archive")
+        assert rows[0]["n"] == 1  # never silently duplicated
+
+    def test_case_b_conflicting_duplicate_within_history_raises_and_writes_nothing(self):
+        # Two history rows, same ts, DIFFERENT content -- must never be
+        # silently resolved either direction. Expected, explicit
+        # contract: sentiment_archive.ArchiveConflictError (a specific,
+        # catchable type -- not a bare sqlite3.IntegrityError), raised
+        # before run_pipeline ever calls d1_execute_fn, so real D1 is
+        # never touched and nothing is overwritten.
+        d1 = FakeD1()
+        ts = 2 * HOUR
+        insert_history(d1, ts, 60, {"fng": 60})  # content A
+        insert_history(d1, ts, 99, {"fng": 99})  # same ts, conflicting content B
+        with pytest.raises(sa.ArchiveConflictError):
+            ep.run_pipeline(d1.query, d1.execute, now_ts=ts + HOUR)
+        assert d1.executed_sql == []  # aborted before any real-D1 write was ever issued
+        rows = d1.query("SELECT COUNT(*) as n FROM research_sentiment_archive")
+        assert rows[0]["n"] == 0  # no partial/overwritten row left behind
+
+    def test_case_a_mirror_level_bare_insert_hard_fails_on_any_duplicate(self):
+        # Directly proves the OTHER claimed safeguard: historical_archive_rows
+        # is replayed via a bare INSERT (no existing-row pre-check at all --
+        # see _build_local_mirror), relying entirely on the mirror's own
+        # UNIQUE index on observation_ts as the backstop. Real run_pipeline
+        # can never actually produce two historical_archive_rows sharing a
+        # ts (real D1's own UNIQUE index on research_sentiment_archive
+        # prevents that SELECT from ever returning duplicates), so this is
+        # a direct _build_local_mirror-level test of the backstop itself,
+        # confirming it is a HARD FAILURE (sqlite3.IntegrityError) -- not
+        # an idempotent no-op like Case A above -- for this specific
+        # insertion path, whether the two rows are identical or
+        # conflicting (a bare INSERT does not distinguish the two).
+        ts = 3 * HOUR
+        row_a = {
+            "observation_ts": ts, "sources_json": '{"fng":10}', "score": 10.0,
+            "technical_score": None, "btc_price": None, "gold_regime": None,
+            "source_weights_version": "v1-unversioned", "schema_version": sa.SCHEMA_VERSION,
+            "written_by": "prior-run", "content_hash": "hash-a", "archived_ts": 0,
+        }
+        row_b = dict(row_a, content_hash="hash-b")  # same ts; content_hash differs, but even
+        # an identical copy of row_a here would fail identically -- the
+        # bare INSERT has no content-aware branch at all.
+        with pytest.raises(sqlite3.IntegrityError):
+            ep._build_local_mirror(
+                history_rows=[], btc_rows=[], archived_observation_ts=set(), now_ts=ts,
+                historical_archive_rows=[row_a, row_b],
+            )
+
+    def test_case_c_normal_run_never_feeds_the_same_ts_through_both_paths(self):
+        # The realistic disjointness guarantee: history rows whose ts is
+        # already archived are excluded from the newly-archived set on a
+        # normal run_pipeline call (not an artificial _build_local_mirror
+        # input, unlike the defensive test above).
+        d1 = FakeD1()
+        ts_a, ts_b = 0, HOUR
+        seed_archive(d1, ts_a, 50, {"fng": 50}, archived_ts=0)  # already archived by a prior run
+        insert_history(d1, ts_a, 50, {"fng": 50})  # history still carries the old, already-archived row
+        insert_history(d1, ts_b, 55, {"fng": 55})  # genuinely new, unarchived row
+        result = ep.run_pipeline(d1.query, d1.execute, now_ts=ts_b + HOUR)
+        assert result["newly_archived"] == 1  # only ts_b -- ts_a was never re-offered
+        insert_sqls = [sql for sql in d1.executed_sql if sql.startswith("INSERT INTO research_sentiment_archive")]
+        assert len(insert_sqls) == 1
+        # observation_ts is the first VALUES column (see ARCHIVE_COLUMNS) --
+        # this pins the single INSERT to ts_b specifically, not merely to
+        # "some" ts appearing anywhere in the string (0 is a misleading
+        # substring of ts_b=3600000, so a bare `in` check on ts_a would be
+        # meaningless here).
+        assert insert_sqls[0].split("VALUES (", 1)[1].startswith(f"{ts_b},")
+        rows = d1.query("SELECT COUNT(*) as n FROM research_sentiment_archive")
+        assert rows[0]["n"] == 2  # ts_a (from the seed) + ts_b (newly written) -- never duplicated

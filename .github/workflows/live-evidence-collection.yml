@@ -84,18 +84,13 @@ jobs:
       # GitHub Actions schedule rather than adding a new Cloudflare Cron
       # (the account's 5-trigger budget is already committed -- see
       # this step's own sibling above, and research/README.md's
-      # Experiment 5 section). continue-on-error is deliberate and
-      # temporary: research_sentiment_archive (migration 0015) and
-      # research_hypotheses (migration 0008) are both proposed but NOT
-      # yet applied to production D1 as of this change (confirmed
-      # directly, read-only, before this step was added) -- this step
-      # will fail at its first query until a human applies both
-      # migrations, and must never be allowed to fail the job or block
-      # the live-evidence-collection step above, which already works
-      # today. Remove continue-on-error once both migrations are
-      # confirmed applied to production.
+      # Experiment 5 section). research_sentiment_archive (migration 0015)
+      # and research_hypotheses (migration 0008) are now applied to
+      # production D1 (confirmed directly, read-only, before this change) --
+      # continue-on-error has been removed so a real failure of this step
+      # now fails the job and is visible, matching the live-evidence-
+      # collection step above.
       - name: Run Experiment 5 agent pipeline
-        continue-on-error: true
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
         run: python3 scripts/experiment5-agent/run.py

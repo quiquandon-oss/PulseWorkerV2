@@ -111,14 +111,20 @@ def build_update_decision_outcome_sql(hypothesis_id, evidence_summary_json, out_
     )
 
 
-def _build_local_mirror(history_rows, btc_rows, archived_observation_ts):
+def _build_local_mirror(history_rows, btc_rows, archived_observation_ts, now_ts):
     """A fresh, throwaway in-memory sqlite3 mirror -- never the real D1
     connection. history_rows/btc_rows are already-fetched real
     production rows (list[dict], from d1_query_fn); archived_observation_ts
     is the set of ts values already present in the REAL
     research_sentiment_archive table, used only to decide which history
     rows still need archiving (see module docstring "Idempotency against
-    real D1")."""
+    real D1"). now_ts is this pipeline run's own actual wall-clock time
+    -- passed through as archived_ts (when the observation was actually
+    captured into the archive), never the observation's own ts (when the
+    observation itself occurred). Conflating the two would make
+    archived_ts a mere copy of observation_ts, losing its purpose: a
+    later backfill/catch-up run archiving an old observation should
+    record TODAY as archived_ts, not the old observation's own moment."""
     conn = sqlite3.connect(":memory:")
     conn.execute("""CREATE TABLE research_sentiment_archive (
         archive_id INTEGER PRIMARY KEY AUTOINCREMENT, observation_ts INTEGER NOT NULL,
@@ -149,7 +155,7 @@ def _build_local_mirror(history_rows, btc_rows, archived_observation_ts):
                 conn, row["ts"], row.get("sources_json") or "{}", row["score"],
                 technical_score=row.get("technical_score"), btc_price=row.get("btc_price"),
                 gold_regime=row.get("gold_regime"), source_weights_version="v1-unversioned",
-                written_by="experiment5-pipeline", archived_ts=row["ts"],
+                written_by="experiment5-pipeline", archived_ts=now_ts,
             )
     for row in btc_rows:
         conn.execute("INSERT INTO btc_data (ts, btc_price) VALUES (?, ?)", (row["ts"], row["btc_price"]))
@@ -181,7 +187,7 @@ def run_pipeline(d1_query_fn, d1_execute_fn, now_ts):
         "WHERE subject LIKE 'experiment5:%' AND out_of_sample_status IS NULL"
     )
 
-    local_conn = _build_local_mirror(history_rows, btc_rows, archived_observation_ts)
+    local_conn = _build_local_mirror(history_rows, btc_rows, archived_observation_ts, now_ts)
 
     newly_archived = 0
     for row in local_conn.execute(
@@ -197,6 +203,35 @@ def run_pipeline(d1_query_fn, d1_execute_fn, now_ts):
             d1_execute_fn(build_insert_archive_sql(archive_row))
             newly_archived += 1
 
+    # Replay any decisions from PRIOR runs (fetched from real D1 above)
+    # into the local mirror BEFORE run_agent_cycle() creates any new
+    # decisions this cycle -- and BEFORE using their real hypothesis_id
+    # explicitly. SQLite's AUTOINCREMENT bookkeeping (sqlite_sequence)
+    # tracks the highest ROWID ever inserted into this table, whether
+    # inserted explicitly (as here) or via a bare autoincrement insert
+    # (as run_agent_cycle's own persist_experiment5_decision does below)
+    # -- so registering these real IDs first guarantees every
+    # subsequently auto-assigned local ID is strictly higher than any of
+    # them, making a collision with a real hypothesis_id structurally
+    # impossible, regardless of what those real ID values are.
+    #
+    # Previously this replay ran AFTER run_agent_cycle. Because the local
+    # mirror is fresh (empty) on every single pipeline run, its
+    # AUTOINCREMENT sequence always starts back at 1 -- so a newly
+    # created decision could be locally assigned an ID (e.g. 1) that
+    # collided with an already-used REAL hypothesis_id (e.g. also 1,
+    # likely early in this table's life) being replayed afterwards,
+    # raising sqlite3.IntegrityError and -- masked by the GitHub Actions
+    # step's continue-on-error -- silently halting the pipeline.
+    for row in pending_decision_rows:
+        local_conn.execute(
+            "INSERT INTO research_hypotheses (hypothesis_id, created_ts, last_updated_ts, subject, "
+            "statement, source_analysis_ids, status, evidence_summary_json, out_of_sample_status) "
+            "VALUES (?, ?, ?, 'experiment5:replayed', 'x', '[]', 'OBSERVATION', ?, NULL)",
+            (row["hypothesis_id"], now_ts, now_ts, row["evidence_summary_json"]),
+        )
+    local_conn.commit()
+
     cycle_result = agent.run_agent_cycle(local_conn, as_of_ts=now_ts, created_ts=now_ts)
     for hypothesis_id in cycle_result.get("decision_ids", []):
         row = local_conn.execute(
@@ -209,19 +244,15 @@ def run_pipeline(d1_query_fn, d1_execute_fn, now_ts):
             subject, statement, source_analysis_ids_json, status, evidence_summary_json, now_ts,
         ))
 
-    # Replay any decisions from PRIOR runs (fetched from real D1 above)
-    # into the local mirror so evaluate_pending_decisions can resolve
-    # them against this run's own fresh btc_data/history window, then
-    # replicate any newly-resolved outcome back to real D1.
-    for row in pending_decision_rows:
-        local_conn.execute(
-            "INSERT INTO research_hypotheses (hypothesis_id, created_ts, last_updated_ts, subject, "
-            "statement, source_analysis_ids, status, evidence_summary_json, out_of_sample_status) "
-            "VALUES (?, ?, ?, 'experiment5:replayed', 'x', '[]', 'OBSERVATION', ?, NULL)",
-            (row["hypothesis_id"], now_ts, now_ts, row["evidence_summary_json"]),
-        )
-    local_conn.commit()
-
+    # evaluate_pending_decisions reads every research_hypotheses row
+    # matching subject LIKE 'experiment5:%' AND out_of_sample_status IS
+    # NULL -- this now sees both the just-replayed prior-run decisions
+    # above and any decision run_agent_cycle just created this cycle.
+    # The latter always have an anchor_ts at or near now_ts, so their
+    # own horizon can never have resolved yet; only genuinely due,
+    # replayed decisions actually get evaluated here. Order relative to
+    # the replay above does not affect this step's own correctness --
+    # only the ID-collision fix above depends on ordering.
     evaluation = agent.evaluate_pending_decisions(local_conn, as_of_ts=now_ts, horizon_hours=24)
     for result in evaluation["results"]:
         row = local_conn.execute(

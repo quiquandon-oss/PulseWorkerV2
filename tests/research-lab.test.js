@@ -1307,3 +1307,249 @@ describe('Research Lab — read-only research API helpers', () => {
     });
   });
 });
+
+// Mobile-first UI redesign of the Sources tab's "Source Effectiveness
+// (EXP-005)" section (worker.js's own inline Research Lab page). These
+// functions are pure HTML-string builders/derivers -- no DOM, no fetch --
+// so they're extracted and eval'd exactly like the backend helpers above,
+// via the same regex-based extractFunctions harness (it works on raw
+// text, so it reaches functions nested inside the RESEARCH_LAB_HTML
+// template literal just as well as top-level ones). This redesign changes
+// presentation only: it reads the SAME getResearchLabSourceEffectiveness
+// payload shape verified in the describe block above, unchanged.
+describe('Research Lab Sources UI — mobile-first EXP-005 redesign', () => {
+  let ui;
+  beforeAll(() => {
+    ui = evalInScope(
+      extractFunctions('esc', 'badge', 'tile', 'emptyState', 'badgeForLevel1', 'badgeForNotAdvanced',
+        'fmtPValue', 'fmtEffectSize', 'deriveSourceEffectivenessSummary',
+        'renderSourceEffectivenessSummary', 'renderSourceEffectivenessGlossary',
+        'oosSummaryForSource', 'significantHorizonCount', 'redundancyChip',
+        'renderSourceHorizonTable', 'renderSourceExpandedDetail', 'renderSourceCompactCard',
+        'renderSourceEffectivenessSection')
+    );
+  });
+
+  const ALL_21 = [
+    'fng', 'funding', 'longshort', 'global', 'cryptonews', 'macrogeo',
+    'geopolitics', 'regulatory', 'sosovalue', 'onchain', 'oil', 'yield10y',
+    'usd', 'nasdaq', 'sp500', 'ninemag', 'foufi', 'etfflows', 'hypefunding',
+    'gold', 'strc',
+  ];
+  const HORIZONS = [1, 3, 6, 12, 24];
+
+  // Builds one source entry shaped exactly like
+  // getResearchLabSourceEffectiveness()'s own per-source output.
+  function makeSource(sourceKey, overrides = {}) {
+    const horizons = HORIZONS.map((h) => ({
+      horizon_hours: h,
+      level2: { n: 200, status: 'OK', sample_size_status: 'OK', effect_size_r: 0.05, p_raw: 0.4, p_corrected: 0.5, significant: false },
+      level3: { status: 'OK', n: 150, partial_correlation: 0.02, oos_status: 'NOT_IMPROVED', rmse_reduction_pct: -0.5 },
+      evidence_label: 'INCONCLUSIVE',
+    }));
+    return {
+      source_key: sourceKey,
+      level1_discovered: true,
+      level1_observed: true,
+      level1_status: 'OK',
+      coverage: { present: 480, missing: 20, coverage_pct: 96, distinct_values: 15, first_ts_present: 1000, last_ts_present: 2000000 },
+      level4_eligible_for_level2plus: true,
+      horizons,
+      any_significant_horizon: false,
+      redundancy_vs_composite: { n: 470, r: 0.12, strong_redundancy: false },
+      not_advanced_reason: 'NO_SIGNIFICANT_HORIZON',
+      level5_hypothesis_gate: { computed: false, reason: 'hypothesis_gate.py is not wired into any scheduled job.' },
+      ...overrides,
+    };
+  }
+  function makeSe(sources, overrides = {}) {
+    return {
+      ok: true,
+      activated: true,
+      analysis: { analysis_id: 2, analysis_ts: Date.now() - 3600000, age_hours: 1.0, freshness_note: 'weekly' },
+      data_window: {
+        configured_max_window_days: 90,
+        requested_window: { start_ts: 0, end_ts: 1 },
+        observed_data_range: { earliest_ts: 1000, latest_ts: 2000000, span_days: 20 },
+        n_history_rows_in_analysis: 500,
+        note: 'never described as 90 days of data',
+      },
+      sample_sufficiency_thresholds: { min_sample_level2: 30, min_sample_level3: 40 },
+      multiple_testing_correction: { method: 'benjamini_hochberg', alpha: 0.05, n_tests: 105 },
+      horizon_independence_note: 'adjacent horizons are not independent',
+      sources,
+      ...overrides,
+    };
+  }
+
+  describe('fmtPValue', () => {
+    it('never renders a tiny p-value as exactly zero', () => {
+      expect(ui.fmtPValue(0)).toBe('< 0.001');
+      expect(ui.fmtPValue(1e-12)).toBe('< 0.001');
+      expect(ui.fmtPValue(0.0009)).toBe('< 0.001');
+    });
+    it('formats an ordinary p-value to 3 decimals', () => {
+      expect(ui.fmtPValue(0.0421)).toBe('0.042');
+      expect(ui.fmtPValue(0.5)).toBe('0.500');
+    });
+    it('missing/malformed p-values degrade to an em dash, never a crash', () => {
+      expect(ui.fmtPValue(null)).toBe(String.fromCharCode(8212));
+      expect(ui.fmtPValue(undefined)).toBe(String.fromCharCode(8212));
+      expect(ui.fmtPValue(NaN)).toBe(String.fromCharCode(8212));
+      expect(ui.fmtPValue('not-a-number')).toBe(String.fromCharCode(8212));
+    });
+  });
+
+  describe('fmtEffectSize', () => {
+    it('signs positive values, leaves negative values alone, 3 decimals', () => {
+      expect(ui.fmtEffectSize(0.1234)).toBe('+0.123');
+      expect(ui.fmtEffectSize(-0.1234)).toBe('-0.123');
+      expect(ui.fmtEffectSize(0)).toBe('0.000');
+    });
+    it('missing/malformed effect sizes degrade to an em dash', () => {
+      expect(ui.fmtEffectSize(null)).toBe(String.fromCharCode(8212));
+      expect(ui.fmtEffectSize(NaN)).toBe(String.fromCharCode(8212));
+    });
+  });
+
+  describe('deriveSourceEffectivenessSummary', () => {
+    it('derives every count from the sources array itself -- never hardcoded', () => {
+      const sources = ALL_21.map((k) => makeSource(k));
+      sources[0] = makeSource(ALL_21[0], { any_significant_horizon: true });
+      sources[1] = makeSource(ALL_21[1], {
+        horizons: HORIZONS.map((h) => ({
+          horizon_hours: h,
+          level2: { n: 200, status: 'OK', sample_size_status: 'OK', effect_size_r: 0.05, p_corrected: 0.5, significant: false },
+          level3: { status: 'OK', n: 150, oos_status: h === 6 ? 'IMPROVED' : 'NOT_IMPROVED' },
+          evidence_label: 'INCONCLUSIVE',
+        })),
+      });
+      const summary = ui.deriveSourceEffectivenessSummary(makeSe(sources));
+      expect(summary.total).toBe(21);
+      expect(summary.discovered).toBe(21);
+      expect(summary.observed).toBe(21);
+      expect(summary.eligible).toBe(21);
+      expect(summary.any_significant).toBe(1);
+      expect(summary.oos_improved).toBe(1);
+      expect(summary.level5_computed).toBe(0);
+    });
+
+    it('a source not discovered/observed/eligible is correctly excluded from every relevant count', () => {
+      const sources = ALL_21.map((k) => makeSource(k));
+      sources[0] = makeSource(ALL_21[0], {
+        level1_discovered: false, level1_observed: false, level1_status: null,
+        coverage: null, level4_eligible_for_level2plus: false, horizons: [],
+        redundancy_vs_composite: null, not_advanced_reason: 'NOT_DISCOVERED_IN_WINDOW',
+      });
+      const summary = ui.deriveSourceEffectivenessSummary(makeSe(sources));
+      expect(summary.discovered).toBe(20);
+      expect(summary.observed).toBe(20);
+      expect(summary.eligible).toBe(20);
+    });
+
+    it('honestly reports level5_computed as nonzero if the backend ever reports one as computed (never assumed zero)', () => {
+      const sources = ALL_21.map((k) => makeSource(k));
+      sources[0] = makeSource(ALL_21[0], { level5_hypothesis_gate: { computed: true, reason: 'cleared' } });
+      const summary = ui.deriveSourceEffectivenessSummary(makeSe(sources));
+      expect(summary.level5_computed).toBe(1);
+    });
+
+    it('malformed input (no sources array) returns null rather than throwing or fabricating zeros', () => {
+      expect(ui.deriveSourceEffectivenessSummary(null)).toBeNull();
+      expect(ui.deriveSourceEffectivenessSummary({})).toBeNull();
+      expect(ui.deriveSourceEffectivenessSummary({ sources: 'not-an-array' })).toBeNull();
+    });
+  });
+
+  describe('renderSourceEffectivenessSection', () => {
+    it('all 21 known source keys are rendered exactly once as compact cards', () => {
+      const se = makeSe(ALL_21.map((k) => makeSource(k)));
+      const html = ui.renderSourceEffectivenessSection(se, null);
+      for (const key of ALL_21) {
+        const matches = html.match(new RegExp('data-src-key="' + key + '"', 'g')) || [];
+        expect(matches.length).toBe(1);
+      }
+    });
+
+    it('inactive/unactivated analysis: honest empty state, no summary or source cards fabricated', () => {
+      const html = ui.renderSourceEffectivenessSection({ ok: true, activated: false, reason: 'none yet' }, null);
+      expect(html).toContain('none yet');
+      expect(html).not.toContain('data-src-key');
+    });
+
+    it('a source with missing/null optional fields renders gracefully, never crashes the whole section', () => {
+      const broken = makeSource('oil', { coverage: null, redundancy_vs_composite: null, horizons: null, level5_hypothesis_gate: null });
+      const se = makeSe([...ALL_21.filter((k) => k !== 'oil').map((k) => makeSource(k)), broken]);
+      expect(() => ui.renderSourceEffectivenessSection(se, null)).not.toThrow();
+      const html = ui.renderSourceEffectivenessSection(se, null);
+      expect(html).toContain('data-src-key="oil"');
+    });
+
+    it('the Level 5 hypothesis gate is always rendered as its own, explicit NOT COMPUTED block when a source is expanded', () => {
+      const sig = makeSource('fng', { any_significant_horizon: true, not_advanced_reason: null });
+      const se = makeSe([sig, ...ALL_21.filter((k) => k !== 'fng').map((k) => makeSource(k))]);
+      const html = ui.renderSourceEffectivenessSection(se, 'fng');
+      expect(html).toMatch(/Level 5[\s\S]{0,200}NOT COMPUTED/);
+      // Significance is visibly distinct from the (uncomputed) Level 5 gate -- never conflated.
+      const gateIndex = html.indexOf('Level 5');
+      expect(gateIndex).toBeGreaterThan(-1);
+    });
+
+    it('expanding one source renders its per-horizon table; other sources stay collapsed', () => {
+      const se = makeSe(ALL_21.map((k) => makeSource(k)));
+      const html = ui.renderSourceEffectivenessSection(se, 'fng');
+      expect(html).toContain('class="tbl-responsive"');
+      // "Tap to collapse" should appear exactly once (only the expanded card), the rest say "Tap for per-horizon detail".
+      expect((html.match(/Tap to collapse/g) || []).length).toBe(1);
+      expect((html.match(/Tap for per-horizon detail/g) || []).length).toBe(20);
+    });
+
+    it('per-horizon table cells carry data-label attributes for the narrow-screen stacked layout', () => {
+      const se = makeSe(ALL_21.map((k) => makeSource(k)));
+      const html = ui.renderSourceEffectivenessSection(se, 'fng');
+      for (const label of ['Horizon', 'Sample size (n)', 'Effect size (r)', 'BH-adj. p', 'Significant', 'OOS result']) {
+        expect(html).toContain('data-label="' + label + '"');
+      }
+    });
+
+    it('tiny/zero p-values in the rendered table are never shown as exactly 0', () => {
+      const tiny = makeSource('fng', {
+        any_significant_horizon: true,
+        horizons: HORIZONS.map((h) => ({
+          horizon_hours: h,
+          level2: { n: 200, status: 'OK', sample_size_status: 'OK', effect_size_r: 0.3, p_corrected: h === 6 ? 0 : 0.5, significant: h === 6 },
+          level3: { status: 'OK', n: 150, oos_status: 'NOT_IMPROVED' },
+          evidence_label: h === 6 ? 'STATISTICALLY_SIGNIFICANT' : 'INCONCLUSIVE',
+        })),
+      });
+      const se = makeSe([tiny, ...ALL_21.filter((k) => k !== 'fng').map((k) => makeSource(k))]);
+      const html = ui.renderSourceEffectivenessSection(se, 'fng');
+      expect(html).toContain('&lt; 0.001');
+      expect(html).not.toMatch(/data-label="BH-adj\. p">0\.000</);
+    });
+
+    it('window/freshness distinction from the audit is preserved in the redesigned summary card', () => {
+      const se = makeSe(ALL_21.map((k) => makeSource(k)));
+      const html = ui.renderSourceEffectivenessSection(se, null);
+      expect(html).toContain('90d ceiling requested');
+      expect(html).toContain('20d actually observed');
+    });
+
+    it('includes an explicit caveat that significance/OOS improvement is not proof of predictive value and does not authorize production changes', () => {
+      const se = makeSe(ALL_21.map((k) => makeSource(k)));
+      const html = ui.renderSourceEffectivenessSection(se, null);
+      expect(html).toMatch(/not proof of predictive value/i);
+      expect(html).toMatch(/does not authorize any change to\s+production/i);
+    });
+
+    it('a glossary defines correlation, BH-adjusted p, redundancy, and OOS in plain language', () => {
+      const se = makeSe(ALL_21.map((k) => makeSource(k)));
+      const html = ui.renderSourceEffectivenessSection(se, null);
+      expect(html).toMatch(/Effect size \(r\)/);
+      expect(html).toMatch(/BH-adjusted p/);
+      expect(html).toMatch(/Redundancy/);
+      expect(html).toMatch(/OOS result/);
+      expect(html).toMatch(/Benjamini-Hochberg/);
+    });
+  });
+});

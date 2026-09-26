@@ -6690,6 +6690,351 @@ async function getResearchLabRegistry(env) {
   return { ok: true, experiments };
 }
 
+// ---- EXPERIMENT 5: agentic market evidence (research-lab UI layer) ----
+// Read-only display over research_sentiment_archive (migration 0015)
+// and research_hypotheses (migration 0008, subject LIKE 'experiment5:%')
+// -- the same two tables research/experiment5_pipeline.py's offline
+// GitHub Actions pipeline writes. Neither migration is applied to
+// production D1 as of this change, so EVERY function below wraps its
+// first D1 call in try/catch and returns an honest activated:false
+// (never a thrown 500, never fabricated data) until a human applies
+// both migrations as a separate, later step. This Worker has no live
+// Python execution -- classification/decision logic itself is never
+// recomputed here, only ever read back from what the offline pipeline
+// already decided (research/experiment5_agent.py); the few structural
+// rollups below (coverage, staleness, candidate-source detection) that
+// ARE mirrored in JS are plain counts, not statistical judgments, using
+// the exact same named constants as their Python source (documented at
+// each one), following this file's own existing precedent
+// (getResearchLabPipelineHealth's events-without-evidence query already
+// mirrors live_evidence_pipeline.py's query SHAPE the same way).
+
+const EXPERIMENT5_MIN_SAMPLE_FOR_CONCLUSION = 20;
+// Deliberately conservative -- same "do not draw a conclusion from a
+// handful of resolved decisions" discipline as this file's own
+// REQUIRED_SAMPLE_FALLBACK for EXP-004/005/009/010 above.
+
+async function getResearchLabExperiment5Overview(env) {
+  let archiveStats;
+  try {
+    archiveStats = await env.DB.prepare(
+      'SELECT COUNT(*) AS n, MIN(observation_ts) AS earliest_ts, MAX(observation_ts) AS latest_ts, MAX(archived_ts) AS latest_archived_ts FROM research_sentiment_archive'
+    ).first();
+  } catch (_err) {
+    return {
+      ok: true,
+      activated: false,
+      reason: 'Experiment 5 migrations (0008 research_hypotheses, 0015 research_sentiment_archive) are not yet applied to production D1.',
+    };
+  }
+
+  let decisions = null;
+  try {
+    const [proposed, resolved, passed, failed, inconclusive] = await Promise.all([
+      env.DB.prepare("SELECT COUNT(*) AS n FROM research_hypotheses WHERE subject LIKE 'experiment5:%'").first(),
+      env.DB.prepare("SELECT COUNT(*) AS n FROM research_hypotheses WHERE subject LIKE 'experiment5:%' AND out_of_sample_status IS NOT NULL").first(),
+      env.DB.prepare("SELECT COUNT(*) AS n FROM research_hypotheses WHERE subject LIKE 'experiment5:%' AND out_of_sample_status = 'PASSED_HOLDOUT'").first(),
+      env.DB.prepare("SELECT COUNT(*) AS n FROM research_hypotheses WHERE subject LIKE 'experiment5:%' AND out_of_sample_status = 'FAILED_HOLDOUT'").first(),
+      env.DB.prepare("SELECT COUNT(*) AS n FROM research_hypotheses WHERE subject LIKE 'experiment5:%' AND out_of_sample_status = 'INSUFFICIENT_DATA_FOR_HOLDOUT'").first(),
+    ]);
+    decisions = {
+      proposed: proposed ? proposed.n : 0, resolved: resolved ? resolved.n : 0,
+      passed: passed ? passed.n : 0, failed: failed ? failed.n : 0, inconclusive: inconclusive ? inconclusive.n : 0,
+    };
+  } catch (_err) {
+    // research_sentiment_archive exists but research_hypotheses does not
+    // (a partial/staged migration) -- disclose plainly, never crash.
+  }
+
+  // Pending decisions split into "not yet eligible" (own target horizon
+  // has not elapsed -- see research/experiment5_agent.py's eligible_ts,
+  // fixed at decision-creation time) vs "eligible, awaiting the next
+  // pipeline run". Purely a DISPLAY computation over already-persisted
+  // eligible_ts values -- never re-evaluates an outcome and never writes
+  // anything, so opening this page cannot itself resolve a decision.
+  const pendingBreakdown = { not_yet_eligible: 0, eligible_awaiting_resolution: 0 };
+  if (decisions) {
+    try {
+      const pendingRows = await env.DB.prepare(
+        "SELECT evidence_summary_json FROM research_hypotheses WHERE subject LIKE 'experiment5:%' AND out_of_sample_status IS NULL"
+      ).all();
+      const now = Date.now();
+      for (const row of (pendingRows && pendingRows.results) || []) {
+        let eligibleTs = null;
+        try {
+          const payload = JSON.parse(row.evidence_summary_json);
+          eligibleTs = payload && payload.decision && typeof payload.decision.eligible_ts === 'number'
+            ? payload.decision.eligible_ts : null;
+        } catch (_rowErr) { /* malformed row -- fall through to the honest "can't tell, count as awaiting" branch */ }
+        if (eligibleTs !== null && now < eligibleTs) pendingBreakdown.not_yet_eligible++;
+        else pendingBreakdown.eligible_awaiting_resolution++;
+      }
+    } catch (_err) { /* leave pendingBreakdown at zero -- honestly unknown, never fabricated */ }
+  }
+
+  return {
+    ok: true,
+    activated: true,
+    archive: {
+      n_observations: archiveStats ? archiveStats.n : 0,
+      earliest_observation_ts: archiveStats ? archiveStats.earliest_ts : null,
+      latest_observation_ts: archiveStats ? archiveStats.latest_ts : null,
+      latest_archived_ts: archiveStats ? archiveStats.latest_archived_ts : null,
+    },
+    decisions: decisions || { proposed: 0, resolved: 0, passed: 0, failed: 0, inconclusive: 0 },
+    pending_breakdown: pendingBreakdown,
+  };
+}
+
+async function getResearchLabExperiment5Decisions(env, opts) {
+  const limit = Math.max(1, Math.min(100, (opts && opts.limit) || 25));
+  const offset = Math.max(0, (opts && opts.offset) || 0);
+  const statusFilter = opts && opts.status; // 'pending' | 'resolved' | 'passed' | 'failed' | undefined (all)
+  let whereExtra = '';
+  if (statusFilter === 'pending') whereExtra = ' AND out_of_sample_status IS NULL';
+  else if (statusFilter === 'resolved') whereExtra = ' AND out_of_sample_status IS NOT NULL';
+  else if (statusFilter === 'passed') whereExtra = " AND out_of_sample_status = 'PASSED_HOLDOUT'";
+  else if (statusFilter === 'failed') whereExtra = " AND out_of_sample_status = 'FAILED_HOLDOUT'";
+
+  let total, rows;
+  try {
+    const totalRow = await env.DB.prepare(
+      `SELECT COUNT(*) AS n FROM research_hypotheses WHERE subject LIKE 'experiment5:%'${whereExtra}`
+    ).first();
+    total = totalRow ? totalRow.n : 0;
+    const result = await env.DB.prepare(
+      `SELECT hypothesis_id, created_ts, last_updated_ts, subject, statement, status, evidence_summary_json, out_of_sample_status
+       FROM research_hypotheses WHERE subject LIKE 'experiment5:%'${whereExtra}
+       ORDER BY created_ts DESC LIMIT ? OFFSET ?`
+    ).bind(limit, offset).all();
+    rows = (result && result.results) || [];
+  } catch (_err) {
+    return { ok: true, activated: false, total: 0, limit, offset, decisions: [] };
+  }
+
+  const now = Date.now();
+  const decisions = rows.map((row) => {
+    let payload = {};
+    try { payload = JSON.parse(row.evidence_summary_json) || {}; } catch (_e) { payload = {}; }
+    const decision = payload.decision || {};
+    const eligibleTs = typeof decision.eligible_ts === 'number' ? decision.eligible_ts : null;
+    let eligibility;
+    if (row.out_of_sample_status) eligibility = 'RESOLVED';
+    else if (eligibleTs !== null && now < eligibleTs) eligibility = 'NOT_YET_ELIGIBLE';
+    else eligibility = 'ELIGIBLE_AWAITING_RESOLUTION';
+    return {
+      hypothesis_id: row.hypothesis_id,
+      created_ts: row.created_ts,
+      last_updated_ts: row.last_updated_ts,
+      subject: row.subject,
+      statement: row.statement,
+      status: row.status,
+      out_of_sample_status: row.out_of_sample_status,
+      eligibility,
+      primary_source: decision.primary_source != null ? decision.primary_source : null,
+      direction: decision.direction != null ? decision.direction : null,
+      anchor_ts: decision.anchor_ts != null ? decision.anchor_ts : null,
+      target_horizon_hours: decision.target_horizon_hours != null ? decision.target_horizon_hours : null,
+      eligible_ts: eligibleTs,
+      confirmation: decision.confirmation || null,
+      classifications: decision.classifications || null,
+      outcome: payload.outcome || null,
+    };
+  });
+  return { ok: true, activated: true, total, limit, offset, decisions };
+}
+
+async function getResearchLabExperiment5Results(env) {
+  let rows;
+  try {
+    const result = await env.DB.prepare(
+      "SELECT evidence_summary_json FROM research_hypotheses WHERE subject LIKE 'experiment5:%' AND out_of_sample_status IS NOT NULL"
+    ).all();
+    rows = (result && result.results) || [];
+  } catch (_err) {
+    return { ok: true, activated: false, n_resolved: 0 };
+  }
+
+  let agentCorrect = 0, agentEvaluable = 0, v1Correct = 0, v1Evaluable = 0;
+  for (const row of rows) {
+    let payload;
+    try { payload = JSON.parse(row.evidence_summary_json); } catch (_e) { continue; }
+    const outcome = payload && payload.outcome;
+    if (!outcome) continue;
+    if (outcome.agent_correct === true) { agentCorrect++; agentEvaluable++; }
+    else if (outcome.agent_correct === false) { agentEvaluable++; }
+    if (outcome.v1_baseline_correct === true) { v1Correct++; v1Evaluable++; }
+    else if (outcome.v1_baseline_correct === false) { v1Evaluable++; }
+  }
+  const sufficientSample = agentEvaluable >= EXPERIMENT5_MIN_SAMPLE_FOR_CONCLUSION;
+  return {
+    ok: true,
+    activated: true,
+    n_resolved: rows.length,
+    agent_accuracy: agentEvaluable ? Math.round((agentCorrect / agentEvaluable) * 1000) / 1000 : null,
+    agent_n: agentEvaluable,
+    v1_baseline_accuracy: v1Evaluable ? Math.round((v1Correct / v1Evaluable) * 1000) / 1000 : null,
+    v1_baseline_n: v1Evaluable,
+    min_sample_for_conclusion: EXPERIMENT5_MIN_SAMPLE_FOR_CONCLUSION,
+    sufficient_sample: sufficientSample,
+    note: sufficientSample
+      ? 'Descriptive comparison over all resolved decisions so far -- not a significance test, not a claim of improvement.'
+      : 'Not enough validated observations to draw a reliable conclusion (' + agentEvaluable + ' of ' + EXPERIMENT5_MIN_SAMPLE_FOR_CONCLUSION + ' minimum resolved).',
+  };
+}
+
+async function getResearchLabExperiment5SentimentSeries(env, sinceTs) {
+  const boundedSince = typeof sinceTs === 'number' && sinceTs > 0 ? sinceTs : (Date.now() - 30 * 24 * 3600000);
+  try {
+    const result = await env.DB.prepare(
+      'SELECT observation_ts, score, technical_score, btc_price, sources_json FROM research_sentiment_archive WHERE observation_ts >= ? ORDER BY observation_ts ASC'
+    ).bind(boundedSince).all();
+    return { ok: true, activated: true, since_ts: boundedSince, series: (result && result.results) || [] };
+  } catch (_err) {
+    return { ok: true, activated: false, since_ts: boundedSince, series: [] };
+  }
+}
+
+const EXPERIMENT5_KNOWN_V1_SOURCE_IDS = new Set([
+  'fng', 'funding', 'longshort', 'global', 'cryptonews', 'macrogeo',
+  'geopolitics', 'regulatory', 'sosovalue', 'onchain', 'oil', 'yield10y',
+  'usd', 'nasdaq', 'sp500', 'ninemag', 'foufi', 'etfflows', 'hypefunding',
+  'gold', 'strc',
+]);
+// Mirrors research/source_intelligence.py's KNOWN_V1_SOURCE_IDS exactly
+// (same 21 ids). Used only to flag an unrecognized key as a candidate
+// for future human consideration -- never auto-added anywhere.
+const EXPERIMENT5_STALE_AFTER_N_OBSERVATIONS = 10;
+// Mirrors research/source_intelligence.py's STALE_AFTER_N_OBSERVATIONS
+// exactly (same value, same meaning -- a source whose value has not
+// changed across this many of its own trailing appearances is flagged
+// stale, a descriptive flag, not a claim the feed is broken).
+
+async function getResearchLabExperiment5SourceIntelligence(env) {
+  let rows;
+  try {
+    const result = await env.DB.prepare(
+      'SELECT sources_json FROM research_sentiment_archive ORDER BY observation_ts DESC LIMIT 200'
+    ).all();
+    rows = (result && result.results) || [];
+  } catch (_err) {
+    return { ok: true, activated: false, sources: [], candidate_new_sources: [] };
+  }
+
+  const perSourceValues = {}; // key -> values, most-recent-first (rows are already DESC)
+  const candidateKeys = new Set();
+  for (const row of rows) {
+    let parsed;
+    try { parsed = JSON.parse(row.sources_json); } catch (_e) { continue; }
+    if (!parsed || typeof parsed !== 'object') continue;
+    for (const [key, value] of Object.entries(parsed)) {
+      (perSourceValues[key] || (perSourceValues[key] = [])).push(value);
+      if (!EXPERIMENT5_KNOWN_V1_SOURCE_IDS.has(key)) candidateKeys.add(key);
+    }
+  }
+  const nRows = rows.length;
+  const sources = Object.keys(perSourceValues).sort().map((key) => {
+    const values = perSourceValues[key];
+    const trailing = values.slice(0, EXPERIMENT5_STALE_AFTER_N_OBSERVATIONS);
+    const isStale = trailing.length >= EXPERIMENT5_STALE_AFTER_N_OBSERVATIONS && new Set(trailing).size === 1;
+    return {
+      source_key: key,
+      is_known_v1_source: EXPERIMENT5_KNOWN_V1_SOURCE_IDS.has(key),
+      n_present: values.length,
+      n_rows: nRows,
+      coverage_pct: nRows ? Math.round((values.length / nRows) * 1000) / 10 : null,
+      is_stale: isStale,
+    };
+  });
+  return { ok: true, activated: true, window_rows: nRows, candidate_new_sources: [...candidateKeys].sort(), sources };
+}
+
+async function getResearchLabTimeline(env, limit) {
+  const boundedLimit = Math.max(1, Math.min(200, limit || 50));
+  const items = [];
+  try {
+    const events = await env.DB.prepare(
+      'SELECT event_id, event_ts, category, direction FROM research_events ORDER BY event_ts DESC LIMIT ?'
+    ).bind(boundedLimit).all();
+    for (const e of (events && events.results) || []) {
+      items.push({ ts: e.event_ts, kind: 'MARKET_EVENT', label: e.category + (e.direction ? ' (' + e.direction + ')' : ''), ref: { event_id: e.event_id } });
+    }
+  } catch (_err) { /* research_events already exists in production today; degrade silently if it ever doesn't */ }
+
+  try {
+    const decisions = await env.DB.prepare(
+      "SELECT hypothesis_id, created_ts, last_updated_ts, subject, out_of_sample_status FROM research_hypotheses WHERE subject LIKE 'experiment5:%' ORDER BY created_ts DESC LIMIT ?"
+    ).bind(boundedLimit).all();
+    for (const d of (decisions && decisions.results) || []) {
+      items.push({ ts: d.created_ts, kind: 'EXPERIMENT5_DECISION_CREATED', label: d.subject, ref: { hypothesis_id: d.hypothesis_id } });
+      // Every timeline build re-derives both items straight from the
+      // persisted row -- never appends to a stored feed -- so refreshing
+      // never duplicates an entry and a resolution always replaces its
+      // own prior "still pending" state rather than stacking a new one.
+      if (d.out_of_sample_status) {
+        items.push({
+          ts: d.last_updated_ts, kind: 'EXPERIMENT5_OUTCOME_RESOLVED',
+          label: d.subject + ' -> ' + d.out_of_sample_status, ref: { hypothesis_id: d.hypothesis_id },
+        });
+      }
+    }
+  } catch (_err) { /* not yet activated -- degrade silently, the research_events-only timeline above still returns */ }
+
+  items.sort((a, b) => b.ts - a.ts);
+  return { ok: true, items: items.slice(0, boundedLimit) };
+}
+
+// Pure, deterministic, rule-based -- no AI/LLM call, no invented claim.
+// Every sentence is conditioned on an explicit field already present in
+// already-fetched, already-persisted API responses; a field that is
+// missing/zero produces an honest "not enough evidence" sentence
+// instead of being silently skipped.
+function buildExperiment5NarrativeSummary(overview, results) {
+  if (!overview || !overview.activated) {
+    return ['Experiment 5 is not yet active in production -- its database migrations have not been applied. All figures below are unavailable.'];
+  }
+  const lines = [];
+  const arch = overview.archive || {};
+  if (!arch.n_observations) {
+    lines.push('No sentiment observations have been archived yet.');
+    return lines;
+  }
+  lines.push(
+    arch.n_observations + ' sentiment observation(s) archived so far, most recently at ' +
+    new Date(arch.latest_observation_ts).toISOString() + '.'
+  );
+  const dec = overview.decisions;
+  if (dec && dec.proposed) {
+    lines.push(
+      dec.proposed + ' decision(s) proposed; ' + dec.resolved + ' resolved (' +
+      dec.passed + ' matched the realized direction, ' + dec.failed + ' did not, ' +
+      dec.inconclusive + ' inconclusive).'
+    );
+  } else {
+    lines.push('No decisions have been proposed yet.');
+  }
+  if (results && results.activated && results.n_resolved > 0) {
+    if (results.sufficient_sample) {
+      lines.push(
+        'Challenger directional accuracy: ' + Math.round(results.agent_accuracy * 100) + '% over ' +
+        results.agent_n + ' resolved decisions, vs. V1 baseline ' + Math.round(results.v1_baseline_accuracy * 100) +
+        '% over ' + results.v1_baseline_n + '. Descriptive only -- not a significance test.'
+      );
+    } else {
+      lines.push(
+        'Not enough validated observations to draw a reliable conclusion (' + results.agent_n +
+        ' of ' + results.min_sample_for_conclusion + ' minimum resolved).'
+      );
+    }
+  }
+  const pb = overview.pending_breakdown;
+  if (pb) {
+    if (pb.not_yet_eligible > 0) lines.push(pb.not_yet_eligible + ' decision(s) awaiting their target evaluation horizon.');
+    if (pb.eligible_awaiting_resolution > 0) lines.push(pb.eligible_awaiting_resolution + ' decision(s) eligible for evaluation, awaiting the next pipeline run.');
+  }
+  return lines;
+}
+
 // Self-contained static page (vanilla HTML/CSS/JS, no build step, no
 // framework, no CDN dependency) -- this Worker has no existing static-
 // asset pipeline or [assets] binding, so embedding the page as a
@@ -6902,7 +7247,7 @@ const RESEARCH_LAB_HTML = `<!DOCTYPE html>
 <main id="app"></main>
 <script>
 (function () {
-  var PAGES = ['Dashboard', 'Events', 'Evidence', 'Sources', 'Pipeline'];
+  var PAGES = ['Dashboard', 'Experiment 5', 'Sentiment', 'Market', 'Results', 'Timeline', 'Methodology', 'Events', 'Evidence', 'Sources', 'Pipeline'];
   var nav = document.getElementById('nav');
   var app = document.getElementById('app');
   var current = 'Dashboard';
@@ -7366,10 +7711,309 @@ const RESEARCH_LAB_HTML = `<!DOCTYPE html>
     app.innerHTML = html;
   }
 
+  // =====================================================================
+  // Experiment 5 -- primary challenger experience. Every number here
+  // comes straight from /api/research-lab/experiment5-* -- this script
+  // never computes a classification, an outcome, or a comparison verdict
+  // itself; it only formats what those endpoints already decided.
+  // =====================================================================
+  var exp5DecisionFilter = 'all';
+  var exp5ExpandedId = null;
+
+  function eligibilityBadge(elig) {
+    if (elig === 'RESOLVED') return badge('RESOLVED', 'b-strong');
+    if (elig === 'NOT_YET_ELIGIBLE') return badge('NOT YET ELIGIBLE', 'b-outline');
+    return badge('ELIGIBLE ' + String.fromCharCode(8212) + ' AWAITING RESOLUTION', 'b-plausible');
+  }
+  function outcomeBadge(status) {
+    if (status === 'PASSED_HOLDOUT') return badge('MATCHED REALIZED DIRECTION', 'b-verified');
+    if (status === 'FAILED_HOLDOUT') return badge('DID NOT MATCH', 'b-blocked');
+    if (status === 'INSUFFICIENT_DATA_FOR_HOLDOUT') return badge('INCONCLUSIVE', 'b-unknown');
+    return '';
+  }
+  function directionLabel(dir) {
+    return dir === 1 ? 'UP' : dir === -1 ? 'DOWN' : String.fromCharCode(8212);
+  }
+
+  function renderMiniLineChart(points, valueKey, opts) {
+    var pts = (points || []).filter(function (p) { return p[valueKey] !== null && p[valueKey] !== undefined; });
+    if (pts.length < 2) return emptyState('Not enough data yet', 'A chart needs at least two points.');
+    var w = 320, h = 110, padL = 44, padR = 10, padT = 10, padB = 20;
+    function tsOf(p) { return p.observation_ts !== undefined ? p.observation_ts : p.ts; }
+    var vals = pts.map(function (p) { return p[valueKey]; });
+    var minV = Math.min.apply(null, vals), maxV = Math.max.apply(null, vals);
+    if (minV === maxV) { minV -= 1; maxV += 1; }
+    var minTs = tsOf(pts[0]), maxTs = tsOf(pts[pts.length - 1]);
+    function x(ts) { return padL + (maxTs === minTs ? 0 : (ts - minTs) / (maxTs - minTs)) * (w - padL - padR); }
+    function y(v) { return padT + (1 - (v - minV) / (maxV - minV)) * (h - padT - padB); }
+    var d = pts.map(function (p, i) { return (i === 0 ? 'M' : 'L') + x(tsOf(p)).toFixed(1) + ',' + y(p[valueKey]).toFixed(1); }).join(' ');
+    var color = (opts && opts.color) || '#6d7bff';
+    return '<svg viewBox="0 0 ' + w + ' ' + h + '" preserveAspectRatio="none">' +
+      '<path d="' + d + '" fill="none" stroke="' + color + '" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"></path>' +
+      '<text class="chart-axis" x="' + padL + '" y="' + (h - 4) + '">' + esc(fmtTs(minTs).split(',')[0]) + '</text>' +
+      '<text class="chart-axis" x="' + (w - padR) + '" y="' + (h - 4) + '" text-anchor="end">' + esc(fmtTs(maxTs).split(',')[0]) + '</text>' +
+      '<text class="chart-axis" x="2" y="' + (padT + 8) + '">' + Math.round(maxV) + '</text>' +
+      '<text class="chart-axis" x="2" y="' + (h - padB) + '">' + Math.round(minV) + '</text>' +
+      '</svg>';
+  }
+
+  function renderDecisionDetail(d) {
+    var html = '<div class="ev-row"><span class="k">Anchor time</span><span class="v">' + esc(fmtTs(d.anchor_ts)) + '</span></div>';
+    if (d.eligible_ts) html += '<div class="ev-row"><span class="k">Eligible from</span><span class="v">' + esc(fmtTs(d.eligible_ts)) + '</span></div>';
+    if (d.confirmation) {
+      html += '<div class="ev-row"><span class="k">Confirmation</span><span class="v">' + esc(d.confirmation.classification) +
+        (d.confirmation.confirming_sources && d.confirmation.confirming_sources.length ? ' (' + d.confirmation.confirming_sources.join(', ') + ')' : '') +
+        '</span></div>';
+    }
+    if (d.classifications) {
+      var keys = Object.keys(d.classifications);
+      for (var i = 0; i < keys.length; i++) {
+        var c = d.classifications[keys[i]];
+        html += '<div class="ev-row"><span class="k">' + esc(keys[i]) + '</span><span class="v">' + esc(c.sequence ? c.sequence.classification : String.fromCharCode(8212)) + '</span></div>';
+      }
+    }
+    if (d.outcome) {
+      html += '<div class="ev-row"><span class="k">Realized direction</span><span class="v">' + esc(d.outcome.realized_direction) + '</span></div>';
+      html += '<div class="ev-row"><span class="k">Forward return</span><span class="v">' + (d.outcome.forward_return_pct != null ? d.outcome.forward_return_pct.toFixed(2) + '%' : String.fromCharCode(8212)) + '</span></div>';
+      html += '<div class="ev-row"><span class="k">V1 baseline direction</span><span class="v">' + esc(d.outcome.v1_baseline_direction) + '</span></div>';
+      html += '<div class="ev-row"><span class="k">V1 baseline correct</span><span class="v">' + (d.outcome.v1_baseline_correct === true ? 'Yes' : d.outcome.v1_baseline_correct === false ? 'No' : String.fromCharCode(8212)) + '</span></div>';
+    }
+    return html;
+  }
+
+  async function renderExperiment5() {
+    app.innerHTML = '<div class="skeleton">Loading Experiment 5&hellip;</div>';
+    var overview = await fetchJson('/api/research-lab/experiment5-overview');
+    if (!overview.ok) { app.innerHTML = emptyState('Could not load Experiment 5', ''); return; }
+    if (!overview.activated) {
+      app.innerHTML = '<div class="card"><h2 class="card-title">Experiment 5 ' + String.fromCharCode(8212) + ' Agentic Market Evidence</h2>' +
+        emptyState('Not yet active in production', overview.reason || 'Its database migrations have not been applied yet.') + '</div>';
+      return;
+    }
+
+    var qs = '?limit=25' + (exp5DecisionFilter !== 'all' ? '&status=' + exp5DecisionFilter : '');
+    var decisionsResp = await fetchJson('/api/research-lab/experiment5-decisions' + qs);
+
+    var html = '<div class="card glow"><h2 class="card-title">What Experiment 5 is</h2><p>' +
+      'A deterministic, zero-AI challenger that permanently archives every sentiment observation, classifies its dynamics (trend, reversal, cross-source confirmation), proposes a directional decision when the evidence is notable, and later scores that decision against what BTC price actually did ' +
+      String.fromCharCode(8212) + ' alongside V1’s own baseline call for the same moment. It never influences V1’s production predictions, weights, or selection.' +
+      '</p></div>';
+
+    if (overview.narrative && overview.narrative.length) {
+      html += '<div class="card"><h2 class="card-title">In plain language</h2>' +
+        overview.narrative.map(function (l) { return '<p>' + esc(l) + '</p>'; }).join('') + '</div>';
+    }
+
+    html += '<div class="grid metrics">' +
+      tile('Archived Observations', overview.archive.n_observations, 'research_sentiment_archive') +
+      tile('Decisions Proposed', overview.decisions.proposed, 'experiment5:* subjects') +
+      tile('Resolved', overview.decisions.resolved, overview.decisions.passed + ' matched, ' + overview.decisions.failed + ' did not') +
+      tile('Awaiting Resolution', overview.pending_breakdown.not_yet_eligible + overview.pending_breakdown.eligible_awaiting_resolution,
+        overview.pending_breakdown.not_yet_eligible + ' not yet eligible, ' + overview.pending_breakdown.eligible_awaiting_resolution + ' eligible') +
+      '</div>';
+
+    html += '<h2 class="section-title">Lifecycle</h2><div class="card"><div class="flow">' +
+      flowStage(1, 'Observation ingestion', 'V1’s sentiment write is mirrored, unmodified, alongside its existing write path.', badge(overview.archive.n_observations + ' archived', 'b-strong')) +
+      flowStage(2, 'Permanent archival', 'Never deleted or overwritten ' + String.fromCharCode(8212) + ' fixes V1’s own 500-row cap.', badge('latest: ' + (overview.archive.latest_observation_ts ? fmtAgo(overview.archive.latest_observation_ts) : String.fromCharCode(8212)), 'b-outline')) +
+      flowStage(3, 'Source intelligence', 'New/stale/redundant source detection over the archive.', badge('see Sentiment tab', 'b-outline')) +
+      flowStage(4, 'Dynamics detection', 'Trend, reversal, acceleration, cross-source confirmation.', badge('deterministic, no AI', 'b-outline')) +
+      flowStage(5, 'Decision creation', 'A proposal is written only on cross-source confirmation or reversal.', badge(overview.decisions.proposed + ' created', 'b-strong')) +
+      flowStage(6, 'Outcome eligibility', 'Never evaluated before its own declared horizon has elapsed.', badge(overview.pending_breakdown.not_yet_eligible + ' not yet eligible', 'b-outline')) +
+      flowStage(7, 'Outcome resolution', 'Resolved against realized BTC direction, no lookahead.', badge(overview.decisions.resolved + ' resolved', 'b-strong')) +
+      flowStage(8, 'Evaluation vs. V1', 'Scored against V1’s own baseline call for the identical moment.', badge('see Results tab', 'b-outline')) +
+      '</div></div>';
+
+    html += '<h2 class="section-title">Decisions</h2>';
+    html += '<div class="chart-ranges">' + ['all', 'pending', 'resolved', 'passed', 'failed'].map(function (f) {
+      return '<button data-filter="' + f + '" class="' + (f === exp5DecisionFilter ? 'active' : '') + '">' + f + '</button>';
+    }).join('') + '</div>';
+
+    if (!decisionsResp.ok || !decisionsResp.decisions.length) {
+      html += '<div class="card">' + emptyState('No decisions in this filter', 'Nothing has been proposed matching this filter yet.') + '</div>';
+    } else {
+      for (var i = 0; i < decisionsResp.decisions.length; i++) {
+        var d = decisionsResp.decisions[i];
+        var expanded = exp5ExpandedId === d.hypothesis_id;
+        html += '<div class="item-card" data-decision-id="' + d.hypothesis_id + '">' +
+          '<div class="ev-head"><span class="ev-cat">' + esc(d.subject) + '</span>' + eligibilityBadge(d.eligibility) + '</div>' +
+          '<div class="ev-row"><span class="k">Decided</span><span class="v">' + esc(fmtTs(d.created_ts)) + '</span></div>' +
+          '<div class="ev-row"><span class="k">Primary source</span><span class="v">' + esc(d.primary_source) + '</span></div>' +
+          '<div class="ev-row"><span class="k">Direction</span><span class="v">' + directionLabel(d.direction) + '</span></div>' +
+          '<div class="ev-row"><span class="k">Target horizon</span><span class="v">' + (d.target_horizon_hours ? d.target_horizon_hours + 'h' : String.fromCharCode(8212)) + '</span></div>' +
+          (d.out_of_sample_status ? '<div class="ev-row"><span class="k">Outcome</span><span class="v">' + outcomeBadge(d.out_of_sample_status) + '</span></div>' : '') +
+          (expanded ? renderDecisionDetail(d) : '') +
+          '<div class="tap-hint">' + (expanded ? 'Tap to collapse' : 'Tap for evidence &amp; provenance') + '</div>' +
+          '</div>';
+      }
+    }
+
+    app.innerHTML = html;
+
+    var filterBtns = app.querySelectorAll('[data-filter]');
+    for (var fi = 0; fi < filterBtns.length; fi++) {
+      filterBtns[fi].addEventListener('click', function (e) {
+        exp5DecisionFilter = e.currentTarget.dataset.filter;
+        exp5ExpandedId = null;
+        renderExperiment5();
+      });
+    }
+    var cards = app.querySelectorAll('[data-decision-id]');
+    for (var ci = 0; ci < cards.length; ci++) {
+      cards[ci].addEventListener('click', function (e) {
+        var id = parseInt(e.currentTarget.dataset.decisionId, 10);
+        exp5ExpandedId = (exp5ExpandedId === id) ? null : id;
+        renderExperiment5();
+      });
+    }
+  }
+
+  async function renderSentiment() {
+    app.innerHTML = '<div class="skeleton">Loading sentiment intelligence&hellip;</div>';
+    var series = await fetchJson('/api/research-lab/experiment5-sentiment');
+    var sourceIntel = await fetchJson('/api/research-lab/experiment5-source-intelligence');
+    if (!series.ok || !series.activated) {
+      app.innerHTML = '<div class="card"><h2 class="card-title">Sentiment Intelligence</h2>' +
+        emptyState('Not yet active in production', 'The permanent sentiment archive has not been activated yet.') + '</div>';
+      return;
+    }
+    var html = '<div class="card"><h2 class="card-title">Composite sentiment score</h2>' +
+      '<p>Experiment 5’s own permanent archive, since it began ' + String.fromCharCode(8212) + ' not V1’s own 500-row-capped history, so earlier observations are only present from whenever archival started.</p>' +
+      '<div class="chart-wrap">' + renderMiniLineChart(series.series, 'score', { color: '#6d7bff' }) + '</div></div>';
+
+    html += '<h2 class="section-title">Source intelligence</h2>';
+    if (!sourceIntel.ok || !sourceIntel.activated || !sourceIntel.sources.length) {
+      html += '<div class="card">' + emptyState('No sources observed yet', '') + '</div>';
+    } else {
+      if (sourceIntel.candidate_new_sources.length) {
+        html += '<div class="card"><h2 class="card-title">Candidate new sources</h2><p>Present in recent observations but not among V1’s 21 known sources. Reported only ' + String.fromCharCode(8212) + ' never auto-added.</p><p>' +
+          sourceIntel.candidate_new_sources.map(function (k) { return badge(k, 'b-plausible'); }).join(' ') + '</p></div>';
+      }
+      html += '<div class="table-wrap"><table><thead><tr><th>Source</th><th>Coverage</th><th>Status</th></tr></thead><tbody>';
+      for (var i = 0; i < sourceIntel.sources.length; i++) {
+        var s = sourceIntel.sources[i];
+        html += '<tr><td>' + esc(s.source_key) + (s.is_known_v1_source ? '' : ' ' + badge('NEW', 'b-plausible')) + '</td>' +
+          '<td>' + (s.coverage_pct != null ? s.coverage_pct + '%' : String.fromCharCode(8212)) + '</td>' +
+          '<td>' + (s.is_stale ? badge('STALE', 'b-blocked') : badge('ACTIVE', 'b-verified')) + '</td></tr>';
+      }
+      html += '</tbody></table></div>';
+    }
+
+    html += '<div class="card"><h2 class="card-title">Repetition vs. independent confirmation</h2><p>' +
+      'A repeated mention of the same underlying story contributes less each time it recurs (diminishing returns) ' + String.fromCharCode(8212) + ' it is never treated as new evidence. Independent confirmation requires distinct sources agreeing in direction within a documented time window; see each decision’s own "Confirmation" field on the Experiment 5 tab for exactly which sources counted, for that decision.' +
+      '</p></div>';
+
+    app.innerHTML = html;
+  }
+
+  async function renderMarket() {
+    app.innerHTML = '<div class="skeleton">Loading market alignment&hellip;</div>';
+    var series = await fetchJson('/api/research-lab/experiment5-sentiment');
+    if (!series.ok || !series.activated || !series.series.length) {
+      app.innerHTML = '<div class="card"><h2 class="card-title">Market Alignment</h2>' +
+        emptyState('Not enough data yet', 'Needs archived observations that also carry a BTC price.') + '</div>';
+      return;
+    }
+    var withPrice = series.series.filter(function (p) { return p.btc_price !== null && p.btc_price !== undefined; });
+    var html = '<div class="card"><h2 class="card-title">Sentiment vs. BTC price</h2>' +
+      '<p>Experiment 5’s archive currently covers BTC composite sentiment only ' + String.fromCharCode(8212) + ' ETH and LINK are not part of this experiment.</p>';
+    if (withPrice.length < 2) {
+      html += emptyState('Not enough paired observations yet', 'Needs at least two archived rows that also carry a BTC price.');
+    } else {
+      html += '<div class="chart-wrap">' + renderMiniLineChart(withPrice, 'btc_price', { color: '#4a9fe0' }) + '</div>' +
+        '<div class="chart-wrap" style="margin-top:8px">' + renderMiniLineChart(withPrice, 'score', { color: '#6d7bff' }) + '</div>';
+      var first = withPrice[0], last = withPrice[withPrice.length - 1];
+      var priceDir = last.btc_price > first.btc_price ? 'UP' : last.btc_price < first.btc_price ? 'DOWN' : 'FLAT';
+      var sentDir = last.score > first.score ? 'UP' : last.score < first.score ? 'DOWN' : 'FLAT';
+      var relation;
+      if (priceDir === sentDir && priceDir !== 'FLAT') relation = 'Sentiment and price moved in the same direction over this window.';
+      else if (priceDir !== sentDir && priceDir !== 'FLAT' && sentDir !== 'FLAT') relation = 'Sentiment and price diverged over this window ' + String.fromCharCode(8212) + ' an observed relationship, not proof of a future price move.';
+      else relation = 'No clear joint direction over this window.';
+      html += '<p style="margin-top:10px">' + esc(relation) + '</p>';
+    }
+    html += '</div>';
+    app.innerHTML = html;
+  }
+
+  async function renderResults() {
+    app.innerHTML = '<div class="skeleton">Loading results&hellip;</div>';
+    var r = await fetchJson('/api/research-lab/experiment5-results');
+    if (!r.ok || !r.activated) {
+      app.innerHTML = '<div class="card"><h2 class="card-title">Results &amp; Comparison</h2>' +
+        emptyState('Not yet active in production', 'No resolved decisions exist yet.') + '</div>';
+      return;
+    }
+    var html = '<div class="card glow"><h2 class="card-title">Challenger vs. V1 baseline</h2>';
+    if (!r.sufficient_sample) {
+      html += '<p><b>Not enough validated observations to draw a reliable conclusion.</b></p>' +
+        '<p>' + r.agent_n + ' of ' + r.min_sample_for_conclusion + ' minimum resolved decisions so far.</p>';
+    } else {
+      html += '<div class="grid metrics">' +
+        tile('Challenger accuracy', Math.round(r.agent_accuracy * 100) + '%', 'n=' + r.agent_n) +
+        tile('V1 baseline accuracy', Math.round(r.v1_baseline_accuracy * 100) + '%', 'n=' + r.v1_baseline_n) +
+        '</div><p>' + esc(r.note) + '</p>';
+    }
+    html += '</div><div class="grid metrics">' + tile('Resolved', r.n_resolved, 'Total decisions with a known outcome') + '</div>';
+    app.innerHTML = html;
+  }
+
+  async function renderTimeline() {
+    app.innerHTML = '<div class="skeleton">Loading timeline&hellip;</div>';
+    var t = await fetchJson('/api/research-lab/timeline?limit=60');
+    if (!t.ok || !t.items.length) {
+      app.innerHTML = '<div class="card">' + emptyState('No timeline events yet', '') + '</div>';
+      return;
+    }
+    var kindLabel = {
+      MARKET_EVENT: 'MARKET EVENT',
+      EXPERIMENT5_DECISION_CREATED: 'DECISION CREATED',
+      EXPERIMENT5_OUTCOME_RESOLVED: 'OUTCOME RESOLVED',
+    };
+    var html = '<div class="card"><h2 class="card-title">Research Timeline</h2><div class="timeline">';
+    for (var i = 0; i < t.items.length; i++) {
+      var item = t.items[i];
+      html += '<div class="tl-item"><div class="tl-label">' + esc(fmtTs(item.ts).split(',')[0]) + '</div>' +
+        '<div class="tl-body">' + badge(kindLabel[item.kind] || item.kind, 'b-outline') + ' ' + esc(item.label) + '</div></div>';
+    }
+    html += '</div></div>';
+    app.innerHTML = html;
+  }
+
+  function glossCard(title, desc) {
+    return '<div class="gloss-card"><div class="gloss-title">' + esc(title) + '</div><div class="gloss-desc">' + esc(desc) + '</div></div>';
+  }
+
+  async function renderMethodology() {
+    app.innerHTML = '<div class="skeleton">Loading&hellip;</div>';
+    var r = await fetchJson('/api/research-lab/experiment5-results');
+    var minSample = (r && r.ok && r.activated) ? r.min_sample_for_conclusion : 'a documented minimum';
+    var html = '<div class="card"><h2 class="card-title">Methodology &amp; Evidence</h2><div class="glossary">' +
+      glossCard('No-lookahead', 'Every decision reads only observations at or before its own decision time. Outcomes are resolved only once a decision’s own declared horizon has actually elapsed -- never off a price point that merely happens to already exist.') +
+      glossCard('Provenance', 'Every archived observation records which source-weights version, schema version, and process wrote it, plus a content hash -- an existing archived row can never be silently overwritten.') +
+      glossCard('Eligibility vs. resolution', 'A decision becomes ELIGIBLE once its own target horizon elapses; it is RESOLVED only once the pipeline next runs and finds a qualifying price point. The two times are tracked separately.') +
+      glossCard('V1 baseline', 'Every resolved decision is also scored against V1’s own composite-score call for the identical moment -- the challenger is never compared to a strawman.') +
+      glossCard('Sample-size gating', 'A directional-accuracy comparison is only shown once at least ' + minSample + ' decisions have resolved. Below that, an honest limitation message is shown instead of a number.') +
+      glossCard('Repetition vs. confirmation', 'A repeated mention of the same story contributes less each time (diminishing returns). Independent confirmation requires distinct sources agreeing within a documented time window.') +
+      '</div></div>';
+    if (r && r.ok && r.activated) {
+      html += '<div class="card"><h2 class="card-title">Current evaluation population</h2><p>' +
+        r.n_resolved + ' resolved decision(s) as of this page load. Minimum required before any accuracy comparison is shown: ' + r.min_sample_for_conclusion + '.</p></div>';
+    }
+    html += '<div class="card"><h2 class="card-title">Known limitations</h2><p>' +
+      'Experiment 5 currently covers BTC composite sentiment only (not ETH/LINK). Decision triggers are limited to cross-source confirmation and reversal -- persistence, acceleration/deceleration, and contradiction are classified but do not yet themselves create a decision. It is not wired into V1’s own write path yet; it only reads whatever V1 has already written, each pipeline cycle.' +
+      '</p></div>';
+    app.innerHTML = html;
+  }
+
   async function render() {
     renderNav();
     if (lastDashboard) renderFreshness(lastDashboard);
     if (current === 'Dashboard') return renderDashboard();
+    if (current === 'Experiment 5') return renderExperiment5();
+    if (current === 'Sentiment') return renderSentiment();
+    if (current === 'Market') return renderMarket();
+    if (current === 'Results') return renderResults();
+    if (current === 'Timeline') return renderTimeline();
+    if (current === 'Methodology') return renderMethodology();
     if (current === 'Events') return renderEvents();
     if (current === 'Evidence') return renderEvidence();
     if (current === 'Sources') return renderSources();
@@ -8144,6 +8788,75 @@ export default {
     if (url.pathname === '/api/research-lab/registry' && request.method === 'GET') {
       try {
         const result = await getResearchLabRegistry(env);
+        return new Response(JSON.stringify(result), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+      } catch (err) {
+        return new Response(JSON.stringify({ ok: false, error: String(err) }), { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+      }
+    }
+
+    // ---- Experiment 5 (research-lab UI layer): every handler already
+    // returns activated:false gracefully on its own (see their own
+    // try/catch above) rather than throwing when migrations 0008/0015
+    // are not yet applied -- the outer try/catch here is only a last-
+    // resort safety net against a genuinely unexpected error. ----
+    if (url.pathname === '/api/research-lab/experiment5-overview' && request.method === 'GET') {
+      try {
+        const result = await getResearchLabExperiment5Overview(env);
+        // Narrative is computed HERE, once, server-side, from this same
+        // already-tested pure function -- never duplicated into the
+        // page's own client-side script, so there is exactly one place
+        // this deterministic explanation logic lives.
+        const resultsForNarrative = await getResearchLabExperiment5Results(env);
+        result.narrative = buildExperiment5NarrativeSummary(result, resultsForNarrative);
+        return new Response(JSON.stringify(result), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+      } catch (err) {
+        return new Response(JSON.stringify({ ok: false, error: String(err) }), { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+      }
+    }
+    if (url.pathname === '/api/research-lab/experiment5-decisions' && request.method === 'GET') {
+      try {
+        const limit = parseInt(url.searchParams.get('limit') || '25', 10);
+        const offset = parseInt(url.searchParams.get('offset') || '0', 10);
+        const status = url.searchParams.get('status') || undefined;
+        const result = await getResearchLabExperiment5Decisions(env, {
+          limit: Number.isFinite(limit) ? limit : 25,
+          offset: Number.isFinite(offset) ? offset : 0,
+          status,
+        });
+        return new Response(JSON.stringify(result), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+      } catch (err) {
+        return new Response(JSON.stringify({ ok: false, error: String(err) }), { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+      }
+    }
+    if (url.pathname === '/api/research-lab/experiment5-results' && request.method === 'GET') {
+      try {
+        const result = await getResearchLabExperiment5Results(env);
+        return new Response(JSON.stringify(result), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+      } catch (err) {
+        return new Response(JSON.stringify({ ok: false, error: String(err) }), { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+      }
+    }
+    if (url.pathname === '/api/research-lab/experiment5-sentiment' && request.method === 'GET') {
+      try {
+        const sinceTs = parseInt(url.searchParams.get('since_ts') || '', 10);
+        const result = await getResearchLabExperiment5SentimentSeries(env, Number.isFinite(sinceTs) ? sinceTs : undefined);
+        return new Response(JSON.stringify(result), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+      } catch (err) {
+        return new Response(JSON.stringify({ ok: false, error: String(err) }), { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+      }
+    }
+    if (url.pathname === '/api/research-lab/experiment5-source-intelligence' && request.method === 'GET') {
+      try {
+        const result = await getResearchLabExperiment5SourceIntelligence(env);
+        return new Response(JSON.stringify(result), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+      } catch (err) {
+        return new Response(JSON.stringify({ ok: false, error: String(err) }), { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+      }
+    }
+    if (url.pathname === '/api/research-lab/timeline' && request.method === 'GET') {
+      try {
+        const limit = parseInt(url.searchParams.get('limit') || '50', 10);
+        const result = await getResearchLabTimeline(env, Number.isFinite(limit) ? limit : 50);
         return new Response(JSON.stringify(result), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
       } catch (err) {
         return new Response(JSON.stringify({ ok: false, error: String(err) }), { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });

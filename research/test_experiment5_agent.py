@@ -119,6 +119,24 @@ class TestRunAgentCycle:
         assert len(rows) == 1
         assert rows[0][1] == "OBSERVATION"
 
+    def test_created_decision_persists_its_own_target_horizon_and_eligible_ts(self):
+        """Structural coverage for the eligibility-gate fix: every newly
+        created decision must carry its own target_horizon_hours and
+        eligible_ts, fixed at creation time, so evaluation never has to
+        guess or fall back to a possibly-different global default."""
+        conn = fresh_db()
+        values = [50, 55, 60, 65, 55]
+        for i, v in enumerate(values):
+            seed(conn, i * HOUR, {"fng": v}, 50)
+        anchor_ts = 4 * HOUR
+        agent.run_agent_cycle(conn, as_of_ts=anchor_ts, created_ts=anchor_ts, window_ms=10 * HOUR)
+        row = conn.execute(
+            "SELECT evidence_summary_json FROM research_hypotheses WHERE subject LIKE '%reversal%'"
+        ).fetchone()
+        decision = json.loads(row[0])["decision"]
+        assert decision["target_horizon_hours"] == agent.EXPERIMENT5_TARGET_HORIZON_HOURS
+        assert decision["eligible_ts"] == anchor_ts + agent.OUTCOME_HORIZON_MS[agent.EXPERIMENT5_TARGET_HORIZON_HOURS]
+
     def test_candidate_new_sources_reported_never_persisted_as_a_decision(self):
         conn = fresh_db()
         seed(conn, 0, {"fng": 50, "totally_new_source": 1}, 50)
@@ -243,6 +261,102 @@ class TestOutcomeEvaluation:
         assert result["n_evaluated"] == 0
         row = conn.execute("SELECT out_of_sample_status FROM research_hypotheses").fetchone()
         assert row[0] is None  # still pending, not fabricated
+
+    def test_same_cycle_premature_resolution_is_prevented_by_the_eligibility_gate(self):
+        """Regression test for the real bug the post-build audit found:
+        a decision anchored recently can have a technically-"future"
+        (already real, already-elapsed) btc_data point sitting only a
+        few hours later -- well before its declared 24h horizon has
+        actually elapsed. Before the eligibility gate existed, this
+        would have resolved the decision using that 3h-ahead price,
+        silently testing a 3h move instead of the 24h move the decision
+        claims to have tested."""
+        conn = fresh_db()
+        anchor_ts = 10 * HOUR
+        seed(conn, anchor_ts, {"fng": 70}, score=60, btc_price=100.0)
+        seed(conn, anchor_ts + 3 * HOUR, {"fng": 71}, score=60, btc_price=101.0)  # real, already-elapsed, but only 3h ahead
+        record = {
+            "subject": "experiment5:reversal:fng", "statement": "x", "lifecycle_status": "OBSERVATION",
+            "decision": {
+                "anchor_ts": anchor_ts, "cycle_ts": anchor_ts, "primary_source": "fng", "direction": 1,
+                "classifications": {}, "confirmation": {"classification": "NO_CONFIRMATION", "confirming_sources": []},
+                "target_horizon_hours": 24, "eligible_ts": anchor_ts + 24 * HOUR,
+            },
+        }
+        agent.persist_experiment5_decision(conn, anchor_ts, record)
+
+        # Pipeline runs 5h after the decision's anchor -- long before the
+        # declared 24h horizon (eligible_ts = anchor_ts + 24h = 34h), but
+        # a qualifying "later" price already exists at anchor_ts+3h.
+        result = agent.evaluate_pending_decisions(conn, as_of_ts=anchor_ts + 5 * HOUR, horizon_hours=24)
+        assert result["n_evaluated"] == 0
+        row = conn.execute("SELECT out_of_sample_status FROM research_hypotheses").fetchone()
+        assert row[0] is None  # correctly withheld -- never resolved off a premature price point
+
+    def test_decision_exactly_one_ms_before_eligible_ts_is_not_yet_eligible(self):
+        conn = fresh_db()
+        anchor_ts = 0
+        eligible_ts = anchor_ts + 24 * HOUR
+        seed(conn, anchor_ts, {"fng": 70}, score=60, btc_price=100.0)
+        seed(conn, eligible_ts - 1, {"fng": 70}, score=60, btc_price=110.0)  # exists, but as_of_ts stops just short
+        record = {
+            "subject": "experiment5:reversal:fng", "statement": "x", "lifecycle_status": "OBSERVATION",
+            "decision": {
+                "anchor_ts": anchor_ts, "cycle_ts": anchor_ts, "primary_source": "fng", "direction": 1,
+                "classifications": {}, "confirmation": {"classification": "NO_CONFIRMATION", "confirming_sources": []},
+                "target_horizon_hours": 24, "eligible_ts": eligible_ts,
+            },
+        }
+        agent.persist_experiment5_decision(conn, anchor_ts, record)
+        result = agent.evaluate_pending_decisions(conn, as_of_ts=eligible_ts - 1, horizon_hours=24)
+        assert result["n_evaluated"] == 0
+        row = conn.execute("SELECT out_of_sample_status FROM research_hypotheses").fetchone()
+        assert row[0] is None
+
+    def test_delayed_execution_still_resolves_correctly_once_eligible(self):
+        """A pipeline that runs LATE (well after the horizon has already
+        elapsed) must not be blocked by the eligibility gate -- it should
+        resolve normally using the best available price, exactly as if
+        it had run right on time."""
+        conn = fresh_db()
+        anchor_ts = 0
+        eligible_ts = anchor_ts + 24 * HOUR
+        seed(conn, anchor_ts, {"fng": 70}, score=60, btc_price=100.0)
+        seed(conn, eligible_ts, {"fng": 70}, score=60, btc_price=110.0)  # price went UP
+        record = {
+            "subject": "experiment5:reversal:fng", "statement": "x", "lifecycle_status": "OBSERVATION",
+            "decision": {
+                "anchor_ts": anchor_ts, "cycle_ts": anchor_ts, "primary_source": "fng", "direction": 1,
+                "classifications": {}, "confirmation": {"classification": "NO_CONFIRMATION", "confirming_sources": []},
+                "target_horizon_hours": 24, "eligible_ts": eligible_ts,
+            },
+        }
+        agent.persist_experiment5_decision(conn, anchor_ts, record)
+        # The pipeline is imagined to have missed several cycles and only
+        # runs 10 days late -- still resolves correctly, not skipped.
+        result = agent.evaluate_pending_decisions(conn, as_of_ts=eligible_ts + 10 * DAY, horizon_hours=24)
+        assert result["n_evaluated"] == 1
+        assert result["results"][0]["agent_correct"] is True
+        row = conn.execute("SELECT out_of_sample_status FROM research_hypotheses").fetchone()
+        assert row[0] == "PASSED_HOLDOUT"
+
+    def test_eligible_at_exactly_eligible_ts_resolves(self):
+        conn = fresh_db()
+        anchor_ts = 0
+        eligible_ts = anchor_ts + 24 * HOUR
+        seed(conn, anchor_ts, {"fng": 70}, score=60, btc_price=100.0)
+        seed(conn, eligible_ts, {"fng": 70}, score=60, btc_price=110.0)
+        record = {
+            "subject": "experiment5:reversal:fng", "statement": "x", "lifecycle_status": "OBSERVATION",
+            "decision": {
+                "anchor_ts": anchor_ts, "cycle_ts": anchor_ts, "primary_source": "fng", "direction": 1,
+                "classifications": {}, "confirmation": {"classification": "NO_CONFIRMATION", "confirming_sources": []},
+                "target_horizon_hours": 24, "eligible_ts": eligible_ts,
+            },
+        }
+        agent.persist_experiment5_decision(conn, anchor_ts, record)
+        result = agent.evaluate_pending_decisions(conn, as_of_ts=eligible_ts, horizon_hours=24)
+        assert result["n_evaluated"] == 1  # at >= eligible_ts, not just strictly after
 
     def test_decision_key_never_rewritten_by_evaluation(self):
         conn = fresh_db()

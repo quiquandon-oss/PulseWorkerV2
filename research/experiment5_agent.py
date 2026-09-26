@@ -61,7 +61,7 @@ no-lookahead requirement applied to this row's own history.
 """
 import json
 
-from outcome_engine import compute_forward_returns_from_history
+from outcome_engine import OUTCOME_HORIZON_MS, compute_forward_returns_from_history
 from sentiment_archive import get_archive_range
 from source_dynamics import (
     classify_acceleration,
@@ -90,6 +90,17 @@ MAX_DECISIONS_PER_CYCLE = 20
 # than this many decisions still returns status "OK" with whatever it
 # produced up to the cap, never raises.
 
+EXPERIMENT5_TARGET_HORIZON_HOURS = 24
+# The single evaluation horizon every Experiment 5 decision is created
+# against today (replaces what used to be a bare "24" repeated at both
+# the decision-creation call site and evaluate_pending_decisions' own
+# default parameter). Persisted onto each decision's own record at
+# creation time (see _build_decision_record) rather than only supplied
+# later as an evaluation-time parameter, so the intended horizon is a
+# traceable, immutable fact of the decision itself -- never something
+# that could silently drift between the run that created a decision and
+# the run that later evaluates it.
+
 
 def observe(conn, as_of_ts, window_ms=DEFAULT_OBSERVE_WINDOW_MS):
     """The literal no-lookahead enforcement point: reads archive rows
@@ -111,7 +122,8 @@ def build_source_series(archive_rows, source_key):
     ]
 
 
-def _build_decision_record(subject, anchor_ts, cycle_ts, classifications, confirmation, primary_source):
+def _build_decision_record(subject, anchor_ts, cycle_ts, classifications, confirmation, primary_source,
+                            target_horizon_hours=EXPERIMENT5_TARGET_HORIZON_HOURS):
     lifecycle_status = "MONITOR" if confirmation["classification"] == "CROSS_SOURCE_CONFIRMATION" else "OBSERVATION"
     direction = None
     for info in classifications.values():
@@ -132,6 +144,12 @@ def _build_decision_record(subject, anchor_ts, cycle_ts, classifications, confir
             "direction": direction,
             "classifications": classifications,
             "confirmation": confirmation,
+            "target_horizon_hours": target_horizon_hours,
+            # Fixed at creation time, from facts already known at
+            # anchor_ts -- never recomputed later, so a decision's own
+            # eligibility can never silently drift with a future code
+            # change to OUTCOME_HORIZON_MS or the default horizon.
+            "eligible_ts": anchor_ts + OUTCOME_HORIZON_MS[target_horizon_hours],
         },
     }
 
@@ -161,7 +179,8 @@ def persist_experiment5_decision(conn, created_ts, record, source_analysis_ids=N
     return cursor.lastrowid
 
 
-def run_agent_cycle(conn, as_of_ts, created_ts, window_ms=DEFAULT_OBSERVE_WINDOW_MS):
+def run_agent_cycle(conn, as_of_ts, created_ts, window_ms=DEFAULT_OBSERVE_WINDOW_MS,
+                     target_horizon_hours=EXPERIMENT5_TARGET_HORIZON_HOURS):
     """One full OBSERVE..CREATE PROPOSAL pass. created_ts is required
     (explicit, no wall-clock default, matching this project's own
     persist_* convention). Never raises on "nothing interesting
@@ -198,6 +217,7 @@ def run_agent_cycle(conn, as_of_ts, created_ts, window_ms=DEFAULT_OBSERVE_WINDOW
             anchor_ts=anchor_ts, cycle_ts=as_of_ts,
             classifications={k: classifications[k] for k in keys},
             confirmation=confirmation, primary_source=keys[0],
+            target_horizon_hours=target_horizon_hours,
         )
         decision_ids.append(persist_experiment5_decision(conn, created_ts, record))
         decisions_created += 1
@@ -212,6 +232,7 @@ def run_agent_cycle(conn, as_of_ts, created_ts, window_ms=DEFAULT_OBSERVE_WINDOW
                 classifications={key: info},
                 confirmation={"classification": "NO_CONFIRMATION", "confirming_sources": []},
                 primary_source=key,
+                target_horizon_hours=target_horizon_hours,
             )
             decision_ids.append(persist_experiment5_decision(conn, created_ts, record))
             decisions_created += 1
@@ -250,7 +271,7 @@ def _v1_baseline_direction(v1_composite_score):
     return "UP" if v1_composite_score >= 50 else "DOWN"
 
 
-def evaluate_pending_decisions(conn, as_of_ts, horizon_hours=24):
+def evaluate_pending_decisions(conn, as_of_ts, horizon_hours=EXPERIMENT5_TARGET_HORIZON_HOURS):
     """Finds Experiment 5's own research_hypotheses rows
     (subject LIKE 'experiment5:%') not yet evaluated
     (out_of_sample_status IS NULL) whose horizon has now resolved, using
@@ -258,7 +279,34 @@ def evaluate_pending_decisions(conn, as_of_ts, horizon_hours=24):
     no-lookahead resolution rule is inherited verbatim, never
     reimplemented). Appends an "outcome" key to evidence_summary_json
     WITHOUT touching the existing "decision" key -- see module docstring
-    "Append-only spirit, applied to a mutable table"."""
+    "Append-only spirit, applied to a mutable table".
+
+    Eligibility gate (fixes a real bug found by post-build audit): a
+    decision anchored recently can already have a technically-"future"
+    (later than anchor_ts, still real/already-elapsed) btc_data point
+    sitting in the fetched window well before its own declared horizon
+    has actually elapsed -- e.g. an archive/sentiment observation lags
+    btc_data's own denser collection cadence, so by the time a decision
+    is created its anchor_ts can already be a few hours "behind" the
+    price feed. outcome_engine's own resolution rule (_resolve_outcome)
+    is deliberately lenient -- "any strictly-later price point at/before
+    anchor_ts+horizon resolves it" -- which is correct and UNCHANGED for
+    every other consumer (source_analysis.py, hypothesis_gate.py,
+    source_family_discrimination.py, fng_24h_robustness.py all query it
+    over windows that have manifestly already fully elapsed by
+    construction). This function's own usage pattern was the one place
+    that assumption didn't hold: it gates a single LIVE pending decision
+    whose intended horizon may not have elapsed yet at all. Calling
+    compute_forward_returns_from_history before the intended horizon has
+    elapsed does not leak future information (every price point involved
+    already existed in D1 at as_of_ts) -- but it can resolve the
+    decision off a price only minutes/hours ahead instead of the
+    declared horizon, silently downgrading what the decision's own
+    out_of_sample_status claims to have tested. The fix: never even
+    attempt resolution until as_of_ts has reached the decision's own
+    eligible_ts (anchor_ts + its own target_horizon_hours, fixed at
+    creation time -- see _build_decision_record), leaving it pending
+    exactly as an insufficient-data case would be left pending."""
     rows = conn.execute(
         "SELECT hypothesis_id, evidence_summary_json FROM research_hypotheses "
         "WHERE subject LIKE 'experiment5:%' AND out_of_sample_status IS NULL"
@@ -269,10 +317,20 @@ def evaluate_pending_decisions(conn, as_of_ts, horizon_hours=24):
         payload = json.loads(evidence_json)
         decision = payload["decision"]
         anchor_ts = decision["anchor_ts"]
+        # Older records (pre-dating this field) fall back to this call's
+        # own horizon_hours parameter -- today that is always the same
+        # EXPERIMENT5_TARGET_HORIZON_HOURS every decision was created
+        # with, so this changes nothing for any decision actually created
+        # by this codebase; it only avoids a KeyError if this function is
+        # ever handed a hand-built payload that omits the field.
+        decision_horizon_hours = decision.get("target_horizon_hours", horizon_hours)
+        eligible_ts = decision.get("eligible_ts", anchor_ts + OUTCOME_HORIZON_MS[decision_horizon_hours])
+        if as_of_ts < eligible_ts:
+            continue  # target horizon has not elapsed yet -- not eligible, never forced
 
-        outcomes = compute_forward_returns_from_history(conn, anchor_ts, anchor_ts + 1, horizon_hours)
+        outcomes = compute_forward_returns_from_history(conn, anchor_ts, anchor_ts + 1, decision_horizon_hours)
         if not outcomes or outcomes[0]["outcome_status"] != "RESOLVED":
-            continue  # horizon hasn't resolved yet -- left pending, never forced
+            continue  # eligible, but no qualifying price point resolved yet -- left pending, never forced
 
         outcome = outcomes[0]
         realized_direction = outcome["realized_direction"]  # "UP"/"DOWN"/"FLAT"/None
@@ -285,7 +343,8 @@ def evaluate_pending_decisions(conn, as_of_ts, horizon_hours=24):
 
         payload["outcome"] = {
             "evaluated_ts": as_of_ts,
-            "horizon_hours": horizon_hours,
+            "horizon_hours": decision_horizon_hours,
+            "eligible_ts": eligible_ts,
             "realized_direction": realized_direction,
             "forward_return_pct": outcome["forward_return_pct"],
             "agent_direction": agent_direction,

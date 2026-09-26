@@ -253,7 +253,9 @@ def run_pipeline(d1_query_fn, d1_execute_fn, now_ts):
     # replayed decisions actually get evaluated here. Order relative to
     # the replay above does not affect this step's own correctness --
     # only the ID-collision fix above depends on ordering.
-    evaluation = agent.evaluate_pending_decisions(local_conn, as_of_ts=now_ts, horizon_hours=24)
+    evaluation = agent.evaluate_pending_decisions(
+        local_conn, as_of_ts=now_ts, horizon_hours=agent.EXPERIMENT5_TARGET_HORIZON_HOURS,
+    )
     for result in evaluation["results"]:
         row = local_conn.execute(
             "SELECT evidence_summary_json, out_of_sample_status, last_updated_ts FROM research_hypotheses WHERE hypothesis_id = ?",

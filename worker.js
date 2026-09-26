@@ -6460,13 +6460,63 @@ async function getResearchLabSourceEffectiveness(env) {
 // reverse: event_ts <= window_end_ts does not prove every source/
 // evidence detail for that event was actually resolved, only that the
 // event could have been in scope.
-function classifyExp009Freshness(nRuns, latestWindowEndTs, latestEventTs) {
+//
+// This alone misses one real case: research/live_evidence_pipeline.py's
+// own "RETRY" path (find_existing_events_without_evidence(), see that
+// module's "Recovery / idempotency fix" docstring section) re-attempts
+// evidence collection, on every scheduled run, for an event that
+// currently has ZERO research_event_evidence rows -- a successful retry
+// INSERTs new evidence rows for that event's EXISTING event_id without
+// ever touching research_events.event_ts. So event_ts alone cannot
+// detect "an already-in-window event just gained its first evidence
+// after we last analyzed it." The second signal below closes that gap
+// using data getResearchLabPipelineHealth() already fetches (MAX(
+// collection_ts), unconditionally, in the very first Promise.all below)
+// -- no new query. Evidence collection (new OR retry) is only ever
+// attempted for an event <= MAX_EVENT_AGE_FOR_EVIDENCE_MS (5 days) +
+// EVIDENCE_RETRY_LOOKBACK_BUFFER_MS (1 day) = 6 days old (research/
+// live_evidence_pipeline.py's own constants), and EXP-009's own window
+// is 90 days (WINDOW_MS = event_detector.MAX_WINDOW_MS, exp009-event-
+// source-evidence/run_experiment.py) -- 6 days is always comfortably
+// inside 90 days, so any event still young enough to receive evidence
+// is always inside EXP-009's own analyzed window; MAX(collection_ts)
+// unscoped by event age cannot therefore false-positive against an
+// event EXP-009 would never have considered anyway. If either bound
+// changes enough to close that 84-day margin, this reasoning needs
+// re-verification.
+function classifyExp009Freshness(nRuns, latestAnalysisTs, latestWindowEndTs, latestEventTs, latestEvidenceCollectionTs) {
   if (nRuns == null) return 'UNKNOWN'; // the query itself failed -- never silently "0 runs"
   if (nRuns === 0) return 'NOT_STARTED';
-  if (typeof latestWindowEndTs !== 'number' || !isFinite(latestWindowEndTs)) return 'UNKNOWN';
-  if (latestEventTs == null) return 'NO_NEWER_EVIDENCE_DETECTED'; // no events exist at all -- vacuously nothing newer
-  if (typeof latestEventTs !== 'number' || !isFinite(latestEventTs)) return 'UNKNOWN';
-  return latestEventTs > latestWindowEndTs ? 'STALE_NEW_EVIDENCE_AVAILABLE' : 'NO_NEWER_EVIDENCE_DETECTED';
+
+  // D1 surfaces INTEGER columns as plain JS numbers (verified directly
+  // against production: typeof(analysis_ts) / typeof(window_end_ts) /
+  // typeof(MAX(collection_ts)) are all SQLite "integer"). isNumericTs()
+  // is the one deliberate gate for "usable as a timestamp": null/
+  // undefined are handled explicitly per-signal below (meaning "nothing
+  // to compare against"), and anything else non-numeric -- a string,
+  // even a numeric-looking one like "12345", NaN, an object -- is
+  // treated as malformed and never parsed or coerced into a number.
+  function isNumericTs(v) { return typeof v === 'number' && isFinite(v); }
+
+  // Both anchors (when the analysis last ran, and the window it covered)
+  // are required for EITHER comparison below -- missing/malformed either
+  // one means freshness genuinely cannot be established.
+  if (!isNumericTs(latestAnalysisTs) || !isNumericTs(latestWindowEndTs)) return 'UNKNOWN';
+
+  var eventIsNewer = latestEventTs != null && isNumericTs(latestEventTs) && latestEventTs > latestWindowEndTs;
+  var evidenceIsNewer = latestEvidenceCollectionTs != null && isNumericTs(latestEvidenceCollectionTs) &&
+    latestEvidenceCollectionTs > latestAnalysisTs;
+  if (eventIsNewer || evidenceIsNewer) return 'STALE_NEW_EVIDENCE_AVAILABLE';
+
+  // Neither comparison found anything newer -- but if a NON-NULL value
+  // for either one couldn't actually be validated as a timestamp, "no
+  // newer evidence" would be a guess, not a finding.
+  var eventMalformed = latestEventTs != null && !isNumericTs(latestEventTs);
+  var evidenceMalformed = latestEvidenceCollectionTs != null && !isNumericTs(latestEvidenceCollectionTs);
+  if (eventMalformed || evidenceMalformed) return 'UNKNOWN';
+
+  return 'NO_NEWER_EVIDENCE_DETECTED'; // null latestEventTs/latestEvidenceCollectionTs (nothing exists yet)
+  // is vacuously "nothing newer", same as a validated non-newer timestamp.
 }
 
 async function getResearchLabPipelineHealth(env) {
@@ -6515,8 +6565,14 @@ async function getResearchLabPipelineHealth(env) {
     exp009Ok = false;
   }
   const exp009WindowEndTs = (exp009Ok && exp009Latest) ? exp009Latest.window_end_ts : null;
+  const exp009AnalysisTs = (exp009Ok && exp009Latest) ? exp009Latest.analysis_ts : null;
+  // latestEvidenceTs is the SAME MAX(collection_ts) value already fetched,
+  // unconditionally, above for Stages 1-5's own latest_evidence_collection_ts
+  // field -- reused here as-is, never a second query.
+  const exp009LatestEvidenceCollectionTs = exp009Ok ? (latestEvidenceTs ? latestEvidenceTs.latest : null) : null;
   const exp009Freshness = classifyExp009Freshness(
-    exp009Ok ? exp009Runs : null, exp009WindowEndTs, exp009Ok ? latestEventTs : null
+    exp009Ok ? exp009Runs : null, exp009AnalysisTs, exp009WindowEndTs,
+    exp009Ok ? latestEventTs : null, exp009LatestEvidenceCollectionTs
   );
 
   return {

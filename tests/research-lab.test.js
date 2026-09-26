@@ -20,7 +20,7 @@ describe('Research Lab — read-only research API helpers', () => {
         'SOURCE_EFFECTIVENESS_MIN_SAMPLE_LEVEL2', 'SOURCE_EFFECTIVENESS_MIN_SAMPLE_LEVEL3',
         'SOURCE_EFFECTIVENESS_CONFIGURED_WINDOW_DAYS') + '\n' +
       extractFunctions('resolveBtcReactionAtHorizon', 'getResearchLabDashboard', 'getResearchLabEvents',
-        'getResearchLabEventDetail', 'getResearchLabSources', 'getResearchLabPipelineHealth',
+        'getResearchLabEventDetail', 'getResearchLabSources', 'classifyExp009Freshness', 'getResearchLabPipelineHealth',
         '_seLevel2Key', '_seLevel3Key', 'getResearchLabSourceEffectiveness')
     );
   });
@@ -488,10 +488,20 @@ describe('Research Lab — read-only research API helpers', () => {
   });
 
   describe('getResearchLabPipelineHealth', () => {
+    // The 3 extra entries at the end of each responses array below feed
+    // the Stage 6 (EXP-009) queries added alongside Stages 1-5's own
+    // (pre-existing) queries: COUNT(*) research_analyses, the latest
+    // row, then MAX(event_ts) research_events -- see the dedicated
+    // 'Stage 6 status (EXP-009)' describe block below for the full
+    // behavior matrix; these three tests only need EXP-009 to be inert
+    // (zero runs) since they assert on Stages 1-5's own fields.
+    const NO_EXP009_RUNS = [{ first: { n: 0 } }, { first: null }, { first: { latest: null } }];
+
     it('empty tables: zero counts, empty lists', async () => {
       const db = makeDb([
         { first: { n: 0 } }, { first: { n: 0 } }, { first: { latest: null } },
         { all: { results: [] } }, { all: { results: [] } },
+        ...NO_EXP009_RUNS,
       ]);
       const result = await scope.getResearchLabPipelineHealth({ DB: db });
       expect(result.research_events_count).toBe(0);
@@ -505,6 +515,7 @@ describe('Research Lab — read-only research API helpers', () => {
         { first: { n: 5 } }, { first: { n: 3 } }, { first: { latest: 123456 } },
         { all: { results: [{ event_id: 4, fingerprint: 'fp4', event_ts: 1000, category: 'LARGE_MOVE' }] } },
         { all: { results: [{ publisher: 'CoinDesk', n: 3 }] } },
+        ...NO_EXP009_RUNS,
       ]);
       const result = await scope.getResearchLabPipelineHealth({ DB: db });
       expect(result.events_without_evidence).toHaveLength(1);
@@ -515,12 +526,269 @@ describe('Research Lab — read-only research API helpers', () => {
       const db = makeDb([
         { first: { n: 0 } }, { first: { n: 0 } }, { first: { latest: null } },
         { all: { results: [] } }, { all: { results: [] } },
+        ...NO_EXP009_RUNS,
       ]);
       await scope.getResearchLabPipelineHealth({ DB: db });
       const q = db.calls.find((c) => /NOT EXISTS/.test(c.sql));
       expect(q).toBeTruthy();
       expect(q.sql).toMatch(/^SELECT/i);
       expect(q.sql).not.toMatch(/INSERT|UPDATE|DELETE/i);
+    });
+
+    // Stage 6 ("Source analysis") status, sourced from EXP-009's own
+    // persisted research_analyses rows. See classifyExp009Freshness()
+    // in worker.js for the exact freshness contract this exercises;
+    // these tests hit it end-to-end via getResearchLabPipelineHealth()
+    // (through the same fake-D1 harness every other endpoint test in
+    // this file uses), not just the pure function in isolation, so a
+    // wiring mistake between the query and the returned field would
+    // also be caught here.
+    describe('Stage 6 status (EXP-009)', () => {
+      // evidenceCollectionTs feeds the SAME MAX(collection_ts) slot
+      // Stages 1-5 already query (index 2 below) -- classifyExp009Freshness
+      // now reads this value too (reused, not a new query). Defaults to
+      // null (no evidence at all) so every pre-existing call site below
+      // that doesn't care about this signal is unaffected.
+      function baseCalls(exp009Calls, evidenceCollectionTs = null) {
+        return [
+          { first: { n: 0 } }, { first: { n: 0 } }, { first: { latest: evidenceCollectionTs } },
+          { all: { results: [] } }, { all: { results: [] } },
+          ...exp009Calls,
+        ];
+      }
+
+      it('no EXP-009 analysis records: NOT_STARTED, never fabricated as UNKNOWN or a fake run', async () => {
+        const db = makeDb(baseCalls([{ first: { n: 0 } }, { first: null }, { first: { latest: null } }]));
+        const result = await scope.getResearchLabPipelineHealth({ DB: db });
+        expect(result.exp009_source_analysis.ok).toBe(true);
+        expect(result.exp009_source_analysis.n_runs).toBe(0);
+        expect(result.exp009_source_analysis.latest).toBeNull();
+        expect(result.exp009_source_analysis.freshness).toBe('NOT_STARTED');
+      });
+
+      it('one persisted analysis record is reported with its own real fields', async () => {
+        const latestRow = { analysis_ts: 1790006831471, window_end_ts: 1790006831471, sample_size: 399, validation_status: 'evidence_observed' };
+        const db = makeDb(baseCalls([
+          { first: { n: 1 } }, { first: latestRow }, { first: { latest: 1789899214938 } },
+        ]));
+        const result = await scope.getResearchLabPipelineHealth({ DB: db });
+        expect(result.exp009_source_analysis.n_runs).toBe(1);
+        expect(result.exp009_source_analysis.latest).toEqual(latestRow);
+        // latest_event_ts (1789899214938) predates window_end_ts (1790006831471) -- not stale.
+        expect(result.exp009_source_analysis.freshness).toBe('NO_NEWER_EVIDENCE_DETECTED');
+      });
+
+      it('multiple persisted analysis records: the ORDER BY analysis_ts DESC LIMIT 1 row is the one reported, not the count', async () => {
+        // The fake D1 doesn't execute real SQL -- it returns whatever this test
+        // configures for that call slot -- so this asserts the query issued
+        // really is ORDER BY analysis_ts DESC LIMIT 1 (never ASC / unordered),
+        // which is what guarantees the newest row is the one selected against
+        // real D1, not just against this fixture.
+        const latestRow = { analysis_ts: 5000, window_end_ts: 5000, sample_size: 10, validation_status: 'evidence_observed' };
+        const db = makeDb(baseCalls([
+          { first: { n: 3 } }, { first: latestRow }, { first: { latest: null } },
+        ]));
+        const result = await scope.getResearchLabPipelineHealth({ DB: db });
+        expect(result.exp009_source_analysis.n_runs).toBe(3);
+        expect(result.exp009_source_analysis.latest.analysis_ts).toBe(5000);
+        const latestQuery = db.calls.find((c) => /research_analyses/.test(c.sql) && /analysis_ts DESC/.test(c.sql));
+        expect(latestQuery).toBeTruthy();
+        expect(latestQuery.sql).toMatch(/LIMIT 1/);
+      });
+
+      it('a newer event than the latest analysis window: STALE_NEW_EVIDENCE_AVAILABLE', async () => {
+        const latestRow = { analysis_ts: 1790006831471, window_end_ts: 1790006831471, sample_size: 399, validation_status: 'evidence_observed' };
+        // event_ts (1790305113702, a real production event11 detection from
+        // the source investigation) is well after window_end_ts.
+        const db = makeDb(baseCalls([
+          { first: { n: 1 } }, { first: latestRow }, { first: { latest: 1790305113702 } },
+        ]));
+        const result = await scope.getResearchLabPipelineHealth({ DB: db });
+        expect(result.exp009_source_analysis.freshness).toBe('STALE_NEW_EVIDENCE_AVAILABLE');
+      });
+
+      it('an event that predates the latest analysis window does NOT falsely trigger stale', async () => {
+        const latestRow = { analysis_ts: 1790006831471, window_end_ts: 1790006831471, sample_size: 399, validation_status: 'evidence_observed' };
+        const db = makeDb(baseCalls([
+          { first: { n: 1 } }, { first: latestRow }, { first: { latest: 1789776026658 } },
+        ]));
+        const result = await scope.getResearchLabPipelineHealth({ DB: db });
+        expect(result.exp009_source_analysis.freshness).toBe('NO_NEWER_EVIDENCE_DETECTED');
+      });
+
+      it('an event exactly at window_end_ts does not falsely trigger stale (the window is inclusive, per the run script’s own event_ts <= now_ms fetch)', async () => {
+        const latestRow = { analysis_ts: 7000, window_end_ts: 7000, sample_size: 5, validation_status: 'evidence_observed' };
+        const db = makeDb(baseCalls([
+          { first: { n: 1 } }, { first: latestRow }, { first: { latest: 7000 } },
+        ]));
+        const result = await scope.getResearchLabPipelineHealth({ DB: db });
+        expect(result.exp009_source_analysis.freshness).toBe('NO_NEWER_EVIDENCE_DETECTED');
+      });
+
+      it('missing window_end_ts on the latest record: UNKNOWN, never guessed as fresh or stale', async () => {
+        const malformedRow = { analysis_ts: 5000, window_end_ts: null, sample_size: 10, validation_status: 'evidence_observed' };
+        const db = makeDb(baseCalls([
+          { first: { n: 1 } }, { first: malformedRow }, { first: { latest: 9999 } },
+        ]));
+        const result = await scope.getResearchLabPipelineHealth({ DB: db });
+        expect(result.exp009_source_analysis.freshness).toBe('UNKNOWN');
+      });
+
+      it('a non-numeric window_end_ts (malformed record) also produces UNKNOWN, not a crash', async () => {
+        const malformedRow = { analysis_ts: 5000, window_end_ts: 'not-a-timestamp', sample_size: 10, validation_status: 'evidence_observed' };
+        const db = makeDb(baseCalls([
+          { first: { n: 1 } }, { first: malformedRow }, { first: { latest: 9999 } },
+        ]));
+        const result = await scope.getResearchLabPipelineHealth({ DB: db });
+        expect(result.exp009_source_analysis.freshness).toBe('UNKNOWN');
+      });
+
+      it('a missing analysis_ts on the latest record produces UNKNOWN, not a crash', async () => {
+        const malformedRow = { analysis_ts: null, window_end_ts: 5000, sample_size: 10, validation_status: 'evidence_observed' };
+        const db = makeDb(baseCalls([
+          { first: { n: 1 } }, { first: malformedRow }, { first: { latest: null } },
+        ]));
+        const result = await scope.getResearchLabPipelineHealth({ DB: db });
+        expect(result.exp009_source_analysis.freshness).toBe('UNKNOWN');
+      });
+
+      // The confirmed gap this fix closes: research/live_evidence_pipeline.py's
+      // "RETRY" path (find_existing_events_without_evidence()) can insert
+      // research_event_evidence rows for an event that already existed at
+      // the time of the last EXP-009 analysis, WITHOUT changing that
+      // event's own event_ts. The event_ts-only check alone would report
+      // NO_NEWER_EVIDENCE_DETECTED here; this must not happen.
+      it('the retry-path regression: an existing event (event_ts <= window_end_ts) whose evidence arrives AFTER analysis_ts is reported STALE', async () => {
+        const latestRow = { analysis_ts: 1790006831471, window_end_ts: 1790006831471, sample_size: 399, validation_status: 'evidence_observed' };
+        const db = makeDb(baseCalls(
+          [{ first: { n: 1 } }, { first: latestRow }, { first: { latest: 1789899214938 } }], // event predates the window -- not stale via event_ts alone
+          1790100000000, // collection_ts strictly AFTER analysis_ts -- a retry that landed later
+        ));
+        const result = await scope.getResearchLabPipelineHealth({ DB: db });
+        expect(result.exp009_source_analysis.freshness).toBe('STALE_NEW_EVIDENCE_AVAILABLE');
+      });
+
+      it('evidence collected at or before analysis_ts, with no newer event either, does NOT falsely trigger stale', async () => {
+        const latestRow = { analysis_ts: 1790006831471, window_end_ts: 1790006831471, sample_size: 399, validation_status: 'evidence_observed' };
+        const db = makeDb(baseCalls(
+          [{ first: { n: 1 } }, { first: latestRow }, { first: { latest: 1789899214938 } }],
+          1789899262893, // real production event4/5 collection_ts -- predates analysis_ts
+        ));
+        const result = await scope.getResearchLabPipelineHealth({ DB: db });
+        expect(result.exp009_source_analysis.freshness).toBe('NO_NEWER_EVIDENCE_DETECTED');
+      });
+
+      it('a malformed latest_evidence_collection_ts produces UNKNOWN rather than a false NO_NEWER_EVIDENCE_DETECTED', async () => {
+        const latestRow = { analysis_ts: 1790006831471, window_end_ts: 1790006831471, sample_size: 399, validation_status: 'evidence_observed' };
+        const db = makeDb(baseCalls(
+          [{ first: { n: 1 } }, { first: latestRow }, { first: { latest: null } }],
+          'not-a-timestamp',
+        ));
+        const result = await scope.getResearchLabPipelineHealth({ DB: db });
+        expect(result.exp009_source_analysis.freshness).toBe('UNKNOWN');
+      });
+
+      it('a database read failure on the EXP-009 queries is reported as UNKNOWN, never misreported as NOT_STARTED or a fabricated 0', async () => {
+        // baseCalls' own 5 entries are enough for Stages 1-5's queries;
+        // no 6th/7th/8th response is configured, so the EXP-009 Promise.all
+        // throws inside getResearchLabPipelineHealth()'s own try/catch --
+        // exactly what a real transient D1 error or a missing table would
+        // also do (both throw before returning a row).
+        const db = makeDb(baseCalls([]));
+        const result = await scope.getResearchLabPipelineHealth({ DB: db });
+        // The REST of the endpoint (Stages 1-5) must still succeed --
+        // Stage 6's own failure must never take down this whole endpoint.
+        expect(result.ok).toBe(true);
+        expect(result.exp009_source_analysis.ok).toBe(false);
+        expect(result.exp009_source_analysis.n_runs).toBeNull();
+        expect(result.exp009_source_analysis.latest).toBeNull();
+        expect(result.exp009_source_analysis.freshness).toBe('UNKNOWN');
+      });
+
+      it('every EXP-009 query is SELECT-only and filters by the exact subject string, never a write or an interpolated value', async () => {
+        const db = makeDb(baseCalls([{ first: { n: 0 } }, { first: null }, { first: { latest: null } }]));
+        await scope.getResearchLabPipelineHealth({ DB: db });
+        const exp009Queries = db.calls.filter((c) => /research_analyses/.test(c.sql));
+        expect(exp009Queries.length).toBeGreaterThan(0);
+        for (const q of exp009Queries) {
+          expect(q.sql).toMatch(/^SELECT/i);
+          expect(q.sql).not.toMatch(/INSERT|UPDATE|DELETE/i);
+          expect(q.sql).not.toContain(scope.EXP009_SUBJECT); // must be bound, never string-interpolated
+        }
+        const subjectBoundCall = db.calls.find((c) => /research_analyses/.test(c.sql) && c.args && c.args.includes(scope.EXP009_SUBJECT));
+        expect(subjectBoundCall).toBeTruthy();
+      });
+    });
+  });
+
+  // classifyExp009Freshness() in isolation -- the pure decision function
+  // getResearchLabPipelineHealth() calls to turn (n_runs, analysis_ts,
+  // window_end_ts, latest_event_ts, latest_evidence_collection_ts) into
+  // one of 4 honest states. Exercised directly (not just through the
+  // D1-mocked integration tests below) so the decision boundary itself
+  // is pinned down with plain numbers, not just observed through one
+  // code path. Signature: (nRuns, latestAnalysisTs, latestWindowEndTs,
+  // latestEventTs, latestEvidenceCollectionTs).
+  describe('classifyExp009Freshness', () => {
+    it('nRuns null (query failed) is always UNKNOWN, regardless of the other arguments', () => {
+      expect(scope.classifyExp009Freshness(null, 500, 500, 400, 400)).toBe('UNKNOWN');
+      expect(scope.classifyExp009Freshness(null, null, null, null, null)).toBe('UNKNOWN');
+    });
+    it('nRuns 0 is always NOT_STARTED, regardless of the other arguments', () => {
+      expect(scope.classifyExp009Freshness(0, 500, 500, 999999, 999999)).toBe('NOT_STARTED');
+      expect(scope.classifyExp009Freshness(0, null, null, null, null)).toBe('NOT_STARTED');
+    });
+    it('a non-numeric or missing window_end_ts is UNKNOWN whenever there is at least one run', () => {
+      expect(scope.classifyExp009Freshness(1, 500, null, 100, null)).toBe('UNKNOWN');
+      expect(scope.classifyExp009Freshness(1, 500, undefined, 100, null)).toBe('UNKNOWN');
+      expect(scope.classifyExp009Freshness(1, 500, NaN, 100, null)).toBe('UNKNOWN');
+      expect(scope.classifyExp009Freshness(1, 500, 'not-a-number', 100, null)).toBe('UNKNOWN');
+    });
+    it('a non-numeric or missing analysis_ts is UNKNOWN whenever there is at least one run', () => {
+      expect(scope.classifyExp009Freshness(1, null, 500, 100, null)).toBe('UNKNOWN');
+      expect(scope.classifyExp009Freshness(1, undefined, 500, 100, null)).toBe('UNKNOWN');
+      expect(scope.classifyExp009Freshness(1, NaN, 500, 100, null)).toBe('UNKNOWN');
+      expect(scope.classifyExp009Freshness(1, '5000', 500, 100, null)).toBe('UNKNOWN'); // numeric STRING is never coerced
+    });
+    it('no events and no evidence at all (both null) is NO_NEWER_EVIDENCE_DETECTED, not UNKNOWN or STALE', () => {
+      expect(scope.classifyExp009Freshness(1, 500, 500, null, null)).toBe('NO_NEWER_EVIDENCE_DETECTED');
+    });
+    it('a non-numeric latestEventTs is UNKNOWN, never guessed', () => {
+      expect(scope.classifyExp009Freshness(1, 500, 500, 'garbage', null)).toBe('UNKNOWN');
+      expect(scope.classifyExp009Freshness(1, 500, 500, NaN, null)).toBe('UNKNOWN');
+      expect(scope.classifyExp009Freshness(1, 500, 500, '', null)).toBe('UNKNOWN'); // empty string is never treated as "no value"
+    });
+    it('a non-numeric latestEvidenceCollectionTs is UNKNOWN, never guessed', () => {
+      expect(scope.classifyExp009Freshness(1, 500, 500, null, 'garbage')).toBe('UNKNOWN');
+      expect(scope.classifyExp009Freshness(1, 500, 500, null, NaN)).toBe('UNKNOWN');
+      expect(scope.classifyExp009Freshness(1, 500, 500, null, '400')).toBe('UNKNOWN'); // numeric string, still rejected
+    });
+    it('latestEventTs strictly greater than window_end_ts is STALE_NEW_EVIDENCE_AVAILABLE', () => {
+      expect(scope.classifyExp009Freshness(1, 500, 500, 501, null)).toBe('STALE_NEW_EVIDENCE_AVAILABLE');
+    });
+    it('latestEventTs equal to window_end_ts is NOT stale (the window is inclusive)', () => {
+      expect(scope.classifyExp009Freshness(1, 500, 500, 500, null)).toBe('NO_NEWER_EVIDENCE_DETECTED');
+    });
+    it('latestEventTs less than window_end_ts (event predating the analysis) is NOT stale', () => {
+      expect(scope.classifyExp009Freshness(1, 500, 500, 100, null)).toBe('NO_NEWER_EVIDENCE_DETECTED');
+    });
+
+    // The retry-path regression (research/live_evidence_pipeline.py's
+    // find_existing_events_without_evidence(): a successful retry inserts
+    // research_event_evidence rows for an EXISTING event_id without ever
+    // changing that event's own event_ts). This is exactly the case the
+    // event_ts-only check could not detect before this fix.
+    it('evidence collected strictly after analysis_ts is STALE, even with no newer event at all (the retry-path regression)', () => {
+      expect(scope.classifyExp009Freshness(1, 500, 500, 100, 501)).toBe('STALE_NEW_EVIDENCE_AVAILABLE');
+      expect(scope.classifyExp009Freshness(1, 500, 500, null, 501)).toBe('STALE_NEW_EVIDENCE_AVAILABLE');
+    });
+    it('evidence collected at or before analysis_ts does NOT falsely trigger stale', () => {
+      expect(scope.classifyExp009Freshness(1, 500, 500, null, 500)).toBe('NO_NEWER_EVIDENCE_DETECTED');
+      expect(scope.classifyExp009Freshness(1, 500, 500, null, 100)).toBe('NO_NEWER_EVIDENCE_DETECTED');
+    });
+    it('either signal alone is sufficient to prove staleness -- a malformed OTHER signal does not suppress an already-proven STALE', () => {
+      expect(scope.classifyExp009Freshness(1, 500, 500, 501, 'garbage')).toBe('STALE_NEW_EVIDENCE_AVAILABLE');
+      expect(scope.classifyExp009Freshness(1, 500, 500, 'garbage', 501)).toBe('STALE_NEW_EVIDENCE_AVAILABLE');
     });
   });
 

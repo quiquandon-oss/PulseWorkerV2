@@ -6444,6 +6444,81 @@ async function getResearchLabSourceEffectiveness(env) {
 }
 
 // ---- PIPELINE HEALTH ----
+// Freshness classification for EXP-009 (research/event_source_evidence_
+// join.py + exp009-event-source-evidence/run_experiment.py, traced
+// directly, never assumed): that script always persists
+// window_end_ts === analysis_ts === the exact now_ms it fetched
+// research_events/research_event_evidence up to, and
+// build_event_source_evidence_dataset()'s own event eligibility is
+// gated ENTIRELY by event_ts (event_source_relevance.collect_events()
+// re-detects fresh events over [start_ts, window_end_ts]) -- evidence
+// rows carry no independent eligibility timestamp of their own; they
+// are only ever in scope via their parent event's event_ts. So a
+// currently-persisted research_events row is PROVABLY not reflected in
+// a given analysis iff its event_ts is strictly greater than that
+// analysis's own window_end_ts. This is never used to assert the
+// reverse: event_ts <= window_end_ts does not prove every source/
+// evidence detail for that event was actually resolved, only that the
+// event could have been in scope.
+//
+// This alone misses one real case: research/live_evidence_pipeline.py's
+// own "RETRY" path (find_existing_events_without_evidence(), see that
+// module's "Recovery / idempotency fix" docstring section) re-attempts
+// evidence collection, on every scheduled run, for an event that
+// currently has ZERO research_event_evidence rows -- a successful retry
+// INSERTs new evidence rows for that event's EXISTING event_id without
+// ever touching research_events.event_ts. So event_ts alone cannot
+// detect "an already-in-window event just gained its first evidence
+// after we last analyzed it." The second signal below closes that gap
+// using data getResearchLabPipelineHealth() already fetches (MAX(
+// collection_ts), unconditionally, in the very first Promise.all below)
+// -- no new query. Evidence collection (new OR retry) is only ever
+// attempted for an event <= MAX_EVENT_AGE_FOR_EVIDENCE_MS (5 days) +
+// EVIDENCE_RETRY_LOOKBACK_BUFFER_MS (1 day) = 6 days old (research/
+// live_evidence_pipeline.py's own constants), and EXP-009's own window
+// is 90 days (WINDOW_MS = event_detector.MAX_WINDOW_MS, exp009-event-
+// source-evidence/run_experiment.py) -- 6 days is always comfortably
+// inside 90 days, so any event still young enough to receive evidence
+// is always inside EXP-009's own analyzed window; MAX(collection_ts)
+// unscoped by event age cannot therefore false-positive against an
+// event EXP-009 would never have considered anyway. If either bound
+// changes enough to close that 84-day margin, this reasoning needs
+// re-verification.
+function classifyExp009Freshness(nRuns, latestAnalysisTs, latestWindowEndTs, latestEventTs, latestEvidenceCollectionTs) {
+  if (nRuns == null) return 'UNKNOWN'; // the query itself failed -- never silently "0 runs"
+  if (nRuns === 0) return 'NOT_STARTED';
+
+  // D1 surfaces INTEGER columns as plain JS numbers (verified directly
+  // against production: typeof(analysis_ts) / typeof(window_end_ts) /
+  // typeof(MAX(collection_ts)) are all SQLite "integer"). isNumericTs()
+  // is the one deliberate gate for "usable as a timestamp": null/
+  // undefined are handled explicitly per-signal below (meaning "nothing
+  // to compare against"), and anything else non-numeric -- a string,
+  // even a numeric-looking one like "12345", NaN, an object -- is
+  // treated as malformed and never parsed or coerced into a number.
+  function isNumericTs(v) { return typeof v === 'number' && isFinite(v); }
+
+  // Both anchors (when the analysis last ran, and the window it covered)
+  // are required for EITHER comparison below -- missing/malformed either
+  // one means freshness genuinely cannot be established.
+  if (!isNumericTs(latestAnalysisTs) || !isNumericTs(latestWindowEndTs)) return 'UNKNOWN';
+
+  var eventIsNewer = latestEventTs != null && isNumericTs(latestEventTs) && latestEventTs > latestWindowEndTs;
+  var evidenceIsNewer = latestEvidenceCollectionTs != null && isNumericTs(latestEvidenceCollectionTs) &&
+    latestEvidenceCollectionTs > latestAnalysisTs;
+  if (eventIsNewer || evidenceIsNewer) return 'STALE_NEW_EVIDENCE_AVAILABLE';
+
+  // Neither comparison found anything newer -- but if a NON-NULL value
+  // for either one couldn't actually be validated as a timestamp, "no
+  // newer evidence" would be a guess, not a finding.
+  var eventMalformed = latestEventTs != null && !isNumericTs(latestEventTs);
+  var evidenceMalformed = latestEvidenceCollectionTs != null && !isNumericTs(latestEvidenceCollectionTs);
+  if (eventMalformed || evidenceMalformed) return 'UNKNOWN';
+
+  return 'NO_NEWER_EVIDENCE_DETECTED'; // null latestEventTs/latestEvidenceCollectionTs (nothing exists yet)
+  // is vacuously "nothing newer", same as a validated non-newer timestamp.
+}
+
 async function getResearchLabPipelineHealth(env) {
   const [eventsCount, evidenceCount, latestEvidenceTs, eventsWithoutEvidence, evidenceByPublisher] = await Promise.all([
     env.DB.prepare('SELECT COUNT(*) AS n FROM research_events').first(),
@@ -6464,6 +6539,42 @@ async function getResearchLabPipelineHealth(env) {
       'SELECT publisher, COUNT(*) AS n FROM research_event_evidence GROUP BY publisher ORDER BY n DESC'
     ).all(),
   ]);
+
+  // Stage 6 ("Source analysis") status -- reads the SAME research_analyses
+  // table EXP-005's own transparency work (getResearchLabSourceEffectiveness)
+  // already reads, just for EXP-009:event_source_evidence's subject. Kept in
+  // its own try/catch so a failure here (missing table, transient D1 error)
+  // degrades ONLY this one field to an honest UNKNOWN -- it must never take
+  // down the rest of this endpoint (Stages 1-5 above), and must never be
+  // silently reported as "0 runs" / NOT STARTED, which would be a false
+  // negative rather than an honest "could not check."
+  let exp009Ok = true, exp009Runs = null, exp009Latest = null, latestEventTs = null;
+  try {
+    const [countRow, latestRow, latestEventRow] = await Promise.all([
+      env.DB.prepare('SELECT COUNT(*) AS n FROM research_analyses WHERE subject = ?').bind(EXP009_SUBJECT).first(),
+      env.DB.prepare(
+        'SELECT analysis_ts, window_end_ts, sample_size, validation_status FROM research_analyses ' +
+        'WHERE subject = ? ORDER BY analysis_ts DESC LIMIT 1'
+      ).bind(EXP009_SUBJECT).first(),
+      env.DB.prepare('SELECT MAX(event_ts) AS latest FROM research_events').first(),
+    ]);
+    exp009Runs = countRow ? countRow.n : 0;
+    exp009Latest = latestRow || null;
+    latestEventTs = latestEventRow ? latestEventRow.latest : null;
+  } catch (_err) {
+    exp009Ok = false;
+  }
+  const exp009WindowEndTs = (exp009Ok && exp009Latest) ? exp009Latest.window_end_ts : null;
+  const exp009AnalysisTs = (exp009Ok && exp009Latest) ? exp009Latest.analysis_ts : null;
+  // latestEvidenceTs is the SAME MAX(collection_ts) value already fetched,
+  // unconditionally, above for Stages 1-5's own latest_evidence_collection_ts
+  // field -- reused here as-is, never a second query.
+  const exp009LatestEvidenceCollectionTs = exp009Ok ? (latestEvidenceTs ? latestEvidenceTs.latest : null) : null;
+  const exp009Freshness = classifyExp009Freshness(
+    exp009Ok ? exp009Runs : null, exp009AnalysisTs, exp009WindowEndTs,
+    exp009Ok ? latestEventTs : null, exp009LatestEvidenceCollectionTs
+  );
+
   return {
     ok: true,
     research_events_count: eventsCount ? eventsCount.n : 0,
@@ -6472,6 +6583,20 @@ async function getResearchLabPipelineHealth(env) {
     events_without_evidence: (eventsWithoutEvidence && eventsWithoutEvidence.results) || [],
     evidence_by_publisher: (evidenceByPublisher && evidenceByPublisher.results) || [],
     feed_pipeline_status: 'UNKNOWN — GitHub Actions run history is not exposed to this Worker by any existing read-only source',
+    // Stage 6 ("Source analysis") -- see classifyExp009Freshness() above for
+    // exactly what "freshness" does and does not prove.
+    exp009_source_analysis: {
+      ok: exp009Ok,
+      n_runs: exp009Ok ? exp009Runs : null,
+      latest: (exp009Ok && exp009Latest) ? {
+        analysis_ts: exp009Latest.analysis_ts,
+        window_end_ts: exp009Latest.window_end_ts,
+        sample_size: exp009Latest.sample_size,
+        validation_status: exp009Latest.validation_status,
+      } : null,
+      latest_event_ts: exp009Ok ? latestEventTs : null,
+      freshness: exp009Freshness,
+    },
   };
 }
 
@@ -8170,6 +8295,25 @@ const RESEARCH_LAB_HTML = `<!DOCTYPE html>
       '</div>';
   }
 
+  // Stage 6 ("Source analysis") badges -- built from
+  // getResearchLabPipelineHealth()'s own exp009_source_analysis field
+  // (see classifyExp009Freshness() in worker.js's backend section for
+  // exactly what each state does and does not prove). Kept as small,
+  // separately-testable functions rather than inlined, matching the
+  // badgeForLevel1/badgeForNotAdvanced convention already established
+  // for the Sources tab's EXP-005 section.
+  function badgeForExp009Runs(exp009) {
+    if (!exp009 || exp009.ok === false) return badge('UNKNOWN', 'b-unknown');
+    if (exp009.n_runs === 0) return badge('NOT STARTED', 'b-unknown');
+    return badge(exp009.n_runs + ' run(s)', 'b-strong');
+  }
+  function badgeForExp009Freshness(freshness) {
+    if (freshness === 'STALE_NEW_EVIDENCE_AVAILABLE') return badge('STALE -- NEW EVIDENCE AVAILABLE', 'b-plausible');
+    if (freshness === 'NO_NEWER_EVIDENCE_DETECTED') return badge('NO NEWER EVIDENCE DETECTED', 'b-outline');
+    if (freshness === 'NOT_STARTED') return null; // no second badge needed when nothing has run at all
+    return badge('FRESHNESS UNKNOWN', 'b-unknown');
+  }
+
   async function renderPipeline() {
     app.innerHTML = '<div class="skeleton">Loading pipeline health&hellip;</div>';
     // Market data availability is a BTC-data fact, not an evidence-
@@ -8182,16 +8326,41 @@ const RESEARCH_LAB_HTML = `<!DOCTYPE html>
     if (!d.ok) { app.innerHTML = emptyState('Could not load pipeline health', ''); return; }
     var evCount = d.research_event_evidence_count, evtCount = d.research_events_count;
     var marketDataBadge = (dash && dash.ok && dash.btc_latest) ? badge('AVAILABLE', 'b-verified') : badge('UNKNOWN', 'b-unknown');
+    var exp009 = d.exp009_source_analysis || null;
+    var stage6Fact = badgeForExp009Runs(exp009);
+    var freshBadge = exp009 ? badgeForExp009Freshness(exp009.freshness) : null;
+    if (freshBadge) stage6Fact += '&nbsp;' + freshBadge;
     var html = '<div class="card glow"><h2 class="card-title">Research flow</h2><div class="flow">' +
       flowStage(1, 'Market data', 'BTC price and V1 sentiment data collected continuously.', marketDataBadge) +
       flowStage(2, 'Event detection', 'Scans recent price data for statistically significant moves.', badge(evtCount + ' recorded', 'b-strong') + '&nbsp;' + badge('running now: UNKNOWN', 'b-unknown')) +
       flowStage(3, 'News / RSS evidence', 'Attempts to fetch public RSS articles near each eligible event.', badge(evCount + ' collected', evCount > 0 ? 'b-strong' : 'b-unknown')) +
       flowStage(4, 'Temporal matching', 'Articles are tagged by when they were published relative to the event.', badge(evCount + ' matched', evCount > 0 ? 'b-strong' : 'b-unknown')) +
       flowStage(5, 'D1 research ledger', 'Events and evidence are persisted in the research database.', badge(evtCount + ' events / ' + evCount + ' evidence', 'b-strong')) +
-      flowStage(6, 'Source analysis', 'Would compare accumulated evidence across sources.', badge('NOT STARTED', 'b-unknown')) +
-      flowStage(7, 'V1 / V2 research', 'Would compare findings against V1/V2 model behavior.', badge('NOT STARTED', 'b-unknown')) +
-      flowStage(8, 'Human review', 'Any proposed change would be reviewed by a person before ever being applied.', badge('NOT STARTED', 'b-unknown')) +
+      flowStage(6, 'Source analysis', 'EXP-009 joins detected events and collected evidence with each V1 source’s own representation and BTC’s reaction -- scheduled weekly, independent of this ledger’s own collection cadence (see detail below).', stage6Fact) +
+      flowStage(7, 'V1 / V2 research', 'No persisted signal in this codebase currently represents a general comparison of research findings against V1/V2 model behavior. EXP-010 (research/exp010_source_dialogue_validation.py) validates a different, narrower thing -- pairwise V1-source dialogue classification -- not this.', badge('UNKNOWN -- NOT TRACKED', 'b-unknown')) +
+      flowStage(8, 'Human review', 'No review-state table or mechanism is persisted anywhere in this codebase. In practice, every production change to selection logic or source weights requires a human-approved pull request merge, but this page has no data source to verify that.', badge('NOT TRACKED', 'b-unknown')) +
       '</div></div>';
+
+    html += '<div class="card"><h2 class="card-title">Stage 6 detail -- EXP-009 (Event &times; Source &times; Evidence)</h2>';
+    if (!exp009 || exp009.ok === false) {
+      html += emptyState('Status unknown.', 'Could not read research_analyses for this subject.');
+    } else if (exp009.n_runs === 0) {
+      html += emptyState('Not started.', 'No EXP-009 analysis has been persisted yet. It runs weekly via exp009-event-source-evidence.yml.');
+    } else {
+      html += '<div class="ev-row"><span class="k">Runs persisted</span><span class="v">' + esc(exp009.n_runs) + '</span></div>';
+      if (exp009.latest) {
+        html += '<div class="ev-row"><span class="k">Latest run</span><span class="v">' +
+            esc(fmtTs(exp009.latest.analysis_ts)) + (exp009.latest.analysis_ts ? ' (' + esc(fmtAgo(exp009.latest.analysis_ts)) + ')' : '') + '</span></div>' +
+          '<div class="ev-row"><span class="k">Validation status</span><span class="v">' + esc(exp009.latest.validation_status) + '</span></div>' +
+          '<div class="ev-row"><span class="k">Sample size</span><span class="v">' + esc(exp009.latest.sample_size) + '</span></div>' +
+          '<div class="ev-row"><span class="k">Freshness</span><span class="v">' +
+            (badgeForExp009Freshness(exp009.freshness) || badge('NO NEWER EVIDENCE DETECTED', 'b-outline')) + '</span></div>';
+      } else {
+        html += emptyState('Run count and latest-run detail disagree.', 'The latest-run record could not be read even though a run count was returned.');
+      }
+      html += '<p style="font-size:11.5px; color:var(--muted); margin-top:6px;">Freshness compares the latest analyzed window’s end against the newest detected event’s own event_ts -- it flags that a newer event exists which this analysis could not have included, never that every evidence row for an in-window event was individually resolved.</p>';
+    }
+    html += '</div>';
 
     html += '<div class="grid metrics">' +
       tile('Research Events', d.research_events_count, 'Total recorded') +

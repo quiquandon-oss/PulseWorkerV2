@@ -19,6 +19,7 @@ import os
 sys.path.insert(0, os.path.dirname(__file__))
 import event_source_relevance as esrel  # noqa: E402
 import evidence_collector as ec  # noqa: E402
+import source_intelligence as si  # noqa: E402
 
 HOUR = 3600000
 DAY = 24 * HOUR
@@ -508,3 +509,28 @@ def test_source_summary_includes_affinity_status_without_ranking():
     for source_key, stats in summary.items():
         assert "rank" not in stats
         assert "score" not in stats
+
+
+def test_no_direct_affinity_keys_match_source_topic_affinity_dict_exactly():
+    # Regression test for a real documentation bug: the module docstring's
+    # "NO DIRECT topical/textual match... (17 of 21)" prose once listed
+    # only 15 names, silently omitting etfflows/foufi -- even though the
+    # actual SOURCE_TOPIC_AFFINITY dict (the real, executed
+    # classification) always excluded them correctly. This asserts
+    # against the CODE, not the prose, so the two can never silently
+    # drift apart again.
+    direct_keys = set(esrel.SOURCE_TOPIC_AFFINITY.keys())
+    no_direct_keys = si.KNOWN_V1_SOURCE_IDS - direct_keys
+
+    assert direct_keys == {"geopolitics", "regulatory", "cryptonews", "macrogeo"}
+    assert no_direct_keys == {
+        "fng", "funding", "longshort", "global", "gold", "hypefunding", "nasdaq",
+        "ninemag", "oil", "onchain", "sosovalue", "sp500", "strc", "usd", "yield10y",
+        "etfflows", "foufi",
+    }
+    assert len(direct_keys) + len(no_direct_keys) == len(si.KNOWN_V1_SOURCE_IDS) == 21
+
+    # Every one of the 21 known ids resolves to exactly one of the two
+    # real affinity statuses -- never a third, invented status.
+    for key in si.KNOWN_V1_SOURCE_IDS:
+        assert esrel.source_affinity_status(key) in esrel.AFFINITY_STATUSES

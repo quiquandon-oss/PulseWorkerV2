@@ -1574,3 +1574,166 @@ variables, horizon, and evaluation window when the purpose is to
 attribute an observed difference.
 
 Research evidence must remain separate from production modification.
+
+## Experiment 5: agentic market evidence
+
+### Purpose
+
+Turns V1's sentiment experience -- 21 hand-weighted sources, no
+discovery/validation/learning loop, and a `history` table that
+actively deletes anything beyond its most recent 500 rows -- into a
+persistent, deterministic-first, agentic research system, while
+keeping V1 fully unchanged as the baseline. Built directly on this
+project's own existing research infrastructure (source_analysis.py,
+event_source_relevance.py, evidence_collector.py, hypothesis_gate.py,
+outcome_engine.py, live_evidence_pipeline.py) rather than a new,
+parallel framework.
+
+### Architecture (implemented)
+
+- `research/sentiment_archive.py` -- an append-only archive
+  (`research_sentiment_archive`, migration 0015) that preserves exactly
+  what was known at each observation timestamp, alongside (never
+  instead of) V1's own `history` write path. Idempotent; a genuine
+  same-timestamp conflict raises rather than silently overwriting.
+- `research/source_dynamics.py` -- deterministic classification of a
+  source's value sequence into NOISE / PERSISTENCE / BULLISH_TREND /
+  BEARISH_TREND / ACCELERATION / DECELERATION / REVERSAL, plus
+  CONTRADICTION and CROSS_SOURCE_CONFIRMATION checks and a
+  diminishing-returns repetition scorer. No AI, no network, no
+  database access at all in this module.
+- `research/source_intelligence.py` -- candidate-new-source detection
+  (a `sources_json` key not in the 21 known V1 ids), stale-source
+  detection, coverage/recurrence, and a thin adapter onto
+  `source_analysis.pairwise_source_redundancy` for redundant-pair
+  detection. Reuses, never duplicates, the existing source-analysis and
+  topic-affinity machinery.
+- `research/experiment5_agent.py` -- the agent loop itself: OBSERVE
+  (no-lookahead-bounded archive read) -> COMPARE/CLASSIFY (via
+  source_dynamics) -> CREATE PROPOSAL (persisted into
+  `research_hypotheses`, migration 0008's already-defined table,
+  reusing its lifecycle-status vocabulary rather than inventing a
+  parallel one) -> EVALUATE (via `outcome_engine.
+  compute_forward_returns_from_history`, unchanged) -> LEARN (records
+  agent-vs-V1-baseline correctness for each resolved decision).
+- `research/experiment5_pipeline.py` + `scripts/experiment5-agent/run.py`
+  -- the D1-query-fn-based orchestration layer and its thin wrangler
+  I/O adapter, mirroring `live_evidence_pipeline.py` / `scripts/
+  live-evidence-pipeline/run.py`'s own established split exactly.
+
+### Agent lifecycle
+
+```
+OBSERVE -> COMPARE -> DETECT CHANGE -> CLASSIFY -> INVESTIGATE (reusing
+already-collected PR4/PR6 evidence) -> UPDATE STATE -> CREATE PROPOSAL
+-> WAIT FOR OUTCOME -> EVALUATE -> LEARN
+```
+
+Every step is a pure/deterministic function. No AI call exists
+anywhere in this MVP -- narration/triage is explicitly future,
+optional work (see "Future AI possibilities" below), never required.
+
+### Why `research_hypotheses`, not a new decision table
+
+`hypothesis_gate.persist_hypothesis()`'s own payload shape (six-part
+statistical decomposition, `gate_results`, `evidence_type`) doesn't fit
+a trend/reversal/confirmation decision. Experiment 5 therefore writes
+its own, differently-shaped `evidence_summary_json` into the SAME
+table, reusing the table and the lifecycle-status vocabulary
+(`OBSERVATION -> MONITOR -> ...`) without reusing that function's body.
+Experiment 5's own decisions are structurally capped at `OBSERVATION`/
+`MONITOR` -- `persist_experiment5_decision()` raises rather than
+allowing `RESEARCH_HYPOTHESIS`/`VALIDATION_READY`/`BUILD_REQUEST` from
+this MVP, since reaching those requires real accumulated outcome data
+this brand-new agent does not have on day one. Extending that cap is
+future, separately-authorized work.
+
+### V1 baseline vs. agentic challenger
+
+Every agent proposal lives only in `research_hypotheses`
+(`subject LIKE 'experiment5:%'`) -- never in `SELECTION_VARIANTS`, never
+touching `COMPOSITE_SOURCES_DEFAULTS` or any production weight.
+`experiment5_agent.evaluate_pending_decisions()` scores each resolved
+decision against BOTH the agent's own predicted direction and V1's own
+baseline call for the identical timestamp (the same >=50-midpoint
+convention this codebase's own `getCalibration()`-style functions
+already use), and `compare_v1_vs_challenger()` reports a descriptive
+scoreboard -- explicitly never a claim of improvement, per this
+project's own "do not claim improvement before testing" discipline
+(see PR5g's own FNG-24h robustness finding for why that discipline
+matters in practice).
+
+### No-lookahead
+
+`observe()`'s own SQL upper bound (`observation_ts <= as_of_ts`) is the
+enforcement mechanism, not a separate runtime check -- it is
+structurally incapable of returning a future row. Outcome resolution
+reuses `outcome_engine.compute_forward_returns_from_history()`
+unchanged, inheriting its already-proven no-lookahead resolution rule
+rather than reimplementing it. A decision's own frozen `"decision"`
+payload key is never rewritten once persisted; evaluation only ever
+adds a sibling `"outcome"` key.
+
+### Zero-cost
+
+No AI/LLM call, no paid API, no new paid Cloudflare service anywhere in
+this experiment. Scheduling reuses `live-evidence-collection.yml`'s
+existing 6-hourly GitHub Actions trigger -- no new Cloudflare Cron
+Trigger was added (the account's 5-trigger budget is already
+committed; see this file's own PR6 section). Runaway guards:
+`MAX_DECISIONS_PER_CYCLE` bounds D1 writes per run; the archive read
+window and btc_data read window are both bounded and use existing
+indexes (`research_sentiment_archive.observation_ts` is UNIQUE-indexed;
+`history.ts`/`btc_data.ts` reuse their existing indexes, unchanged).
+
+### Limitations (implemented vs. not)
+
+- **Not yet wired into V1's own write path.** `sentiment_archive.
+  archive_observation()` is built, tested, and called by the pipeline
+  against whatever `history` rows already exist in the read window --
+  but PulseWorker's own `POST /history` handler does not yet call it
+  directly. Until either that call site is added or the scheduled
+  pipeline runs frequently enough to catch every row before `history`'s
+  own 500-row cap deletes it, some observations between successive
+  pipeline runs could still be lost. Wiring the direct call site is
+  future work, not built here.
+- **Migrations 0008 and 0015 are proposed, not applied to production.**
+  The pipeline and its GitHub Actions step are real and tested against
+  an in-memory sqlite mirror; running them against production today
+  fails at the first query, by design (`continue-on-error: true` on
+  that step exists specifically so this does not break the
+  already-working live-evidence-collection step next to it). Applying
+  either migration is a separate, later, explicitly-authorized
+  deployment step.
+- **Deliberately narrow decision triggers.** This MVP only proposes a
+  decision on CROSS_SOURCE_CONFIRMATION or REVERSAL -- PERSISTENCE,
+  ACCELERATION/DECELERATION, and CONTRADICTION are classified and
+  available but do not yet themselves trigger a proposal. Extending
+  the trigger set is a small, separate follow-up once the narrower set
+  has real outcome data behind it.
+- **No missing-source candidate is ever proposed for addition.**
+  `detect_candidate_sources()` only ever reports what it finds; nothing
+  in this experiment adds a source to `COMPOSITE_SOURCES_DEFAULTS` or
+  anywhere production-facing.
+- **Redundancy/cross-source-confirmation both use fixed, documented,
+  not-yet-empirically-tuned constants** (`CONFIRMATION_WINDOW_MS`,
+  `REPETITION_DECAY_BASE`, `STALE_AFTER_N_OBSERVATIONS`) -- the same
+  "reasonable initial parameter, not proven optimal" epistemic stance
+  this project already takes elsewhere (e.g. `MOMENTUM_BLEND_WEIGHT_V1`
+  in worker.js).
+
+### Future AI possibilities (not built, explicitly optional)
+
+A bounded, quota-gated Gemini call (reusing the existing
+`gemini_quota_ledger`/`GEMINI_SHARED_QUOTA_CONFIG` shared infrastructure
+in worker.js, never a new, ungated call site) could eventually narrate
+*why* a cluster of evidence looks like one story vs. several, or
+produce a human-readable summary of a decision for the audit trail --
+but never the classification or the decision itself. Before adding
+even a capped version of this, re-read the history of the automated
+Gemini-driven market-intelligence investigation feature that PulseWorkerV2
+already built and then removed (`getGeminiInvestigationCounts`/
+`remainingGeminiBudget` are kept only as tested reference functions;
+"nothing live calls them anymore" per worker.js's own comment) -- that
+removal's rationale is not yet re-investigated and must inform whether
+resurrecting any automatic-AI-call shape here is actually a good idea.

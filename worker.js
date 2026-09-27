@@ -6106,7 +6106,7 @@ const BTC_SERIES_WINDOW_MS = 30 * 24 * 3600000; // 30 days -- confirmed against
 // since no existing endpoint exposed more than one BTC point. Still
 // SELECT-only, still the same existing btc_data table.
 async function getResearchLabDashboard(env) {
-  const [btcLatest, v1Latest, eventsCount, evidenceCount, latestEvidenceTs, recentEvents, btcSeries] = await Promise.all([
+  const [btcLatest, v1Latest, eventsCount, evidenceCount, latestEvidenceTs, recentEvents, btcSeries, analysisRuns] = await Promise.all([
     env.DB.prepare('SELECT ts, btc_price FROM btc_data ORDER BY ts DESC LIMIT 1').first(),
     env.DB.prepare('SELECT ts, score FROM history ORDER BY ts DESC LIMIT 1').first(),
     env.DB.prepare('SELECT COUNT(*) AS n FROM research_events').first(),
@@ -6120,7 +6120,25 @@ async function getResearchLabDashboard(env) {
     env.DB.prepare(
       `SELECT ts, btc_price FROM btc_data WHERE ts >= (SELECT MAX(ts) FROM btc_data) - ${BTC_SERIES_WINDOW_MS} ORDER BY ts ASC`
     ).all(),
+    // Same three experiment subjects the Pipeline tab's own live-metric
+    // providers (computeExp005LiveFields/009/010) already read from --
+    // queried directly here (not via those heavier functions, which also
+    // parse metric_json for evidence-maturity verdicts this card doesn't
+    // need) purely so the "Analyse" step below can report real
+    // accumulated-run counts instead of a permanent placeholder.
+    env.DB.prepare(
+      `SELECT subject, COUNT(*) AS n, MAX(analysis_ts) AS latest_ts FROM research_analyses
+       WHERE subject IN (?, ?, ?) GROUP BY subject`
+    ).bind(EXP005_SUBJECT, EXP009_SUBJECT, EXP010_SUBJECT).all(),
   ]);
+  const analysisBySubject = {};
+  for (const row of (analysisRuns && analysisRuns.results) || []) {
+    analysisBySubject[row.subject] = { n: row.n, latest_ts: row.latest_ts };
+  }
+  const analysisTotalRuns = Object.values(analysisBySubject).reduce((sum, r) => sum + r.n, 0);
+  const analysisLatestTs = Object.values(analysisBySubject).reduce(
+    (max, r) => (r.latest_ts && (max === null || r.latest_ts > max) ? r.latest_ts : max), null
+  );
   return {
     ok: true,
     btc_latest: btcLatest || null,
@@ -6130,6 +6148,9 @@ async function getResearchLabDashboard(env) {
     research_event_evidence_count: evidenceCount ? evidenceCount.n : 0,
     latest_evidence_collection_ts: latestEvidenceTs ? latestEvidenceTs.latest : null,
     recent_events: (recentEvents && recentEvents.results) || [],
+    analysis_runs_by_subject: analysisBySubject,
+    analysis_runs_total: analysisTotalRuns,
+    analysis_latest_ts: analysisLatestTs,
     // GitHub Actions run history is not queryable from inside this Worker
     // without a new credential (a GitHub PAT) -- out of scope for a
     // read-only, $0, no-new-infrastructure PR. Disclosed as UNKNOWN
@@ -7816,6 +7837,16 @@ const RESEARCH_LAB_HTML = `<!DOCTYPE html>
   function whereAreWeCard(d) {
     var eventsCount = d.research_events_count, evidenceCount = d.research_event_evidence_count;
     var latestEvidence = d.latest_evidence_collection_ts;
+    var analysisRuns = d.analysis_runs_total || 0, analysisLatestTs = d.analysis_latest_ts;
+    var analysisStep = analysisRuns === 0
+      ? { name: 'Analyse', dotClass: 'idle', dotChar: String.fromCharCode(9675),
+          desc: 'Not started. No EXP-005/009/010 analysis has been persisted yet.' }
+      : { name: 'Analyse', dotClass: 'data', dotChar: String(analysisRuns),
+          desc: '<b>' + analysisRuns + '</b> analysis run' + (analysisRuns === 1 ? '' : 's') +
+            ' recorded across EXP-005 (source effectiveness), EXP-009 (event' + String.fromCharCode(215) +
+            'source' + String.fromCharCode(215) + 'evidence) and EXP-010 (source dialogue validation).' +
+            (analysisLatestTs ? ' Latest: <b>' + esc(fmtTs(analysisLatestTs)) + '</b>.' : '') +
+            ' See the Pipeline tab for per-experiment detail.' };
     var steps = [
       { name: 'Schedule', dotClass: 'done', dotChar: String.fromCharCode(10003),
         desc: 'Configured to run automatically <b>every 6 hours</b>.' },
@@ -7827,8 +7858,7 @@ const RESEARCH_LAB_HTML = `<!DOCTYPE html>
         desc: '<b>' + evidenceCount + '</b> evidence row' + (evidenceCount === 1 ? '' : 's') + ' collected so far from public RSS feeds.' },
       { name: 'Store evidence', dotClass: evidenceCount > 0 ? 'data' : 'idle', dotChar: evidenceCount > 0 ? String.fromCharCode(10003) : String.fromCharCode(9675),
         desc: latestEvidence ? 'Latest evidence stored: <b>' + esc(fmtTs(latestEvidence)) + '</b>.' : 'No evidence has been stored yet.' },
-      { name: 'Analyse', dotClass: 'idle', dotChar: String.fromCharCode(9675),
-        desc: 'Not started. Meaningful source-level analysis needs far more accumulated evidence than exists today.' },
+      analysisStep,
     ];
     var html = '<div class="card glow"><h2 class="card-title">Where are we?</h2><div class="stepper">';
     for (var i = 0; i < steps.length; i++) {

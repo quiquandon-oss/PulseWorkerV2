@@ -64,6 +64,7 @@ describe('Research Lab — read-only research API helpers', () => {
         { first: { latest: null } }, // latest evidence ts
         { all: { results: [] } }, // recent events
         { all: { results: [] } }, // btc price series
+        { all: { results: [] } }, // EXP-005/009/010 analysis runs
       ]);
       const result = await scope.getResearchLabDashboard({ DB: db });
       expect(result.ok).toBe(true);
@@ -74,6 +75,10 @@ describe('Research Lab — read-only research API helpers', () => {
       expect(result.research_event_evidence_count).toBe(0);
       expect(result.latest_evidence_collection_ts).toBeNull();
       expect(result.recent_events).toEqual([]);
+      // No analysis runs recorded: honest zero/null, never a fabricated count.
+      expect(result.analysis_runs_total).toBe(0);
+      expect(result.analysis_latest_ts).toBeNull();
+      expect(result.analysis_runs_by_subject).toEqual({});
       // Scheduled-run status is honestly UNKNOWN, never a fabricated
       // "success"/"running" guess.
       expect(result.latest_scheduled_run_status).toMatch(/UNKNOWN/);
@@ -89,6 +94,7 @@ describe('Research Lab — read-only research API helpers', () => {
         { first: { latest: null } },
         { all: { results: [{ event_id: 1, event_ts: 1000, category: 'LARGE_MOVE', direction: 'UP', evidence_count: 0 }] } },
         { all: { results: seriesRows } },
+        { all: { results: [] } },
       ]);
       const result = await scope.getResearchLabDashboard({ DB: db });
       expect(result.btc_latest).toEqual({ ts: 1000, btc_price: 50000 });
@@ -102,6 +108,7 @@ describe('Research Lab — read-only research API helpers', () => {
       const db = makeDb([
         { first: null }, { first: null }, { first: { n: 0 } }, { first: { n: 0 } },
         { first: { latest: null } }, { all: { results: [] } }, { all: { results: [] } },
+        { all: { results: [] } },
       ]);
       await scope.getResearchLabDashboard({ DB: db });
       for (const call of db.calls) {
@@ -114,12 +121,42 @@ describe('Research Lab — read-only research API helpers', () => {
       const db = makeDb([
         { first: null }, { first: null }, { first: { n: 0 } }, { first: { n: 0 } },
         { first: { latest: null } }, { all: { results: [] } }, { all: { results: [] } },
+        { all: { results: [] } },
       ]);
       await scope.getResearchLabDashboard({ DB: db });
       const seriesQuery = db.calls.find((c) => /FROM btc_data WHERE ts >=/.test(c.sql));
       expect(seriesQuery).toBeTruthy();
       expect(seriesQuery.sql).toContain(String(scope.BTC_SERIES_WINDOW_MS));
       expect(seriesQuery.sql).toMatch(/ORDER BY ts ASC/);
+    });
+
+    it('analysis runs: aggregates real EXP-005/009/010 rows into totals, per-subject counts, and the overall latest timestamp', async () => {
+      const db = makeDb([
+        { first: null }, { first: null }, { first: { n: 0 } }, { first: { n: 0 } },
+        { first: { latest: null } }, { all: { results: [] } }, { all: { results: [] } },
+        { all: { results: [
+          { subject: scope.EXP005_SUBJECT, n: 2, latest_ts: 1000 },
+          { subject: scope.EXP009_SUBJECT, n: 5, latest_ts: 3000 },
+          { subject: scope.EXP010_SUBJECT, n: 1, latest_ts: 2000 },
+        ] } },
+      ]);
+      const result = await scope.getResearchLabDashboard({ DB: db });
+      expect(result.analysis_runs_total).toBe(8);
+      expect(result.analysis_latest_ts).toBe(3000); // the max across all three subjects, not just the last row
+      expect(result.analysis_runs_by_subject[scope.EXP009_SUBJECT]).toEqual({ n: 5, latest_ts: 3000 });
+    });
+
+    it('analysis runs query filters to exactly the three known experiment subjects, never an unfiltered scan', async () => {
+      const db = makeDb([
+        { first: null }, { first: null }, { first: { n: 0 } }, { first: { n: 0 } },
+        { first: { latest: null } }, { all: { results: [] } }, { all: { results: [] } },
+        { all: { results: [] } },
+      ]);
+      await scope.getResearchLabDashboard({ DB: db });
+      const analysisQuery = db.calls.find((c) => /FROM research_analyses/.test(c.sql));
+      expect(analysisQuery).toBeTruthy();
+      expect(analysisQuery.sql).toMatch(/WHERE subject IN \(\?, \?, \?\)/);
+      expect(analysisQuery.args).toEqual([scope.EXP005_SUBJECT, scope.EXP009_SUBJECT, scope.EXP010_SUBJECT]);
     });
   });
 

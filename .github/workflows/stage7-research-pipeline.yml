@@ -55,6 +55,40 @@ name: Stage 7 - AI-Assisted Research & Full-Source Sentiment Recalculation
 # Until step 1 is done, every run of this workflow is a safe, intentional
 # no-op.
 #
+# STAGING-ONLY, FAIL-CLOSED (Copilot-audit remediation, 2026-09):
+# run_stage7.py hardcoded production's OWN D1 database (sentiment-history)
+# with no way to point it anywhere else, so this workflow -- which used the
+# general-purpose CLOUDFLARE_API_TOKEN and could in principle run on main --
+# could have silently written to production. Fixed on BOTH sides:
+#   - run_stage7.py now has NO default/fallback database target at all; it
+#     requires STAGE7_TARGET_ACCOUNT_ID/_DATABASE_NAME/_DATABASE_ID (set
+#     below, pointing at the separate pulseworker-v2-staging D1 database)
+#     and validates them against that one expected staging target BEFORE
+#     any remote D1 call -- see its own validate_staging_target().
+#   - This workflow only ever runs against the
+#     claude/stage7-research-pipeline branch (the "Enforce staging-only
+#     branch" step below, which runs before checkout/tests/anything that
+#     could touch Cloudflare or git-push), and uses the DEDICATED
+#     STAGE7_STAGING_CLOUDFLARE_API_TOKEN secret rather than the general
+#     CLOUDFLARE_API_TOKEN production deploy uses.
+# KNOWN LIMITATION (documented, not fixed by scoping alone): Cloudflare's
+# D1 Edit/Read API-token permissions are ACCOUNT-WIDE -- there is no
+# per-database resource restriction in Cloudflare's permission model as of
+# this writing. A token with D1 Edit therefore CAN technically reach
+# production's sentiment-history database even when minted "for staging
+# only"; a token's name or intended purpose is not itself an access
+# control. The isolation this workflow provides is: (a) this script will
+# refuse to use such a token against anything but the exact staging
+# database id above, and (b) this workflow will not run outside this one
+# branch. Minimum permission to grant STAGE7_STAGING_CLOUDFLARE_API_TOKEN:
+# Account -> D1 -> Edit, scoped to this one Cloudflare account (no Workers
+# Scripts / KV / R2 / other account permissions needed) -- there is
+# currently no way to further scope it to only the staging database.
+# This workflow, this script, and this comment do NOT create, rotate, or
+# reveal any secret; STAGE7_STAGING_CLOUDFLARE_API_TOKEN must be created
+# and set by a human with Cloudflare account access, same as every other
+# secret in this repo.
+#
 # Daily rather than weekly (unlike exp009/EXP-005): Stage 6 evidence
 # changes every 6 hours (live-evidence-collection.yml), so a new event
 # can become SUFFICIENT, or a pending request can be resolved by a
@@ -86,6 +120,39 @@ jobs:
   research:
     runs-on: ubuntu-latest
     steps:
+      # MUST be the first step -- runs before checkout, before tests,
+      # before anything that could touch Cloudflare or publish a git
+      # commit. `github.ref` is compared for EXACT equality against
+      # refs/heads/claude/stage7-research-pipeline; any other ref (main,
+      # a PR merge ref, a tag, a different branch) aborts the job here.
+      # This is what makes the `schedule:`/`workflow_dispatch:` triggers
+      # above safe even if this workflow file is ever merged to main --
+      # scheduled runs only ever use the DEFAULT branch's copy of this
+      # file, so once merged the schedule would otherwise start firing on
+      # main with no other guard in place.
+      - name: Enforce staging-only branch
+        run: |
+          if [ "${{ github.ref }}" != "refs/heads/claude/stage7-research-pipeline" ]; then
+            echo "::error::Stage 7 is staging-only. Refusing to run on ref '${{ github.ref }}' -- this workflow may only execute on refs/heads/claude/stage7-research-pipeline. Aborting before checkout, tests, Cloudflare access, or any git publish step."
+            exit 1
+          fi
+          echo "Branch guard passed: running on refs/heads/claude/stage7-research-pipeline."
+
+      # Fail closed, not silently skip, if the dedicated staging token
+      # isn't configured -- a missing secret must never be mistaken for
+      # "nothing to do" (that path is schema_state == NOT_APPLIED,
+      # handled inside run_stage7.py itself). Checked before checkout:
+      # no reason to even clone the repo if this job can't proceed.
+      - name: Verify staging Cloudflare token is configured
+        env:
+          STAGE7_STAGING_CLOUDFLARE_API_TOKEN: ${{ secrets.STAGE7_STAGING_CLOUDFLARE_API_TOKEN }}
+        run: |
+          if [ -z "$STAGE7_STAGING_CLOUDFLARE_API_TOKEN" ]; then
+            echo "::error::STAGE7_STAGING_CLOUDFLARE_API_TOKEN secret is missing or empty. Refusing to run Stage 7 without the dedicated staging token -- never falls back to CLOUDFLARE_API_TOKEN (the production deploy token) or any other secret."
+            exit 1
+          fi
+          echo "Staging Cloudflare token is configured."
+
       - name: Checkout
         uses: actions/checkout@v4
 
@@ -116,7 +183,18 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
+      # CLOUDFLARE_API_TOKEN here is the DEDICATED staging token (never
+      # the production CLOUDFLARE_API_TOKEN secret deploy.yml uses) --
+      # wrangler and run_stage7.py's own d1_api_query() both read it from
+      # this exact env var name. STAGE7_TARGET_* pin the explicit staging
+      # account/database that run_stage7.py's validate_staging_target()
+      # checks BEFORE any remote D1 access; see that function's own
+      # docstring and this file's staging-only-and-fail-closed comment
+      # above for what happens if any of these is wrong or missing.
       - name: Run Stage 7 research + recalculation
         env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.STAGE7_STAGING_CLOUDFLARE_API_TOKEN }}
+          STAGE7_TARGET_ACCOUNT_ID: f58e761fbc8e62dc404d8684290af264
+          STAGE7_TARGET_DATABASE_NAME: pulseworker-v2-staging
+          STAGE7_TARGET_DATABASE_ID: 5458d504-2778-49ae-bd25-7751f1c49d50
         run: python3 stage7-research-pipeline/run_stage7.py

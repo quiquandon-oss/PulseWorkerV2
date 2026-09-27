@@ -21,6 +21,17 @@ import subprocess
 REQUEST_DIR = "research/stage7_requests"
 SCHEMA_VERSION = "stage7-request-v1"
 
+# The ONLY branch this publisher will ever commit/push to. Named
+# explicitly (never "the current branch" / "whatever HEAD is") so a
+# misconfigured checkout -- a detached HEAD, a checkout of main, a
+# workflow accidentally triggered on the wrong ref -- can never result in
+# an automated push to main. See resolve_current_branch()/
+# publish_request_file() below: the branch is checked BEFORE any file is
+# staged, committed, or pushed, and "main" is rejected by name even if it
+# were ever passed as the allowed target by mistake.
+ALLOWED_PUBLISH_BRANCH = "claude/stage7-research-pipeline"
+FORBIDDEN_PUBLISH_BRANCHES = ("main", "master")
+
 
 def build_request_id(event_id, attempt=1):
     """Deterministic, not random -- repeated scheduled executions for the
@@ -85,6 +96,20 @@ def build_research_prompt(request):
     return "\n".join(lines)
 
 
+def resolve_current_branch(repo_dir, run):
+    """Returns the current branch name via `git rev-parse --abbrev-ref
+    HEAD`, using the SAME injectable `run` callable publish_request_file's
+    own git steps use -- tests fake this exactly like every other git call
+    here, never a real subprocess. Returns None (never raises, never
+    guesses a branch name) if the command fails, e.g. a repo_dir that
+    isn't actually a git checkout -- the caller treats None the same as
+    any other not-the-allowed-branch value: refuse to publish."""
+    result = run(["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=repo_dir)
+    if result.returncode != 0:
+        return None
+    return result.stdout.strip()
+
+
 def publish_request_file(request, repo_dir, run=None):
     """Writes the request file and commits+pushes it via plain git.
 
@@ -92,6 +117,13 @@ def publish_request_file(request, repo_dir, run=None):
     inject a fake that records calls and returns canned
     CompletedProcess-like results, so this function is fully testable
     without a real git repo or network access.
+
+    BRANCH GUARD (Copilot-audit remediation): the current branch is
+    resolved and checked against ALLOWED_PUBLISH_BRANCH FIRST, before the
+    request file is even written to disk -- never mind staged, committed,
+    or pushed. Any branch other than the one explicit allowed target
+    (main/master included, and rejected by name in the error message) is
+    refused with zero git mutation and zero filesystem write.
 
     Idempotency / never-overwrite: if the target file already exists on
     disk with IDENTICAL content, this is a no-op success (a repeated
@@ -104,10 +136,25 @@ def publish_request_file(request, repo_dir, run=None):
     "skipped_unchanged": bool}. A git failure (non-zero exit at any
     step) never raises -- it returns published=False with `error` set,
     so the caller can record FAILED_RETRYABLE and retry on the next
-    scheduled run, per Step E's explicit requirement.
+    scheduled run, per Step E's explicit requirement. The branch-guard
+    refusal uses this same never-raises, published=False contract.
     """
     run = run or _default_run
     path = request_file_path(request["request_id"])
+
+    current_branch = resolve_current_branch(repo_dir, run)
+    if current_branch != ALLOWED_PUBLISH_BRANCH:
+        branch_desc = "could not be determined" if current_branch is None else repr(current_branch)
+        forbidden_note = " (main/master are explicitly forbidden publish targets)" \
+            if current_branch in FORBIDDEN_PUBLISH_BRANCHES else ""
+        return {
+            "published": False, "path": path,
+            "error": f"refusing to publish: current branch {branch_desc} is not the allowed publish "
+                     f"branch {ALLOWED_PUBLISH_BRANCH!r}{forbidden_note}. No file was written and no git "
+                     "command (add/commit/push) was run.",
+            "skipped_unchanged": False,
+        }
+
     abs_path = os.path.join(repo_dir, path)
     content = json.dumps(build_request_file_content(request), indent=2, sort_keys=True) + "\n"
 

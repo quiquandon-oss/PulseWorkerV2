@@ -27,6 +27,18 @@ def _dataset(events, results):
     return {"events": events, "results": results}
 
 
+def _set_valid_staging_env(monkeypatch):
+    """Every test that calls the real rs.main() must first configure the
+    staging target env vars main() now validates before its first D1
+    call -- otherwise validate_staging_target() aborts before run_d1 (real
+    or monkeypatched) is ever reached. Values match wrangler.staging.toml
+    / EXPECTED_STAGING_* exactly."""
+    monkeypatch.setenv("STAGE7_TARGET_ACCOUNT_ID", rs.EXPECTED_STAGING_ACCOUNT_ID)
+    monkeypatch.setenv("STAGE7_TARGET_DATABASE_NAME", rs.EXPECTED_STAGING_DATABASE_NAME)
+    monkeypatch.setenv("STAGE7_TARGET_DATABASE_ID", rs.EXPECTED_STAGING_DATABASE_ID)
+    monkeypatch.setenv("CLOUDFLARE_API_TOKEN", "fake-staging-token-for-tests")
+
+
 def test_group_results_by_event_keys_by_event_ts_not_local_event_id():
     # Two events sharing the SAME session-local event_id (as can happen
     # since collect_events() reassigns 1..N on every run) must never be
@@ -149,6 +161,8 @@ def test_main_returns_clean_skip_result_when_schema_not_applied(monkeypatch):
     # schema query itself SUCCEEDS but finds zero of the three tables --
     # run_d1 is monkeypatched only for this one call shape, never for
     # anything that would mask a real, unrelated D1 error.
+    _set_valid_staging_env(monkeypatch)
+
     def fake_run_d1(sql):
         assert "sqlite_master" in sql
         return []  # none of the three Stage7 tables exist
@@ -161,7 +175,9 @@ def test_main_returns_clean_skip_result_when_schema_not_applied(monkeypatch):
     assert result["sentiment_rows_written"] == 0
 
 
-def test_main_raises_loudly_on_partial_schema_never_silently_skips():
+def test_main_raises_loudly_on_partial_schema_never_silently_skips(monkeypatch):
+    _set_valid_staging_env(monkeypatch)
+
     def fake_run_d1(sql):
         assert "sqlite_master" in sql
         return [{"name": "stage7_research_requests"}]  # only one of three
@@ -174,10 +190,12 @@ def test_main_raises_loudly_on_partial_schema_never_silently_skips():
         rs.run_d1 = orig
 
 
-def test_main_does_not_swallow_an_unrelated_run_d1_error():
+def test_main_does_not_swallow_an_unrelated_run_d1_error(monkeypatch):
     # A real connectivity/permission/malformed-SQL failure on the schema
     # check itself must propagate exactly as it did before this fix --
     # never reinterpreted as "migration not applied".
+    _set_valid_staging_env(monkeypatch)
+
     def failing_run_d1(sql):
         raise RuntimeError("wrangler: authentication error")
     orig = rs.run_d1
@@ -206,7 +224,8 @@ def test_main_does_not_swallow_an_unrelated_run_d1_error():
 # fetch_start_ts already uses.
 # =====================================================================
 
-def test_main_passes_exactly_window_ms_to_the_detector_never_window_plus_lookback():
+def test_main_passes_exactly_window_ms_to_the_detector_never_window_plus_lookback(monkeypatch):
+    _set_valid_staging_env(monkeypatch)
     calls = {}
 
     def fake_run_d1(sql):
@@ -237,7 +256,8 @@ def test_main_passes_exactly_window_ms_to_the_detector_never_window_plus_lookbac
     assert window_passed_to_detector == rs.WINDOW_MS
 
 
-def test_main_fetch_queries_use_a_wider_lookback_inclusive_bound_than_the_detector_window():
+def test_main_fetch_queries_use_a_wider_lookback_inclusive_bound_than_the_detector_window(monkeypatch):
+    _set_valid_staging_env(monkeypatch)
     fetch_sqls = []
 
     def fake_run_d1(sql):
@@ -272,3 +292,180 @@ def test_main_fetch_queries_use_a_wider_lookback_inclusive_bound_than_the_detect
         # accidentally being narrowed to match the detector's window.
         assert fetch_start <= expected_detection_start - rs.LOOKBACK_BUFFER_MS + (now_after - now_before)
         assert fetch_start >= expected_detection_start - rs.LOOKBACK_BUFFER_MS - (now_after - now_before) - 1000
+
+
+# =====================================================================
+# Copilot-audit remediation: explicit, fail-closed staging-only D1
+# target. validate_staging_target() must run -- and succeed -- before
+# ANY remote D1 access; run_d1()/d1_api_query() must both read the exact
+# same validated config, never independent constants, and must never
+# default or fall back to production's own sentiment-history database.
+# =====================================================================
+
+def _valid_target_env(**overrides):
+    env = {
+        "STAGE7_TARGET_ACCOUNT_ID": rs.EXPECTED_STAGING_ACCOUNT_ID,
+        "STAGE7_TARGET_DATABASE_NAME": rs.EXPECTED_STAGING_DATABASE_NAME,
+        "STAGE7_TARGET_DATABASE_ID": rs.EXPECTED_STAGING_DATABASE_ID,
+        "CLOUDFLARE_API_TOKEN": "fake-staging-token",
+    }
+    env.update(overrides)
+    return env
+
+
+def test_validate_staging_target_accepts_the_correct_staging_configuration():
+    config = rs.validate_staging_target(env=_valid_target_env())
+    assert config.account_id == rs.EXPECTED_STAGING_ACCOUNT_ID
+    assert config.database_name == rs.EXPECTED_STAGING_DATABASE_NAME
+    assert config.database_id == rs.EXPECTED_STAGING_DATABASE_ID
+    assert config.api_token == "fake-staging-token"
+
+
+def test_validate_staging_target_raises_before_any_remote_access_when_env_completely_missing():
+    with pytest.raises(RuntimeError, match="missing/empty required staging target environment"):
+        rs.validate_staging_target(env={})
+
+
+def test_validate_staging_target_raises_when_any_single_var_is_missing():
+    for missing_key in ("STAGE7_TARGET_ACCOUNT_ID", "STAGE7_TARGET_DATABASE_NAME",
+                        "STAGE7_TARGET_DATABASE_ID", "CLOUDFLARE_API_TOKEN"):
+        env = _valid_target_env()
+        del env[missing_key]
+        with pytest.raises(RuntimeError, match=missing_key):
+            rs.validate_staging_target(env=env)
+
+
+def test_validate_staging_target_raises_when_a_var_is_present_but_empty():
+    env = _valid_target_env(STAGE7_TARGET_DATABASE_NAME="   ")
+    with pytest.raises(RuntimeError, match="STAGE7_TARGET_DATABASE_NAME"):
+        rs.validate_staging_target(env=env)
+
+
+def test_validate_staging_target_rejects_production_database_name():
+    env = _valid_target_env(STAGE7_TARGET_DATABASE_NAME=rs.PRODUCTION_DATABASE_NAME)
+    with pytest.raises(RuntimeError, match="PRODUCTION"):
+        rs.validate_staging_target(env=env)
+
+
+def test_validate_staging_target_rejects_production_database_id():
+    env = _valid_target_env(STAGE7_TARGET_DATABASE_ID=rs.PRODUCTION_DATABASE_ID)
+    with pytest.raises(RuntimeError, match="PRODUCTION"):
+        rs.validate_staging_target(env=env)
+
+
+def test_validate_staging_target_rejects_production_name_even_when_id_field_still_says_staging():
+    # Belt-and-braces: a mismatched name alone is rejected even when the
+    # id field still holds the real staging id -- in case the two
+    # identifiers are ever set independently/inconsistently by mistake.
+    env = _valid_target_env(STAGE7_TARGET_DATABASE_NAME=rs.PRODUCTION_DATABASE_NAME)
+    with pytest.raises(RuntimeError, match="PRODUCTION"):
+        rs.validate_staging_target(env=env)
+
+
+def test_validate_staging_target_rejects_a_wrong_staging_database_id_that_is_not_production_either():
+    # Distinct from "matches production": a typo'd or unrelated database
+    # id that is neither the real staging id nor production's must still
+    # be rejected.
+    env = _valid_target_env(STAGE7_TARGET_DATABASE_ID="00000000-0000-0000-0000-000000000000")
+    with pytest.raises(RuntimeError, match="does not match the expected staging target"):
+        rs.validate_staging_target(env=env)
+
+
+def test_validate_staging_target_rejects_wrong_account_id():
+    env = _valid_target_env(STAGE7_TARGET_ACCOUNT_ID="wrong-account-id")
+    with pytest.raises(RuntimeError, match="does not match the expected staging target"):
+        rs.validate_staging_target(env=env)
+
+
+def test_missing_staging_token_fails_closed_even_when_database_target_is_correct():
+    env = _valid_target_env(CLOUDFLARE_API_TOKEN="")
+    with pytest.raises(RuntimeError, match="CLOUDFLARE_API_TOKEN"):
+        rs.validate_staging_target(env=env)
+
+
+def test_main_aborts_before_any_remote_d1_call_when_staging_target_is_not_configured(monkeypatch):
+    # Missing database configuration fails before remote access: run_d1
+    # is monkeypatched to a recorder that fails the test if it is ever
+    # actually invoked, proving main() never reaches its first remote
+    # call once validate_staging_target() raises.
+    monkeypatch.delenv("STAGE7_TARGET_ACCOUNT_ID", raising=False)
+    monkeypatch.delenv("STAGE7_TARGET_DATABASE_NAME", raising=False)
+    monkeypatch.delenv("STAGE7_TARGET_DATABASE_ID", raising=False)
+    monkeypatch.delenv("CLOUDFLARE_API_TOKEN", raising=False)
+
+    def run_d1_must_not_be_called(sql):
+        raise AssertionError("run_d1() must never be called when the staging target is unconfigured")
+    monkeypatch.setattr(rs, "run_d1", run_d1_must_not_be_called)
+
+    with pytest.raises(RuntimeError, match="missing/empty required staging target environment"):
+        rs.main()
+
+
+def test_main_aborts_before_any_remote_d1_call_when_staging_token_is_missing(monkeypatch):
+    monkeypatch.setenv("STAGE7_TARGET_ACCOUNT_ID", rs.EXPECTED_STAGING_ACCOUNT_ID)
+    monkeypatch.setenv("STAGE7_TARGET_DATABASE_NAME", rs.EXPECTED_STAGING_DATABASE_NAME)
+    monkeypatch.setenv("STAGE7_TARGET_DATABASE_ID", rs.EXPECTED_STAGING_DATABASE_ID)
+    monkeypatch.delenv("CLOUDFLARE_API_TOKEN", raising=False)
+
+    def run_d1_must_not_be_called(sql):
+        raise AssertionError("run_d1() must never be called when the staging token is missing")
+    monkeypatch.setattr(rs, "run_d1", run_d1_must_not_be_called)
+
+    with pytest.raises(RuntimeError, match="CLOUDFLARE_API_TOKEN"):
+        rs.main()
+
+
+def test_run_d1_refuses_to_run_when_target_config_not_yet_validated(monkeypatch):
+    monkeypatch.setattr(rs, "_TARGET_CONFIG", None)
+    with pytest.raises(RuntimeError, match="before validate_staging_target"):
+        rs.run_d1("SELECT 1")
+
+
+def test_d1_api_query_refuses_to_run_when_target_config_not_yet_validated(monkeypatch):
+    monkeypatch.setattr(rs, "_TARGET_CONFIG", None)
+    with pytest.raises(RuntimeError, match="before validate_staging_target"):
+        rs.d1_api_query("SELECT 1", [])
+
+
+def test_run_d1_and_d1_api_query_both_read_the_same_validated_target(monkeypatch):
+    # Both D1 access paths use the same validated staging target: after
+    # validate_staging_target() runs, run_d1() (wrangler CLI) and
+    # d1_api_query() (Cloudflare REST API) are proven -- by actually
+    # inspecting the subprocess/urllib calls each one makes -- to use the
+    # identical account_id/database_name/database_id, never independent
+    # values.
+    config = rs.validate_staging_target(env=_valid_target_env())
+    monkeypatch.setattr(rs, "_TARGET_CONFIG", config)
+
+    captured = {}
+
+    def fake_subprocess_run(args, **kwargs):
+        captured["run_d1_database_name"] = args[3]  # ["wrangler","d1","execute",<name>,...]
+
+        class FakeCompletedProcess:
+            stdout = '[{"results": []}]'
+        return FakeCompletedProcess()
+    monkeypatch.setattr(rs.subprocess, "run", fake_subprocess_run)
+    rs.run_d1("SELECT 1")
+
+    class FakeHTTPResponse:
+        status = 200
+
+        def read(self):
+            return b'{"success": true, "result": [{"success": true, "results": []}]}'
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc_info):
+            return False
+
+    def fake_urlopen(request, timeout=60):
+        captured["d1_api_url"] = request.full_url
+        return FakeHTTPResponse()
+    monkeypatch.setattr(rs.urllib.request, "urlopen", fake_urlopen)
+    rs.d1_api_query("SELECT 1", [])
+
+    assert captured["run_d1_database_name"] == config.database_name
+    assert config.account_id in captured["d1_api_url"]
+    assert config.database_id in captured["d1_api_url"]

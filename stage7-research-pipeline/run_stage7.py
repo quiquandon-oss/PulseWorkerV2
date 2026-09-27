@@ -37,6 +37,20 @@ commit (existing repo, existing ambient GITHUB_TOKEN via actions/checkout
 -- see .github/workflows/stage7-research-pipeline.yml), never a call to
 Claude/ChatGPT/Gemini/Grok. The actual internet research is Olivier's,
 run manually outside this script (Step G).
+
+STAGING-ONLY, FAIL-CLOSED D1 TARGET (Copilot-audit remediation): this
+script has no hardcoded database to talk to. validate_staging_target()
+reads STAGE7_TARGET_ACCOUNT_ID / STAGE7_TARGET_DATABASE_NAME /
+STAGE7_TARGET_DATABASE_ID / CLOUDFLARE_API_TOKEN from the environment and
+checks them against the one expected staging target (pulseworker-v2-
+staging) BEFORE main() issues its first remote D1 call -- a missing,
+empty, or mismatched value (including a value that names production's own
+sentiment-history database) aborts immediately, never falls back to a
+default. Both run_d1() (wrangler CLI) and d1_api_query() (Cloudflare REST
+API) read the SAME validated config object, never independent constants.
+There is no production mode in this script at all -- see the workflow
+file's own branch guard and STAGE7_STAGING_CLOUDFLARE_API_TOKEN secret for
+the other half of this isolation.
 """
 import json
 import os
@@ -54,10 +68,102 @@ import stage7_evidence_sufficiency as suff  # noqa: E402
 import stage7_sentiment_recalculation as sr  # noqa: E402
 import stage7_github_publisher as pub  # noqa: E402
 
-DATABASE_NAME = "sentiment-history"
-# Same non-secret identifiers every other experiment script already uses.
-CLOUDFLARE_ACCOUNT_ID = "f58e761fbc8e62dc404d8684290af264"
-D1_DATABASE_ID = "f91ca980-b886-423a-bd6f-f3baea46d181"
+# The ONLY staging target this script will ever accept. Named "EXPECTED_"
+# rather than "DATABASE_NAME"/"D1_DATABASE_ID" etc. so it can never be
+# mistaken for -- or accidentally used as -- a live default: the actual
+# target used by run_d1()/d1_api_query() always comes from _TARGET_CONFIG,
+# populated only after validate_staging_target() confirms the environment
+# matches these values exactly.
+EXPECTED_STAGING_ACCOUNT_ID = "f58e761fbc8e62dc404d8684290af264"
+EXPECTED_STAGING_DATABASE_NAME = "pulseworker-v2-staging"
+EXPECTED_STAGING_DATABASE_ID = "5458d504-2778-49ae-bd25-7751f1c49d50"
+
+# Named explicitly so validate_staging_target() can reject a configured
+# target that matches production BY NAME, with a clear error message,
+# rather than merely failing the "doesn't match staging" check.
+PRODUCTION_DATABASE_NAME = "sentiment-history"
+PRODUCTION_DATABASE_ID = "f91ca980-b886-423a-bd6f-f3baea46d181"
+
+REQUIRED_TARGET_ENV_VARS = (
+    "STAGE7_TARGET_ACCOUNT_ID",
+    "STAGE7_TARGET_DATABASE_NAME",
+    "STAGE7_TARGET_DATABASE_ID",
+    "CLOUDFLARE_API_TOKEN",
+)
+
+
+class StagingTargetConfig:
+    """The single validated D1 target run_d1() and d1_api_query() both
+    read from -- never two independently-sourced constants that could
+    drift apart. Only ever constructed by validate_staging_target()."""
+
+    def __init__(self, account_id, database_name, database_id, api_token):
+        self.account_id = account_id
+        self.database_name = database_name
+        self.database_id = database_id
+        self.api_token = api_token
+
+
+def validate_staging_target(env=None):
+    """Fail-closed staging-target validation. Must be called, and must
+    succeed, before ANY remote D1 query or write -- including the
+    schema-state check main() otherwise issues first. Reads
+    STAGE7_TARGET_ACCOUNT_ID, STAGE7_TARGET_DATABASE_NAME,
+    STAGE7_TARGET_DATABASE_ID, and CLOUDFLARE_API_TOKEN from `env`
+    (defaults to os.environ).
+
+    Raises RuntimeError -- never returns a partial/best-effort result --
+    if any of the four is missing or empty, if the configured database
+    name/id matches PRODUCTION under any name, or if the full triple
+    (account_id, database_name, database_id) does not match the one
+    expected staging target exactly. There is no default value for any
+    of these three identifiers: an unset variable is always a hard
+    failure, never a silent fallback to staging OR production.
+
+    Returns a StagingTargetConfig on success.
+    """
+    env = env if env is not None else os.environ
+    missing = [name for name in REQUIRED_TARGET_ENV_VARS if not (env.get(name) or "").strip()]
+    if missing:
+        raise RuntimeError(
+            "Stage 7 refusing to run: missing/empty required staging target environment "
+            f"variable(s): {', '.join(missing)}. Aborting before any remote D1 access -- "
+            "see run_stage7.py's validate_staging_target()."
+        )
+
+    account_id = env["STAGE7_TARGET_ACCOUNT_ID"].strip()
+    database_name = env["STAGE7_TARGET_DATABASE_NAME"].strip()
+    database_id = env["STAGE7_TARGET_DATABASE_ID"].strip()
+    api_token = env["CLOUDFLARE_API_TOKEN"]
+
+    if database_name == PRODUCTION_DATABASE_NAME or database_id == PRODUCTION_DATABASE_ID:
+        raise RuntimeError(
+            "Stage 7 refusing to run: configured D1 target matches PRODUCTION "
+            f"(database_name={database_name!r}, database_id={database_id!r}). This script "
+            "must never write to the production sentiment-history database. Aborting "
+            "before any remote D1 access."
+        )
+
+    expected = (EXPECTED_STAGING_ACCOUNT_ID, EXPECTED_STAGING_DATABASE_NAME, EXPECTED_STAGING_DATABASE_ID)
+    if (account_id, database_name, database_id) != expected:
+        raise RuntimeError(
+            "Stage 7 refusing to run: configured D1 target does not match the expected "
+            f"staging target. Got account_id={account_id!r}, database_name={database_name!r}, "
+            f"database_id={database_id!r}; expected account_id={EXPECTED_STAGING_ACCOUNT_ID!r}, "
+            f"database_name={EXPECTED_STAGING_DATABASE_NAME!r}, database_id={EXPECTED_STAGING_DATABASE_ID!r}. "
+            "Aborting before any remote D1 access."
+        )
+
+    return StagingTargetConfig(account_id, database_name, database_id, api_token)
+
+
+# Populated by main() via validate_staging_target() before any remote call
+# -- module-level so run_d1()/d1_api_query() always read the exact same
+# validated object, never two independently-resolved configs that could
+# disagree. None until main() runs; run_d1()/d1_api_query() raise loudly
+# if called while it is still None, rather than falling back to anything.
+_TARGET_CONFIG = None
+
 WINDOW_MS = ed.MAX_WINDOW_MS
 LOOKBACK_BUFFER_MS = ed.LOOKBACK_BUFFER_MS
 # The same 5-day + 1-day retry-eligibility window live_evidence_pipeline.py
@@ -69,8 +175,13 @@ MAX_EVENT_AGE_FOR_STAGE7_MS = 6 * 24 * 3600000
 
 
 def run_d1(sql: str):
+    if _TARGET_CONFIG is None:
+        raise RuntimeError(
+            "run_d1() called before validate_staging_target() populated the target "
+            "config -- main() must validate the staging target before any remote D1 access."
+        )
     result = subprocess.run(
-        ["wrangler", "d1", "execute", DATABASE_NAME, "--remote", "--json", "--command", sql],
+        ["wrangler", "d1", "execute", _TARGET_CONFIG.database_name, "--remote", "--json", "--command", sql],
         capture_output=True, text=True, check=True,
     )
     parsed = json.loads(result.stdout)
@@ -81,9 +192,15 @@ def d1_api_query(sql: str, params: list):
     """Identical implementation/rationale to exp009's own d1_api_query --
     see that script's docstring for the full history of why a bound
     parameter is required here (D1's ~100,000-byte SQL statement-length
-    ceiling)."""
-    token = os.environ["CLOUDFLARE_API_TOKEN"]
-    url = f"https://api.cloudflare.com/client/v4/accounts/{CLOUDFLARE_ACCOUNT_ID}/d1/database/{D1_DATABASE_ID}/query"
+    ceiling). account_id/database_id/token all come from the SAME
+    validated _TARGET_CONFIG run_d1() reads -- never independently."""
+    if _TARGET_CONFIG is None:
+        raise RuntimeError(
+            "d1_api_query() called before validate_staging_target() populated the target "
+            "config -- main() must validate the staging target before any remote D1 access."
+        )
+    token = _TARGET_CONFIG.api_token
+    url = f"https://api.cloudflare.com/client/v4/accounts/{_TARGET_CONFIG.account_id}/d1/database/{_TARGET_CONFIG.database_id}/query"
     body = json.dumps({"sql": sql, "params": params}).encode("utf-8")
     request = urllib.request.Request(
         url, data=body, method="POST",
@@ -244,6 +361,14 @@ def resolve_real_event_ids(events_by_ts, research_events_rows):
 
 
 def main():
+    global _TARGET_CONFIG
+    # Must be the very first thing main() does -- strictly before the
+    # schema-state check below, which is otherwise the first remote D1
+    # call this script makes. Raises and aborts on any missing/malformed/
+    # production-pointing configuration; see validate_staging_target()'s
+    # own docstring.
+    _TARGET_CONFIG = validate_staging_target()
+
     now_ts = int(datetime.now(timezone.utc).timestamp() * 1000)
     # Two DELIBERATELY DIFFERENT boundaries, matching exp009-event-source-
     # evidence/run_experiment.py's own established pattern (its start_ts

@@ -32,11 +32,17 @@ def _request(request_id="stage7-req-1-1", event_id=1):
     }
 
 
-def _successful_run_recorder():
+def _successful_run_recorder(branch=pub.ALLOWED_PUBLISH_BRANCH):
+    """Fakes `git rev-parse --abbrev-ref HEAD` as returning `branch`
+    (the allowed publish branch by default) and every other git command
+    as succeeding with empty output -- the shape publish_request_file's
+    own branch guard now expects as its very first call."""
     calls = []
 
     def run(args, cwd):
         calls.append((args, cwd))
+        if args[:2] == ["git", "rev-parse"]:
+            return FakeResult(0, branch + "\n", "")
         return FakeResult(0, "", "")
     return run, calls
 
@@ -80,9 +86,10 @@ def test_publish_request_file_writes_and_commits(tmp_path):
     assert written.exists()
     saved = json.loads(written.read_text())
     assert saved["request_id"] == "stage7-req-1-1"
-    assert len(calls) == 3  # add, commit, push
-    assert calls[0][0][:2] == ["git", "add"]
-    assert calls[2][0] == ["git", "push"]
+    assert len(calls) == 4  # rev-parse (branch guard), add, commit, push
+    assert calls[0][0] == ["git", "rev-parse", "--abbrev-ref", "HEAD"]
+    assert calls[1][0][:2] == ["git", "add"]
+    assert calls[3][0] == ["git", "push"]
 
 
 def test_publish_request_file_is_idempotent_on_identical_content(tmp_path):
@@ -93,7 +100,10 @@ def test_publish_request_file_is_idempotent_on_identical_content(tmp_path):
     second = pub.publish_request_file(req, str(tmp_path), run=run)
     assert second["published"] is True
     assert second["skipped_unchanged"] is True
-    assert len(calls) == 3  # no additional git calls on the second, unchanged publish
+    # first call: rev-parse + add + commit + push (4); second call: only
+    # the branch-guard rev-parse (1) -- no additional add/commit/push on
+    # the second, unchanged publish.
+    assert len(calls) == 5
 
 
 def test_publish_request_file_never_overwrites_different_existing_content(tmp_path):
@@ -105,7 +115,10 @@ def test_publish_request_file_never_overwrites_different_existing_content(tmp_pa
     result = pub.publish_request_file(req, str(tmp_path), run=run)
     assert result["published"] is False
     assert "refusing to overwrite" in result["error"]
-    assert calls == []  # no git call attempted when refusing to overwrite
+    # only the branch-guard rev-parse call happens -- no add/commit/push
+    # attempted when refusing to overwrite.
+    assert len(calls) == 1
+    assert calls[0][0] == ["git", "rev-parse", "--abbrev-ref", "HEAD"]
     # the file on disk must be untouched
     assert (path / "stage7-req-1-1.json").read_text() == '{"different": "content"}\n'
 
@@ -114,6 +127,8 @@ def test_publish_request_file_git_failure_is_retryable_not_a_crash(tmp_path):
     req = _request()
 
     def failing_run(args, cwd):
+        if args[:2] == ["git", "rev-parse"]:
+            return FakeResult(0, pub.ALLOWED_PUBLISH_BRANCH + "\n", "")
         return FakeResult(1, "", "push rejected: network error")
 
     result = pub.publish_request_file(req, str(tmp_path), run=failing_run)
@@ -132,10 +147,86 @@ def test_publish_request_file_stops_at_first_failing_git_step(tmp_path):
 
     def run(args, cwd):
         calls.append(args)
+        if args[:2] == ["git", "rev-parse"]:
+            return FakeResult(0, pub.ALLOWED_PUBLISH_BRANCH + "\n", "")
         if args[1] == "commit":
             return FakeResult(1, "", "nothing to commit")
         return FakeResult(0, "", "")
 
     result = pub.publish_request_file(req, str(tmp_path), run=run)
     assert result["published"] is False
-    assert len(calls) == 2  # add, commit -- push never attempted
+    assert len(calls) == 3  # rev-parse, add, commit -- push never attempted
+
+
+# =====================================================================
+# Copilot-audit remediation: this publisher must never commit or push to
+# main. The branch is resolved and checked BEFORE the request file is
+# written to disk or any git mutation (add/commit/push) is attempted.
+# =====================================================================
+
+def test_publish_request_file_rejects_main_branch_before_any_git_mutation(tmp_path):
+    req = _request()
+    run, calls = _successful_run_recorder(branch="main")
+    result = pub.publish_request_file(req, str(tmp_path), run=run)
+    assert result["published"] is False
+    assert "main" in result["error"]
+    assert "forbidden" in result["error"]
+    # only the read-only rev-parse call happened -- no add/commit/push,
+    # i.e. zero git mutation.
+    assert len(calls) == 1
+    assert calls[0][0] == ["git", "rev-parse", "--abbrev-ref", "HEAD"]
+    # no file was written either.
+    written = tmp_path / "research" / "stage7_requests" / "stage7-req-1-1.json"
+    assert not written.exists()
+
+
+def test_publish_request_file_rejects_master_branch_before_any_git_mutation(tmp_path):
+    req = _request()
+    run, calls = _successful_run_recorder(branch="master")
+    result = pub.publish_request_file(req, str(tmp_path), run=run)
+    assert result["published"] is False
+    assert "master" in result["error"]
+    assert len(calls) == 1  # rev-parse only
+
+
+def test_publish_request_file_rejects_arbitrary_other_branch(tmp_path):
+    req = _request()
+    run, calls = _successful_run_recorder(branch="some-other-feature-branch")
+    result = pub.publish_request_file(req, str(tmp_path), run=run)
+    assert result["published"] is False
+    assert "some-other-feature-branch" in result["error"]
+    assert len(calls) == 1  # rev-parse only, no git mutation
+    written = tmp_path / "research" / "stage7_requests" / "stage7-req-1-1.json"
+    assert not written.exists()
+
+
+def test_publish_request_file_rejects_when_current_branch_cannot_be_resolved(tmp_path):
+    req = _request()
+
+    def failing_rev_parse(args, cwd):
+        return FakeResult(128, "", "fatal: not a git repository")
+
+    result = pub.publish_request_file(req, str(tmp_path), run=failing_rev_parse)
+    assert result["published"] is False
+    assert "not the allowed publish branch" in result["error"]
+    written = tmp_path / "research" / "stage7_requests" / "stage7-req-1-1.json"
+    assert not written.exists()
+
+
+def test_publish_request_file_succeeds_on_the_allowed_staging_branch(tmp_path):
+    req = _request()
+    run, calls = _successful_run_recorder(branch=pub.ALLOWED_PUBLISH_BRANCH)
+    result = pub.publish_request_file(req, str(tmp_path), run=run)
+    assert result["published"] is True
+
+
+def test_resolve_current_branch_returns_stripped_branch_name(tmp_path):
+    def run(args, cwd):
+        return FakeResult(0, "claude/stage7-research-pipeline\n", "")
+    assert pub.resolve_current_branch(str(tmp_path), run) == "claude/stage7-research-pipeline"
+
+
+def test_resolve_current_branch_returns_none_on_failure(tmp_path):
+    def run(args, cwd):
+        return FakeResult(128, "", "fatal: not a git repository")
+    assert pub.resolve_current_branch(str(tmp_path), run) is None

@@ -25,12 +25,35 @@ name: Stage 7 - AI-Assisted Research & Full-Source Sentiment Recalculation
 # uses) and to a real git commit/push for the request file.
 #
 # Writes ONLY stage7_research_requests and stage7_event_sentiment (both
-# new, migration 0016 -- NOT yet applied to production D1; this workflow
-# will fail loudly until it is, which is the intended, visible behaviour
-# rather than a silent no-op). Never writes research_events, research_
+# new, migration 0016 -- NOT yet applied to production D1 as of this
+# workflow's creation). run_stage7.py checks for that schema FIRST, before
+# touching either table: if migration 0016 has not been applied at all, it
+# prints {"status": "SKIPPED -- MIGRATION NOT APPLIED", ...} and exits 0
+# (a clean, green, no-op run -- never a daily red X while waiting on a
+# deliberate, separate migration-application step). A genuinely PARTIAL
+# schema (some but not all of the three Stage 7 tables present) or any
+# other real D1/read error still fails the job loudly, exactly as before --
+# only the single, verified "migration not applied yet" case is quiet.
+# See stage7-research-pipeline/run_stage7.py's own classify_stage7_schema_
+# state() for the exact rule. Never writes research_events, research_
 # event_evidence, history, btc_data, predictions, or any other V1/V2
 # production table. stage7_research_responses is written only by a human
 # via the Worker endpoint above, never by this script.
+#
+# ACTIVATION SEQUENCE (manual, deliberate -- never automatic):
+#   1. Review and apply .ai/migrations/0016_stage7_research_pipeline.sql
+#      to production D1 (`wrangler d1 execute sentiment-history --remote
+#      --file .ai/migrations/0016_stage7_research_pipeline.sql`).
+#   2. Set the STAGE7_ADMIN_TOKEN Worker secret (`wrangler secret put
+#      STAGE7_ADMIN_TOKEN`) -- required before POST /api/research-lab/
+#      stage7-register-response will accept any request; see that
+#      endpoint's own comment in worker.js.
+#   3. Deploy worker.js (this repo's existing deploy.yml, triggered by a
+#      push to main that touches worker.js).
+#   4. This workflow's next scheduled or manually-dispatched run will then
+#      see schema_state == "READY" and process events normally.
+# Until step 1 is done, every run of this workflow is a safe, intentional
+# no-op.
 #
 # Daily rather than weekly (unlike exp009/EXP-005): Stage 6 evidence
 # changes every 6 hours (live-evidence-collection.yml), so a new event

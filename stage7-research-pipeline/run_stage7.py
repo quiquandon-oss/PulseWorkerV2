@@ -194,6 +194,37 @@ def select_eligible_events(events_by_ts, now_ts, max_age_ms=MAX_EVENT_AGE_FOR_ST
     return {ts: e for ts, e in events_by_ts.items() if now_ts - e["event_ts"] <= max_age_ms}
 
 
+REQUIRED_STAGE7_TABLES = ("stage7_research_requests", "stage7_research_responses", "stage7_event_sentiment")
+
+
+def classify_stage7_schema_state(existing_table_names):
+    """Pure. (Adversarial-review remediation, finding #3.) `existing_table_
+    names` is whatever a real `SELECT name FROM sqlite_master WHERE
+    type='table' AND name IN (...)` query actually returned -- this
+    function never queries anything itself, so it is fully testable
+    without D1/wrangler/network.
+
+    Returns:
+    - "READY": all three Stage 7 tables exist -- migration 0016 is fully
+      applied, safe to read/write normally.
+    - "NOT_APPLIED": NONE of the three exist -- the expected, safe
+      pre-migration state. The caller must skip cleanly (exit 0, a
+      no-op), never raise, never fail the workflow.
+    - "PARTIAL": SOME but not all three exist -- an anomalous state (a
+      migration that started but didn't finish, or was hand-edited).
+      This is deliberately NEVER treated the same as NOT_APPLIED or
+      READY -- the caller must raise loudly, since silently proceeding
+      against, or silently skipping, a half-applied schema could corrupt
+      data or mask a real deployment problem.
+    """
+    present = set(existing_table_names) & set(REQUIRED_STAGE7_TABLES)
+    if len(present) == len(REQUIRED_STAGE7_TABLES):
+        return "READY"
+    if len(present) == 0:
+        return "NOT_APPLIED"
+    return "PARTIAL"
+
+
 def resolve_real_event_ids(events_by_ts, research_events_rows):
     """Pure. Maps session-local-keyed (by event_ts) events onto
     research_events' REAL persisted event_id, via the exact same
@@ -216,6 +247,37 @@ def main():
     now_ts = int(datetime.now(timezone.utc).timestamp() * 1000)
     start_ts = now_ts - WINDOW_MS - LOOKBACK_BUFFER_MS
     end_ts = now_ts
+
+    # (Adversarial-review remediation, finding #3.) Checked FIRST, before
+    # any other D1 read, and via a query that must itself succeed: if this
+    # raises, that is a real, unrelated D1/connectivity error and propagates
+    # exactly as before (never swallowed). Only a SUCCESSFUL query that
+    # finds zero of the three Stage 7 tables is treated as "migration not
+    # applied yet" -- see classify_stage7_schema_state()'s own docstring.
+    existing_stage7_tables = {
+        r["name"] for r in run_d1(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name IN "
+            "('stage7_research_requests','stage7_research_responses','stage7_event_sentiment')"
+        )
+    }
+    schema_state = classify_stage7_schema_state(existing_stage7_tables)
+    if schema_state == "NOT_APPLIED":
+        result = {
+            "ok": True, "status": "SKIPPED -- MIGRATION NOT APPLIED",
+            "reason": "None of stage7_research_requests/stage7_research_responses/stage7_event_sentiment "
+                      "exist yet. Apply .ai/migrations/0016_stage7_research_pipeline.sql to production D1, "
+                      "then re-run -- see this workflow file's own ACTIVATION SEQUENCE comment.",
+            "events_considered": 0, "requests_created": 0, "publish_failures": 0, "sentiment_rows_written": 0,
+        }
+        print(json.dumps(result))
+        return result
+    if schema_state == "PARTIAL":
+        raise RuntimeError(
+            "Stage 7 schema is PARTIALLY applied (some but not all of stage7_research_requests / "
+            "stage7_research_responses / stage7_event_sentiment exist: "
+            f"found {sorted(existing_stage7_tables)}). Never treated as 'migration not applied' -- fix or "
+            "complete migration 0016 manually before re-running."
+        )
 
     history_rows = run_d1(f"SELECT ts, score, technical_score, sources_json, gold_regime FROM history WHERE ts BETWEEN {start_ts} AND {end_ts} ORDER BY ts ASC")
     btc_rows = run_d1(f"SELECT ts, btc_price FROM btc_data WHERE ts BETWEEN {start_ts} AND {end_ts} ORDER BY ts ASC")
@@ -248,7 +310,8 @@ def main():
     )}
     latest_responses = {
         r["event_id"]: r for r in run_d1(
-            "SELECT req.event_id, resp.response_id, resp.request_id, resp.validation_status, resp.findings_json "
+            "SELECT req.event_id, resp.response_id, resp.request_id, resp.validation_status, "
+            "resp.findings_json, resp.sources_json "
             "FROM stage7_research_responses resp "
             "JOIN stage7_research_requests req ON req.request_id = resp.request_id "
             "WHERE resp.validation_status = 'VALIDATED'"
@@ -271,6 +334,15 @@ def main():
                 "response_id": validated["response_id"],
                 "validation_status": validated["validation_status"],
                 "findings": json.loads(validated["findings_json"]),
+                # sources_json: the AI's own self-reported sources, only
+                # ever read here for a row whose validation_status is
+                # already VALIDATED (this query's own WHERE clause) --
+                # normalize_response_sources() re-checks validity/cutoff
+                # per source, but never re-checks validation_status itself,
+                # so an unvalidated response's sources must never reach
+                # this dict at all (they don't: this branch is unreachable
+                # for anything but a VALIDATED row).
+                "sources": json.loads(validated["sources_json"]) if validated.get("sources_json") else [],
             }
 
         assessment = None
@@ -286,6 +358,7 @@ def main():
             event, evidence_rows, interpretation_results, sufficiency_status, v1_macro_context,
             validated_response=validated_response,
             previous_sentiment_id=previous.get("id") if previous else None,
+            historical_cutoff_ts=event["event_ts"],
         )
 
         if not sr.is_idempotent_repeat(result, previous):
@@ -349,10 +422,12 @@ def main():
         if not publish_result["published"]:
             publish_failures += 1
 
-    print(json.dumps({
-        "ok": True, "events_considered": len(eligible), "requests_created": requests_created,
+    result = {
+        "ok": True, "status": "OK", "events_considered": len(eligible), "requests_created": requests_created,
         "publish_failures": publish_failures, "sentiment_rows_written": sentiment_rows_written,
-    }))
+    }
+    print(json.dumps(result))
+    return result
 
 
 if __name__ == "__main__":

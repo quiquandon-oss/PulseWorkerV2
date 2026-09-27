@@ -1,15 +1,22 @@
 """
 Tests for stage7-research-pipeline/run_stage7.py's own pure functions
-(group_results_by_event, select_eligible_events, resolve_real_event_ids).
-No DB, no network, no wrangler/D1 API calls -- run_d1/d1_api_query/main
-are exercised only against real infrastructure and are intentionally not
-covered here (same convention as exp009-event-source-evidence, which
-only unit-tests its own pure helpers).
+(group_results_by_event, select_eligible_events, resolve_real_event_ids,
+classify_stage7_schema_state). No DB, no network, no wrangler/D1 API
+calls -- run_d1/d1_api_query are exercised only against real
+infrastructure ordinarily (same convention as exp009-event-source-
+evidence, which only unit-tests its own pure helpers). The migration-
+gating tests below are the one exception: they call the real main(),
+but with run_d1 monkeypatched to a fake that returns a specific,
+already-fixed response shape for the ONE schema-check query main() issues
+before touching anything else -- this proves main()'s own early-exit
+wiring (not just the pure classifier) without ever needing a live D1.
 
 Run with: python3 -m pytest stage7-research-pipeline/ -v
 """
 import sys
 import os
+
+import pytest
 
 sys.path.insert(0, os.path.dirname(__file__))
 import run_stage7 as rs  # noqa: E402
@@ -100,3 +107,82 @@ def test_resolve_real_event_ids_two_local_events_map_to_distinct_real_ids():
     assert set(resolved) == {10, 11}
     assert resolved[10]["event_id"] == 10
     assert resolved[11]["event_id"] == 11
+
+
+# =====================================================================
+# Adversarial-review remediation, finding #3: migration-missing gating.
+# classify_stage7_schema_state() is the pure decision function main()
+# calls right after a real `SELECT name FROM sqlite_master ...` query --
+# that query itself is not mocked here (no live D1/wrangler in tests,
+# same constraint every other test file in this repo already follows),
+# but its three possible real-world outcomes (all three tables present,
+# none present, some present) are exactly what this function classifies,
+# so pinning its behavior directly covers both the "normal execution"
+# and "missing schema" paths main() actually takes.
+# =====================================================================
+
+def test_schema_state_ready_when_all_three_tables_present():
+    assert rs.classify_stage7_schema_state(
+        {"stage7_research_requests", "stage7_research_responses", "stage7_event_sentiment"}
+    ) == "READY"
+
+
+def test_schema_state_not_applied_when_none_present():
+    assert rs.classify_stage7_schema_state(set()) == "NOT_APPLIED"
+    assert rs.classify_stage7_schema_state({"history", "btc_data", "predictions"}) == "NOT_APPLIED"
+
+
+def test_schema_state_partial_when_some_but_not_all_present():
+    assert rs.classify_stage7_schema_state({"stage7_research_requests"}) == "PARTIAL"
+    assert rs.classify_stage7_schema_state({"stage7_research_requests", "stage7_research_responses"}) == "PARTIAL"
+
+
+def test_schema_state_ready_ignores_unrelated_extra_tables():
+    assert rs.classify_stage7_schema_state(
+        {"stage7_research_requests", "stage7_research_responses", "stage7_event_sentiment", "history", "predictions"}
+    ) == "READY"
+
+
+def test_main_returns_clean_skip_result_when_schema_not_applied(monkeypatch):
+    # Simulates the exact "normal execution path" main() takes once the
+    # schema query itself SUCCEEDS but finds zero of the three tables --
+    # run_d1 is monkeypatched only for this one call shape, never for
+    # anything that would mask a real, unrelated D1 error.
+    def fake_run_d1(sql):
+        assert "sqlite_master" in sql
+        return []  # none of the three Stage7 tables exist
+    monkeypatch.setattr(rs, "run_d1", fake_run_d1)
+    result = rs.main()
+    assert result["ok"] is True
+    assert result["status"] == "SKIPPED -- MIGRATION NOT APPLIED"
+    assert result["events_considered"] == 0
+    assert result["requests_created"] == 0
+    assert result["sentiment_rows_written"] == 0
+
+
+def test_main_raises_loudly_on_partial_schema_never_silently_skips():
+    def fake_run_d1(sql):
+        assert "sqlite_master" in sql
+        return [{"name": "stage7_research_requests"}]  # only one of three
+    orig = rs.run_d1
+    rs.run_d1 = fake_run_d1
+    try:
+        with pytest.raises(RuntimeError, match="PARTIALLY applied"):
+            rs.main()
+    finally:
+        rs.run_d1 = orig
+
+
+def test_main_does_not_swallow_an_unrelated_run_d1_error():
+    # A real connectivity/permission/malformed-SQL failure on the schema
+    # check itself must propagate exactly as it did before this fix --
+    # never reinterpreted as "migration not applied".
+    def failing_run_d1(sql):
+        raise RuntimeError("wrangler: authentication error")
+    orig = rs.run_d1
+    rs.run_d1 = failing_run_d1
+    try:
+        with pytest.raises(RuntimeError, match="authentication error"):
+            rs.main()
+    finally:
+        rs.run_d1 = orig

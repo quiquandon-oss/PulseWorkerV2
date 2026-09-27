@@ -1,5 +1,11 @@
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+import { dirname, join } from 'node:path';
 import { describe, it, expect, beforeAll } from 'vitest';
 import { extractFunctions, extractConstants, evalInScope } from './helpers/extract.js';
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const WORKER_JS_SOURCE = readFileSync(join(__dirname, '..', 'worker.js'), 'utf8');
 
 // Stage 7 (AI-assisted internet research + full-source event sentiment
 // recalculation): the research-lab UI layer's two new endpoints.
@@ -16,7 +22,10 @@ describe('Stage 7 — AI-assisted research & sentiment recalculation (research-l
   beforeAll(() => {
     scope = evalInScope(
       extractConstants('STAGE7_SENTIMENT_ASSESSMENTS') + '\n' +
-      extractFunctions('parseStage7JsonField', 'getResearchLabStage7Overview', 'registerStage7ResearchResponse')
+      extractFunctions(
+        'parseStage7JsonField', 'getResearchLabStage7Overview', 'stage7ConstantTimeEqual',
+        'registerStage7ResearchResponse'
+      )
     );
   });
 
@@ -237,6 +246,39 @@ describe('Stage 7 — AI-assisted research & sentiment recalculation (research-l
     });
   });
 
+  // Adversarial-review remediation, finding #2: every call below now must
+  // supply a correct providedToken matching env.STAGE7_ADMIN_TOKEN, or the
+  // function must reject before touching the DB at all. ADMIN_TOKEN/envOf
+  // are shared by every test in this describe block, including the
+  // pre-existing ones (updated in place), so a regression that silently
+  // widens the auth gate would fail broadly, not just in the dedicated
+  // auth tests below.
+  const ADMIN_TOKEN = 'test-admin-token-do-not-use-in-prod';
+  function envOf(db, token = ADMIN_TOKEN) {
+    return { DB: db, STAGE7_ADMIN_TOKEN: token };
+  }
+
+  describe('stage7ConstantTimeEqual', () => {
+    it('equal strings are equal', () => {
+      expect(scope.stage7ConstantTimeEqual('abc123', 'abc123')).toBe(true);
+    });
+    it('different content, same length, is not equal', () => {
+      expect(scope.stage7ConstantTimeEqual('abc123', 'abc124')).toBe(false);
+    });
+    it('different length is not equal', () => {
+      expect(scope.stage7ConstantTimeEqual('short', 'a-much-longer-string')).toBe(false);
+    });
+    it('empty strings compare equal to each other, never to a non-empty one', () => {
+      expect(scope.stage7ConstantTimeEqual('', '')).toBe(true);
+      expect(scope.stage7ConstantTimeEqual('', 'x')).toBe(false);
+    });
+    it('non-string inputs are never coerced into a match', () => {
+      expect(scope.stage7ConstantTimeEqual(null, null)).toBe(false);
+      expect(scope.stage7ConstantTimeEqual(undefined, undefined)).toBe(false);
+      expect(scope.stage7ConstantTimeEqual(123, 123)).toBe(false);
+    });
+  });
+
   describe('registerStage7ResearchResponse', () => {
     const validFindings = { summary: 's', sentiment_assessment: 'POSITIVE' };
 
@@ -244,10 +286,66 @@ describe('Stage 7 — AI-assisted research & sentiment recalculation (research-l
       expect(scope.STAGE7_SENTIMENT_ASSESSMENTS).toEqual(['POSITIVE', 'NEGATIVE', 'MIXED', 'INDETERMINATE']);
     });
 
+    // ---- Authorization gate: checked before ANY D1 call, in every case ----
+
+    it('STAGE7_ADMIN_TOKEN not configured on the Worker: 503, no DB call at all, no hardcoded fallback', async () => {
+      const db = makeDb([]);
+      const result = await scope.registerStage7ResearchResponse(
+        { DB: db }, { requestId: 'stage7-req-1-1', findings: validFindings, providedToken: 'anything' }
+      );
+      expect(result.ok).toBe(false);
+      expect(result.status).toBe(503);
+      expect(result.error).toMatch(/STAGE7_ADMIN_TOKEN/);
+      expect(db.calls).toHaveLength(0);
+    });
+
+    it('missing providedToken: 401, no DB call, even when the Worker has a configured token', async () => {
+      const db = makeDb([]);
+      const result = await scope.registerStage7ResearchResponse(
+        envOf(db), { requestId: 'stage7-req-1-1', findings: validFindings }
+      );
+      expect(result.ok).toBe(false);
+      expect(result.status).toBe(401);
+      expect(db.calls).toHaveLength(0);
+    });
+
+    it('wrong providedToken: 401, no DB call', async () => {
+      const db = makeDb([]);
+      const result = await scope.registerStage7ResearchResponse(
+        envOf(db), { requestId: 'stage7-req-1-1', findings: validFindings, providedToken: 'totally-wrong' }
+      );
+      expect(result.ok).toBe(false);
+      expect(result.status).toBe(401);
+      expect(db.calls).toHaveLength(0);
+    });
+
+    it('validated:true with a missing/wrong token is still rejected 401 -- validated is NEVER itself authorization', async () => {
+      const db = makeDb([]);
+      const result = await scope.registerStage7ResearchResponse(
+        envOf(db), { requestId: 'stage7-req-1-1', findings: validFindings, validated: true, providedToken: 'wrong' }
+      );
+      expect(result.ok).toBe(false);
+      expect(result.status).toBe(401);
+      // Nothing was ever read or written -- an attacker cannot use
+      // validated:true to force a VALIDATED row without the real token.
+      expect(db.calls).toHaveLength(0);
+    });
+
+    it('a correct token proceeds past the auth gate to the normal request lookup', async () => {
+      const db = makeDb([{ first: null }]); // request lookup: not found
+      const result = await scope.registerStage7ResearchResponse(
+        envOf(db), { requestId: 'stage7-req-999-1', findings: validFindings, providedToken: ADMIN_TOKEN }
+      );
+      expect(result.status).toBe(404); // proves it passed auth and reached real business logic
+      expect(db.calls).toHaveLength(1);
+    });
+
+    // ---- Everything below requires the correct token, per the gate above ----
+
     it('unknown request_id: explicit 404, never a thrown error or fabricated success', async () => {
       const db = makeDb([{ first: null }]);
       const result = await scope.registerStage7ResearchResponse(
-        { DB: db }, { requestId: 'stage7-req-999-1', findings: validFindings }
+        envOf(db), { requestId: 'stage7-req-999-1', findings: validFindings, providedToken: ADMIN_TOKEN }
       );
       expect(result.ok).toBe(false);
       expect(result.status).toBe(404);
@@ -256,7 +354,7 @@ describe('Stage 7 — AI-assisted research & sentiment recalculation (research-l
     it('a terminal (INTEGRATED) request refuses a new response -- a new research pass requires a NEW request', async () => {
       const db = makeDb([{ first: { request_id: 'stage7-req-1-1', status: 'INTEGRATED' } }]);
       const result = await scope.registerStage7ResearchResponse(
-        { DB: db }, { requestId: 'stage7-req-1-1', findings: validFindings }
+        envOf(db), { requestId: 'stage7-req-1-1', findings: validFindings, providedToken: ADMIN_TOKEN }
       );
       expect(result.ok).toBe(false);
       expect(result.status).toBe(409);
@@ -266,7 +364,7 @@ describe('Stage 7 — AI-assisted research & sentiment recalculation (research-l
     it('a REJECTED request also refuses a new response', async () => {
       const db = makeDb([{ first: { request_id: 'stage7-req-1-1', status: 'REJECTED' } }]);
       const result = await scope.registerStage7ResearchResponse(
-        { DB: db }, { requestId: 'stage7-req-1-1', findings: validFindings }
+        envOf(db), { requestId: 'stage7-req-1-1', findings: validFindings, providedToken: ADMIN_TOKEN }
       );
       expect(result.ok).toBe(false);
       expect(result.status).toBe(409);
@@ -278,7 +376,7 @@ describe('Stage 7 — AI-assisted research & sentiment recalculation (research-l
         { first: { response_id: 'stage7-resp-stage7-req-1-1' } },
       ]);
       const result = await scope.registerStage7ResearchResponse(
-        { DB: db }, { requestId: 'stage7-req-1-1', findings: validFindings }
+        envOf(db), { requestId: 'stage7-req-1-1', findings: validFindings, providedToken: ADMIN_TOKEN }
       );
       expect(result.ok).toBe(false);
       expect(result.status).toBe(409);
@@ -293,7 +391,8 @@ describe('Stage 7 — AI-assisted research & sentiment recalculation (research-l
         { first: null },
       ]);
       const result = await scope.registerStage7ResearchResponse(
-        { DB: db }, { requestId: 'stage7-req-1-1', findings: { summary: 's', sentiment_assessment: 'BULLISH' } }
+        envOf(db),
+        { requestId: 'stage7-req-1-1', findings: { summary: 's', sentiment_assessment: 'BULLISH' }, providedToken: ADMIN_TOKEN }
       );
       expect(result.ok).toBe(false);
       expect(result.status).toBe(400);
@@ -305,7 +404,7 @@ describe('Stage 7 — AI-assisted research & sentiment recalculation (research-l
         { first: null },
       ]);
       const result = await scope.registerStage7ResearchResponse(
-        { DB: db }, { requestId: 'stage7-req-1-1', findings: null }
+        envOf(db), { requestId: 'stage7-req-1-1', findings: null, providedToken: ADMIN_TOKEN }
       );
       expect(result.ok).toBe(false);
       expect(result.status).toBe(400);
@@ -319,7 +418,8 @@ describe('Stage 7 — AI-assisted research & sentiment recalculation (research-l
         { run: { success: true } }, // UPDATE stage7_research_requests
       ]);
       const result = await scope.registerStage7ResearchResponse(
-        { DB: db }, { requestId: 'stage7-req-1-1', provider: 'claude', findings: validFindings, sources: [], validated: false }
+        envOf(db),
+        { requestId: 'stage7-req-1-1', provider: 'claude', findings: validFindings, sources: [], validated: false, providedToken: ADMIN_TOKEN }
       );
       expect(result.ok).toBe(true);
       expect(result.response_id).toBe('stage7-resp-stage7-req-1-1');
@@ -334,9 +434,11 @@ describe('Stage 7 — AI-assisted research & sentiment recalculation (research-l
       // even though the earlier explicit check already prevents reaching
       // here for one.
       expect(updateCall.sql).toMatch(/status NOT IN \('INTEGRATED', 'REJECTED'\)/);
+      // Never leak the admin token anywhere in the result.
+      expect(JSON.stringify(result)).not.toContain(ADMIN_TOKEN);
     });
 
-    it('an explicit validated:true registration sets VALIDATED and moves the request to RESEARCH_COMPLETED', async () => {
+    it('an explicit validated:true registration WITH the correct token sets VALIDATED and moves the request to RESEARCH_COMPLETED', async () => {
       const db = makeDb([
         { first: { request_id: 'stage7-req-2-1', status: 'RESEARCH_REQUEST_PUBLISHED' } },
         { first: null },
@@ -344,7 +446,7 @@ describe('Stage 7 — AI-assisted research & sentiment recalculation (research-l
         { run: { success: true } },
       ]);
       const result = await scope.registerStage7ResearchResponse(
-        { DB: db }, { requestId: 'stage7-req-2-1', findings: validFindings, validated: true }
+        envOf(db), { requestId: 'stage7-req-2-1', findings: validFindings, validated: true, providedToken: ADMIN_TOKEN }
       );
       expect(result.validation_status).toBe('VALIDATED');
       const insertCall = db.calls[2];
@@ -361,7 +463,7 @@ describe('Stage 7 — AI-assisted research & sentiment recalculation (research-l
         { run: { success: true } },
       ]);
       const result = await scope.registerStage7ResearchResponse(
-        { DB: db }, { requestId: 'stage7-req-3-1', findings: validFindings }
+        envOf(db), { requestId: 'stage7-req-3-1', findings: validFindings, providedToken: ADMIN_TOKEN }
       );
       expect(result.validation_status).toBe('PENDING');
     });
@@ -374,7 +476,7 @@ describe('Stage 7 — AI-assisted research & sentiment recalculation (research-l
         { run: { success: true } },
       ]);
       const result = await scope.registerStage7ResearchResponse(
-        { DB: db }, { requestId: 'stage7-req-4-1', findings: validFindings, sources: 'not-an-array' }
+        envOf(db), { requestId: 'stage7-req-4-1', findings: validFindings, sources: 'not-an-array', providedToken: ADMIN_TOKEN }
       );
       expect(result.ok).toBe(true);
       const insertCall = db.calls[2];
@@ -390,7 +492,7 @@ describe('Stage 7 — AI-assisted research & sentiment recalculation (research-l
       ]);
       const sneaky = { summary: '<script>alert(1)</script>; DROP TABLE stage7_event_sentiment;', sentiment_assessment: 'NEGATIVE' };
       const result = await scope.registerStage7ResearchResponse(
-        { DB: db }, { requestId: 'stage7-req-5-1', findings: sneaky }
+        envOf(db), { requestId: 'stage7-req-5-1', findings: sneaky, providedToken: ADMIN_TOKEN }
       );
       expect(result.ok).toBe(true);
       const insertCall = db.calls[2];
@@ -398,6 +500,53 @@ describe('Stage 7 — AI-assisted research & sentiment recalculation (research-l
       // Never a second statement, never string-interpolated into the SQL itself.
       expect(insertCall.sql).not.toContain('DROP TABLE');
       expect(insertCall.sql.match(/;/g) || []).toHaveLength(0);
+    });
+  });
+
+  // Adversarial-review remediation, finding #1: the Stage 7 UI must
+  // explicitly disclose that its sentiment value is a distinct, per-event
+  // assessment on Stage 7's own scale -- never presented as, or confusable
+  // with, V1's market-wide composite. These are lightweight content-
+  // presence assertions against the raw worker.js source (the same file
+  // extractFunctions/extractConstants already read), not a full DOM
+  // render -- they exist so a future edit that silently deletes this
+  // disclosure fails a test, not just a manual read-through.
+  describe('UI text: Stage 7 sentiment scale is explicitly distinguished from V1', () => {
+    // NOTE ON BACKSLASHES: worker.js's client-side UI text lives inside a
+    // backtick template literal (RESEARCH_LAB_HTML) whose own contents are
+    // single-quoted JS strings, so a literal apostrophe in the rendered
+    // page is written in worker.js's raw source as TWO backslashes plus a
+    // quote ("\\\\'" below is exactly that, in a double-quoted string so
+    // the apostrophe itself needs no escaping) -- the outer template
+    // literal consumes one backslash, leaving a real "\'" for the client
+    // script's own single-quoted string to correctly unescape in turn.
+    // Matched with plain toContain() against the raw file, not toMatch()
+    // with a regex, specifically to avoid a second, independent layer of
+    // backslash reinterpretation.
+    it("the Stage 7 tab states plainly that its score is not V1's composite", () => {
+      expect(WORKER_JS_SOURCE).toContain("This is not V1\\\\'s composite score");
+    });
+    it("the Stage 7 tab discloses its own 0/50/100 scale and human-validated basis", () => {
+      expect(WORKER_JS_SOURCE).toContain("Stage 7\\\\'s own 0/50/100 scale");
+      expect(WORKER_JS_SOURCE).toContain('human-validated AI research response');
+    });
+    it("the Stage 7 tab states it never automatically changes V1, weights, or predictions", () => {
+      expect(WORKER_JS_SOURCE).toContain("never changes V1\\\\'s market-wide composite");
+      expect(WORKER_JS_SOURCE).toContain('global source weights, or any production prediction');
+    });
+    it('the recalculated-sentiment row label itself names Stage 7 and disclaims V1', () => {
+      expect(WORKER_JS_SOURCE).toContain('Stage 7 event sentiment (not V1)');
+    });
+    it("the Dashboard's V1 Composite tile cross-references the Stage 7 distinction", () => {
+      expect(WORKER_JS_SOURCE).toContain('V1 market-wide sentiment score (0-100) -- distinct from any Stage 7 per-event assessment');
+    });
+    it('the Pipeline flow-stage description for Stage 7 also discloses the separate-scale rule', () => {
+      // This one line uses the file's own curly-apostrophe convention
+      // (’, U+2019), not the backslash-escaped straight quote used
+      // elsewhere in this template -- matched verbatim, not via a
+      // wildcard, so a future edit that reverts to a straight quote
+      // would also be caught.
+      expect(WORKER_JS_SOURCE).toContain('Produces a separate, per-event score on Stage 7’s own 0/50/100 scale');
     });
   });
 });

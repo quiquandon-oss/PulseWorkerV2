@@ -6745,6 +6745,24 @@ async function getResearchLabStage7Overview(env) {
 
 const STAGE7_SENTIMENT_ASSESSMENTS = ['POSITIVE', 'NEGATIVE', 'MIXED', 'INDETERMINATE'];
 
+// Plain, dependency-free constant-time-ish string compare for the Stage 7
+// admin token below. Cloudflare Workers has no Node crypto.timingSafeEqual;
+// this always scans the full length of both operands (never short-circuits
+// on the first mismatched byte) so a network timing side-channel can't be
+// used to guess the secret one character at a time. Sized for a short
+// shared-secret token, not a general-purpose primitive.
+function stage7ConstantTimeEqual(a, b) {
+  if (typeof a !== 'string' || typeof b !== 'string') return false;
+  const maxLen = Math.max(a.length, b.length);
+  let diff = a.length === b.length ? 0 : 1;
+  for (let i = 0; i < maxLen; i++) {
+    const ca = i < a.length ? a.charCodeAt(i) : 0;
+    const cb = i < b.length ? b.charCodeAt(i) : 0;
+    diff |= ca ^ cb;
+  }
+  return diff === 0;
+}
+
 // Registers a human-submitted AI research response as DATA ONLY.
 // "Treat AI-generated output and retrieved web content as untrusted until
 // reviewed. Do not allow web-page instructions or AI-generated content to
@@ -6757,7 +6775,36 @@ const STAGE7_SENTIMENT_ASSESSMENTS = ['POSITIVE', 'NEGATIVE', 'MIXED', 'INDETERM
 // human sets themselves after reviewing the response's citations -- it is
 // never inferred or defaulted to true, and validation_status is computed
 // from it here, never accepted as a raw client-supplied value.
-async function registerStage7ResearchResponse(env, { requestId, provider, submittedTs, findings, sources, confidence, validated }) {
+//
+// SECURITY (adversarial-review remediation): this is the ONLY write path
+// into stage7_research_responses/stage7_research_requests reachable over
+// this Worker's public HTTP surface (confirmed by inspection -- every
+// other reference to these tables is a SELECT in getResearchLabStage7Overview,
+// and the only other writer is stage7-research-pipeline/run_stage7.py,
+// which runs under GitHub Actions against a repository-scoped secret, never
+// over this Worker's HTTP endpoint). `validated: true` in the request body
+// is NEVER itself treated as authorization -- a caller claiming validated
+// status proves nothing; only a correct STAGE7_ADMIN_TOKEN does. The check
+// below runs FIRST, before any D1 read or write, and fails CLOSED: if the
+// Worker secret is not configured at all, every request is rejected (503)
+// rather than falling back to some hardcoded or implicit "allow" default.
+// Configuration: `wrangler secret put STAGE7_ADMIN_TOKEN` in this Worker's
+// environment -- never in wrangler.toml's [vars] (plaintext, committed) and
+// never hardcoded here. The token itself is never logged or echoed back in
+// any response, including error responses.
+async function registerStage7ResearchResponse(env, { requestId, provider, submittedTs, findings, sources, confidence, validated, providedToken }) {
+  const configuredToken = env.STAGE7_ADMIN_TOKEN;
+  if (!configuredToken) {
+    return {
+      ok: false,
+      error: 'Stage 7 response registration is disabled on this Worker: STAGE7_ADMIN_TOKEN is not configured. Set it with `wrangler secret put STAGE7_ADMIN_TOKEN` before this endpoint can be used.',
+      status: 503,
+    };
+  }
+  if (typeof providedToken !== 'string' || !providedToken || !stage7ConstantTimeEqual(providedToken, configuredToken)) {
+    return { ok: false, error: 'Unauthorized', status: 401 };
+  }
+
   const request = await env.DB.prepare(
     'SELECT request_id, status FROM stage7_research_requests WHERE request_id = ?'
   ).bind(requestId).first();
@@ -8124,7 +8171,7 @@ const RESEARCH_LAB_HTML = `<!DOCTYPE html>
     html += whatHappensNextCard(d);
     html += '<h2 class="section-title">Key metrics</h2><div class="grid metrics">' +
       tile('BTC Price', esc(btcVal), 'Latest observed BTC price') +
-      tile('V1 Composite', esc(v1Val), 'Current V1 sentiment score (0-100)') +
+      tile('V1 Composite', esc(v1Val), 'Current V1 market-wide sentiment score (0-100) -- distinct from any Stage 7 per-event assessment (see the Stage 7 tab)') +
       tile('Research Events', d.research_events_count, 'Market events detected') +
       tile('Evidence Rows', d.research_event_evidence_count, 'News/evidence records collected') +
       '</div>';
@@ -8599,7 +8646,7 @@ const RESEARCH_LAB_HTML = `<!DOCTYPE html>
       flowStage(4, 'Temporal matching', 'Articles are tagged by when they were published relative to the event.', badge(evCount + ' matched', evCount > 0 ? 'b-strong' : 'b-unknown')) +
       flowStage(5, 'D1 research ledger', 'Events and evidence are persisted in the research database.', badge(evtCount + ' events / ' + evCount + ' evidence', 'b-strong')) +
       flowStage(6, 'Source analysis', 'EXP-009 joins detected events and collected evidence with each V1 source’s own representation and BTC’s reaction -- scheduled weekly, independent of this ledger’s own collection cadence (see detail below).', stage6Fact) +
-      flowStage(7, 'AI-assisted research & sentiment recalculation', 'For each live event: sufficient evidence is recalculated over the complete source set; insufficient/conflicting evidence gets a published research request for a human to investigate with an AI tool’s real internet search -- never an automatic AI API call (see detail below).', badgeForStage7(stage7)) +
+      flowStage(7, 'AI-assisted research & sentiment recalculation', 'For each live event: sufficient evidence is recalculated over the complete source set; insufficient/conflicting evidence gets a published research request for a human to investigate with an AI tool’s real internet search -- never an automatic AI API call (see detail below). Produces a separate, per-event score on Stage 7’s own 0/50/100 scale -- never a change to V1’s composite above, global source weights, or model predictions.', badgeForStage7(stage7)) +
       flowStage(8, 'Human review', 'No review-state table or mechanism is persisted anywhere in this codebase. In practice, every production change to selection logic or source weights requires a human-approved pull request merge, but this page has no data source to verify that.', badge('NOT TRACKED', 'b-unknown')) +
       '</div></div>';
 
@@ -9027,7 +9074,12 @@ const RESEARCH_LAB_HTML = `<!DOCTYPE html>
     var html = '<div class="card"><h2 class="card-title">Stage 7 -- AI-assisted research &amp; sentiment recalculation</h2>' +
       '<p>Human-triggered research, human-approved integration. This page never calls an AI API itself and never ' +
       'claims research happened merely because a request was published or a link was opened -- only a registered, ' +
-      'human-reviewed response can drive a sentiment recalculation.</p></div>';
+      'human-reviewed response can drive a sentiment recalculation.</p>' +
+      '<p><b>This is not V1\\'s composite score.</b> The "Sentiment" value below is a Stage 7, per-EVENT assessment, ' +
+      'set only from a human-validated AI research response\\'s own POSITIVE/NEGATIVE/MIXED/INDETERMINATE judgment, ' +
+      'on Stage 7\\'s own 0/50/100 scale. It never changes V1\\'s market-wide composite (shown on the Dashboard tab), ' +
+      'global source weights, or any production prediction, and nothing here does so automatically -- any such ' +
+      'change would be a separate, explicitly-approved decision.</p></div>';
 
     if (!s || !s.ok) {
       html += emptyState('Could not load Stage 7 status', '');
@@ -9086,6 +9138,8 @@ const RESEARCH_LAB_HTML = `<!DOCTYPE html>
               '<label>Sources -- one per line: url | publisher | publication_date | claim (optional)</label><textarea data-field="sources_text"></textarea>' +
               '<div class="s7-check"><input type="checkbox" data-field="validated" id="validated-' + esc(r.request_id) + '"/>' +
               '<label for="validated-' + esc(r.request_id) + '" style="display:inline; margin:0; text-transform:none;">I personally reviewed this response and its citations, and confirm it is not fabricated</label></div>' +
+              '<label>Admin token (required -- never stored by this page; ask whoever holds STAGE7_ADMIN_TOKEN)</label>' +
+              '<input type="password" data-field="admin_token" autocomplete="off"/>' +
               '<div class="s7-actions"><button class="primary" data-submit="' + esc(r.request_id) + '">Submit response</button></div>' +
               '<div class="s7-msg" data-msg="' + esc(r.request_id) + '"></div>' +
             '</div>') +
@@ -9102,7 +9156,7 @@ const RESEARCH_LAB_HTML = `<!DOCTYPE html>
         html += '<div class="item-card">' +
           '<div class="ev-row"><span class="k">Event #' + esc(ev.event_id) + '</span><span class="v">' + esc(ev.event_category) + '</span></div>' +
           '<div class="ev-row"><span class="k">Evidence sufficiency</span><span class="v">' + badgeForStage7Sufficiency(ev.evidence_sufficiency) + '</span></div>' +
-          '<div class="ev-row"><span class="k">Sentiment</span><span class="v">' +
+          '<div class="ev-row"><span class="k">Stage 7 event sentiment (not V1)</span><span class="v">' +
             (ev.sentiment_label ? badge(ev.sentiment_label + ' (' + ev.sentiment_score + ')', 'b-strong') : badge('NO DEFENSIBLE ASSESSMENT YET', 'b-unknown')) +
             '</span></div>' +
           '<div class="ev-row"><span class="k">Contributing / excluded evidence</span><span class="v">' + esc(ev.contributing_evidence_count) + ' / ' + esc(ev.excluded_evidence_count) + '</span></div>' +
@@ -9150,6 +9204,12 @@ const RESEARCH_LAB_HTML = `<!DOCTYPE html>
           msg.className = 's7-msg err';
           return;
         }
+        var adminToken = get('admin_token');
+        if (!adminToken) {
+          msg.textContent = 'Admin token is required to submit.';
+          msg.className = 's7-msg err';
+          return;
+        }
         var sourcesText = get('sources_text');
         var sources = sourcesText.split('\\n').map(function (line) { return line.trim(); }).filter(Boolean).map(function (line) {
           var parts = line.split('|').map(function (p) { return p.trim(); });
@@ -9171,8 +9231,15 @@ const RESEARCH_LAB_HTML = `<!DOCTYPE html>
         };
         msg.textContent = 'Submitting…';
         msg.className = 's7-msg';
+        // adminToken is read once from this page's own password-type input
+        // (never pre-filled, never persisted to localStorage/sessionStorage,
+        // never embedded in this script) and sent only as this one request's
+        // Authorization header -- see registerStage7ResearchResponse's own
+        // header comment in the Worker for the server-side enforcement.
         fetch('/api/research-lab/stage7-register-response', {
-          method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + adminToken },
+          body: JSON.stringify(body),
         }).then(function (res) { return res.json(); }).then(function (result) {
           if (result.ok) {
             msg.textContent = 'Registered (' + result.validation_status + ').';
@@ -10010,8 +10077,17 @@ export default {
     // own header comment). This is the ONLY write path for
     // stage7_research_responses; the scheduled stage7-research-pipeline/
     // run_stage7.py never writes to that table, only reads VALIDATED rows.
+    //
+    // SECURITY: requires `Authorization: Bearer <STAGE7_ADMIN_TOKEN>`,
+    // checked by registerStage7ResearchResponse itself before any D1 call
+    // -- see that function's own header comment for the full rationale.
+    // The token is read here and passed straight through; it is never
+    // logged, and the error responses below never echo request headers or
+    // body content back to the caller.
     if (url.pathname === '/api/research-lab/stage7-register-response' && request.method === 'POST') {
       try {
+        const authHeader = request.headers.get('Authorization') || '';
+        const providedToken = authHeader.startsWith('Bearer ') ? authHeader.slice('Bearer '.length) : null;
         const body = await request.json();
         if (!body || typeof body.request_id !== 'string' || !body.request_id.trim()) {
           return new Response(JSON.stringify({ ok: false, error: 'request_id is required' }), { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
@@ -10027,9 +10103,14 @@ export default {
           sources: body.sources,
           confidence: typeof body.confidence === 'string' ? body.confidence : null,
           validated: body.validated === true,
+          providedToken,
         });
         return new Response(JSON.stringify(result), { status: result.status || (result.ok ? 200 : 500), headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
       } catch (err) {
+        // Never echo the caught error's own message verbatim here if it
+        // could ever originate from something request-controlled; today
+        // it cannot (JSON.parse failures and D1 errors only), but the
+        // token itself never flows through `err` in any code path above.
         return new Response(JSON.stringify({ ok: false, error: String(err) }), { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
       }
     }

@@ -1,0 +1,35 @@
+{
+  "created_ts": 1790542244943,
+  "event": {
+    "category": "LARGE_MOVE",
+    "direction": "UP",
+    "event_id": 1,
+    "event_ts": 1790282851152,
+    "fingerprint": "LARGE_MOVE|1790282851152|UP|pr3-v1",
+    "intensity": 5.0,
+    "is_internal_model_event": false,
+    "is_post_event_analysis": 0,
+    "trigger_metric": "24h_btc_return_pct",
+    "trigger_threshold": 4.0,
+    "trigger_version": "pr3-v1"
+  },
+  "event_id": 1,
+  "evidence_snapshot": [],
+  "historical_cutoff_ts": 1790282851152,
+  "missing_categories": [
+    "primary_reporting",
+    "independent_corroboration"
+  ],
+  "questions": [
+    "What specific real-world development explains the detected LARGE_MOVE event for BTC around event_ts=1790282851152?",
+    "What independent, credible sources (beyond what is already collected) report on this event?",
+    "Is there a plausible transmission mechanism connecting this development to the affected asset's price, and is it corroborated by more than one independent source?"
+  ],
+  "reasons": [
+    "No research_event_evidence rows exist for this event."
+  ],
+  "request_id": "stage7-req-1-1",
+  "research_prompt": "Research this market event for BTC using your actual internet-search capability. Event category: LARGE_MOVE. Event timestamp (ms): 1790282851152.\nRespect this historical cutoff: do not use information published after 1790282851152 (ms since epoch) -- reconstruct only what was knowable at or before that time.\n\nWhy existing evidence is insufficient:\n- No research_event_evidence rows exist for this event.\n\nQuestions to answer:\n- What specific real-world development explains the detected LARGE_MOVE event for BTC around event_ts=1790282851152?\n- What independent, credible sources (beyond what is already collected) report on this event?\n- Is there a plausible transmission mechanism connecting this development to the affected asset's price, and is it corroborated by more than one independent source?\n\nFor your findings, explicitly state: (1) what existing sources failed to explain, (2) relevant primary sources and independent reporting with verifiable URLs/publishers/dates, (3) the event's relevance to the affected asset and broader market, (4) a plausible transmission mechanism without presenting speculation as fact, (5) whether the implications are POSITIVE, NEGATIVE, MIXED, or INDETERMINATE, (6) contradictory evidence and unresolved questions, and (7) your confidence and limitations. Distinguish sourced facts, third-party claims, analysis, and uncertainty. Do not fabricate citations or claim a source was checked if it was not.",
+  "schema_version": "stage7-request-v1",
+  "sufficiency_status": "INSUFFICIENT_EVIDENCE"
+}

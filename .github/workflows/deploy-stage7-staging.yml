@@ -41,8 +41,23 @@ name: Deploy Stage 7 Staging Worker
 #     git commit/push, unlike stage7-research-pipeline.yml's own
 #     publish step), so it needs nothing more.
 #   - No `set -x` / shell tracing anywhere, and no step ever echoes an
-#     env var that could hold the token -- wrangler's own deploy output
-#     does not print the token either.
+#     env var that could hold a token to the log -- wrangler's own
+#     deploy/secret-put output does not print secret values either.
+#
+# Also configures the Worker secret STAGE7_ADMIN_TOKEN (the Worker's own
+# admin gate for POST /api/research-lab/stage7-register-response) via
+# `wrangler secret put`, sourcing its value from the DEDICATED
+# STAGE7_STAGING_ADMIN_TOKEN GitHub secret -- distinct from
+# STAGE7_STAGING_CLOUDFLARE_API_TOKEN (which authenticates wrangler
+# itself, never the value being stored). The value is piped through
+# stdin (`printf '%s' "$VALUE" | wrangler secret put ...`) rather than
+# passed as a command-line argument or echoed as a standalone log line,
+# so it never appears in plaintext in the command, the logs, or any
+# file -- and GitHub Actions independently masks the literal value
+# anywhere it might otherwise surface. Fails closed (before checkout)
+# if STAGE7_STAGING_ADMIN_TOKEN is missing or empty, same as the
+# Cloudflare token check. This does NOT trigger the Stage 7 research
+# pipeline itself -- that stays a separate, later, explicit step.
 on:
   workflow_dispatch: {}
 
@@ -66,6 +81,21 @@ jobs:
             exit 1
           fi
           echo "Staging Cloudflare token is configured."
+
+      # Same fail-closed pattern, for the value that will be written
+      # into the Worker's own STAGE7_ADMIN_TOKEN secret. Checked before
+      # checkout for the same reason: no point cloning the repo if this
+      # job can't finish. Never falls back to any other secret or a
+      # placeholder value.
+      - name: Verify staging admin token secret is configured
+        env:
+          STAGE7_STAGING_ADMIN_TOKEN: ${{ secrets.STAGE7_STAGING_ADMIN_TOKEN }}
+        run: |
+          if [ -z "$STAGE7_STAGING_ADMIN_TOKEN" ]; then
+            echo "::error::STAGE7_STAGING_ADMIN_TOKEN secret is missing or empty. Refusing to configure the Worker's admin secret without it."
+            exit 1
+          fi
+          echo "Staging admin token secret is configured."
 
       # Pinned to the exact commit verified before this workflow was
       # authored -- see this file's own module comment above. Update
@@ -127,3 +157,22 @@ jobs:
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.STAGE7_STAGING_CLOUDFLARE_API_TOKEN }}
         run: npx wrangler deploy -c wrangler.staging.toml
+
+      # `wrangler secret put` requires the Worker to already exist --
+      # this step runs after (never before) the deploy step above.
+      # STAGE7_ADMIN_TOKEN_VALUE is a plain shell variable, scoped to
+      # this one step only, holding the value read from the
+      # STAGE7_STAGING_ADMIN_TOKEN GitHub secret; it is fed to wrangler
+      # via stdin (printf, piped -- never a command-line argument, never
+      # echoed as a standalone log line, never written to a file). -c
+      # wrangler.staging.toml is what scopes this to the staging Worker
+      # specifically -- same as the deploy step, never the production
+      # config. CLOUDFLARE_API_TOKEN here is still the dedicated staging
+      # token, same as above -- never the general-purpose one.
+      - name: Configure STAGE7_ADMIN_TOKEN on the staging Worker
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.STAGE7_STAGING_CLOUDFLARE_API_TOKEN }}
+          STAGE7_ADMIN_TOKEN_VALUE: ${{ secrets.STAGE7_STAGING_ADMIN_TOKEN }}
+        run: |
+          printf '%s' "$STAGE7_ADMIN_TOKEN_VALUE" | npx wrangler secret put STAGE7_ADMIN_TOKEN -c wrangler.staging.toml
+          echo "STAGE7_ADMIN_TOKEN configured on pulseworker-v2-staging."

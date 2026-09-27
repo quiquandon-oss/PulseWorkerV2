@@ -1,0 +1,158 @@
+name: Stage 7 E2E Response Registration Test (temporary)
+
+# REGISTRATION-ONLY COPY ON MAIN -- this file's real, active home is the
+# claude/stage7-research-pipeline branch; this copy exists on main SOLELY
+# so GitHub recognizes it as a dispatchable workflow at all (GitHub only
+# lists/dispatches-by-filename a workflow that exists on the default
+# branch or has already run at least once -- confirmed via a direct 404
+# on the dispatch API before this copy was added, the same limitation
+# already documented for stage7-research-pipeline.yml). Its own branch
+# guard (see "Enforce staging-only branch" below) rejects any ref other
+# than exactly refs/heads/claude/stage7-research-pipeline before the HTTP
+# call step runs, so a dispatch to ref=main fails immediately here. Both
+# this file and its registration purpose are TEMPORARY: removed from
+# both branches once the E2E test it supports is complete.
+#
+# TEMPORARY test-harness workflow, added solely to exercise
+# POST /api/research-lab/stage7-register-response on the deployed staging
+# Worker for a controlled end-to-end test -- removed again once that test
+# is complete (see the test's own final report for confirmation).
+#
+# Why this exists at all: this sandbox's own outbound network access to
+# *.workers.dev is blocked by organization egress policy (confirmed
+# directly -- a plain curl to the staging Worker's URL was rejected with a
+# 403 before this file was written), so the ONLY way to make a real HTTP
+# call against the deployed staging Worker is from a GitHub-hosted runner,
+# which has real internet access. This workflow does exactly one HTTP
+# call per dispatch and nothing else -- no D1 access, no Cloudflare API
+# call, no deploy, no write to this repository.
+#
+# Target is HARDCODED to the staging Worker's own URL -- never a
+# workflow_dispatch input -- so there is no way to point this at anything
+# else by mistake.
+#
+# Auth modes (auth_mode input), matching exactly what a real caller would
+# do -- no bypass, no shortcut around registerStage7ResearchResponse's own
+# checks in worker.js:
+#   - "real":    sends `Authorization: Bearer <STAGE7_STAGING_ADMIN_TOKEN>`
+#                (the real secret, read only here, never echoed).
+#   - "missing": sends no Authorization header at all.
+#   - "wrong":   sends a deliberately wrong, hardcoded, obviously-fake
+#                token literal -- never a real secret value.
+# The real token is read from the STAGE7_STAGING_ADMIN_TOKEN GitHub
+# secret ONLY when auth_mode=real, is never printed, logged, echoed, or
+# written to a file, and this workflow fails closed (before making any
+# HTTP call) if that secret is missing while auth_mode=real is requested.
+on:
+  workflow_dispatch:
+    inputs:
+      request_id:
+        description: 'stage7_research_requests.request_id to target'
+        required: true
+        type: string
+      auth_mode:
+        description: 'real | missing | wrong'
+        required: true
+        type: choice
+        options: [real, missing, wrong]
+        default: missing
+      validated:
+        description: 'validated field to send (true/false)'
+        required: true
+        type: choice
+        options: ['true', 'false']
+        default: 'false'
+      sentiment_assessment:
+        description: 'findings.sentiment_assessment to send'
+        required: true
+        type: choice
+        options: [POSITIVE, NEGATIVE, MIXED, INDETERMINATE]
+        default: INDETERMINATE
+      sources_json:
+        description: 'JSON-encoded sources array to send (default: empty array)'
+        required: false
+        type: string
+        default: '[]'
+
+permissions:
+  contents: read
+
+jobs:
+  register-response:
+    runs-on: ubuntu-latest
+    steps:
+      # Defense-in-depth, matching this project's own established pattern
+      # for every Stage 7 workflow: reject any ref other than this exact
+      # branch before anything else runs, even though this workflow only
+      # calls the staging Worker's own HTTP endpoint (never D1/Cloudflare
+      # API directly) and is never dispatched with any other ref in
+      # practice.
+      - name: Enforce staging-only branch
+        run: |
+          if [ "${{ github.ref }}" != "refs/heads/claude/stage7-research-pipeline" ]; then
+            echo "::error::Refusing to run on ref '${{ github.ref }}' -- this workflow may only execute on refs/heads/claude/stage7-research-pipeline."
+            exit 1
+          fi
+
+      - name: Verify staging admin token secret is configured (only when auth_mode=real)
+        if: ${{ inputs.auth_mode == 'real' }}
+        env:
+          STAGE7_STAGING_ADMIN_TOKEN: ${{ secrets.STAGE7_STAGING_ADMIN_TOKEN }}
+        run: |
+          if [ -z "$STAGE7_STAGING_ADMIN_TOKEN" ]; then
+            echo "::error::STAGE7_STAGING_ADMIN_TOKEN secret is missing or empty. Refusing to proceed with auth_mode=real."
+            exit 1
+          fi
+          echo "Staging admin token secret is configured."
+
+      # Builds the Authorization header value into a step OUTPUT (GitHub
+      # Actions masks any string that matches a registered secret value
+      # wherever it appears in logs) rather than printing it directly --
+      # never logged, never echoed as a standalone line.
+      - name: Call the staging response-registration endpoint
+        env:
+          STAGE7_STAGING_ADMIN_TOKEN: ${{ secrets.STAGE7_STAGING_ADMIN_TOKEN }}
+          AUTH_MODE: ${{ inputs.auth_mode }}
+          REQUEST_ID: ${{ inputs.request_id }}
+          VALIDATED: ${{ inputs.validated }}
+          SENTIMENT_ASSESSMENT: ${{ inputs.sentiment_assessment }}
+          SOURCES_JSON: ${{ inputs.sources_json }}
+        run: |
+          set -e
+          case "$AUTH_MODE" in
+            real)
+              AUTH_HEADER="Authorization: Bearer ${STAGE7_STAGING_ADMIN_TOKEN}"
+              ;;
+            wrong)
+              AUTH_HEADER="Authorization: Bearer stage7-e2e-test-deliberately-wrong-token"
+              ;;
+            missing)
+              AUTH_HEADER=""
+              ;;
+            *)
+              echo "::error::Unknown auth_mode: $AUTH_MODE"
+              exit 1
+              ;;
+          esac
+
+          BODY=$(python3 -c "import json, os; print(json.dumps({'request_id': os.environ['REQUEST_ID'], 'provider': 'stage7-e2e-test-harness', 'validated': os.environ['VALIDATED'] == 'true', 'findings': {'sentiment_assessment': os.environ['SENTIMENT_ASSESSMENT'], 'summary': 'Synthetic Stage 7 E2E test response -- not real market research.'}, 'sources': json.loads(os.environ['SOURCES_JSON'])}))")
+
+          if [ -n "$AUTH_HEADER" ]; then
+            HTTP_CODE=$(curl -sS -o /tmp/response_body.json -w "%{http_code}" \
+              -X POST "https://pulseworker-v2-staging.quiquandon.workers.dev/api/research-lab/stage7-register-response" \
+              -H "Content-Type: application/json" \
+              -H "$AUTH_HEADER" \
+              -d "$BODY")
+          else
+            HTTP_CODE=$(curl -sS -o /tmp/response_body.json -w "%{http_code}" \
+              -X POST "https://pulseworker-v2-staging.quiquandon.workers.dev/api/research-lab/stage7-register-response" \
+              -H "Content-Type: application/json" \
+              -d "$BODY")
+          fi
+
+          echo "HTTP status: $HTTP_CODE"
+          echo "Response body:"
+          cat /tmp/response_body.json
+          echo ""
+          echo "http_code=$HTTP_CODE" >> "$GITHUB_OUTPUT"
+        id: call

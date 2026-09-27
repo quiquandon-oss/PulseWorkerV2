@@ -93,9 +93,28 @@ def test_missing_staging_token_check_runs_before_checkout_and_fails_closed():
 def test_workflow_is_not_triggered_by_pushes():
     # This workflow's on: block must never include a `push` trigger at
     # all (unlike deploy.yml, which deploys on push to main) -- only
-    # schedule/workflow_dispatch. The branch guard is defense in depth;
-    # not having a push trigger in the first place is the primary
-    # control. PyYAML parses the YAML 1.1 boolean key `on:` as `True`.
+    # workflow_dispatch. The branch guard is defense in depth; not having
+    # a push trigger in the first place is the primary control. PyYAML
+    # parses the YAML 1.1 boolean key `on:` as `True`.
     triggers = _load_workflow()[True]
     assert "push" not in triggers
-    assert set(triggers.keys()) == {"schedule", "workflow_dispatch"}
+    assert set(triggers.keys()) == {"workflow_dispatch"}
+
+
+def test_workflow_has_no_schedule_trigger_of_its_own():
+    # (Copilot-audit follow-up.) The daily cadence now lives entirely in
+    # .github/workflows/stage7-staging-dispatcher.yml on main, which
+    # fires this workflow's own workflow_dispatch event once a day with
+    # ref=claude/stage7-research-pipeline. A `schedule:` trigger here
+    # would only ever be evaluated using the copy of this file on the
+    # default branch (main) -- since this workflow must never run
+    # automatically off of main, and must never depend on staying absent
+    # from main as its only protection, the schedule was moved off this
+    # file entirely rather than left here "safely dormant".
+    triggers = _load_workflow()[True]
+    assert "schedule" not in triggers
+
+
+def test_workflow_still_supports_manual_dispatch():
+    triggers = _load_workflow()[True]
+    assert "workflow_dispatch" in triggers

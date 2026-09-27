@@ -50,8 +50,9 @@ name: Stage 7 - AI-Assisted Research & Full-Source Sentiment Recalculation
 #      endpoint's own comment in worker.js.
 #   3. Deploy worker.js (this repo's existing deploy.yml, triggered by a
 #      push to main that touches worker.js).
-#   4. This workflow's next scheduled or manually-dispatched run will then
-#      see schema_state == "READY" and process events normally.
+#   4. This workflow's next run (whether from the daily staging dispatcher
+#      on main or a manual workflow_dispatch) will then see schema_state
+#      == "READY" and process events normally.
 # Until step 1 is done, every run of this workflow is a safe, intentional
 # no-op.
 #
@@ -89,19 +90,27 @@ name: Stage 7 - AI-Assisted Research & Full-Source Sentiment Recalculation
 # and set by a human with Cloudflare account access, same as every other
 # secret in this repo.
 #
-# Daily rather than weekly (unlike exp009/EXP-005): Stage 6 evidence
-# changes every 6 hours (live-evidence-collection.yml), so a new event
-# can become SUFFICIENT, or a pending request can be resolved by a
-# VALIDATED response, well within a week -- a daily check keeps Olivier's
-# request queue and event sentiment reasonably current without adding a
-# new Cloudflare Cron Trigger (GitHub Actions `schedule:` only, same $0
-# reasoning as every other experiment workflow in this repo). Offset one
-# hour after live-evidence-collection's own day-boundary run and one hour
-# after exp009's Monday run, purely to avoid two large jobs starting at
-# the same instant -- Stage 7 is otherwise fully independent of both.
+# NO schedule: TRIGGER HERE (Copilot-audit follow-up): a `schedule:`
+# trigger is only ever evaluated using the workflow file version on the
+# repository's DEFAULT branch (main), regardless of which branch defines
+# it -- so a schedule declared here would sit dormant and safe only for
+# as long as this file never reaches main, which is a fragile, easy-to-
+# violate invariant to depend on for something meant to run daily
+# forever. The daily 11:00 UTC cadence (originally: same reasoning as
+# every other experiment workflow in this repo -- Stage 6 evidence
+# changes every 6 hours via live-evidence-collection.yml, so a daily
+# check keeps Olivier's request queue and event sentiment reasonably
+# current; offset one hour after live-evidence-collection's own day-
+# boundary run and exp009's Monday run, purely to avoid two large jobs
+# starting at the same instant) now lives entirely in
+# .github/workflows/stage7-staging-dispatcher.yml on main instead: that
+# workflow holds no Cloudflare secret and makes no D1/Cloudflare call of
+# its own -- it only fires this workflow's own workflow_dispatch event
+# with ref=claude/stage7-research-pipeline once a day, so THIS workflow
+# only ever runs the way it always could: manually, or by explicit
+# dispatch, always subject to the branch guard below regardless of who
+# or what invoked it.
 on:
-  schedule:
-    - cron: '0 11 * * *'
   workflow_dispatch: {}
 
 concurrency:
@@ -125,11 +134,13 @@ jobs:
       # commit. `github.ref` is compared for EXACT equality against
       # refs/heads/claude/stage7-research-pipeline; any other ref (main,
       # a PR merge ref, a tag, a different branch) aborts the job here.
-      # This is what makes the `schedule:`/`workflow_dispatch:` triggers
-      # above safe even if this workflow file is ever merged to main --
-      # scheduled runs only ever use the DEFAULT branch's copy of this
-      # file, so once merged the schedule would otherwise start firing on
-      # main with no other guard in place.
+      # This workflow now has ONLY workflow_dispatch as a trigger (no
+      # schedule: -- see the module comment above and .github/workflows/
+      # stage7-staging-dispatcher.yml on main, which fires this event
+      # daily with ref=claude/stage7-research-pipeline), but the guard
+      # stays regardless: it is what keeps a manual dispatch, or this
+      # file ever being merged to main, from running against anything
+      # but this one staging branch.
       - name: Enforce staging-only branch
         run: |
           if [ "${{ github.ref }}" != "refs/heads/claude/stage7-research-pipeline" ]; then

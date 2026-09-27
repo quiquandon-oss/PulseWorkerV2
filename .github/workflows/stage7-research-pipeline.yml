@@ -180,8 +180,13 @@ jobs:
         with:
           python-version: '3.11'
 
+      # PyYAML is needed by test_workflow_staging_guard.py's own static
+      # parsing of this workflow file -- ubuntu-latest's system Python
+      # does not ship it by default (confirmed via a real CI failure,
+      # "No module named 'yaml'", on the equivalent install step in
+      # .github/workflows/test.yml on main before this line was added).
       - name: Install pytest
-        run: pip install pytest --break-system-packages
+        run: pip install pytest pyyaml --break-system-packages
 
       - name: Run research/ and stage7-research-pipeline/ tests (never run this pipeline against production on red tests)
         run: python3 -m pytest research/ stage7-research-pipeline/ -v

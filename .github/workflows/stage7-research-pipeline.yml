@@ -1,0 +1,243 @@
+name: Stage 7 - AI-Assisted Research & Full-Source Sentiment Recalculation
+
+# ============================================================================
+# REGISTRATION-ONLY COPY ON MAIN -- this file's real, active home is the
+# claude/stage7-research-pipeline branch; this copy exists on main SOLELY so
+# GitHub's Actions system recognizes "stage7-research-pipeline.yml" as a
+# dispatchable workflow at all (GitHub only lists/dispatches-by-filename a
+# workflow that exists on the default branch or has already run at least
+# once -- confirmed via a direct 404 on GET /actions/workflows/stage7-
+# research-pipeline.yml before this copy was added). It is otherwise
+# completely inert here: this copy's own branch guard (see the "Enforce
+# staging-only branch" step below) rejects any ref other than exactly
+# refs/heads/claude/stage7-research-pipeline BEFORE checkout, tests, or any
+# Cloudflare/git-publish step -- so a dispatch to ref=main (accidental or
+# otherwise) fails immediately here, and this copy's own `pytest
+# research/ stage7-research-pipeline/` step would fail anyway on main
+# (stage7-research-pipeline/ does not exist here) if it were ever somehow
+# reached, which it structurally cannot be.
+#
+# .github/workflows/stage7-staging-dispatcher.yml (also on main) always
+# dispatches with ref=claude/stage7-research-pipeline explicitly, which is
+# what actually runs -- GitHub executes the workflow file AS IT EXISTS ON
+# THE DISPATCHED REF, not this main-branch copy, so the feature branch
+# remains the sole place this workflow's real logic is edited. Keep this
+# copy's branch guard, staging-target env vars, and dedicated-secret usage
+# byte-identical to the feature branch's own copy whenever that file
+# changes -- research/test_stage7_scheduler_isolation.py enforces this.
+# ============================================================================
+#
+# Stage 7 of the Research Lab pipeline: for each real-world event Stage 6
+# (live-evidence-collection.yml + event_source_relevance.py/event_source_
+# evidence_join.py, all UNCHANGED here) still considers live, this either
+# (a) recalculates the event's sentiment over the COMPLETE eligible source
+# set when evidence is already sufficient, or (b) publishes a structured
+# research request -- as a versioned file in this repo, via a plain git
+# commit -- for Olivier to investigate manually with an AI tool's real
+# internet-search capability.
+#
+# Does NOT call any AI API and does NOT perform its own internet search --
+# see stage7-research-pipeline/run_stage7.py's own module docstring and
+# research/stage7_github_publisher.py. A human registers a completed AI
+# response separately via the Worker's POST /api/research-lab/stage7-
+# register-response endpoint; this workflow only reads VALIDATED responses
+# to decide whether a pending request is now resolved.
+#
+# All new sentiment/sufficiency/publishing logic lives in, and is unit-
+# tested in, research/stage7_evidence_sufficiency.py, research/stage7_
+# sentiment_recalculation.py, and research/stage7_github_publisher.py --
+# each independently, with zero DB/network dependency. This workflow only
+# wires that logic to real D1 (same dual wrangler-CLI-read + Cloudflare
+# D1 REST-API-write pattern exp009-event-source-evidence.yml already
+# uses) and to a real git commit/push for the request file.
+#
+# Writes ONLY stage7_research_requests and stage7_event_sentiment (both
+# new, migration 0016 -- NOT yet applied to production D1 as of this
+# workflow's creation). run_stage7.py checks for that schema FIRST, before
+# touching either table: if migration 0016 has not been applied at all, it
+# prints {"status": "SKIPPED -- MIGRATION NOT APPLIED", ...} and exits 0
+# (a clean, green, no-op run -- never a daily red X while waiting on a
+# deliberate, separate migration-application step). A genuinely PARTIAL
+# schema (some but not all of the three Stage 7 tables present) or any
+# other real D1/read error still fails the job loudly, exactly as before --
+# only the single, verified "migration not applied yet" case is quiet.
+# See stage7-research-pipeline/run_stage7.py's own classify_stage7_schema_
+# state() for the exact rule. Never writes research_events, research_
+# event_evidence, history, btc_data, predictions, or any other V1/V2
+# production table. stage7_research_responses is written only by a human
+# via the Worker endpoint above, never by this script.
+#
+# ACTIVATION SEQUENCE (manual, deliberate -- never automatic):
+#   1. Review and apply .ai/migrations/0016_stage7_research_pipeline.sql
+#      to production D1 (`wrangler d1 execute sentiment-history --remote
+#      --file .ai/migrations/0016_stage7_research_pipeline.sql`).
+#   2. Set the STAGE7_ADMIN_TOKEN Worker secret (`wrangler secret put
+#      STAGE7_ADMIN_TOKEN`) -- required before POST /api/research-lab/
+#      stage7-register-response will accept any request; see that
+#      endpoint's own comment in worker.js.
+#   3. Deploy worker.js (this repo's existing deploy.yml, triggered by a
+#      push to main that touches worker.js).
+#   4. This workflow's next run (whether from the daily staging dispatcher
+#      on main or a manual workflow_dispatch) will then see schema_state
+#      == "READY" and process events normally.
+# Until step 1 is done, every run of this workflow is a safe, intentional
+# no-op.
+#
+# STAGING-ONLY, FAIL-CLOSED (Copilot-audit remediation, 2026-09):
+# run_stage7.py hardcoded production's OWN D1 database (sentiment-history)
+# with no way to point it anywhere else, so this workflow -- which used the
+# general-purpose CLOUDFLARE_API_TOKEN and could in principle run on main --
+# could have silently written to production. Fixed on BOTH sides:
+#   - run_stage7.py now has NO default/fallback database target at all; it
+#     requires STAGE7_TARGET_ACCOUNT_ID/_DATABASE_NAME/_DATABASE_ID (set
+#     below, pointing at the separate pulseworker-v2-staging D1 database)
+#     and validates them against that one expected staging target BEFORE
+#     any remote D1 call -- see its own validate_staging_target().
+#   - This workflow only ever runs against the
+#     claude/stage7-research-pipeline branch (the "Enforce staging-only
+#     branch" step below, which runs before checkout/tests/anything that
+#     could touch Cloudflare or git-push), and uses the DEDICATED
+#     STAGE7_STAGING_CLOUDFLARE_API_TOKEN secret rather than the general
+#     CLOUDFLARE_API_TOKEN production deploy uses.
+# KNOWN LIMITATION (documented, not fixed by scoping alone): Cloudflare's
+# D1 Edit/Read API-token permissions are ACCOUNT-WIDE -- there is no
+# per-database resource restriction in Cloudflare's permission model as of
+# this writing. A token with D1 Edit therefore CAN technically reach
+# production's sentiment-history database even when minted "for staging
+# only"; a token's name or intended purpose is not itself an access
+# control. The isolation this workflow provides is: (a) this script will
+# refuse to use such a token against anything but the exact staging
+# database id above, and (b) this workflow will not run outside this one
+# branch. Minimum permission to grant STAGE7_STAGING_CLOUDFLARE_API_TOKEN:
+# Account -> D1 -> Edit, scoped to this one Cloudflare account (no Workers
+# Scripts / KV / R2 / other account permissions needed) -- there is
+# currently no way to further scope it to only the staging database.
+# This workflow, this script, and this comment do NOT create, rotate, or
+# reveal any secret; STAGE7_STAGING_CLOUDFLARE_API_TOKEN must be created
+# and set by a human with Cloudflare account access, same as every other
+# secret in this repo.
+#
+# NO schedule: TRIGGER HERE (Copilot-audit follow-up): a `schedule:`
+# trigger is only ever evaluated using the workflow file version on the
+# repository's DEFAULT branch (main), regardless of which branch defines
+# it -- so a schedule declared here would sit dormant and safe only for
+# as long as this file never reaches main, which is a fragile, easy-to-
+# violate invariant to depend on for something meant to run daily
+# forever. The daily 11:00 UTC cadence (originally: same reasoning as
+# every other experiment workflow in this repo -- Stage 6 evidence
+# changes every 6 hours via live-evidence-collection.yml, so a daily
+# check keeps Olivier's request queue and event sentiment reasonably
+# current; offset one hour after live-evidence-collection's own day-
+# boundary run and exp009's Monday run, purely to avoid two large jobs
+# starting at the same instant) now lives entirely in
+# .github/workflows/stage7-staging-dispatcher.yml on main instead: that
+# workflow holds no Cloudflare secret and makes no D1/Cloudflare call of
+# its own -- it only fires this workflow's own workflow_dispatch event
+# with ref=claude/stage7-research-pipeline once a day, so THIS workflow
+# only ever runs the way it always could: manually, or by explicit
+# dispatch, always subject to the branch guard below regardless of who
+# or what invoked it.
+on:
+  workflow_dispatch: {}
+
+concurrency:
+  group: stage7-research-pipeline
+  cancel-in-progress: false
+
+# contents: write (unlike every read-only research workflow in this repo)
+# because publish_request_file() commits a new file under research/
+# stage7_requests/ via plain git -- the same ambient-GITHUB_TOKEN
+# checkout/commit/push pattern proven for automated commits elsewhere,
+# never a new PAT, never Octokit.
+permissions:
+  contents: write
+
+jobs:
+  research:
+    runs-on: ubuntu-latest
+    steps:
+      # MUST be the first step -- runs before checkout, before tests,
+      # before anything that could touch Cloudflare or publish a git
+      # commit. `github.ref` is compared for EXACT equality against
+      # refs/heads/claude/stage7-research-pipeline; any other ref (main,
+      # a PR merge ref, a tag, a different branch) aborts the job here.
+      # This workflow now has ONLY workflow_dispatch as a trigger (no
+      # schedule: -- see the module comment above and .github/workflows/
+      # stage7-staging-dispatcher.yml on main, which fires this event
+      # daily with ref=claude/stage7-research-pipeline), but the guard
+      # stays regardless: it is what keeps a manual dispatch, or this
+      # file ever being merged to main, from running against anything
+      # but this one staging branch.
+      - name: Enforce staging-only branch
+        run: |
+          if [ "${{ github.ref }}" != "refs/heads/claude/stage7-research-pipeline" ]; then
+            echo "::error::Stage 7 is staging-only. Refusing to run on ref '${{ github.ref }}' -- this workflow may only execute on refs/heads/claude/stage7-research-pipeline. Aborting before checkout, tests, Cloudflare access, or any git publish step."
+            exit 1
+          fi
+          echo "Branch guard passed: running on refs/heads/claude/stage7-research-pipeline."
+
+      # Fail closed, not silently skip, if the dedicated staging token
+      # isn't configured -- a missing secret must never be mistaken for
+      # "nothing to do" (that path is schema_state == NOT_APPLIED,
+      # handled inside run_stage7.py itself). Checked before checkout:
+      # no reason to even clone the repo if this job can't proceed.
+      - name: Verify staging Cloudflare token is configured
+        env:
+          STAGE7_STAGING_CLOUDFLARE_API_TOKEN: ${{ secrets.STAGE7_STAGING_CLOUDFLARE_API_TOKEN }}
+        run: |
+          if [ -z "$STAGE7_STAGING_CLOUDFLARE_API_TOKEN" ]; then
+            echo "::error::STAGE7_STAGING_CLOUDFLARE_API_TOKEN secret is missing or empty. Refusing to run Stage 7 without the dedicated staging token -- never falls back to CLOUDFLARE_API_TOKEN (the production deploy token) or any other secret."
+            exit 1
+          fi
+          echo "Staging Cloudflare token is configured."
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node (for wrangler)
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install wrangler
+        run: npm install -g wrangler
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      # PyYAML is needed by test_workflow_staging_guard.py's own static
+      # parsing of this workflow file -- ubuntu-latest's system Python
+      # does not ship it by default (confirmed via a real CI failure,
+      # "No module named 'yaml'", on the equivalent install step in
+      # .github/workflows/test.yml on main before this line was added).
+      - name: Install pytest
+        run: pip install pytest pyyaml --break-system-packages
+
+      - name: Run research/ and stage7-research-pipeline/ tests (never run this pipeline against production on red tests)
+        run: python3 -m pytest research/ stage7-research-pipeline/ -v
+
+      # publish_request_file() shells out to `git commit`, which requires
+      # a configured identity -- the standard github-actions[bot] identity,
+      # scoped to this job only (never a user's own git config).
+      - name: Configure git identity for automated request commits
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      # CLOUDFLARE_API_TOKEN here is the DEDICATED staging token (never
+      # the production CLOUDFLARE_API_TOKEN secret deploy.yml uses) --
+      # wrangler and run_stage7.py's own d1_api_query() both read it from
+      # this exact env var name. STAGE7_TARGET_* pin the explicit staging
+      # account/database that run_stage7.py's validate_staging_target()
+      # checks BEFORE any remote D1 access; see that function's own
+      # docstring and this file's staging-only-and-fail-closed comment
+      # above for what happens if any of these is wrong or missing.
+      - name: Run Stage 7 research + recalculation
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.STAGE7_STAGING_CLOUDFLARE_API_TOKEN }}
+          STAGE7_TARGET_ACCOUNT_ID: f58e761fbc8e62dc404d8684290af264
+          STAGE7_TARGET_DATABASE_NAME: pulseworker-v2-staging
+          STAGE7_TARGET_DATABASE_ID: 5458d504-2778-49ae-bd25-7751f1c49d50
+        run: python3 stage7-research-pipeline/run_stage7.py

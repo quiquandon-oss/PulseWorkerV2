@@ -4,11 +4,14 @@ main and claude/stage7-research-pipeline (see .github/workflows/stage7-
 staging-dispatcher.yml's own module comment for the full rationale).
 
 These tests only run against files present on main -- there is no
-checkout of the feature branch available here. The complementary checks
-for the Stage 7 workflow itself (branch guard, validate_staging_target,
-dedicated staging secret, no schedule: trigger there) live in
-stage7-research-pipeline/test_workflow_staging_guard.py on
-claude/stage7-research-pipeline, and are NOT duplicated here.
+checkout of the feature branch available here. A copy of stage7-
+research-pipeline.yml DOES live on main (registration-only, see that
+file's own top-of-file comment); this file re-checks the same guard/
+secret/target properties against THAT copy. The authoritative copy's own
+full test suite (including its pure-Python config validation) lives in
+stage7-research-pipeline/test_workflow_staging_guard.py and
+stage7-research-pipeline/test_run_stage7.py on
+claude/stage7-research-pipeline, and is NOT duplicated here.
 
 Run with: python3 -m pytest research/ -v
 """
@@ -155,10 +158,73 @@ def test_deploy_workflow_still_only_deploys_on_push_to_main_with_the_production_
         assert "STAGE7_STAGING_CLOUDFLARE_API_TOKEN" not in f.read()
 
 
-def test_stage7_workflow_file_itself_is_not_present_on_main():
-    # The Stage 7 workflow's actual logic (branch guard, staging-target
-    # validation, dedicated secret) is owned entirely by
-    # claude/stage7-research-pipeline. Main only ever gets this thin
-    # dispatcher -- never a copy of the Stage 7 workflow's own logic.
-    stage7_path = os.path.join(REPO_ROOT, ".github", "workflows", STAGE7_WORKFLOW_FILENAME)
-    assert not os.path.exists(stage7_path)
+# =====================================================================
+# A copy of stage7-research-pipeline.yml DOES exist on main -- REQUIRED
+# for GitHub to recognize it as a dispatchable workflow at all (GitHub
+# only lists/dispatches-by-filename a workflow that exists on the
+# default branch or has already run at least once; confirmed via a
+# direct 404 on GET /actions/workflows/stage7-research-pipeline.yml
+# before this copy was added). It must never diverge from the feature
+# branch's own copy in the properties that keep it safe to have on main
+# at all: reject everything but the exact feature-branch ref, carry no
+# schedule: of its own, and never use the general-purpose production
+# token. The feature branch's own test_workflow_staging_guard.py checks
+# the SAME properties against its own (authoritative) copy -- this is
+# not a substitute for that, it's the same invariant re-checked against
+# whatever main happens to carry, since main's copy is edited far less
+# often and is easy to forget to keep in sync.
+# =====================================================================
+
+def _stage7_workflow_path_on_main():
+    return os.path.join(REPO_ROOT, ".github", "workflows", STAGE7_WORKFLOW_FILENAME)
+
+
+def _load_stage7_workflow_on_main():
+    with open(_stage7_workflow_path_on_main()) as f:
+        return yaml.safe_load(f)
+
+
+def test_stage7_workflow_copy_exists_on_main_for_registration():
+    assert os.path.exists(_stage7_workflow_path_on_main())
+
+
+def test_stage7_workflow_copy_on_main_still_has_no_schedule_trigger():
+    triggers = _load_stage7_workflow_on_main()[True]
+    assert "schedule" not in triggers
+    assert set(triggers.keys()) == {"workflow_dispatch"}
+
+
+def test_stage7_workflow_copy_on_main_still_rejects_every_ref_but_the_feature_branch():
+    workflow = _load_stage7_workflow_on_main()
+    first_step = workflow["jobs"]["research"]["steps"][0]
+    run_text = first_step.get("run", "")
+    assert f'!= "refs/heads/{FEATURE_BRANCH}"' in run_text
+    assert "exit 1" in run_text
+
+
+def test_stage7_workflow_copy_on_main_branch_guard_precedes_checkout():
+    workflow = _load_stage7_workflow_on_main()
+    steps = workflow["jobs"]["research"]["steps"]
+    guard_index = next(i for i, s in enumerate(steps) if f"refs/heads/{FEATURE_BRANCH}" in s.get("run", ""))
+    checkout_index = next(i for i, s in enumerate(steps) if s.get("uses", "").startswith("actions/checkout"))
+    assert guard_index < checkout_index
+
+
+def test_stage7_workflow_copy_on_main_still_uses_the_dedicated_staging_secret():
+    workflow = _load_stage7_workflow_on_main()
+    steps = workflow["jobs"]["research"]["steps"]
+    run_step = next(s for s in steps if "Run Stage 7" in s.get("name", ""))
+    env = run_step.get("env", {})
+    assert env.get("CLOUDFLARE_API_TOKEN") == "${{ secrets.STAGE7_STAGING_CLOUDFLARE_API_TOKEN }}"
+    assert "${{ secrets.CLOUDFLARE_API_TOKEN }}" not in yaml.dump(run_step)
+
+
+def test_stage7_workflow_copy_on_main_still_targets_the_expected_staging_database():
+    workflow = _load_stage7_workflow_on_main()
+    steps = workflow["jobs"]["research"]["steps"]
+    run_step = next(s for s in steps if "Run Stage 7" in s.get("name", ""))
+    env = run_step.get("env", {})
+    assert env.get("STAGE7_TARGET_DATABASE_NAME") == "pulseworker-v2-staging"
+    assert env.get("STAGE7_TARGET_DATABASE_ID") == "5458d504-2778-49ae-bd25-7751f1c49d50"
+    assert env.get("STAGE7_TARGET_DATABASE_NAME") != PRODUCTION_DATABASE_NAME
+    assert env.get("STAGE7_TARGET_DATABASE_ID") != PRODUCTION_DATABASE_ID

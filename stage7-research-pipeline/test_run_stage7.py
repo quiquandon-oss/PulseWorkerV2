@@ -15,6 +15,7 @@ Run with: python3 -m pytest stage7-research-pipeline/ -v
 """
 import sys
 import os
+import time
 
 import pytest
 
@@ -186,3 +187,88 @@ def test_main_does_not_swallow_an_unrelated_run_d1_error():
             rs.main()
     finally:
         rs.run_d1 = orig
+
+
+# =====================================================================
+# Regression: a real local `wrangler dev` end-to-end run (against a
+# fully-migrated local D1, disposable synthetic events, no production
+# access) found that main() was passing a 98-day window (WINDOW_MS +
+# LOOKBACK_BUFFER_MS) to join_module.build_event_source_evidence_dataset,
+# whose own _validate_window() hard-rejects anything wider than
+# event_detector.MAX_WINDOW_MS (90 days) -- every single real run of this
+# script would have raised ValueError and crashed, unconditionally, the
+# moment migration 0016 was applied. No existing fixture-based test
+# caught this, because none of them call the real detector with a real
+# window end to end. Fixed by separating detection_start_ts (exactly
+# WINDOW_MS wide, what the detector receives) from fetch_start_ts (wider,
+# lookback-inclusive, used only for the raw D1 SELECTs) -- the same split
+# exp009-event-source-evidence/run_experiment.py's own start_ts/
+# fetch_start_ts already uses.
+# =====================================================================
+
+def test_main_passes_exactly_window_ms_to_the_detector_never_window_plus_lookback():
+    calls = {}
+
+    def fake_run_d1(sql):
+        if "sqlite_master" in sql:
+            return [{"name": t} for t in rs.REQUIRED_STAGE7_TABLES]
+        return []  # history/btc_data/predictions/research_events all empty
+
+    def fake_build_dataset(conn, start_ts, end_ts):
+        calls["start_ts"] = start_ts
+        calls["end_ts"] = end_ts
+        return {"events": [], "results": []}
+
+    orig_run_d1 = rs.run_d1
+    orig_build = rs.join_module.build_event_source_evidence_dataset
+    rs.run_d1 = fake_run_d1
+    rs.join_module.build_event_source_evidence_dataset = fake_build_dataset
+    try:
+        result = rs.main()
+    finally:
+        rs.run_d1 = orig_run_d1
+        rs.join_module.build_event_source_evidence_dataset = orig_build
+
+    assert result["ok"] is True
+    window_passed_to_detector = calls["end_ts"] - calls["start_ts"]
+    # Exactly WINDOW_MS (== event_detector.MAX_WINDOW_MS, imported as an
+    # alias) -- never wider. The old, broken value was WINDOW_MS +
+    # LOOKBACK_BUFFER_MS, which this equality would catch immediately.
+    assert window_passed_to_detector == rs.WINDOW_MS
+
+
+def test_main_fetch_queries_use_a_wider_lookback_inclusive_bound_than_the_detector_window():
+    fetch_sqls = []
+
+    def fake_run_d1(sql):
+        if "sqlite_master" in sql:
+            return [{"name": t} for t in rs.REQUIRED_STAGE7_TABLES]
+        if "BETWEEN" in sql:
+            fetch_sqls.append(sql)
+        return []
+
+    def fake_build_dataset(conn, start_ts, end_ts):
+        return {"events": [], "results": []}
+
+    now_before = int(time.time() * 1000)
+    orig_run_d1 = rs.run_d1
+    orig_build = rs.join_module.build_event_source_evidence_dataset
+    rs.run_d1 = fake_run_d1
+    rs.join_module.build_event_source_evidence_dataset = fake_build_dataset
+    try:
+        rs.main()
+    finally:
+        rs.run_d1 = orig_run_d1
+        rs.join_module.build_event_source_evidence_dataset = orig_build
+    now_after = int(time.time() * 1000)
+
+    assert len(fetch_sqls) >= 4  # history, btc_data, predictions, research_events
+    expected_detection_start = now_before - rs.WINDOW_MS  # give or take main()'s own now_ts call
+    for sql in fetch_sqls:
+        fetch_start = int(sql.split("BETWEEN")[1].split("AND")[0].strip())
+        # The raw fetch bound must be strictly EARLIER than the narrower
+        # detection window's own start -- i.e. it really does include the
+        # extra LOOKBACK_BUFFER_MS (exp009's own pattern), rather than
+        # accidentally being narrowed to match the detector's window.
+        assert fetch_start <= expected_detection_start - rs.LOOKBACK_BUFFER_MS + (now_after - now_before)
+        assert fetch_start >= expected_detection_start - rs.LOOKBACK_BUFFER_MS - (now_after - now_before) - 1000

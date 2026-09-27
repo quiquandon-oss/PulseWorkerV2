@@ -245,7 +245,24 @@ def resolve_real_event_ids(events_by_ts, research_events_rows):
 
 def main():
     now_ts = int(datetime.now(timezone.utc).timestamp() * 1000)
-    start_ts = now_ts - WINDOW_MS - LOOKBACK_BUFFER_MS
+    # Two DELIBERATELY DIFFERENT boundaries, matching exp009-event-source-
+    # evidence/run_experiment.py's own established pattern (its start_ts
+    # vs. fetch_start_ts) -- found to be missing here via a real local
+    # end-to-end run, which is exactly the class of bug pure unit tests
+    # (which never call the real detector with a real window) cannot
+    # catch. event_detector._validate_window() hard-rejects any window
+    # wider than WINDOW_MS (MAX_WINDOW_MS, 90 days) -- passing it a window
+    # that already has LOOKBACK_BUFFER_MS added on top (98 days) makes
+    # EVERY run of this script raise ValueError and crash, unconditionally.
+    # detection_start_ts (exactly WINDOW_MS wide) is what actually goes to
+    # build_event_source_evidence_dataset(); fetch_start_ts (the wider,
+    # lookback-inclusive bound) is used ONLY for the raw SQL SELECTs below
+    # that populate the local mirror -- the detector modules themselves
+    # already subtract their own LOOKBACK_BUFFER_MS internally from
+    # whatever start_ts they're given, so pre-subtracting it here a
+    # second time was the root cause, not a defense.
+    detection_start_ts = now_ts - WINDOW_MS
+    fetch_start_ts = detection_start_ts - LOOKBACK_BUFFER_MS
     end_ts = now_ts
 
     # (Adversarial-review remediation, finding #3.) Checked FIRST, before
@@ -279,10 +296,10 @@ def main():
             "complete migration 0016 manually before re-running."
         )
 
-    history_rows = run_d1(f"SELECT ts, score, technical_score, sources_json, gold_regime FROM history WHERE ts BETWEEN {start_ts} AND {end_ts} ORDER BY ts ASC")
-    btc_rows = run_d1(f"SELECT ts, btc_price FROM btc_data WHERE ts BETWEEN {start_ts} AND {end_ts} ORDER BY ts ASC")
-    predictions_rows = run_d1(f"SELECT ts, horizon_hours, p_up, realized_up FROM predictions WHERE ts BETWEEN {start_ts} AND {end_ts} ORDER BY ts ASC")
-    research_events_rows = run_d1(f"SELECT event_id, event_ts FROM research_events WHERE event_ts BETWEEN {start_ts} AND {end_ts} ORDER BY event_ts ASC")
+    history_rows = run_d1(f"SELECT ts, score, technical_score, sources_json, gold_regime FROM history WHERE ts BETWEEN {fetch_start_ts} AND {end_ts} ORDER BY ts ASC")
+    btc_rows = run_d1(f"SELECT ts, btc_price FROM btc_data WHERE ts BETWEEN {fetch_start_ts} AND {end_ts} ORDER BY ts ASC")
+    predictions_rows = run_d1(f"SELECT ts, horizon_hours, p_up, realized_up FROM predictions WHERE ts BETWEEN {fetch_start_ts} AND {end_ts} ORDER BY ts ASC")
+    research_events_rows = run_d1(f"SELECT event_id, event_ts FROM research_events WHERE event_ts BETWEEN {fetch_start_ts} AND {end_ts} ORDER BY event_ts ASC")
     event_ids = [r["event_id"] for r in research_events_rows]
     evidence_rows_all = []
     if event_ids:
@@ -293,7 +310,7 @@ def main():
         )
 
     conn = build_local_mirror(history_rows, btc_rows, predictions_rows, research_events_rows, evidence_rows_all)
-    dataset = join_module.build_event_source_evidence_dataset(conn, start_ts, end_ts)
+    dataset = join_module.build_event_source_evidence_dataset(conn, detection_start_ts, end_ts)
     events_by_ts, relevance_by_ts, interpretation_by_ts = group_results_by_event(dataset)
     eligible_by_ts = select_eligible_events(events_by_ts, now_ts)
     eligible = resolve_real_event_ids(eligible_by_ts, research_events_rows)

@@ -25,13 +25,18 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-      # Only pytest -- NOT torch/timesfm. exp004-timesfm/run_experiment.py
-      # imports those lazily, inside generate_forecasts() itself,
-      # specifically so this test suite (scope/data-integrity/model-
-      # integrity/production-isolation/failure-handling checks) can run
-      # in every CI job without needing the real, large ML dependencies
-      # installed just to verify the surrounding logic.
+      # Only pytest (+ PyYAML) -- NOT torch/timesfm. exp004-timesfm/
+      # run_experiment.py imports those lazily, inside generate_forecasts()
+      # itself, specifically so this test suite (scope/data-integrity/
+      # model-integrity/production-isolation/failure-handling checks) can
+      # run in every CI job without needing the real, large ML
+      # dependencies installed just to verify the surrounding logic.
+      # PyYAML added for research/test_stage7_scheduler_isolation.py's
+      # own static parsing of .github/workflows/*.yml -- ubuntu-latest's
+      # system Python does NOT ship PyYAML by default (unlike some local
+      # dev environments), confirmed by this exact step failing with
+      # "No module named 'yaml'" before this line was added.
       - name: Install pytest
-        run: pip install pytest --break-system-packages
+        run: pip install pytest pyyaml --break-system-packages
       - name: Run Experiment 4 and research schema tests
         run: python3 -m pytest exp004-timesfm/ research/ -v

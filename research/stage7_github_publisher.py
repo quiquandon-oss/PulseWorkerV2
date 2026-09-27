@@ -1,0 +1,143 @@
+"""
+Stage 7 -- Step E: publish a research request as a versioned file in this
+repository, using the SAME plain-git checkout/commit/push pattern already
+proven in .github/workflows/ai-capital-rotation-research.yml (the GitHub
+Actions ambient GITHUB_TOKEN, not a new PAT, not Octokit -- there is no
+existing Octokit usage anywhere in this project, per audit, and no new
+dependency is warranted for one write path).
+
+File content and path are pure/deterministic (testable without touching
+disk or git). The actual `git` invocations are isolated behind an
+injectable `run` callable (defaulting to subprocess.run), matching this
+project's established injectable-fetcher testing convention (see e.g.
+data_sources.py in the CryptoPulse V1 research module) -- tests never
+shell out to real git.
+"""
+
+import json
+import os
+import subprocess
+
+REQUEST_DIR = "research/stage7_requests"
+SCHEMA_VERSION = "stage7-request-v1"
+
+
+def build_request_id(event_id, attempt=1):
+    """Deterministic, not random -- repeated scheduled executions for the
+    same event/attempt must compute the identical ID, which is what
+    makes the whole publish step idempotent at the filesystem/git layer
+    in addition to the DB partial-unique-index layer."""
+    return f"stage7-req-{event_id}-{attempt}"
+
+
+def request_file_path(request_id):
+    return f"{REQUEST_DIR}/{request_id}.json"
+
+
+def build_request_file_content(request):
+    """`request` is a stage7_research_requests row (as a dict) plus the
+    original event dict and evidence rows needed for a self-contained
+    research prompt -- everything Step D lists, nothing more (no bulk
+    historical market data, per the explicit instruction not to use
+    GitHub as an archive for that)."""
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "request_id": request["request_id"],
+        "event_id": request["event_id"],
+        "created_ts": request["created_ts"],
+        "historical_cutoff_ts": request["historical_cutoff_ts"],
+        "sufficiency_status": request["sufficiency_status"],
+        "reasons": request["reasons"],
+        "questions": request["questions"],
+        "missing_categories": request["missing_categories"],
+        "event": request["event"],
+        "evidence_snapshot": request["evidence_snapshot"],
+        "research_prompt": build_research_prompt(request),
+    }
+
+
+def build_research_prompt(request):
+    """The actual text Olivier copies into Claude/ChatGPT/Gemini/Grok
+    (Step F.2/G). Deterministic template, filled only with real request
+    fields -- never invented content, never a claim that research has
+    already happened."""
+    event = request["event"]
+    lines = [
+        f"Research this market event for {event.get('coin', 'BTC')} using your actual internet-search "
+        f"capability. Event category: {event.get('category')}. Event timestamp (ms): {event.get('event_ts')}.",
+        f"Respect this historical cutoff: do not use information published after {request['historical_cutoff_ts']} "
+        "(ms since epoch) -- reconstruct only what was knowable at or before that time.",
+        "",
+        "Why existing evidence is insufficient:",
+        *[f"- {r}" for r in request["reasons"]],
+        "",
+        "Questions to answer:",
+        *[f"- {q}" for q in request["questions"]],
+        "",
+        "For your findings, explicitly state: (1) what existing sources failed to explain, (2) relevant "
+        "primary sources and independent reporting with verifiable URLs/publishers/dates, (3) the event's "
+        "relevance to the affected asset and broader market, (4) a plausible transmission mechanism without "
+        "presenting speculation as fact, (5) whether the implications are POSITIVE, NEGATIVE, MIXED, or "
+        "INDETERMINATE, (6) contradictory evidence and unresolved questions, and (7) your confidence and "
+        "limitations. Distinguish sourced facts, third-party claims, analysis, and uncertainty. Do not "
+        "fabricate citations or claim a source was checked if it was not.",
+    ]
+    return "\n".join(lines)
+
+
+def publish_request_file(request, repo_dir, run=None):
+    """Writes the request file and commits+pushes it via plain git.
+
+    `run(args, cwd)` defaults to a thin subprocess.run wrapper; tests
+    inject a fake that records calls and returns canned
+    CompletedProcess-like results, so this function is fully testable
+    without a real git repo or network access.
+
+    Idempotency / never-overwrite: if the target file already exists on
+    disk with IDENTICAL content, this is a no-op success (a repeated
+    scheduled run must not fail or re-commit). If it exists with
+    DIFFERENT content, this refuses to overwrite it and returns an
+    explicit conflict -- per the task's explicit "avoid overwriting an
+    existing request or completed response" instruction.
+
+    Returns {"published": bool, "path": str, "error": str|None,
+    "skipped_unchanged": bool}. A git failure (non-zero exit at any
+    step) never raises -- it returns published=False with `error` set,
+    so the caller can record FAILED_RETRYABLE and retry on the next
+    scheduled run, per Step E's explicit requirement.
+    """
+    run = run or _default_run
+    path = request_file_path(request["request_id"])
+    abs_path = os.path.join(repo_dir, path)
+    content = json.dumps(build_request_file_content(request), indent=2, sort_keys=True) + "\n"
+
+    if os.path.exists(abs_path):
+        with open(abs_path, "r") as f:
+            existing = f.read()
+        if existing == content:
+            return {"published": True, "path": path, "error": None, "skipped_unchanged": True}
+        return {"published": False, "path": path,
+                "error": f"refusing to overwrite existing, different content at {path}",
+                "skipped_unchanged": False}
+
+    os.makedirs(os.path.dirname(abs_path), exist_ok=True)
+    with open(abs_path, "w") as f:
+        f.write(content)
+
+    steps = [
+        ["git", "add", path],
+        ["git", "commit", "-m", f"stage7: publish research request {request['request_id']} [skip ci]"],
+        ["git", "push"],
+    ]
+    for step in steps:
+        result = run(step, cwd=repo_dir)
+        if result.returncode != 0:
+            return {"published": False, "path": path,
+                    "error": f"`{' '.join(step)}` failed (exit {result.returncode}): {result.stderr}",
+                    "skipped_unchanged": False}
+
+    return {"published": True, "path": path, "error": None, "skipped_unchanged": False}
+
+
+def _default_run(args, cwd):
+    return subprocess.run(args, cwd=cwd, capture_output=True, text=True)

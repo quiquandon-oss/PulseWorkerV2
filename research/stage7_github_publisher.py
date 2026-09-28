@@ -32,6 +32,41 @@ SCHEMA_VERSION = "stage7-request-v1"
 ALLOWED_PUBLISH_BRANCH = "claude/stage7-research-pipeline"
 FORBIDDEN_PUBLISH_BRANCHES = ("main", "master")
 
+# A FAILED_RETRYABLE request is retried once per scheduled run (see
+# run_stage7.py's own retry_stage7_request_publish()) until it either
+# succeeds or this many total attempts (the original attempt at request-
+# creation time, plus every retry) have been made. Kept small and
+# explicit: a genuinely broken publish path (a revoked GITHUB_TOKEN, a
+# newly-protected branch) should surface as FAILED_PERMANENT -- needing a
+# human -- well before it could run up meaningful CI cost retrying forever.
+MAX_PUBLISH_ATTEMPTS = 5
+
+
+def decide_retry_outcome(current_attempts, published, max_attempts=MAX_PUBLISH_ATTEMPTS):
+    """Pure. Decides the next status/attempt-count for a stage7_research_
+    requests row after one publish attempt (the first, at request-creation
+    time, or a later retry of a FAILED_RETRYABLE row).
+
+    `current_attempts` is the row's publish_attempts value BEFORE this
+    attempt. `published` is whether THIS attempt's publish_request_file()
+    call reported success (including an idempotent "already published,
+    unchanged" outcome -- both count as success here).
+
+    Returns (new_status, new_attempts):
+    - published=True -> ("RESEARCH_REQUEST_PUBLISHED", current_attempts + 1)
+    - published=False and the incremented count has now reached
+      max_attempts -> ("FAILED_PERMANENT", current_attempts + 1) -- never
+      retried again automatically; needs manual investigation.
+    - published=False otherwise -> ("FAILED_RETRYABLE", current_attempts + 1)
+      -- eligible for another attempt on a subsequent scheduled run.
+    """
+    new_attempts = current_attempts + 1
+    if published:
+        return "RESEARCH_REQUEST_PUBLISHED", new_attempts
+    if new_attempts >= max_attempts:
+        return "FAILED_PERMANENT", new_attempts
+    return "FAILED_RETRYABLE", new_attempts
+
 
 def build_request_id(event_id, attempt=1):
     """Deterministic, not random -- repeated scheduled executions for the

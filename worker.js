@@ -8615,7 +8615,13 @@ const RESEARCH_LAB_HTML = `<!DOCTYPE html>
     if (!stage7.activated) return badge('NOT ACTIVATED -- MIGRATION 0016 NOT APPLIED', 'b-unknown');
     var recalculated = stage7.sentiment.total_events_recalculated;
     var openCount = stage7.requests.open.length;
-    var failedCount = (stage7.requests.by_status && stage7.requests.by_status.FAILED_RETRYABLE) || 0;
+    var byStatus = stage7.requests.by_status || {};
+    // FAILED_RETRYABLE is retried automatically on a later scheduled run
+    // (stage7-research-pipeline/run_stage7.py); FAILED_PERMANENT means
+    // that retry loop gave up (MAX_PUBLISH_ATTEMPTS exhausted) and this
+    // row now needs a human to look at it -- both count as a publish
+    // failure here, never silently dropped once retries are exhausted.
+    var failedCount = (byStatus.FAILED_RETRYABLE || 0) + (byStatus.FAILED_PERMANENT || 0);
     var out = badge(recalculated + ' event(s) recalculated', recalculated > 0 ? 'b-strong' : 'b-outline');
     if (openCount > 0) out += '&nbsp;' + badge(openCount + ' request(s) open', 'b-plausible');
     if (failedCount > 0) out += '&nbsp;' + badge(failedCount + ' publish failure(s)', 'b-unknown');
@@ -9057,6 +9063,9 @@ const RESEARCH_LAB_HTML = `<!DOCTYPE html>
 
   function badgeForStage7RequestStatus(status) {
     if (status === 'FAILED_RETRYABLE') return badge(status, 'b-unknown');
+    // Retries (run_stage7.py) are exhausted -- this needs a human, unlike
+    // FAILED_RETRYABLE which will be attempted again automatically.
+    if (status === 'FAILED_PERMANENT') return badge(status, 'b-blocked');
     if (status === 'INTEGRATION_REVIEW' || status === 'RESEARCH_COMPLETED') return badge(status, 'b-strong');
     return badge(status, 'b-outline');
   }

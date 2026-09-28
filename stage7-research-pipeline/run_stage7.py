@@ -360,6 +360,67 @@ def resolve_real_event_ids(events_by_ts, research_events_rows):
     }
 
 
+def build_retry_request(existing_request, event):
+    """Pure. Reconstructs the exact request dict pub.publish_request_file()
+    needs to retry a FAILED_RETRYABLE row's publish, from that row's own
+    persisted columns plus the current `event` dict (event/coin/category
+    are not persisted on the row itself -- see stage7_github_publisher.
+    build_request_file_content()). Deliberately reuses the ORIGINAL
+    created_ts/reasons/questions/missing_categories/evidence_snapshot
+    exactly as first computed, never today's now_ts or freshly re-queried
+    evidence -- a retried publish must write the same file a successful
+    first attempt would have, per evidence_snapshot_json's own "a stable
+    summary at request-creation time" contract (migration 0016)."""
+    return {
+        "request_id": existing_request["request_id"],
+        "event_id": existing_request["event_id"],
+        "created_ts": existing_request["created_ts"],
+        "historical_cutoff_ts": existing_request["historical_cutoff_ts"],
+        "sufficiency_status": existing_request["sufficiency_status"],
+        "reasons": json.loads(existing_request["reasons_json"]),
+        "questions": json.loads(existing_request["questions_json"]),
+        "missing_categories": json.loads(existing_request["missing_categories_json"]),
+        "event": event,
+        "evidence_snapshot": json.loads(existing_request["evidence_snapshot_json"]),
+    }
+
+
+def retry_stage7_request_publish(existing_request, event, now_ts):
+    """Retries publishing a single FAILED_RETRYABLE request's file on this
+    run, UPDATING that same row in place -- never INSERTing a new
+    stage7_research_requests row (the partial unique index on
+    (event_id) WHERE status NOT IN ('INTEGRATED','REJECTED') would reject
+    one anyway while this row stays non-terminal, so this is belt-and-
+    braces, not the only guard). Goes through the exact same
+    pub.publish_request_file() the original, request-creation-time
+    publish used -- so the same branch guard (never main/master) and the
+    same idempotent/never-overwrite disk-content checks apply identically
+    to a retry. The `WHERE ... AND status = 'FAILED_RETRYABLE'` on the
+    UPDATE is a defensive no-op guard against acting on a row that
+    concurrently left that state (e.g. a human registered a response
+    against it between this function's caller reading it and this call).
+
+    Returns True if this attempt published successfully (including an
+    idempotent "already published, unchanged" outcome), False otherwise.
+    See pub.decide_retry_outcome() for the attempt-count/give-up logic."""
+    request = build_retry_request(existing_request, event)
+    publish_result = pub.publish_request_file(request, repo_dir=os.getcwd())
+    new_status, new_attempts = pub.decide_retry_outcome(
+        existing_request["publish_attempts"], publish_result["published"]
+    )
+    d1_api_query(
+        "UPDATE stage7_research_requests SET status = ?, updated_ts = ?, publish_attempts = ?, "
+        "github_path = ?, github_published_ts = ?, github_publish_error = ? "
+        "WHERE request_id = ? AND status = 'FAILED_RETRYABLE'",
+        [new_status, now_ts, new_attempts,
+         publish_result["path"] if publish_result["published"] else None,
+         now_ts if publish_result["published"] else None,
+         publish_result["error"],
+         existing_request["request_id"]],
+    )
+    return publish_result["published"]
+
+
 def main():
     global _TARGET_CONFIG
     # Must be the very first thing main() does -- strictly before the
@@ -447,7 +508,9 @@ def main():
         evidence_by_event.setdefault(row["event_id"], []).append(row)
 
     existing_requests = {r["event_id"]: r for r in run_d1(
-        "SELECT event_id, request_id, status FROM stage7_research_requests "
+        "SELECT event_id, request_id, status, publish_attempts, created_ts, historical_cutoff_ts, "
+        "sufficiency_status, reasons_json, questions_json, missing_categories_json, "
+        "evidence_snapshot_json FROM stage7_research_requests "
         "WHERE status NOT IN ('INTEGRATED','REJECTED')"
     )}
     latest_responses = {
@@ -464,6 +527,7 @@ def main():
         latest_sentiment.setdefault(r["event_id"], r)
 
     requests_created, sentiment_rows_written, publish_failures = 0, 0, 0
+    retries_attempted, retries_succeeded = 0, 0
 
     for event_id, event in eligible.items():
         evidence_rows = evidence_by_event.get(event_id, [])
@@ -531,8 +595,22 @@ def main():
                     [now_ts, event_id],
                 )
 
-        if sufficiency_status == "SUFFICIENT" or event_id in existing_requests:
-            continue  # no new request needed -- either resolved, or one is already open
+        if sufficiency_status == "SUFFICIENT":
+            continue  # resolved -- no new request needed, no retry needed
+
+        existing_request = existing_requests.get(event_id)
+        if existing_request is not None:
+            # A non-terminal request is already open for this event.
+            # Never create a second row (the partial unique index would
+            # reject it anyway) -- retry the SAME row's publish only while
+            # it is FAILED_RETRYABLE; any other open status (already
+            # published, awaiting a response, in integration review, ...)
+            # needs no action here.
+            if existing_request["status"] == "FAILED_RETRYABLE":
+                retries_attempted += 1
+                if retry_stage7_request_publish(existing_request, event, now_ts):
+                    retries_succeeded += 1
+            continue
 
         # assessment is always populated here: reaching this line means
         # validated_response was None (the only case that skips computing
@@ -551,13 +629,14 @@ def main():
             "INSERT INTO stage7_research_requests (request_id, event_id, created_ts, updated_ts, "
             "schema_version, status, sufficiency_status, reasons_json, questions_json, "
             "missing_categories_json, historical_cutoff_ts, evidence_snapshot_json, github_path, "
-            "github_published_ts, github_publish_error, input_fingerprint) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "github_published_ts, github_publish_error, publish_attempts, input_fingerprint) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             [request_id, event_id, now_ts, now_ts, pub.SCHEMA_VERSION,
              "RESEARCH_REQUEST_PUBLISHED" if publish_result["published"] else "FAILED_RETRYABLE",
              assessment["status"], json.dumps(assessment["reasons"]), json.dumps(assessment["questions"]),
              json.dumps(assessment["missing_categories"]), event["event_ts"], json.dumps(evidence_rows),
              publish_result["path"] if publish_result["published"] else None,
-             now_ts if publish_result["published"] else None, publish_result["error"],
+             now_ts if publish_result["published"] else None, publish_result["error"], 1,
              result["input_fingerprint"]],
         )
         requests_created += 1
@@ -567,6 +646,7 @@ def main():
     result = {
         "ok": True, "status": "OK", "events_considered": len(eligible), "requests_created": requests_created,
         "publish_failures": publish_failures, "sentiment_rows_written": sentiment_rows_written,
+        "retries_attempted": retries_attempted, "retries_succeeded": retries_succeeded,
     }
     print(json.dumps(result))
     return result

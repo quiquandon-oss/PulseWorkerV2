@@ -230,3 +230,56 @@ def test_resolve_current_branch_returns_none_on_failure(tmp_path):
     def run(args, cwd):
         return FakeResult(128, "", "fatal: not a git repository")
     assert pub.resolve_current_branch(str(tmp_path), run) is None
+
+
+# =====================================================================
+# M1 fix: decide_retry_outcome() -- the pure attempt-count/give-up logic
+# retry_stage7_request_publish() (stage7-research-pipeline/run_stage7.py)
+# uses after each retry attempt. No DB, no network, no git -- pins the
+# status/attempt-count transition table exhaustively.
+# =====================================================================
+
+def test_decide_retry_outcome_success_moves_to_published_and_increments_attempts():
+    status, attempts = pub.decide_retry_outcome(current_attempts=1, published=True)
+    assert status == "RESEARCH_REQUEST_PUBLISHED"
+    assert attempts == 2
+
+
+def test_decide_retry_outcome_failure_below_max_stays_failed_retryable():
+    status, attempts = pub.decide_retry_outcome(current_attempts=1, published=False, max_attempts=5)
+    assert status == "FAILED_RETRYABLE"
+    assert attempts == 2
+
+
+def test_decide_retry_outcome_failure_reaching_max_gives_up_permanently():
+    # current_attempts=4 -> this attempt is the 5th; max_attempts=5 means
+    # this is the LAST one auto-retried -- reaching it on failure gives up.
+    status, attempts = pub.decide_retry_outcome(current_attempts=4, published=False, max_attempts=5)
+    assert status == "FAILED_PERMANENT"
+    assert attempts == 5
+
+
+def test_decide_retry_outcome_never_retries_past_max_attempts_once_given_up():
+    # A defensive case: if this were ever called again with an
+    # already-at-or-past-max attempt count, it must still give up, never
+    # loop back to FAILED_RETRYABLE.
+    status, attempts = pub.decide_retry_outcome(current_attempts=6, published=False, max_attempts=5)
+    assert status == "FAILED_PERMANENT"
+    assert attempts == 7
+
+
+def test_decide_retry_outcome_success_on_the_very_last_allowed_attempt_still_counts_as_success():
+    # Success is checked before the give-up threshold -- a publish that
+    # finally succeeds on what would have been the last attempt is a
+    # success, never overridden by the attempt-count limit.
+    status, attempts = pub.decide_retry_outcome(current_attempts=4, published=True, max_attempts=5)
+    assert status == "RESEARCH_REQUEST_PUBLISHED"
+    assert attempts == 5
+
+
+def test_decide_retry_outcome_uses_module_level_max_by_default():
+    # No explicit max_attempts -- uses pub.MAX_PUBLISH_ATTEMPTS, so a
+    # change to that one constant changes behavior everywhere, never a
+    # second, independently-drifting copy of the limit.
+    status, _attempts = pub.decide_retry_outcome(current_attempts=pub.MAX_PUBLISH_ATTEMPTS - 1, published=False)
+    assert status == "FAILED_PERMANENT"

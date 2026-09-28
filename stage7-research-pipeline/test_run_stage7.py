@@ -13,6 +13,7 @@ wiring (not just the pure classifier) without ever needing a live D1.
 
 Run with: python3 -m pytest stage7-research-pipeline/ -v
 """
+import json
 import sys
 import os
 import time
@@ -469,3 +470,346 @@ def test_run_d1_and_d1_api_query_both_read_the_same_validated_target(monkeypatch
     assert captured["run_d1_database_name"] == config.database_name
     assert config.account_id in captured["d1_api_url"]
     assert config.database_id in captured["d1_api_url"]
+
+
+# =====================================================================
+# M1 fix: FAILED_RETRYABLE requests are now actually retried on a
+# subsequent scheduled run, instead of being published once and then
+# stuck forever. build_retry_request() (pure) and
+# retry_stage7_request_publish() (the one D1/publish side effect) are
+# tested directly here; the fuller main()-level routing decision (retry
+# vs. create vs. leave alone, keyed off each existing request's own
+# status) is tested further below.
+# =====================================================================
+
+def _existing_request_row(**overrides):
+    row = {
+        "event_id": 42,
+        "request_id": "stage7-req-42-1",
+        "status": "FAILED_RETRYABLE",
+        "publish_attempts": 1,
+        "created_ts": 1000,
+        "historical_cutoff_ts": 950,
+        "sufficiency_status": "INSUFFICIENT_EVIDENCE",
+        "reasons_json": json.dumps(["no evidence rows exist"]),
+        "questions_json": json.dumps(["what happened?"]),
+        "missing_categories_json": json.dumps(["primary_reporting"]),
+        "evidence_snapshot_json": json.dumps([{"evidence_id": 1}]),
+    }
+    row.update(overrides)
+    return row
+
+
+def test_build_retry_request_reconstructs_original_fields_from_the_stored_row():
+    # Deliberately uses the row's OWN created_ts/reasons/questions/
+    # missing_categories/evidence_snapshot -- never today's now_ts or
+    # freshly re-queried evidence -- so a retry publishes the identical
+    # file a successful first attempt would have.
+    existing = _existing_request_row()
+    event = {"event_id": 42, "event_ts": 950, "category": "LARGE_MOVE", "coin": "BTC"}
+    request = rs.build_retry_request(existing, event)
+    assert request["request_id"] == "stage7-req-42-1"
+    assert request["event_id"] == 42
+    assert request["created_ts"] == 1000
+    assert request["historical_cutoff_ts"] == 950
+    assert request["sufficiency_status"] == "INSUFFICIENT_EVIDENCE"
+    assert request["reasons"] == ["no evidence rows exist"]
+    assert request["questions"] == ["what happened?"]
+    assert request["missing_categories"] == ["primary_reporting"]
+    assert request["event"] is event
+    assert request["evidence_snapshot"] == [{"evidence_id": 1}]
+
+
+def test_retry_stage7_request_publish_success_updates_row_to_published(monkeypatch):
+    existing = _existing_request_row(publish_attempts=1)
+    event = {"event_id": 42, "event_ts": 950, "category": "LARGE_MOVE"}
+    monkeypatch.setattr(
+        rs.pub, "publish_request_file",
+        lambda request, repo_dir: {"published": True, "path": "research/stage7_requests/stage7-req-42-1.json",
+                                    "error": None, "skipped_unchanged": False},
+    )
+    calls = []
+    monkeypatch.setattr(rs, "d1_api_query", lambda sql, params: calls.append((sql, params)) or [])
+
+    succeeded = rs.retry_stage7_request_publish(existing, event, now_ts=5000)
+
+    assert succeeded is True
+    assert len(calls) == 1
+    sql, params = calls[0]
+    assert "UPDATE stage7_research_requests" in sql
+    assert "status = 'FAILED_RETRYABLE'" in sql  # defensive WHERE guard, never an unconditional UPDATE
+    assert params == [
+        "RESEARCH_REQUEST_PUBLISHED", 5000, 2,
+        "research/stage7_requests/stage7-req-42-1.json", 5000, None,
+        "stage7-req-42-1",
+    ]
+
+
+def test_retry_stage7_request_publish_failure_below_max_stays_retryable(monkeypatch):
+    existing = _existing_request_row(publish_attempts=1)
+    event = {"event_id": 42, "event_ts": 950, "category": "LARGE_MOVE"}
+    monkeypatch.setattr(
+        rs.pub, "publish_request_file",
+        lambda request, repo_dir: {"published": False, "path": "research/stage7_requests/stage7-req-42-1.json",
+                                    "error": "`git push` failed: network error", "skipped_unchanged": False},
+    )
+    calls = []
+    monkeypatch.setattr(rs, "d1_api_query", lambda sql, params: calls.append((sql, params)) or [])
+
+    succeeded = rs.retry_stage7_request_publish(existing, event, now_ts=5000)
+
+    assert succeeded is False
+    _sql, params = calls[0]
+    assert params == [
+        "FAILED_RETRYABLE", 5000, 2,
+        None, None, "`git push` failed: network error",
+        "stage7-req-42-1",
+    ]
+
+
+def test_retry_stage7_request_publish_failure_reaching_max_attempts_gives_up_permanently(monkeypatch):
+    # publish_attempts already at MAX_PUBLISH_ATTEMPTS - 1 -- this failing
+    # attempt is the last one that will ever be tried automatically.
+    existing = _existing_request_row(publish_attempts=rs.pub.MAX_PUBLISH_ATTEMPTS - 1)
+    event = {"event_id": 42, "event_ts": 950, "category": "LARGE_MOVE"}
+    monkeypatch.setattr(
+        rs.pub, "publish_request_file",
+        lambda request, repo_dir: {"published": False, "path": "research/stage7_requests/stage7-req-42-1.json",
+                                    "error": "`git push` failed: permission denied", "skipped_unchanged": False},
+    )
+    calls = []
+    monkeypatch.setattr(rs, "d1_api_query", lambda sql, params: calls.append((sql, params)) or [])
+
+    succeeded = rs.retry_stage7_request_publish(existing, event, now_ts=5000)
+
+    assert succeeded is False
+    _sql, params = calls[0]
+    assert params[0] == "FAILED_PERMANENT"
+    assert params[2] == rs.pub.MAX_PUBLISH_ATTEMPTS
+
+
+def test_retry_stage7_request_publish_never_creates_a_new_row(monkeypatch):
+    # Only ever an UPDATE against the SAME request_id -- never an INSERT,
+    # which would either violate the partial unique index (if the old row
+    # is still non-terminal) or duplicate the request outright.
+    existing = _existing_request_row()
+    event = {"event_id": 42, "event_ts": 950, "category": "LARGE_MOVE"}
+    monkeypatch.setattr(
+        rs.pub, "publish_request_file",
+        lambda request, repo_dir: {"published": True, "path": "x", "error": None, "skipped_unchanged": False},
+    )
+    calls = []
+    monkeypatch.setattr(rs, "d1_api_query", lambda sql, params: calls.append(sql) or [])
+    rs.retry_stage7_request_publish(existing, event, now_ts=5000)
+    assert len(calls) == 1
+    assert "INSERT" not in calls[0]
+    assert "UPDATE" in calls[0]
+
+
+# =====================================================================
+# main()-level routing: for each event with a still-open request, retry
+# is attempted if and only if that request's own status is
+# FAILED_RETRYABLE. Every other open status (already published, awaiting
+# a response, in integration review, permanently failed, ...) -- and any
+# INTEGRATED/REJECTED row, which the SQL WHERE clause itself never even
+# returns -- is left completely alone: no publish call, no new row.
+# =====================================================================
+
+def _recent_event_ts():
+    # ~2 minutes old: comfortably inside MAX_EVENT_AGE_FOR_STAGE7_MS (6
+    # days) regardless of any timing skew between this helper and main()'s
+    # own now_ts, and comfortably outside any "just detected" edge case.
+    return int(time.time() * 1000) - 120_000
+
+
+def _run_main_with_fakes(monkeypatch, existing_requests_rows, publish_request_file=None):
+    """Drives the real rs.main() through exactly one eligible event
+    (event_id=42), with every D1 read/write and the real git-publish call
+    faked -- isolating the one thing under test here: main()'s own
+    routing decision for that event's already-open request (if any),
+    keyed off `existing_requests_rows`. Returns (result, d1_api_calls,
+    publish_calls)."""
+    _set_valid_staging_env(monkeypatch)
+    event_ts = _recent_event_ts()
+
+    def fake_run_d1(sql):
+        if "sqlite_master" in sql:
+            return [{"name": t} for t in rs.REQUIRED_STAGE7_TABLES]
+        if "FROM research_events WHERE" in sql:
+            return [{"event_id": 42, "event_ts": event_ts}]
+        if "FROM history WHERE" in sql or "FROM btc_data WHERE" in sql or "FROM predictions WHERE" in sql:
+            return []
+        if "FROM research_event_evidence WHERE" in sql:
+            return []
+        if "publish_attempts" in sql and "FROM stage7_research_requests" in sql:
+            return existing_requests_rows
+        if "FROM stage7_research_responses" in sql:
+            return []  # no validated human response for this event
+        if "FROM stage7_event_sentiment" in sql:
+            return []  # no previous sentiment row
+        raise AssertionError(f"unexpected run_d1 call: {sql}")
+
+    def fake_build_dataset(conn, start_ts, end_ts):
+        return {
+            "events": [{"event_id": 1, "event_ts": event_ts, "category": "LARGE_MOVE",
+                        "is_internal_model_event": False, "coin": "BTC"}],
+            "results": [],
+        }
+
+    d1_api_calls = []
+
+    def fake_d1_api_query(sql, params):
+        d1_api_calls.append((sql, params))
+        return []
+
+    publish_calls = []
+
+    def fake_publish(request, repo_dir):
+        publish_calls.append(request)
+        if publish_request_file is not None:
+            return publish_request_file
+        return {"published": True, "path": rs.pub.request_file_path(request["request_id"]),
+                "error": None, "skipped_unchanged": False}
+
+    monkeypatch.setattr(rs, "run_d1", fake_run_d1)
+    monkeypatch.setattr(rs.join_module, "build_event_source_evidence_dataset", fake_build_dataset)
+    monkeypatch.setattr(rs, "d1_api_query", fake_d1_api_query)
+    monkeypatch.setattr(rs.pub, "publish_request_file", fake_publish)
+    monkeypatch.setattr(
+        rs.suff, "assess_evidence_sufficiency",
+        lambda event, evidence_rows, relevance_results, interpretation_results: {
+            "status": "INSUFFICIENT_EVIDENCE", "reasons": ["no evidence rows exist"],
+            "questions": ["what happened?"], "missing_categories": ["primary_reporting"],
+        },
+    )
+    monkeypatch.setattr(
+        rs.sr, "compute_event_sentiment",
+        lambda *a, **kw: {
+            "formula_version": "v1", "evidence_sufficiency": "INSUFFICIENT_EVIDENCE",
+            "sentiment_label": None, "sentiment_score": None, "v1_macro_context": {},
+            "evidence_interpretation": {}, "contributing_evidence_ids": [], "excluded_evidence": [],
+            "duplicate_handling": {}, "ai_research_response_id": None, "previous_sentiment_id": None,
+            "input_fingerprint": "fp-fixed",
+        },
+    )
+    # Forced True regardless of `previous` -- this suite is about request-
+    # retry routing, not sentiment-row idempotency (already covered
+    # elsewhere), so the sentiment INSERT is deliberately suppressed here
+    # to keep each test's d1_api_query calls attributable to the request
+    # write path alone.
+    monkeypatch.setattr(rs.sr, "is_idempotent_repeat", lambda *a, **kw: True)
+
+    result = rs.main()
+    return result, d1_api_calls, publish_calls
+
+
+def test_main_creates_a_new_request_when_none_exists_yet(monkeypatch):
+    # Regression check: the retry-routing change must not disturb the
+    # existing "no open request yet" creation path, including the new
+    # publish_attempts column now included in that INSERT.
+    result, d1_api_calls, publish_calls = _run_main_with_fakes(monkeypatch, existing_requests_rows=[])
+    assert result["requests_created"] == 1
+    assert result["retries_attempted"] == 0
+    assert len(publish_calls) == 1
+    insert_calls = [c for c in d1_api_calls if "INSERT INTO stage7_research_requests" in c[0]]
+    assert len(insert_calls) == 1
+    _sql, params = insert_calls[0]
+    assert "RESEARCH_REQUEST_PUBLISHED" in params
+    assert 1 in params  # publish_attempts, explicit
+
+
+def test_main_retries_a_failed_retryable_request_and_updates_it_in_place(monkeypatch):
+    existing = _existing_request_row(publish_attempts=2)
+    result, d1_api_calls, publish_calls = _run_main_with_fakes(monkeypatch, existing_requests_rows=[existing])
+
+    assert result["requests_created"] == 0  # never a second row
+    assert result["retries_attempted"] == 1
+    assert result["retries_succeeded"] == 1
+    assert len(publish_calls) == 1
+    assert publish_calls[0]["request_id"] == "stage7-req-42-1"  # SAME request_id, not a new one
+
+    write_calls = [c for c in d1_api_calls if "stage7_research_requests" in c[0]]
+    assert len(write_calls) == 1
+    sql, params = write_calls[0]
+    assert sql.startswith("UPDATE stage7_research_requests")
+    assert "INSERT" not in sql
+    assert params[0] == "RESEARCH_REQUEST_PUBLISHED"
+    assert params[2] == 3  # publish_attempts incremented from 2
+
+
+def test_main_repeated_publish_failure_keeps_request_failed_retryable(monkeypatch):
+    existing = _existing_request_row(publish_attempts=1)
+    failing_publish = {"published": False, "path": "research/stage7_requests/stage7-req-42-1.json",
+                        "error": "`git push` failed: network error", "skipped_unchanged": False}
+    result, d1_api_calls, publish_calls = _run_main_with_fakes(
+        monkeypatch, existing_requests_rows=[existing], publish_request_file=failing_publish,
+    )
+
+    assert result["retries_attempted"] == 1
+    assert result["retries_succeeded"] == 0
+    assert result["requests_created"] == 0
+    write_calls = [c for c in d1_api_calls if "stage7_research_requests" in c[0]]
+    assert len(write_calls) == 1
+    _sql, params = write_calls[0]
+    assert params[0] == "FAILED_RETRYABLE"
+    assert params[2] == 2
+
+
+def test_main_gives_up_permanently_after_max_attempts_of_persistent_failure(monkeypatch):
+    existing = _existing_request_row(publish_attempts=rs.pub.MAX_PUBLISH_ATTEMPTS - 1)
+    failing_publish = {"published": False, "path": "research/stage7_requests/stage7-req-42-1.json",
+                        "error": "`git push` failed: permission denied", "skipped_unchanged": False}
+    result, d1_api_calls, _publish_calls = _run_main_with_fakes(
+        monkeypatch, existing_requests_rows=[existing], publish_request_file=failing_publish,
+    )
+
+    assert result["retries_attempted"] == 1
+    assert result["retries_succeeded"] == 0
+    write_calls = [c for c in d1_api_calls if "stage7_research_requests" in c[0]]
+    _sql, params = write_calls[0]
+    assert params[0] == "FAILED_PERMANENT"
+    assert params[2] == rs.pub.MAX_PUBLISH_ATTEMPTS
+
+
+@pytest.mark.parametrize("status", ["FAILED_PERMANENT", "RESEARCH_REQUEST_PUBLISHED",
+                                     "RESEARCH_RESPONSE_RECEIVED", "INTEGRATION_REVIEW"])
+def test_main_never_retries_or_duplicates_a_request_that_is_open_but_not_failed_retryable(monkeypatch, status):
+    existing = _existing_request_row(status=status)
+    result, d1_api_calls, publish_calls = _run_main_with_fakes(monkeypatch, existing_requests_rows=[existing])
+
+    assert result["retries_attempted"] == 0
+    assert result["requests_created"] == 0
+    assert publish_calls == []
+    write_calls = [c for c in d1_api_calls if "stage7_research_requests" in c[0]]
+    assert write_calls == []  # no UPDATE, no INSERT -- this event is left completely alone
+
+
+@pytest.mark.parametrize("status", ["INTEGRATED", "REJECTED"])
+def test_main_never_retries_a_terminal_request_even_if_one_defensively_appeared(monkeypatch, status):
+    # The real SQL WHERE clause already excludes INTEGRATED/REJECTED rows
+    # from existing_requests entirely -- this pins the routing logic's
+    # OWN defense-in-depth: even if one leaked through (a future SQL
+    # change, a test double), it is still never retried and never
+    # mistaken for "no request exists" (which would insert a duplicate).
+    existing = _existing_request_row(status=status)
+    result, d1_api_calls, publish_calls = _run_main_with_fakes(monkeypatch, existing_requests_rows=[existing])
+
+    assert result["retries_attempted"] == 0
+    assert result["requests_created"] == 0
+    assert publish_calls == []
+    write_calls = [c for c in d1_api_calls if "stage7_research_requests" in c[0]]
+    assert write_calls == []
+
+
+def test_main_retry_never_writes_a_new_sentiment_row_beyond_normal_idempotency_gating(monkeypatch):
+    # The sentiment-row write path is untouched by the retry fix -- it is
+    # gated by sr.is_idempotent_repeat exactly as before, independent of
+    # whether this event's request is being retried, newly created, or
+    # left alone. Forcing is_idempotent_repeat True (as every test in this
+    # section does) must mean ZERO stage7_event_sentiment writes here,
+    # retry included.
+    existing = _existing_request_row(publish_attempts=2)
+    result, d1_api_calls, _publish_calls = _run_main_with_fakes(monkeypatch, existing_requests_rows=[existing])
+    assert result["sentiment_rows_written"] == 0
+    sentiment_writes = [c for c in d1_api_calls if "INSERT INTO stage7_event_sentiment" in c[0]]
+    assert sentiment_writes == []

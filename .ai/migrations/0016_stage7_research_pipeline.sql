@@ -22,10 +22,16 @@ CREATE TABLE stage7_research_requests (
   updated_ts INTEGER NOT NULL,
   schema_version TEXT NOT NULL,
   status TEXT NOT NULL,               -- PENDING_RESEARCH | RESEARCH_REQUEST_PUBLISHED |
-                                       -- FAILED_RETRYABLE | RESEARCH_RESPONSE_RECEIVED |
-                                       -- RESEARCH_VALIDATION | RESEARCH_COMPLETED |
-                                       -- INTEGRATION_REVIEW | APPROVED_FOR_IMPLEMENTATION |
-                                       -- INTEGRATED | REJECTED
+                                       -- FAILED_RETRYABLE | FAILED_PERMANENT |
+                                       -- RESEARCH_RESPONSE_RECEIVED | RESEARCH_VALIDATION |
+                                       -- RESEARCH_COMPLETED | INTEGRATION_REVIEW |
+                                       -- APPROVED_FOR_IMPLEMENTATION | INTEGRATED | REJECTED
+                                       -- FAILED_PERMANENT: publish_attempts reached
+                                       -- MAX_PUBLISH_ATTEMPTS (run_stage7.py) without ever
+                                       -- succeeding -- never auto-retried again; needs a
+                                       -- human to investigate (e.g. a revoked GITHUB_TOKEN
+                                       -- or a protected branch), same as FAILED_RETRYABLE
+                                       -- is never auto-retried once INTEGRATED/REJECTED.
   sufficiency_status TEXT NOT NULL,   -- INSUFFICIENT | CONFLICTING | INSUFFICIENT_EVIDENCE
                                        -- (never SUFFICIENT -- a request is only ever
                                        -- created for one of the other three, see
@@ -39,7 +45,12 @@ CREATE TABLE stage7_research_requests (
                                          -- change is visible as a diff, not silently lost
   github_path TEXT,                   -- set once the request file is actually published
   github_published_ts INTEGER,
-  github_publish_error TEXT,          -- non-null => FAILED_RETRYABLE; retried next run
+  github_publish_error TEXT,          -- non-null => FAILED_RETRYABLE (or FAILED_PERMANENT
+                                       -- once publish_attempts is exhausted); retried on
+                                       -- the next scheduled run while still FAILED_RETRYABLE
+  publish_attempts INTEGER NOT NULL DEFAULT 1, -- counts the initial attempt (at request
+                                       -- creation) plus every subsequent retry; see
+                                       -- stage7_github_publisher.decide_retry_outcome()
   input_fingerprint TEXT NOT NULL     -- hash of (event_id, sorted evidence_ids,
                                        -- sufficiency_status) -- a scheduled re-run
                                        -- recomputes this and skips creating a new

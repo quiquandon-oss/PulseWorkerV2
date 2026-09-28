@@ -1,32 +1,5 @@
 name: Stage 7 - AI-Assisted Research & Full-Source Sentiment Recalculation
 
-# ============================================================================
-# REGISTRATION-ONLY COPY ON MAIN -- this file's real, active home is the
-# claude/stage7-research-pipeline branch; this copy exists on main SOLELY so
-# GitHub's Actions system recognizes "stage7-research-pipeline.yml" as a
-# dispatchable workflow at all (GitHub only lists/dispatches-by-filename a
-# workflow that exists on the default branch or has already run at least
-# once -- confirmed via a direct 404 on GET /actions/workflows/stage7-
-# research-pipeline.yml before this copy was added). It is otherwise
-# completely inert here: this copy's own branch guard (see the "Enforce
-# staging-only branch" step below) rejects any ref other than exactly
-# refs/heads/claude/stage7-research-pipeline BEFORE checkout, tests, or any
-# Cloudflare/git-publish step -- so a dispatch to ref=main (accidental or
-# otherwise) fails immediately here, and this copy's own `pytest
-# research/ stage7-research-pipeline/` step would fail anyway on main
-# (stage7-research-pipeline/ does not exist here) if it were ever somehow
-# reached, which it structurally cannot be.
-#
-# .github/workflows/stage7-staging-dispatcher.yml (also on main) always
-# dispatches with ref=claude/stage7-research-pipeline explicitly, which is
-# what actually runs -- GitHub executes the workflow file AS IT EXISTS ON
-# THE DISPATCHED REF, not this main-branch copy, so the feature branch
-# remains the sole place this workflow's real logic is edited. Keep this
-# copy's branch guard, staging-target env vars, and dedicated-secret usage
-# byte-identical to the feature branch's own copy whenever that file
-# changes -- research/test_stage7_scheduler_isolation.py enforces this.
-# ============================================================================
-#
 # Stage 7 of the Research Lab pipeline: for each real-world event Stage 6
 # (live-evidence-collection.yml + event_source_relevance.py/event_source_
 # evidence_join.py, all UNCHANGED here) still considers live, this either

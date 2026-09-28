@@ -1,0 +1,44 @@
+# Stage 7 staging configuration -- NOT used by any production path.
+#
+# Never referenced by .github/workflows/deploy.yml (which only ever
+# targets wrangler.toml, no -c flag) or by any other existing workflow --
+# this file has to be passed explicitly via `wrangler <cmd> -c
+# wrangler.staging.toml` / `--config wrangler.staging.toml` for anything
+# to happen with it at all. Deploys a SEPARATE Worker
+# ("pulseworker-v2-staging", distinct from production's "pulseworker-v2")
+# bound EXCLUSIVELY to a SEPARATE, newly-created D1 database
+# ("pulseworker-v2-staging", distinct from production's
+# "sentiment-history") -- see the binding below. Reuses the same
+# worker.js source (so Stage 7's real code is what's actually being
+# tested) but deliberately omits:
+#   - [ai] (Workers AI binding) -- Stage 7 never uses it; omitting it
+#     keeps this config's surface area minimal and avoids any AI-related
+#     cost/quota shared with production.
+#   - [triggers] (Cloudflare Cron Triggers) -- this account's 5-per-
+#     account Free-plan budget is already fully committed to V1+V2
+#     production; Stage 7's own scheduling is GitHub Actions' `schedule:`
+#     (stage7-research-pipeline.yml), which needs no Cloudflare cron at
+#     all. Deploying with zero triggers here costs nothing against that
+#     budget.
+#   - [observability.*] -- production-tuned dashboard-linked settings,
+#     not needed for a throwaway staging deployment.
+# GEMINI_API_KEY is intentionally not set here either -- no Gemini/V1/V2
+# route is exercised against this staging Worker; only the Stage 7
+# endpoints are.
+name = "pulseworker-v2-staging"
+main = "worker.js"
+compatibility_date = "2024-11-01"
+account_id = "f58e761fbc8e62dc404d8684290af264"
+
+[vars]
+GIT_COMMIT_SHA = "staging"
+
+# The ONLY D1 binding in this file -- a brand-new, empty database created
+# specifically for this staging deployment. Binding name "DB" matches
+# exactly what worker.js's own code expects (env.DB.prepare(...)
+# throughout) -- this is the one thing that MUST match production's own
+# binding name for the same code to work against a different database.
+[[d1_databases]]
+binding = "DB"
+database_name = "pulseworker-v2-staging"
+database_id = "5458d504-2778-49ae-bd25-7751f1c49d50"

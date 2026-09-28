@@ -69,7 +69,7 @@ jobs:
       # simply missing. Matches the exact, already-established
       # convention test.yml uses for the same runner image.
       - name: Install pytest
-        run: pip install pytest --break-system-packages
+        run: pip install pytest pyyaml --break-system-packages
 
       - name: Run research/ tests (never run this pipeline against production on red tests)
         run: python3 -m pytest research/ -v

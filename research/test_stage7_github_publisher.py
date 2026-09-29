@@ -67,6 +67,36 @@ def test_build_request_file_content_includes_required_fields():
     assert "research_prompt" in content and isinstance(content["research_prompt"], str)
 
 
+def test_build_request_file_content_prefers_the_stored_prompt_text_verbatim():
+    # Confirmed human-controlled operating model: every request created via
+    # the app's candidate flow already has an exact prompt_text -- generated
+    # ONCE, server-side (worker.js's buildStage7ResearchPromptText()) -- and
+    # shown to the human verbatim. This must be reused unchanged here, never
+    # regenerated via build_research_prompt(), so there is exactly one
+    # prompt implementation in the whole system.
+    req = _request()
+    req["prompt_text"] = "EXACT PROMPT THE HUMAN ACTUALLY SAW AND COPIED"
+    content = pub.build_request_file_content(req)
+    assert content["research_prompt"] == "EXACT PROMPT THE HUMAN ACTUALLY SAW AND COPIED"
+
+
+def test_build_request_file_content_falls_back_to_build_research_prompt_when_no_stored_prompt_text():
+    # A legacy request created before this column existed (or outside the
+    # candidate flow) has no prompt_text -- the Python-side prompt builder
+    # remains a correct fallback, never a crash.
+    req = _request()
+    assert "prompt_text" not in req
+    content = pub.build_request_file_content(req)
+    assert content["research_prompt"] == pub.build_research_prompt(req)
+
+
+def test_build_request_file_content_falls_back_when_prompt_text_is_empty_string():
+    req = _request()
+    req["prompt_text"] = ""
+    content = pub.build_request_file_content(req)
+    assert content["research_prompt"] == pub.build_research_prompt(req)
+
+
 def test_research_prompt_respects_historical_cutoff_and_asks_for_sentiment_classification():
     req = _request()
     prompt = pub.build_research_prompt(req)

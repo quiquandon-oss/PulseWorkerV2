@@ -105,7 +105,7 @@ jobs:
       - name: Checkout claude/stage7-research-pipeline at the verified commit
         uses: actions/checkout@v4
         with:
-          ref: 423ed051dbbb4e230bf6ea832f8c20ead591466f
+          ref: 9e4dac567e2d20081a5f23fe954ff5212238945d
 
       # Belt-and-braces: confirm the checked-out wrangler.staging.toml
       # still targets exactly the staging Worker/D1 pair, and contains no

@@ -86,7 +86,7 @@ CREATE INDEX idx_stage7_candidates_status ON stage7_research_candidates(status);
 CREATE INDEX idx_stage7_candidates_event_id ON stage7_research_candidates(event_id);
 
 -- ---------------------------------------------------------------------
--- 3. Request-table extensions -- all nullable, all additive, no existing
+-- 2. Request-table extensions -- all nullable, all additive, no existing
 --    column's meaning changes.
 -- ---------------------------------------------------------------------
 ALTER TABLE stage7_research_requests ADD COLUMN candidate_id TEXT REFERENCES stage7_research_candidates(candidate_id);
@@ -126,7 +126,7 @@ ALTER TABLE stage7_research_requests ADD COLUMN recalculation_requested_by TEXT;
                                        -- as for response registration).
 
 -- ---------------------------------------------------------------------
--- 4. Response-table extensions.
+-- 3. Response-table extensions.
 -- ---------------------------------------------------------------------
 ALTER TABLE stage7_research_responses ADD COLUMN raw_response_text TEXT NOT NULL DEFAULT '';
                                        -- The AI's full answer, exactly as pasted by the

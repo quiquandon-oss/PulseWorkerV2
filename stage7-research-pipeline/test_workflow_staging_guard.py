@@ -6,7 +6,8 @@ here, and this task's own scope explicitly forbids running the workflow),
 so this asserts directly against the parsed YAML: the branch guard is the
 very first step in the job (before checkout, tests, or the Stage 7 run
 step), it checks github.ref for exact equality against
-refs/heads/claude/stage7-research-pipeline, the job uses the dedicated
+refs/heads/claude/stage7-human-controlled-workflow (the reviewed branch;
+see test_branch_binding.py for the SHA binding), the job uses the dedicated
 STAGE7_STAGING_CLOUDFLARE_API_TOKEN secret (never the general
 CLOUDFLARE_API_TOKEN production deploy.yml uses), and a missing/empty
 token is checked and fails closed.
@@ -35,8 +36,10 @@ def test_branch_guard_is_the_first_step_in_the_job():
     steps = _steps()
     assert len(steps) > 0
     first_step_run = steps[0].get("run", "")
-    assert "github.ref" in first_step_run
-    assert "refs/heads/claude/stage7-research-pipeline" in first_step_run
+    # github.ref reaches the script through env (never interpolated into the shell text), then is compared.
+    assert steps[0]["env"]["DISPATCH_REF"] == "${{ github.ref }}"
+    assert "$DISPATCH_REF" in first_step_run
+    assert "refs/heads/claude/stage7-human-controlled-workflow" in first_step_run
     assert "exit 1" in first_step_run
 
 
@@ -45,14 +48,14 @@ def test_branch_guard_checks_exact_equality_not_a_prefix_match():
     first_step_run = steps[0].get("run", "")
     # Exact-equality shell comparison ("!=" against the literal ref) --
     # never a substring/prefix test that a differently-named branch
-    # (e.g. claude/stage7-research-pipeline-old) could slip through.
-    assert '!= "refs/heads/claude/stage7-research-pipeline"' in first_step_run
+    # (e.g. claude/stage7-human-controlled-workflow-old) could slip through.
+    assert '!= "refs/heads/claude/stage7-human-controlled-workflow"' in first_step_run
 
 
 def test_branch_guard_precedes_checkout_and_every_other_step():
     steps = _steps()
     step_names = [s.get("name", "") for s in steps]
-    guard_index = next(i for i, s in enumerate(steps) if "refs/heads/claude/stage7-research-pipeline" in s.get("run", ""))
+    guard_index = next(i for i, s in enumerate(steps) if "refs/heads/claude/stage7-human-controlled-workflow" in s.get("run", ""))
     checkout_index = next(i for i, s in enumerate(steps) if s.get("uses", "").startswith("actions/checkout"))
     run_stage7_index = next(i for i, name in enumerate(step_names) if "Run Stage 7" in name)
     assert guard_index < checkout_index < run_stage7_index
@@ -102,10 +105,9 @@ def test_workflow_is_not_triggered_by_pushes():
 
 
 def test_workflow_has_no_schedule_trigger_of_its_own():
-    # (Copilot-audit follow-up.) The daily cadence now lives entirely in
-    # .github/workflows/stage7-staging-dispatcher.yml on main, which
-    # fires this workflow's own workflow_dispatch event once a day with
-    # ref=claude/stage7-research-pipeline. A `schedule:` trigger here
+    # (Copilot-audit follow-up, revised in the PR #82 remediation.) There is no
+    # daily cadence any more: the dispatcher is manual-only (see
+    # research/test_stage7_scheduler_isolation.py). A `schedule:` trigger here
     # would only ever be evaluated using the copy of this file on the
     # default branch (main) -- since this workflow must never run
     # automatically off of main, and must never depend on staying absent

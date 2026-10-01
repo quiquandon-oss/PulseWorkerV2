@@ -211,7 +211,7 @@ async function stage7Journey(browser, label, viewport, mobile) {
   await page.waitForSelector(`[data-review-panel="${rid}"].open`);
   const review = await page.locator(`[data-review-panel="${rid}"]`).innerText();
   check(area, 'review screen shows assessment, rationale, per-source technical check, cutoff, verbatim response and "nothing saved yet"',
-    /nothing has been saved yet/i.test(review) && /POSITIVE/i.test(review) && /Large exchange outflow/i.test(review) && /VALID/i.test(review) && /Historical cutoff/i.test(review) && /Verbatim response as pasted/i.test(review),
+    /nothing has been saved yet/i.test(review) && /POSITIVE/i.test(review) && /Large exchange outflow/i.test(review) && /FORMAT OK/.test(review) && /does not mean the source is real/i.test(review) && /Historical cutoff/i.test(review) && /Verbatim response as pasted/i.test(review),
     review.slice(0, 1200));
   check(area, 'review screen does not register anything by itself', count('stage7_research_responses') === 0);
   await shot('03-review');
@@ -323,7 +323,7 @@ async function stage7Journey(browser, label, viewport, mobile) {
     /RECALCULATED -- COMPLETED/i.test(done_) && /POSITIVE \(100\)/i.test(done_) && /POSITIVE=100, MIXED=50, NEGATIVE=0/i.test(done_) && /Previous result/i.test(done_) && /no defensible assessment/i.test(done_) &&
     /Formula version/i.test(done_) && /stage7-v1/.test(done_) && /Evidence excluded/i.test(done_) && /Historical cutoff/i.test(done_),
     done_.slice(done_.indexOf('Sentiment recalculation'), done_.indexOf('Sentiment recalculation') + 1500));
-  check(area, 'UI shows source provenance (both sources with their technical verdict) next to the result', /example\.com\/reuters-a/.test(done_) && /VALID/.test(done_));
+  check(area, 'UI shows source provenance (both sources with their technical verdict) next to the result', /example\.com\/reuters-a/.test(done_) && /FORMAT OK/.test(done_) && /was not opened/i.test(done_));
   await shot('06-completed');
 
   // ---- 11. failure is visible and recoverable ----
@@ -382,6 +382,126 @@ async function stage7Journey(browser, label, viewport, mobile) {
   await srv.close();
 }
 
+// Hardening scenarios added in the PR #82 remediation: deployment gate, schema readiness, malformed input,
+// authorization failures, idempotent retries and deployed-identity visibility. Local SQLite only -- NOT staging.
+async function hardeningScenarios(browser, label, viewport, mobile) {
+  const area = `${mobile ? 'mobile' : 'desktop'}-hardening`;
+  const ports = { off: mobile ? 8803 : 8802, behind: mobile ? 8805 : 8804, full: mobile ? 8807 : 8806 };
+  const open = async (port) => {
+    const context = await browser.newContext({ viewport, isMobile: mobile, hasTouch: mobile, baseURL: `http://127.0.0.1:${port}` });
+    const page = await context.newPage();
+    const errors = []; page.on('pageerror', (e) => errors.push(String(e)));
+    return { context, page, errors };
+  };
+  const api = (page, path, { method = 'POST', body, token, raw } = {}) => page.evaluate(async ([p, m, b, t, r]) => {
+    const headers = { 'Content-Type': 'application/json' };
+    if (t) headers.Authorization = 'Bearer ' + t;
+    const res = await fetch(p, { method: m, headers, body: m === 'GET' ? undefined : (r !== undefined ? r : JSON.stringify(b)) });
+    const text = await res.text();
+    let json = null; try { json = JSON.parse(text); } catch (_e) { /* keep null */ }
+    return { http: res.status, json, text };
+  }, [path, method, body, token, raw]);
+  const overflowOk = async (page) => { const o = await page.evaluate(() => ({ sw: document.documentElement.scrollWidth, iw: window.innerWidth })); return o.sw <= o.iw + 1; };
+
+  // ---- A. Stage 7 NOT enabled on the deployment (what a merge to production would look like) ----
+  {
+    const dbPath = join(OUT, `${label}-off.db`);
+    const { db, failed } = buildDatabase(dbPath); seedStage7(db); db.close();
+    const srv = await startServer({ workerPath: WORKER, dbPath, port: ports.off, token: TOKEN, enabled: false });
+    const q = new DatabaseSync(dbPath);
+    const { context, page, errors } = await open(ports.off);
+    await page.goto('/research-lab');
+    await page.click('button[data-page="Stage 7"]');
+    await page.waitForSelector('.empty');
+    const text = await page.locator('#app').innerText();
+    check(area, 'Stage 7 not enabled on this deployment: the tab says so plainly and offers no controls', /not enabled on this deployment/i.test(text) && (await page.locator('[data-create-requests], [data-copy-prompt], [data-candidate-checkbox]').count()) === 0, text.slice(0, 400));
+    check(area, 'the not-enabled message never mentions "production" migrations or a missing migration', !/production d1|migration 0016/i.test(text));
+    const writes = [
+      ['/api/research-lab/stage7-create-requests', { candidate_ids: ['stage7-cand-101'] }],
+      ['/api/research-lab/stage7-register-response', { request_id: 'x', findings: { sentiment_assessment: 'POSITIVE' }, raw_response_text: 'x' }],
+      ['/api/research-lab/stage7-trigger-recalculation', { request_id: 'x' }],
+      ['/api/research-lab/stage7-review-response', { request_id: 'x', decision: 'REJECT', human_confirmed: true }],
+    ];
+    const outs = [];
+    for (const [p, b] of writes) outs.push(await api(page, p, { body: b, token: TOKEN }));
+    check(area, 'every Stage 7 write is refused with 503 STAGE7_DISABLED even with the CORRECT admin token', outs.every((o) => o.http === 503 && o.json && o.json.code === 'STAGE7_DISABLED'), JSON.stringify(outs.map((o) => o.http)));
+    const src = await api(page, '/api/research-lab/stage7-validate-sources', { body: { sources: [] } });
+    check(area, 'the source-check preview is also off', src.http === 503);
+    const n = (t) => Number(q.prepare(`SELECT COUNT(*) n FROM ${t}`).get().n);
+    check(area, 'nothing was written: no requests, responses or sentiment rows; candidates untouched', n('stage7_research_requests') === 0 && n('stage7_research_responses') === 0 && n('stage7_event_sentiment') === 0 && Number(q.prepare("SELECT COUNT(*) n FROM stage7_research_candidates WHERE status = 'PROPOSED'").get().n) === 4);
+    check(area, 'other Research Lab tabs still load on a Stage 7-disabled deployment', await (async () => { await page.click('button[data-page="Dashboard"]'); await page.waitForTimeout(300); return errors.length === 0; })(), errors.join(' | '));
+    check(area, 'no horizontal overflow on the not-enabled screen', await overflowOk(page));
+    await page.click('button[data-page="Stage 7"]'); await page.waitForSelector('.empty');
+    await page.screenshot({ path: join(OUT, `${label}-hardening-01-disabled.png`), fullPage: true });
+    await context.close(); q.close(); await srv.close();
+  }
+
+  // ---- B. schema behind (0016+0017 applied, 0018 missing): reported precisely, no write attempted ----
+  {
+    const dbPath = join(OUT, `${label}-behind.db`);
+    const { db, failed } = buildDatabase(dbPath, { upTo: '0017' }); seedStage7(db); db.close();
+    const srv = await startServer({ workerPath: WORKER, dbPath, port: ports.behind, token: TOKEN });
+    const q = new DatabaseSync(dbPath);
+    const { context, page } = await open(ports.behind);
+    await page.goto('/research-lab');
+    await page.click('button[data-page="Stage 7"]');
+    await page.waitForSelector('.empty');
+    const text = await page.locator('#app').innerText();
+    check(area, 'schema behind (0018 missing): the tab names the migration to apply and says it is never automatic', /0018/.test(text) && /never applied automatically/i.test(text) && /partially applied/i.test(text), text.slice(0, 500));
+    const ov = await api(page, '/api/research-lab/stage7-overview', { method: 'GET' });
+    check(area, 'overview API: 200 activated:false with the structured schema state, not a 500', ov.http === 200 && ov.json.activated === false && ov.json.schema.state === 'PARTIAL' && JSON.stringify(ov.json.schema.migrations_required) === '["0018"]', ov.text.slice(0, 300));
+    const wr = await api(page, '/api/research-lab/stage7-create-requests', { body: { candidate_ids: ['stage7-cand-101'] }, token: TOKEN });
+    check(area, 'a write on a behind schema is refused 503 STAGE7_SCHEMA_NOT_READY and creates nothing', wr.http === 503 && wr.json.code === 'STAGE7_SCHEMA_NOT_READY' && Number(q.prepare('SELECT COUNT(*) n FROM stage7_research_requests').get().n) === 0, wr.text.slice(0, 300));
+    const wrong = await api(page, '/api/research-lab/stage7-create-requests', { body: { candidate_ids: ['stage7-cand-101'] }, token: 'wrong' });
+    check(area, 'an unauthenticated caller learns nothing about the schema (401 with no schema detail)', wrong.http === 401 && !/schema|migration/i.test(wrong.text), wrong.text);
+    check(area, 'no horizontal overflow on the schema-not-ready screen', await overflowOk(page));
+    await page.screenshot({ path: join(OUT, `${label}-hardening-02-schema-behind.png`), fullPage: true });
+    await context.close(); q.close(); await srv.close();
+  }
+
+  // ---- C. fully migrated: malformed input, auth failures, idempotent retries, deployed identity ----
+  {
+    const dbPath = join(OUT, `${label}-full.db`);
+    const { db } = buildDatabase(dbPath); const events = seedStage7(db); db.close();
+    const SHA = 'a'.repeat(40);
+    const srv = await startServer({ workerPath: WORKER, dbPath, port: ports.full, token: TOKEN, sha: SHA });
+    const q = new DatabaseSync(dbPath);
+    const one = (sql, ...a) => q.prepare(sql).get(...a);
+    const { context, page, errors } = await open(ports.full);
+    await page.goto('/research-lab');
+    const ov = await api(page, '/api/research-lab/stage7-overview', { method: 'GET' });
+    check(area, 'the overview reports which commit the Worker is running (acceptance can confirm deployed identity)', ov.json && ov.json.deployment && ov.json.deployment.git_commit_sha === SHA && ov.json.deployment.stage7_enabled === true);
+    const malformed = await api(page, '/api/research-lab/stage7-create-requests', { token: TOKEN, raw: '{"candidate_ids": [' });
+    check(area, 'a malformed JSON body is a 400 INVALID_JSON (not a 500) and echoes nothing back', malformed.http === 400 && malformed.json.code === 'INVALID_JSON' && !/Unexpected|position/i.test(malformed.text), malformed.text);
+    const wrongTok = await api(page, '/api/research-lab/stage7-trigger-recalculation', { token: 'nope', body: { request_id: 'x' } });
+    const noTok = await api(page, '/api/research-lab/stage7-trigger-recalculation', { body: { request_id: 'x' } });
+    check(area, 'wrong and missing tokens are 401 on writes', wrongTok.http === 401 && noTok.http === 401);
+    check(area, 'the admin token never appears in any response body', ![malformed, wrongTok, noTok, ov].some((r) => r.text.includes(TOKEN)));
+
+    const created = await api(page, '/api/research-lab/stage7-create-requests', { token: TOKEN, body: { candidate_ids: ['stage7-cand-102'] } });
+    const rid = created.json.created[0].request_id;
+    const when = events.find((e) => e.id === 102).ts;
+    const body = { request_id: rid, provider: 'claude', raw_response_text: 'verbatim answer', findings: { sentiment_assessment: 'MIXED', summary: 's' }, sources: [{ url: 'https://example.com/x', publisher: 'P', publication_date: new Date(when - 3 * 24 * HOUR).toISOString().slice(0, 10), claim: 'c' }], validated: false };
+    const first = await api(page, '/api/research-lab/stage7-register-response', { token: TOKEN, body });
+    const again = await api(page, '/api/research-lab/stage7-register-response', { token: TOKEN, body });
+    check(area, 'registering the SAME response twice (a retry) is idempotent: second call returns already_registered, one row', first.json.ok && again.json.ok && again.json.already_registered === true && Number(q.prepare('SELECT COUNT(*) n FROM stage7_research_responses WHERE request_id = ?').get(rid).n) === 1, again.text);
+    const different = await api(page, '/api/research-lab/stage7-register-response', { token: TOKEN, body: { ...body, raw_response_text: 'a DIFFERENT answer' } });
+    check(area, 'a different response for the same request is refused (409) and the stored one is unchanged', different.http === 409 && one('SELECT raw_response_text t FROM stage7_research_responses WHERE request_id = ?', rid).t === 'verbatim answer', different.text);
+
+    // Reproduces the UI path for an authorization failure: wrong token typed into the page.
+    await page.click('button[data-page="Stage 7"]');
+    await page.waitForSelector('#s7-admin-token');
+    await page.fill('#s7-admin-token', 'definitely-wrong');
+    await page.check('#cand-stage7-cand-101');
+    await page.click('[data-create-requests]');
+    const authMsg = await page.waitForFunction(() => { const el = document.querySelector('[data-msg="create-requests"]'); return el && /unauthor|token|401/i.test(el.textContent) ? el.textContent : null; }, null, { timeout: 8000 }).then((h) => h.jsonValue()).catch(() => 'NO MESSAGE');
+    check(area, 'UI: a wrong admin token produces an understandable error and creates nothing', /unauthor|token/i.test(authMsg) && Number(q.prepare("SELECT COUNT(*) n FROM stage7_research_requests WHERE event_id = 101").get().n) === 0, authMsg);
+    check(area, 'no JavaScript errors and no horizontal overflow with the hardened screens', errors.length === 0 && await overflowOk(page), errors.join(' | '));
+    await page.screenshot({ path: join(OUT, `${label}-hardening-03-full.png`), fullPage: true });
+    await context.close(); q.close(); await srv.close();
+  }
+}
+
 async function existingFeaturesDifferential(browser) {
   // Same schema/data, two workers: `main` (before these changes) and the working tree.
   // Every non-Stage-7 tab must behave identically (render the same, throw the same).
@@ -421,6 +541,8 @@ try {
   if (!TABS_ONLY) {
     if (!ONLY || ONLY === 'desktop') await guarded('desktop', () => stage7Journey(browser, 'desktop', { width: 1280, height: 900 }, false));
     if (!ONLY || ONLY === 'mobile') await guarded('mobile', () => stage7Journey(browser, 'mobile', { width: 390, height: 844 }, true));
+    if (!ONLY || ONLY === 'desktop') await guarded('desktop-hardening', () => hardeningScenarios(browser, 'desktop', { width: 1280, height: 900 }, false));
+    if (!ONLY || ONLY === 'mobile') await guarded('mobile-hardening', () => hardeningScenarios(browser, 'mobile', { width: 390, height: 844 }, true));
   }
   if (!ONLY || ONLY === 'tabs') await existingFeaturesDifferential(browser);
 } finally {

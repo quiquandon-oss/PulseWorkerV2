@@ -65,7 +65,10 @@ name: Stage 7 - AI-Assisted Research & Full-Source Sentiment Recalculation
 #   2. Set the STAGE7_ADMIN_TOKEN Worker secret (`wrangler secret put
 #      STAGE7_ADMIN_TOKEN`) -- required before any of the Stage 7 write
 #      endpoints (create-requests, register-response, trigger-
-#      recalculation) will accept any request; see worker.js.
+#      recalculation) will accept any request; see worker.js. Stage 7 is
+#      also OFF unless the deployment sets the plain var STAGE7_ENABLED =
+#      "true" (only wrangler.staging.toml does; production's wrangler.toml
+#      never does, so merging worker.js cannot activate Stage 7 there).
 #   3. Deploy worker.js (this repo's existing deploy.yml, triggered by a
 #      push to main that touches worker.js). This alone makes the
 #      interactive candidate-review/request-creation/response-registration/
@@ -88,10 +91,12 @@ name: Stage 7 - AI-Assisted Research & Full-Source Sentiment Recalculation
 #     below, pointing at the separate pulseworker-v2-staging D1 database)
 #     and validates them against that one expected staging target BEFORE
 #     any remote D1 call -- see its own validate_staging_target().
-#   - This workflow only ever runs against the
-#     claude/stage7-research-pipeline branch (the "Enforce staging-only
-#     branch" step below, which runs before checkout/tests/anything that
-#     could touch Cloudflare or git-push), and uses the DEDICATED
+#   - This workflow only ever runs against the reviewed
+#     claude/stage7-human-controlled-workflow branch AND only for code
+#     whose full SHA a human supplies as `expected_sha` (the "Enforce
+#     staging-only branch" step and the "Verify the head is the reviewed
+#     commit" step below -- the former runs before checkout/tests/anything
+#     that could touch Cloudflare or git-push), and uses the DEDICATED
 #     STAGE7_STAGING_CLOUDFLARE_API_TOKEN secret rather than the general
 #     CLOUDFLARE_API_TOKEN production deploy uses.
 # KNOWN LIMITATION (documented, not fixed by scoping alone): Cloudflare's
@@ -112,28 +117,23 @@ name: Stage 7 - AI-Assisted Research & Full-Source Sentiment Recalculation
 # and set by a human with Cloudflare account access, same as every other
 # secret in this repo.
 #
-# NO schedule: TRIGGER HERE (Copilot-audit follow-up): a `schedule:`
-# trigger is only ever evaluated using the workflow file version on the
-# repository's DEFAULT branch (main), regardless of which branch defines
-# it -- so a schedule declared here would sit dormant and safe only for
-# as long as this file never reaches main, which is a fragile, easy-to-
-# violate invariant to depend on for something meant to run daily
-# forever. The daily 11:00 UTC cadence (originally: same reasoning as
-# every other experiment workflow in this repo -- Stage 6 evidence
-# changes every 6 hours via live-evidence-collection.yml, so a daily
-# check keeps Olivier's request queue and event sentiment reasonably
-# current; offset one hour after live-evidence-collection's own day-
-# boundary run and exp009's Monday run, purely to avoid two large jobs
-# starting at the same instant) now lives entirely in
-# .github/workflows/stage7-staging-dispatcher.yml on main instead: that
-# workflow holds no Cloudflare secret and makes no D1/Cloudflare call of
-# its own -- it only fires this workflow's own workflow_dispatch event
-# with ref=claude/stage7-research-pipeline once a day, so THIS workflow
-# only ever runs the way it always could: manually, or by explicit
-# dispatch, always subject to the branch guard below regardless of who
-# or what invoked it.
+# NO schedule: TRIGGER HERE, AND NO SCHEDULED DISPATCH EITHER. A `schedule:` trigger is only ever evaluated using
+# the workflow file on the repository's DEFAULT branch (main), so one declared here would sit dormant only for as
+# long as this file never reaches main. The human-controlled operating model (a person selects candidates,
+# validates responses and explicitly requests recalculation; this workflow only executes what they asked for) also
+# means a run must be a deliberate human act. The former daily dispatcher
+# (.github/workflows/stage7-staging-dispatcher.yml) fired this workflow on a different branch, so unreviewed code
+# kept running against staging; it is now manual-only and must be given the reviewed SHA. A run is bound to
+# reviewed code twice: the ref must be exactly refs/heads/claude/stage7-human-controlled-workflow, and a human
+# supplies `expected_sha`, which must be an ancestor of the checked-out head with nothing but publisher data
+# (research/stage7_requests/**) committed after it.
 on:
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      expected_sha:
+        description: 'Full 40-character commit SHA of the reviewed code this run is allowed to execute (see "Enforce staging-only branch" below).'
+        required: true
+        type: string
 
 concurrency:
   group: stage7-research-pipeline
@@ -164,12 +164,19 @@ jobs:
       # file ever being merged to main, from running against anything
       # but this one staging branch.
       - name: Enforce staging-only branch
+        env:
+          DISPATCH_REF: ${{ github.ref }}
+          EXPECTED_SHA: ${{ inputs.expected_sha }}
         run: |
-          if [ "${{ github.ref }}" != "refs/heads/claude/stage7-research-pipeline" ]; then
-            echo "::error::Stage 7 is staging-only. Refusing to run on ref '${{ github.ref }}' -- this workflow may only execute on refs/heads/claude/stage7-research-pipeline. Aborting before checkout, tests, Cloudflare access, or any git publish step."
+          if [ "$DISPATCH_REF" != "refs/heads/claude/stage7-human-controlled-workflow" ]; then
+            echo "::error::Stage 7 is staging-only. Refusing to run on ref '$DISPATCH_REF' -- this workflow may only execute on refs/heads/claude/stage7-human-controlled-workflow. Aborting before checkout, tests, Cloudflare access, or any git publish step."
             exit 1
           fi
-          echo "Branch guard passed: running on refs/heads/claude/stage7-research-pipeline."
+          if ! printf '%s' "$EXPECTED_SHA" | grep -Eq '^[0-9a-f]{40}$'; then
+            echo "::error::expected_sha must be a full 40-character lowercase commit SHA. Aborting before checkout, tests, Cloudflare access, or any git publish step."
+            exit 1
+          fi
+          echo "Branch guard passed: $DISPATCH_REF (reviewed SHA to be verified after checkout: $EXPECTED_SHA)."
 
       # Fail closed, not silently skip, if the dedicated staging token
       # isn't configured -- a missing secret must never be mistaken for
@@ -188,6 +195,27 @@ jobs:
 
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # The code that runs here must BE the reviewed code: expected_sha must be an ancestor of the checked-out
+      # head, and the only paths that may differ since are the request files this pipeline itself publishes
+      # (research/stage7_requests/**). Anything else means unreviewed code, so the run aborts before any
+      # Cloudflare access or publish step.
+      - name: Verify the head is the reviewed commit (only publisher data may follow it)
+        env:
+          EXPECTED_SHA: ${{ inputs.expected_sha }}
+        run: |
+          set -e
+          git cat-file -e "$EXPECTED_SHA^{commit}" || { echo "::error::expected_sha $EXPECTED_SHA is not a commit in this repository."; exit 1; }
+          git merge-base --is-ancestor "$EXPECTED_SHA" HEAD || { echo "::error::expected_sha is not an ancestor of the dispatched head; the branch was rewritten or the SHA is wrong."; exit 1; }
+          unreviewed=$(git diff --name-only "$EXPECTED_SHA" HEAD | grep -v '^research/stage7_requests/' || true)
+          if [ -n "$unreviewed" ]; then
+            echo "::error::These files changed after the reviewed commit and are not publisher data -- review them and dispatch with the new SHA:"
+            echo "$unreviewed"
+            exit 1
+          fi
+          echo "Head $(git rev-parse HEAD) contains reviewed code $EXPECTED_SHA plus, at most, publisher request files."
 
       - name: Setup Node (for wrangler)
         uses: actions/setup-node@v4

@@ -4,10 +4,11 @@ import http from 'node:http';
 import { pathToFileURL } from 'node:url';
 import { D1Shim } from './d1_shim.mjs';
 
-export async function startServer({ workerPath, dbPath, port, token = 'local-acceptance-token' }) {
+// `enabled` mirrors the deployment switch STAGE7_ENABLED (set only by wrangler.staging.toml in real deployments).
+export async function startServer({ workerPath, dbPath, port, token = 'local-acceptance-token', enabled = true, sha = 'local-acceptance' }) {
   const worker = (await import(pathToFileURL(workerPath).href)).default;
   const db = new D1Shim(dbPath);
-  const env = { DB: db, STAGE7_ADMIN_TOKEN: token, GIT_COMMIT_SHA: 'local-acceptance' };
+  const env = { DB: db, STAGE7_ADMIN_TOKEN: token, GIT_COMMIT_SHA: sha, ...(enabled ? { STAGE7_ENABLED: 'true' } : {}) };
   const server = http.createServer(async (req, res) => {
     try {
       const chunks = [];

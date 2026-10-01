@@ -29,7 +29,13 @@ SCHEMA_VERSION = "stage7-request-v1"
 # publish_request_file() below: the branch is checked BEFORE any file is
 # staged, committed, or pushed, and "main" is rejected by name even if it
 # were ever passed as the allowed target by mistake.
-ALLOWED_PUBLISH_BRANCH = "claude/stage7-research-pipeline"
+#
+# This is the REVIEWED Stage 7 branch -- the same one the pipeline and staging-deploy workflows are bound to
+# (stage7-research-pipeline/test_branch_binding.py asserts all of them agree). It used to name the older
+# claude/stage7-research-pipeline branch, which made publishing impossible from the reviewed branch. Published
+# request files land only under research/stage7_requests/, and both workflows accept those as the sole
+# permitted change after the reviewed commit.
+ALLOWED_PUBLISH_BRANCH = "claude/stage7-human-controlled-workflow"
 FORBIDDEN_PUBLISH_BRANCHES = ("main", "master")
 
 # A FAILED_RETRYABLE request is retried once per scheduled run (see

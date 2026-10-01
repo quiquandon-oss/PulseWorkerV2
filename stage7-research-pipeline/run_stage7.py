@@ -506,6 +506,17 @@ RECALC_ACTIVE_STATUSES = (None, "REQUESTED", "RUNNING")
 MAX_RECALC_ERROR_CHARS = 500
 
 
+# Tables introduced after 0016. Checked together with the columns so a database that is missing the candidates
+# table (migration 0017) fails with an actionable message instead of a raw D1 "no such table" mid-run.
+REQUIRED_STAGE7_LATER_TABLES = {"stage7_research_candidates": "0017"}
+
+
+def find_missing_stage7_tables(existing_table_names):
+    """Pure. [(table, migration)] for every post-0016 Stage 7 table that is absent."""
+    present = set(existing_table_names)
+    return [(t, m) for t, m in REQUIRED_STAGE7_LATER_TABLES.items() if t not in present]
+
+
 def find_missing_stage7_columns(present_columns_by_table):
     """present_columns_by_table: {table: set(column names)} as found in the
     database. Returns [(table, column, migration)] for every required column
@@ -599,8 +610,8 @@ def main():
         result = {
             "ok": True, "status": "SKIPPED -- MIGRATION NOT APPLIED",
             "reason": "None of stage7_research_requests/stage7_research_responses/stage7_event_sentiment "
-                      "exist yet. Apply .ai/migrations/0016_stage7_research_pipeline.sql to production D1, "
-                      "then re-run -- see this workflow file's own ACTIVATION SEQUENCE comment.",
+                      "exist yet in the STAGING database. Apply .ai/migrations/0016, then 0017, then 0018 to it "
+                      "(a human step, never automatic), then re-run.",
             "events_considered": 0, "candidates_proposed": 0, "candidates_marked_stale": 0,
             "publish_failures": 0, "sentiment_rows_written": 0, "retries_attempted": 0, "retries_succeeded": 0,
         }
@@ -619,12 +630,20 @@ def main():
         present_columns[table] = {
             r["name"] for r in run_d1(f"SELECT name FROM pragma_table_info('{table}')")
         }
+    existing_later_tables = {
+        r["name"] for r in run_d1(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name IN "
+            f"({','.join(repr(t) for t in REQUIRED_STAGE7_LATER_TABLES)})"
+        )
+    }
+    missing_tables = find_missing_stage7_tables(existing_later_tables)
     missing_columns = find_missing_stage7_columns(present_columns)
-    if missing_columns:
+    if missing_tables or missing_columns:
         raise RuntimeError(
-            "Stage 7 schema is behind this script: missing column(s) "
-            + ", ".join(f"{t}.{c} (migration {m})" for t, c, m in missing_columns)
-            + ". Apply the named migration(s) to the STAGING database, then re-run. Never worked around."
+            "Stage 7 schema is behind this script: missing "
+            + ", ".join([f"table {t} (migration {m})" for t, m in missing_tables]
+                        + [f"column {t}.{c} (migration {m})" for t, c, m in missing_columns])
+            + ". Apply the named migration(s) to the STAGING database, in order, then re-run. Never worked around."
         )
 
     history_rows = run_d1(f"SELECT ts, score, technical_score, sources_json, gold_regime FROM history WHERE ts BETWEEN {fetch_start_ts} AND {end_ts} ORDER BY ts ASC")

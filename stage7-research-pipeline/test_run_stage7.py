@@ -230,6 +230,8 @@ def test_main_passes_exactly_window_ms_to_the_detector_never_window_plus_lookbac
     calls = {}
 
     def fake_run_d1(sql):
+        if "sqlite_master" in sql and "stage7_research_candidates" in sql:  # the post-0016 table check
+            return [{"name": "stage7_research_candidates"}]
         if "sqlite_master" in sql:
             return [{"name": t} for t in rs.REQUIRED_STAGE7_TABLES]
         if "pragma_table_info" in sql:
@@ -265,6 +267,8 @@ def test_main_fetch_queries_use_a_wider_lookback_inclusive_bound_than_the_detect
     fetch_sqls = []
 
     def fake_run_d1(sql):
+        if "sqlite_master" in sql and "stage7_research_candidates" in sql:  # the post-0016 table check
+            return [{"name": "stage7_research_candidates"}]
         if "sqlite_master" in sql:
             return [{"name": t} for t in rs.REQUIRED_STAGE7_TABLES]
         if "pragma_table_info" in sql:
@@ -668,7 +672,7 @@ def _existing_candidate_row(**overrides):
 def _run_main_with_fakes(monkeypatch, existing_requests_rows, existing_candidates_rows=(), publish_request_file=None,
                          validated_rows=(), previous_sentiment_rows=(), inserted_sentiment_rows=(),
                          present_columns=None, compute_result=None, idempotent_repeat=True,
-                         candidate_counts_rows=()):
+                         candidate_counts_rows=(), candidates_table_present=True):
     """Drives the real rs.main() through exactly one eligible event
     (event_id=42), with every D1 read/write and the real git-publish call
     faked -- isolating the one thing under test here: main()'s own
@@ -679,6 +683,8 @@ def _run_main_with_fakes(monkeypatch, existing_requests_rows, existing_candidate
     event_ts = _recent_event_ts()
 
     def fake_run_d1(sql):
+        if "sqlite_master" in sql and "stage7_research_candidates" in sql:  # the post-0016 table check
+            return [{"name": "stage7_research_candidates"}] if candidates_table_present else []
         if "sqlite_master" in sql:
             return [{"name": t} for t in rs.REQUIRED_STAGE7_TABLES]
         if "pragma_table_info" in sql:
@@ -964,6 +970,35 @@ def test_find_missing_stage7_columns_names_the_migration_for_each_gap():
         ("stage7_research_requests", "recalculation_status", "0018"),
         ("stage7_research_responses", "raw_response_text", "0017"),
     ]
+
+
+def test_find_missing_stage7_tables_names_the_migration():
+    assert rs.find_missing_stage7_tables({"stage7_research_candidates", "history"}) == []
+    assert rs.find_missing_stage7_tables({"history"}) == [("stage7_research_candidates", "0017")]
+
+
+def test_main_refuses_to_run_when_the_candidates_table_from_migration_0017_is_missing(monkeypatch):
+    with pytest.raises(RuntimeError, match=r"table stage7_research_candidates \(migration 0017\)") as exc:
+        _run_main_with_fakes(monkeypatch, existing_requests_rows=[], candidates_table_present=False)
+    assert "STAGING database" in str(exc.value)  # actionable: says where, never 'production'
+
+
+def test_main_names_every_missing_piece_in_one_error_not_just_the_first(monkeypatch):
+    columns = {t: set(c) for t, c in rs.REQUIRED_STAGE7_COLUMNS.items()}
+    columns["stage7_research_requests"].discard("recalculation_status")
+    with pytest.raises(RuntimeError) as exc:
+        _run_main_with_fakes(monkeypatch, existing_requests_rows=[], present_columns=columns, candidates_table_present=False)
+    message = str(exc.value)
+    assert "table stage7_research_candidates (migration 0017)" in message
+    assert "column stage7_research_requests.recalculation_status (migration 0018)" in message
+
+
+def test_not_applied_skip_reason_points_at_the_staging_database_and_all_three_migrations(monkeypatch):
+    _set_valid_staging_env(monkeypatch)
+    monkeypatch.setattr(rs, "run_d1", lambda sql: [])
+    result = rs.main()
+    assert "STAGING" in result["reason"] and "0016" in result["reason"] and "0017" in result["reason"] and "0018" in result["reason"]
+    assert "production" not in result["reason"].lower()
 
 
 def test_main_refuses_to_run_when_migration_0018_columns_are_missing(monkeypatch):

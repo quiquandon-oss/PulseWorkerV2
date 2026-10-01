@@ -62,6 +62,13 @@ describe('Stage 7 — AI-assisted research & sentiment recalculation (research-l
           run: async () => respond().run || { success: true },
         };
       },
+      // D1's batch() runs its statements together as one transaction. The fake runs them in order, which
+      // consumes the per-call responses in the same order the statements were prepared.
+      async batch(statements) {
+        const results = [];
+        for (const statement of statements) results.push(await statement.run());
+        return results;
+      },
     };
   }
 
@@ -995,41 +1002,77 @@ describe('Stage 7 — AI-assisted research & sentiment recalculation (research-l
       expect(result.skipped).toEqual([]);
     });
 
-    it('a concurrent duplicate creation (D1 unique-index violation on INSERT) is caught and reported per-item, never a 500 for the whole batch', async () => {
+    it('a concurrent duplicate creation (D1 unique-index violation) is caught per-item, never a 500, never half-written, and never echoes the raw database error', async () => {
+      const committed = [];
       const db = {
         calls: [],
         prepare(sql) {
           db.calls.push(sql);
-          return {
-            bind: () => ({
-              first: async () => {
-                if (sql.includes('FROM stage7_research_candidates')) {
-                  return {
-                    candidate_id: 'stage7-cand-1', event_id: 1, status: 'PROPOSED', sufficiency_status: 'INSUFFICIENT',
-                    reasons_json: '[]', questions_json: '[]', missing_categories_json: '[]',
-                    historical_cutoff_ts: 1000, evidence_snapshot_json: '[]', input_fingerprint: 'fp',
-                  };
-                }
-                if (sql.includes('FROM research_events')) return { category: 'LARGE_MOVE', event_ts: 1000 };
-                return null;
-              },
-              run: async () => {
-                if (sql.includes('INSERT INTO stage7_research_requests')) {
-                  throw new Error('UNIQUE constraint failed: stage7_research_requests.event_id');
-                }
-                return { success: true };
-              },
-            }),
-          };
+          const statement = (args) => ({
+            sql, args,
+            first: async () => {
+              if (sql.includes('FROM stage7_research_candidates')) {
+                return {
+                  candidate_id: 'stage7-cand-1', event_id: 1, status: 'PROPOSED', sufficiency_status: 'INSUFFICIENT',
+                  reasons_json: '[]', questions_json: '[]', missing_categories_json: '[]',
+                  historical_cutoff_ts: 1000, evidence_snapshot_json: '[]', input_fingerprint: 'fp',
+                };
+              }
+              if (sql.includes('FROM research_events')) return { category: 'LARGE_MOVE', event_ts: 1000 };
+              return null;
+            },
+          });
+          return { ...statement([]), bind: (...args) => statement(args) };
+        },
+        // Transactional: if ANY statement violates the unique index, NOTHING from the batch is committed.
+        async batch(statements) {
+          if (statements.some((st) => st.sql.includes('INSERT INTO stage7_research_requests'))) {
+            throw new Error('UNIQUE constraint failed: stage7_research_requests.event_id');
+          }
+          statements.forEach((st) => committed.push(st.sql));
+          return statements.map(() => ({ success: true }));
         },
       };
       const result = await scope.createStage7ResearchRequests(envOf(db), { candidateIds: ['stage7-cand-1'], providedToken: ADMIN_TOKEN });
       expect(result.ok).toBe(true);
       expect(result.created).toEqual([]);
       expect(result.skipped).toHaveLength(1);
-      expect(result.skipped[0].reason).toMatch(/UNIQUE constraint/);
-      // The candidate's own status update must never be attempted after a failed insert.
-      expect(db.calls.some((sql) => sql.includes("SET status = 'CONVERTED'"))).toBe(false);
+      expect(result.skipped[0].reason).toMatch(/Nothing was written for this candidate/);
+      expect(JSON.stringify(result)).not.toMatch(/UNIQUE constraint|stage7_research_requests\.event_id/);
+      // Atomicity: neither the request row nor the candidate's CONVERTED marker was committed.
+      expect(committed).toEqual([]);
+    });
+
+    it('the request insert and the candidate CONVERTED marker are issued in ONE atomic batch', async () => {
+      const batches = [];
+      const db = {
+        prepare(sql) {
+          const statement = (args) => ({
+            sql, args,
+            first: async () => {
+              if (sql.includes('FROM stage7_research_candidates')) {
+                return {
+                  candidate_id: 'stage7-cand-1', event_id: 1, status: 'PROPOSED', sufficiency_status: 'INSUFFICIENT',
+                  reasons_json: '[]', questions_json: '[]', missing_categories_json: '[]',
+                  historical_cutoff_ts: 1000, evidence_snapshot_json: '[]', input_fingerprint: 'fp',
+                };
+              }
+              if (sql.includes('FROM research_events')) return { category: 'LARGE_MOVE', event_ts: 1000 };
+              if (sql.includes('COUNT(*)')) return { n: 0 };
+              return null;
+            },
+            run: async () => { throw new Error('a write was issued outside the atomic batch'); },
+          });
+          return { ...statement([]), bind: (...args) => statement(args) };
+        },
+        async batch(statements) { batches.push(statements.map((st) => st.sql)); return statements.map(() => ({ success: true })); },
+      };
+      const result = await scope.createStage7ResearchRequests(envOf(db), { candidateIds: ['stage7-cand-1'], providedToken: ADMIN_TOKEN });
+      expect(result.created).toHaveLength(1);
+      expect(batches).toHaveLength(1);
+      expect(batches[0]).toHaveLength(2);
+      expect(batches[0][0]).toMatch(/INSERT INTO stage7_research_requests/);
+      expect(batches[0][1]).toMatch(/UPDATE stage7_research_candidates SET status = 'CONVERTED'/);
     });
 
     it('duplicate candidate_ids in one call are de-duplicated before processing', async () => {

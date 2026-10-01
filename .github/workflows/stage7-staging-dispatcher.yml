@@ -1,46 +1,35 @@
 name: Stage 7 Staging Dispatcher
 
-# Minimal, credential-free daily scheduler for Stage 7. The actual Stage 7
-# workflow (research + full-source sentiment recalculation) lives ONLY on
-# claude/stage7-research-pipeline -- never on main -- gated by its own
-# staging-only branch guard and validate_staging_target() (see that
-# branch's .github/workflows/stage7-research-pipeline.yml and
-# stage7-research-pipeline/run_stage7.py). This dispatcher's ONLY
-# responsibility is to fire that workflow's workflow_dispatch event with
-# ref=claude/stage7-research-pipeline once a day, so Stage 7 keeps
-# running against staging without ever putting a schedule: trigger on
-# main itself.
+# MANUAL-ONLY trampoline for the Stage 7 pipeline workflow. It exists because GitHub only recognises a
+# workflow as dispatchable once it exists on the default branch (or has run once); this file (on main once
+# merged) lets a human fire stage7-research-pipeline.yml on the reviewed branch.
+#
+# It previously ran on a daily cron and fired the pipeline on claude/stage7-research-pipeline -- a DIFFERENT
+# branch from the reviewed human-controlled-workflow branch -- so code nobody had reviewed kept executing
+# against staging every day. That cron is removed: Stage 7 is human-controlled (a person selects candidates,
+# validates responses and explicitly requests recalculation; a run only executes what they asked for), and a
+# scheduled run cannot supply the reviewed SHA the pipeline now requires. The pipeline itself still enforces
+# the branch and SHA (see its "Enforce staging-only branch" and "Verify the head is the reviewed commit" steps).
 #
 # This workflow does NOT, and must never be changed to:
 #   - query or write to D1 (staging or production)
 #   - call any Cloudflare API
 #   - deploy a Worker
 #   - publish a research request
-#   - hold, read, or reference ANY Cloudflare secret (CLOUDFLARE_API_
-#     TOKEN, STAGE7_STAGING_CLOUDFLARE_API_TOKEN, GEMINI_API_KEY) -- those
-#     belong exclusively to the dispatched workflow's own job, which reads
-#     them from ITS OWN secrets context (the ref it actually runs on),
-#     never from this one.
+#   - hold, read, or reference ANY Cloudflare secret (CLOUDFLARE_API_TOKEN, STAGE7_STAGING_CLOUDFLARE_API_TOKEN,
+#     GEMINI_API_KEY) -- those belong exclusively to the dispatched workflow's own job.
+#   - run on a schedule
 #
-# Credential: the ambient, per-job secrets.GITHUB_TOKEN GitHub Actions
-# already provides -- no PAT, no GitHub App, no new secret was
-# introduced. GITHUB_TOKEN's workflow_dispatch/repository_dispatch calls
-# are explicitly exempted from the "GITHUB_TOKEN can't trigger other
-# workflows" recursion guard (GitHub Docs, "Triggering a workflow from a
-# workflow"), and the dispatched workflow is in this SAME repository, so
-# no cross-repo credential is needed either.
-#
-# KNOWN LIMITATION (see this change's own PR/report): GitHub only
-# recognizes a workflow as dispatchable once it (a) exists on the
-# repository's default branch, or (b) has actually run at least once.
-# stage7-research-pipeline.yml currently satisfies neither, so this
-# dispatcher's run step will fail with "workflow not found" until that is
-# resolved -- resolving it is a separate, explicitly-flagged decision,
-# not made silently by this file.
+# Credential: the ambient, per-job secrets.GITHUB_TOKEN GitHub Actions already provides -- no PAT, no GitHub
+# App, no new secret. workflow_dispatch calls made with GITHUB_TOKEN are exempt from the "GITHUB_TOKEN can't
+# trigger other workflows" recursion guard, and the target workflow is in this same repository.
 on:
-  schedule:
-    - cron: '0 11 * * *'
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      expected_sha:
+        description: 'Full 40-character SHA of the reviewed code the pipeline may execute (passed through to the pipeline, which verifies it).'
+        required: true
+        type: string
 
 permissions:
   actions: write
@@ -49,10 +38,12 @@ jobs:
   dispatch-stage7:
     runs-on: ubuntu-latest
     steps:
-      - name: Dispatch Stage 7 on its staging branch
+      - name: Dispatch Stage 7 on the reviewed branch
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          EXPECTED_SHA: ${{ inputs.expected_sha }}
         run: |
           gh workflow run stage7-research-pipeline.yml \
             --repo "${{ github.repository }}" \
-            --ref claude/stage7-research-pipeline
+            --ref claude/stage7-human-controlled-workflow \
+            -f expected_sha="$EXPECTED_SHA"

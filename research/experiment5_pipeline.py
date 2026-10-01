@@ -128,6 +128,17 @@ def classify_sources_json(raw):
     return "OK" if parsed else "EMPTY"
 
 
+def decision_key(evidence_summary_json, subject):
+    """Pure. The natural identity of a decision: (subject, anchor_ts). The same observation can only ever give
+    one decision per subject, whatever number of times the pipeline runs. None for a payload that is not valid
+    JSON / has no anchor (such a row simply cannot suppress a new decision; it is never rewritten)."""
+    try:
+        anchor = json.loads(evidence_summary_json)["decision"]["anchor_ts"]
+    except (TypeError, ValueError, KeyError):
+        return None
+    return (subject, anchor) if isinstance(anchor, (int, float)) and not isinstance(anchor, bool) else None
+
+
 def _sql_literal(value):
     if value is None:
         return "NULL"
@@ -164,7 +175,11 @@ def build_update_decision_outcome_sql(hypothesis_id, evidence_summary_json, out_
         f"evidence_summary_json = {_sql_literal(evidence_summary_json)}, "
         f"out_of_sample_status = {_sql_literal(out_of_sample_status)}, "
         f"last_updated_ts = {_sql_literal(last_updated_ts)} "
-        f"WHERE hypothesis_id = {_sql_literal(hypothesis_id)}"
+        f"WHERE hypothesis_id = {_sql_literal(hypothesis_id)} "
+        # Append-only resolution: only an UNRESOLVED Experiment 5 row may be resolved. A row someone else
+        # (an overlapping run, a manual edit) already resolved keeps its FIRST outcome, and a row that is not an
+        # Experiment 5 decision can never be touched even if an id were ever wrong.
+        "AND subject LIKE 'experiment5:%' AND out_of_sample_status IS NULL"
     )
 
 
@@ -285,13 +300,32 @@ def run_pipeline(d1_query_fn, d1_execute_fn, now_ts):
         "WHERE subject LIKE 'experiment5:%' AND out_of_sample_status IS NULL"
     )
 
+    # Identity of every decision created inside the observe window (resolved ones included): a new decision whose
+    # (subject, anchor_ts) is already here is a repeat of the same observation and is NOT persisted again. Bounded by
+    # created_ts -- a decision can only share an anchor with a new one if it was created at or after that anchor.
+    existing_decision_rows = d1_query_fn(
+        "SELECT subject, evidence_summary_json FROM research_hypotheses "
+        f"WHERE subject LIKE 'experiment5:%' AND created_ts >= {now_ts - agent.DEFAULT_OBSERVE_WINDOW_MS}"
+    )
+    existing_decision_keys = {decision_key(r["evidence_summary_json"], r["subject"]) for r in existing_decision_rows}
+    existing_decision_keys.discard(None)
+
     diagnostics = {"rejected_ts": set()}
     local_conn = _build_local_mirror(
         history_rows, btc_rows, archived_observation_ts, now_ts,
         historical_archive_rows=historical_archive_rows, diagnostics=diagnostics,
     )
-    observed_rows = local_conn.execute("SELECT sources_json FROM research_sentiment_archive").fetchall()
+    # Every diagnostic about "what the agent saw" describes the AGENT'S OBSERVE WINDOW (the same bounds
+    # experiment5_agent.observe() uses). The mirror also holds older rows (the 30-day archiving read window), which
+    # the agent never observes; counting them here made `observed + rejected` describe no real set.
+    observe_lo = now_ts - agent.DEFAULT_OBSERVE_WINDOW_MS
+    observed_rows = local_conn.execute(
+        "SELECT sources_json FROM research_sentiment_archive WHERE observation_ts >= ? AND observation_ts <= ?",
+        (observe_lo, now_ts),
+    ).fetchall()
     observations_without_sources = sum(1 for (raw,) in observed_rows if classify_sources_json(raw) == "EMPTY")
+    rejected_in_window = sorted(t for t in diagnostics["rejected_ts"] if observe_lo <= t <= now_ts)
+    rejected_outside_window = len(diagnostics["rejected_ts"]) - len(rejected_in_window)
 
     # Iterates every mirror archive row -- both the historical replay
     # above and whatever this cycle newly archived. Only a row whose ts
@@ -339,6 +373,7 @@ def run_pipeline(d1_query_fn, d1_execute_fn, now_ts):
 
     cycle_result = agent.run_agent_cycle(local_conn, as_of_ts=now_ts, created_ts=now_ts)
     new_local_decision_ids = list(cycle_result.get("decision_ids", []))
+    decisions_skipped_duplicate = 0
     for hypothesis_id in new_local_decision_ids:
         row = local_conn.execute(
             "SELECT subject, statement, source_analysis_ids, status, evidence_summary_json "
@@ -346,6 +381,12 @@ def run_pipeline(d1_query_fn, d1_execute_fn, now_ts):
             (hypothesis_id,),
         ).fetchone()
         subject, statement, source_analysis_ids_json, status, evidence_summary_json = row
+        key = decision_key(evidence_summary_json, subject)
+        if key is not None and key in existing_decision_keys:
+            decisions_skipped_duplicate += 1  # same observation, same subject: already persisted by an earlier run
+            continue
+        if key is not None:
+            existing_decision_keys.add(key)
         d1_execute_fn(build_insert_decision_sql(
             subject, statement, source_analysis_ids_json, status, evidence_summary_json, now_ts,
         ))
@@ -408,10 +449,12 @@ def run_pipeline(d1_query_fn, d1_execute_fn, now_ts):
         "newly_archived": newly_archived,
         "archive_rows_observed": len(observed_rows),
         "observations_without_sources": observations_without_sources,
-        "observations_rejected_malformed": len(diagnostics["rejected_ts"]),
-        "rejected_observation_ts_sample": sorted(diagnostics["rejected_ts"])[:MAX_REJECTED_SAMPLE],
+        "observations_rejected_malformed": len(rejected_in_window),
+        "observations_rejected_malformed_outside_observe_window": rejected_outside_window,
+        "rejected_observation_ts_sample": rejected_in_window[:MAX_REJECTED_SAMPLE],
         "agent_cycle": {k: v for k, v in cycle_result.items() if k != "decision_ids"},
-        "decisions_created": len(cycle_result.get("decision_ids", [])),
+        "decisions_created": len(cycle_result.get("decision_ids", [])) - decisions_skipped_duplicate,
+        "decisions_skipped_duplicate": decisions_skipped_duplicate,
         "decisions_replayed": len(pending_decision_rows),
         "decisions_evaluated": evaluation["n_evaluated"],
         "evaluation_outcomes": outcome_counts,
@@ -436,18 +479,20 @@ def build_insert_run_sql(run_ts, status, summary, error_text):
     columns = [
         "run_ts", "status", "error_text", "pipeline_version", "constants_json", "history_rows_read",
         "btc_rows_read", "newly_archived", "archive_rows_observed", "observations_without_sources",
-        "observations_rejected_malformed", "rejected_observation_ts_json", "sources_observed",
+        "observations_rejected_malformed", "observations_rejected_outside_window", "rejected_observation_ts_json", "sources_observed",
         "candidate_new_sources_json", "agent_status", "decisions_replayed", "decisions_created",
-        "decisions_evaluated", "evaluated_passed", "evaluated_failed", "evaluated_inconclusive",
+        "decisions_skipped_duplicate", "decisions_evaluated", "evaluated_passed", "evaluated_failed", "evaluated_inconclusive",
     ]
     values = [
         run_ts, status, None if error_text is None else str(error_text)[:MAX_ERROR_CHARS], PIPELINE_VERSION,
         json.dumps(_constants_snapshot(), sort_keys=True), summary.get("history_rows_read"),
         summary.get("btc_rows_read"), summary.get("newly_archived"), summary.get("archive_rows_observed"),
         summary.get("observations_without_sources"), summary.get("observations_rejected_malformed"),
+        summary.get("observations_rejected_malformed_outside_observe_window"),
         json.dumps(summary.get("rejected_observation_ts_sample") or []), cycle.get("n_sources_observed"),
         json.dumps(cycle.get("candidate_new_sources") or []), cycle.get("status"),
-        summary.get("decisions_replayed"), summary.get("decisions_created"), summary.get("decisions_evaluated"),
+        summary.get("decisions_replayed"), summary.get("decisions_created"), summary.get("decisions_skipped_duplicate"),
+        summary.get("decisions_evaluated"),
         outcomes.get("PASSED_HOLDOUT"), outcomes.get("FAILED_HOLDOUT"), outcomes.get("INSUFFICIENT_DATA_FOR_HOLDOUT"),
     ]
     return (f"INSERT INTO {RUN_TABLE} ({', '.join(columns)}) VALUES "
@@ -469,9 +514,17 @@ def record_run(d1_query_fn, d1_execute_fn, run_ts, status, summary, error_text):
 
 
 def run_pipeline_recorded(d1_query_fn, d1_execute_fn, now_ts):
-    """run_pipeline() plus a persisted operational record. A failure is recorded (best effort) and then
-    RE-RAISED -- the job must still go red; the record exists so the app can show the failure and the
-    consecutive-failure count, not to hide it."""
+    """run_pipeline() plus a persisted operational record.
+
+    * Pipeline FAILS: the failure is recorded best-effort and then RE-RAISED -- the job must still go red; the
+      record exists so the app can show the failure and the consecutive-failure count, not to hide it. A failure
+      to write that record is reported on stderr and NEVER masks the original error.
+    * Pipeline SUCCEEDS but the record cannot be written: the experiment's own data was written correctly (and is
+      idempotent), so the run is not turned into a failure. The summary says so explicitly --
+      run_record = "WRITE_FAILED" plus run_record_error -- and the caller must surface it loudly. It is never
+      reported as WRITTEN. The Worker's overdue flag covers a prolonged loss of telemetry.
+    * Telemetry table missing (migration 0019 not applied): run_record = "SKIPPED_TABLE_MISSING" -- the run is
+      reported as unrecorded, never as recorded."""
     try:
         summary = run_pipeline(d1_query_fn, d1_execute_fn, now_ts)
     except Exception as exc:
@@ -480,5 +533,10 @@ def run_pipeline_recorded(d1_query_fn, d1_execute_fn, now_ts):
         except Exception as record_exc:  # already propagating the real error; never mask it
             print(f"ALSO FAILED to record the failed run: {type(record_exc).__name__}: {record_exc}", file=sys.stderr)
         raise
-    summary["run_record"] = record_run(d1_query_fn, d1_execute_fn, now_ts, "OK", summary, None)
+    try:
+        summary["run_record"] = record_run(d1_query_fn, d1_execute_fn, now_ts, "OK", summary, None)
+    except Exception as record_exc:
+        summary["run_record"] = "WRITE_FAILED"
+        summary["run_record_error"] = f"{type(record_exc).__name__}: {record_exc}"[:MAX_ERROR_CHARS]
+        print(f"TELEMETRY WRITE FAILED (the pipeline itself succeeded): {summary['run_record_error']}", file=sys.stderr)
     return summary

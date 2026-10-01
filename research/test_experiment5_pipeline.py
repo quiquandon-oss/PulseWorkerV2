@@ -10,6 +10,7 @@ FakeD1 convention exactly. Zero network access anywhere in this file.
 Run with: python3 -m pytest research/test_experiment5_pipeline.py -v
 """
 import json
+import re
 import os
 import sqlite3
 import sys
@@ -949,3 +950,391 @@ class TestRunRecord:
         assert second["newly_archived"] == 0
         assert d1.query("SELECT * FROM research_sentiment_archive") == archive_after_first
         assert d1.query("SELECT COUNT(*) AS n FROM experiment5_pipeline_runs")[0]["n"] == 2
+
+
+def _decision_payload(anchor_ts, source="fng", direction=1):
+    return json.dumps({"decision": {
+        "anchor_ts": anchor_ts, "cycle_ts": anchor_ts, "primary_source": source, "direction": direction,
+        "classifications": {}, "confirmation": {"classification": "NO_CONFIRMATION", "confirming_sources": []},
+    }})
+
+
+def insert_decision(d1, subject, anchor_ts, status=None, outcome=None, created_ts=None):
+    payload = json.loads(_decision_payload(anchor_ts, source=subject.split(":")[-1]))
+    if outcome is not None:
+        payload["outcome"] = outcome
+    d1.conn.execute(
+        "INSERT INTO research_hypotheses (created_ts, last_updated_ts, subject, statement, source_analysis_ids, status, "
+        "evidence_summary_json, out_of_sample_status) VALUES (?, ?, ?, 'x', '[]', 'OBSERVATION', ?, ?)",
+        (anchor_ts if created_ts is None else created_ts, anchor_ts, subject, json.dumps(payload), status),
+    )
+    d1.conn.commit()
+    return d1.conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+
+
+class TestDecisionIdempotencyReproduction:
+    """REPRODUCTION (found during PR #83 pre-merge review): the pipeline created a NEW decision row for the SAME
+    (subject, anchor_ts) on every re-run. Decision ids are database AUTOINCREMENTs, so nothing made a repeat run
+    recognise the decision it (or an earlier run) had already persisted. A manual re-dispatch, a retried workflow
+    or a stalled V1 history write therefore inflated the decision count with duplicated, fully dependent samples."""
+
+    def _reversal_scenario(self):
+        d1 = FakeD1()
+        for i in range(4):
+            insert_history(d1, i * HOUR, 50, {"onchain": 50 + i * 10})
+        insert_history(d1, 4 * HOUR, 50, {"onchain": 10})
+        insert_btc(d1, 4 * HOUR, 100.0)
+        insert_btc(d1, 28 * HOUR, 110.0)
+        return d1
+
+    def _count(self, d1):
+        return d1.query("SELECT COUNT(*) AS n FROM research_hypotheses WHERE subject LIKE 'experiment5:%'")[0]["n"]
+
+    def test_rerunning_with_identical_inputs_creates_no_second_decision_for_the_same_subject_and_anchor(self):
+        d1 = self._reversal_scenario()
+        first = ep.run_pipeline(d1.query, d1.execute, now_ts=10 * HOUR)
+        assert first["decisions_created"] == 1 and self._count(d1) == 1
+        again = ep.run_pipeline(d1.query, d1.execute, now_ts=10 * HOUR)
+        assert again["decisions_created"] == 0
+        assert again["decisions_skipped_duplicate"] == 1
+        assert self._count(d1) == 1
+
+    def test_a_decision_that_has_already_been_RESOLVED_is_still_recognised_as_existing(self):
+        d1 = self._reversal_scenario()
+        ep.run_pipeline(d1.query, d1.execute, now_ts=10 * HOUR)          # creates (anchor 4h)
+        ep.run_pipeline(d1.query, d1.execute, now_ts=34 * HOUR)          # resolves it (24h horizon elapsed)
+        resolved = d1.query("SELECT out_of_sample_status FROM research_hypotheses")[0]["out_of_sample_status"]
+        assert resolved is not None
+        third = ep.run_pipeline(d1.query, d1.execute, now_ts=34 * HOUR)  # same signal still in the observe window
+        assert third["decisions_created"] == 0
+        assert self._count(d1) == 1
+
+    def test_a_genuinely_new_observation_still_creates_a_new_decision(self):
+        d1 = self._reversal_scenario()
+        ep.run_pipeline(d1.query, d1.execute, now_ts=10 * HOUR)
+        # a later observation moves the anchor; the same dynamic at a NEW anchor is a legitimately new decision
+        insert_history(d1, 5 * HOUR, 50, {"onchain": 90})
+        insert_history(d1, 6 * HOUR, 50, {"onchain": 5})
+        ep.run_pipeline(d1.query, d1.execute, now_ts=11 * HOUR)
+        anchors = sorted(json.loads(r["evidence_summary_json"])["decision"]["anchor_ts"]
+                         for r in d1.query("SELECT evidence_summary_json FROM research_hypotheses"))
+        assert len(anchors) == len(set(anchors)), "no anchor may appear twice for the same subject"
+
+    def test_the_duplicate_is_not_persisted_to_real_d1_at_all(self):
+        d1 = self._reversal_scenario()
+        ep.run_pipeline(d1.query, d1.execute, now_ts=10 * HOUR)
+        before = list(d1.executed_sql)
+        ep.run_pipeline(d1.query, d1.execute, now_ts=10 * HOUR)
+        new_sql = d1.executed_sql[len(before):]
+        assert not [s for s in new_sql if s.startswith("INSERT INTO research_hypotheses")]
+
+
+class TestDecisionResolutionSafety:
+    """No real row may be resolved/overwritten except the one the replayed decision actually is."""
+
+    def test_the_outcome_update_only_applies_to_an_unresolved_experiment5_row(self):
+        sql = ep.build_update_decision_outcome_sql(7, "{}", "PASSED_HOLDOUT", 5)
+        assert "WHERE hypothesis_id = 7" in sql
+        assert "out_of_sample_status IS NULL" in sql
+        assert "subject LIKE 'experiment5:%'" in sql
+
+    def test_a_row_resolved_by_someone_else_between_read_and_write_is_never_overwritten(self):
+        d1 = FakeD1()
+        hid = insert_decision(d1, "experiment5:reversal:fng", 0)
+        insert_btc(d1, 0, 100.0)
+        insert_btc(d1, 24 * HOUR, 110.0)
+        insert_history(d1, 0, 60, {"fng": 50})
+        for i in range(2):
+            insert_history(d1, 30 * HOUR + i, 50, {"fng": 50})
+        winner = {"marker": "FIRST-RESOLUTION-WINS"}
+        original_execute = d1.execute
+
+        def racing_execute(sql):
+            if sql.startswith("UPDATE research_hypotheses"):
+                # a concurrent run resolves the same decision just before this UPDATE lands
+                d1.conn.execute(
+                    "UPDATE research_hypotheses SET out_of_sample_status = 'FAILED_HOLDOUT', evidence_summary_json = ? WHERE hypothesis_id = ?",
+                    (json.dumps({"decision": json.loads(_decision_payload(0))["decision"], "outcome": winner}), hid),
+                )
+                d1.conn.commit()
+            original_execute(sql)
+
+        result = ep.run_pipeline(d1.query, racing_execute, now_ts=30 * HOUR)
+        assert result["decisions_evaluated"] == 1  # this run did evaluate it locally...
+        row = d1.query(f"SELECT evidence_summary_json, out_of_sample_status FROM research_hypotheses WHERE hypothesis_id = {hid}")[0]
+        assert json.loads(row["evidence_summary_json"])["outcome"] == winner  # ...but the first resolution is preserved
+        assert row["out_of_sample_status"] == "FAILED_HOLDOUT"
+
+    def test_multiple_pending_decisions_each_resolve_under_their_own_real_id_and_nothing_else_changes(self):
+        d1 = FakeD1()
+        ids = [insert_decision(d1, f"experiment5:reversal:{name}", anchor) for name, anchor in
+               (("fng", 0), ("onchain", 2 * HOUR), ("etfflows", 3 * HOUR))]
+        resolved_marker = {"marker": "UNTOUCHED", "evaluated_ts": 1}
+        old_id = insert_decision(d1, "experiment5:reversal:legacy", 0, status="PASSED_HOLDOUT", outcome=resolved_marker)
+        not_experiment5 = d1.conn.execute(
+            "INSERT INTO research_hypotheses (created_ts, last_updated_ts, subject, statement, source_analysis_ids, status, "
+            "evidence_summary_json, out_of_sample_status) VALUES (1, 1, 'unrelated:other', 'x', '[]', 'OBSERVATION', '{}', NULL)"
+        ).lastrowid
+        d1.conn.commit()
+        for ts in (0, 2 * HOUR, 3 * HOUR):
+            insert_history(d1, ts, 60, {"fng": 50})  # the outcome engine anchors each decision on the history row at its own ts
+            insert_btc(d1, ts, 100.0)
+            insert_btc(d1, ts + 24 * HOUR, 110.0)
+        insert_history(d1, 49 * HOUR, 50, {"fng": 50})
+        insert_history(d1, 50 * HOUR, 50, {"fng": 50})
+
+        result = ep.run_pipeline(d1.query, d1.execute, now_ts=50 * HOUR)
+
+        assert result["decisions_replayed"] == 3
+        assert result["decisions_evaluated"] == 3
+        for hid in ids:
+            assert d1.query(f"SELECT out_of_sample_status AS s FROM research_hypotheses WHERE hypothesis_id = {hid}")[0]["s"] is not None
+        legacy = d1.query(f"SELECT evidence_summary_json, out_of_sample_status FROM research_hypotheses WHERE hypothesis_id = {old_id}")[0]
+        assert json.loads(legacy["evidence_summary_json"])["outcome"] == resolved_marker and legacy["out_of_sample_status"] == "PASSED_HOLDOUT"
+        other = d1.query(f"SELECT evidence_summary_json, out_of_sample_status FROM research_hypotheses WHERE hypothesis_id = {not_experiment5}")[0]
+        assert other["evidence_summary_json"] == "{}" and other["out_of_sample_status"] is None
+        updated_ids = {int(re.search(r"hypothesis_id = (\d+)", s).group(1)) for s in d1.executed_sql if s.startswith("UPDATE research_hypotheses")}
+        assert updated_ids == set(ids)
+
+    def test_a_catch_up_run_long_after_the_horizons_resolves_each_pending_decision_once_and_a_second_run_changes_nothing(self):
+        d1 = FakeD1()
+        ids = [insert_decision(d1, f"experiment5:reversal:{name}", anchor) for name, anchor in (("fng", 0), ("onchain", HOUR))]
+        for ts in (0, HOUR):
+            insert_history(d1, ts, 60, {"fng": 50})
+            insert_btc(d1, ts, 100.0)
+            insert_btc(d1, ts + 24 * HOUR, 90.0)
+        for t in (5 * 24 * HOUR, 5 * 24 * HOUR + HOUR):
+            insert_history(d1, t, 50, {"fng": 50})
+        late = 5 * 24 * HOUR + 2 * HOUR  # a run five days late
+        first = ep.run_pipeline(d1.query, d1.execute, now_ts=late)
+        assert first["decisions_evaluated"] == 2
+        snapshot = d1.query("SELECT hypothesis_id, evidence_summary_json, out_of_sample_status, last_updated_ts FROM research_hypotheses ORDER BY hypothesis_id")
+        again = ep.run_pipeline(d1.query, d1.execute, now_ts=late)
+        assert again["decisions_evaluated"] == 0 and again["decisions_replayed"] == 0
+        assert d1.query("SELECT hypothesis_id, evidence_summary_json, out_of_sample_status, last_updated_ts FROM research_hypotheses ORDER BY hypothesis_id") == snapshot
+
+
+class TestObservationPopulationConsistency:
+    """REPRODUCTION (PR #83 pre-merge review): the diagnostics mixed two populations. `archive_rows_observed` counted
+    every row in the local mirror -- including rows up to 30 days old that the agent (which observes only its own
+    14-day window) never sees -- and `observations_rejected_malformed` counted rejects across the same 30-day read
+    window. So `observed + rejected` described no real set. Every counter the run reports about "what the agent saw"
+    must now describe the agent's observe window; rejects outside it are reported separately."""
+
+    DAY = 24 * HOUR
+
+    def _scenario(self):
+        d1 = FakeD1()
+        now = 30 * self.DAY
+        for i in range(3):                                           # inside the agent window, well-formed
+            insert_history(d1, now - (3 - i) * HOUR, 50, {"fng": 50 + i})
+        insert_history(d1, now - 90 * 60000, 50, {})                 # inside the window, no sources (own distinct ts)
+        for i in range(2):                                           # 20 days old: archived, but NOT observed by the agent
+            insert_history(d1, now - 20 * self.DAY + i * HOUR, 50, {"fng": 40 + i})
+        d1.conn.execute("INSERT INTO history (ts, score, sources_json) VALUES (?, 50, '{bad')", (now - 20 * self.DAY + 5 * HOUR,))
+        d1.conn.execute("INSERT INTO history (ts, score, sources_json) VALUES (?, 50, '{bad')", (now - 2 * HOUR,))
+        d1.conn.commit()
+        return d1, now
+
+    def test_observed_without_sources_and_rejected_all_describe_the_agents_observe_window(self):
+        d1, now = self._scenario()
+        r = ep.run_pipeline(d1.query, d1.execute, now_ts=now)
+        assert r["archive_rows_observed"] == 4                      # 3 well-formed + 1 empty, all inside 14 days
+        assert r["observations_without_sources"] == 1
+        assert r["observations_rejected_malformed"] == 1            # the 2h-old malformed row only
+        assert r["observations_rejected_malformed_outside_observe_window"] == 1   # the 20-day-old one, reported separately
+        # the agent's intended population is fully accounted for
+        assert r["archive_rows_observed"] + r["observations_rejected_malformed"] == 5
+
+    def test_all_rows_are_still_archived_so_nothing_is_lost_by_the_window_split(self):
+        d1, now = self._scenario()
+        r = ep.run_pipeline(d1.query, d1.execute, now_ts=now)
+        assert r["newly_archived"] == 6                              # 4 recent + 2 old well-formed; the 2 malformed are rejected
+        assert d1.query("SELECT COUNT(*) AS n FROM research_sentiment_archive")[0]["n"] == 6
+
+    def test_a_malformed_row_seen_via_both_history_and_the_archive_is_counted_once(self):
+        d1 = FakeD1()
+        now = 10 * self.DAY
+        seed_archive(d1, now - 2 * HOUR, 50, {"fng": 50}, archived_ts=1)
+        d1.conn.execute("UPDATE research_sentiment_archive SET sources_json = '{bad' WHERE observation_ts = ?", (now - 2 * HOUR,))
+        d1.conn.execute("INSERT INTO history (ts, score, sources_json) VALUES (?, 50, '{bad')", (now - 2 * HOUR,))
+        d1.conn.commit()
+        r = ep.run_pipeline(d1.query, d1.execute, now_ts=now)
+        assert r["observations_rejected_malformed"] == 1
+
+    def test_the_run_record_stores_the_window_consistent_counters(self):
+        d1, now = self._scenario()
+        apply_run_table_migration(d1)
+        r = ep.run_pipeline_recorded(d1.query, d1.execute, now_ts=now)
+        row = d1.query("SELECT * FROM experiment5_pipeline_runs")[0]
+        assert row["archive_rows_observed"] == r["archive_rows_observed"] == 4
+        assert row["observations_rejected_malformed"] == 1
+        assert row["observations_rejected_outside_window"] == 1
+        assert json.loads(row["rejected_observation_ts_json"]) == r["rejected_observation_ts_sample"]
+
+
+class TestRunRecordSchemaAndSemantics:
+    """Run record validated against the REAL migration 0019 in real sqlite."""
+
+    def _table_info(self, d1):
+        return {r["name"]: r for r in d1.query("PRAGMA table_info(experiment5_pipeline_runs)")}
+
+    def test_every_column_the_insert_builder_writes_exists_and_every_required_column_is_written(self):
+        d1 = FakeD1()
+        apply_run_table_migration(d1)
+        sql = ep.build_insert_run_sql(5, "OK", {}, None)
+        written = [c.strip() for c in re.search(r"\(([^)]*)\) VALUES", sql).group(1).split(",")]
+        info = self._table_info(d1)
+        assert set(written) <= set(info)
+        required = {name for name, col in info.items() if col["notnull"] and col["dflt_value"] is None and not col["pk"]}
+        assert required <= set(written), required - set(written)
+        # nothing in the table is silently left unfilled by the builder (a column added to one side but not the other)
+        assert set(info) - {"run_id"} == set(written)
+
+    def test_status_is_constrained_to_OK_or_FAILED_by_the_schema(self):
+        d1 = FakeD1()
+        apply_run_table_migration(d1)
+        for bad in ("RUNNING", "ok", "", "SKIPPED_TABLE_MISSING"):
+            with pytest.raises(sqlite3.IntegrityError):
+                d1.conn.execute(
+                    "INSERT INTO experiment5_pipeline_runs (run_ts, status, pipeline_version, constants_json) VALUES (1, ?, 'v', '{}')", (bad,))
+
+    def test_the_status_lookup_indexes_exist(self):
+        d1 = FakeD1()
+        apply_run_table_migration(d1)
+        names = {r["name"] for r in d1.query("SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'experiment5_pipeline_runs'")}
+        assert {"idx_exp5_runs_run_ts", "idx_exp5_runs_status_run_ts"} <= names
+        plan = " ".join(str(tuple(r)) for r in d1.conn.execute(
+            "EXPLAIN QUERY PLAN SELECT * FROM experiment5_pipeline_runs WHERE status = 'OK' ORDER BY run_ts DESC, run_id DESC LIMIT 1"))
+        assert "idx_exp5_runs_status_run_ts" in plan
+
+    def test_hostile_text_in_an_error_is_stored_verbatim_and_cannot_break_out_of_the_statement(self):
+        d1 = FakeD1()
+        apply_run_table_migration(d1)
+        nasty = "boom'); DROP TABLE research_hypotheses; --"
+        ep.record_run(d1.query, d1.execute, 7, "FAILED", None, nasty)
+        assert d1.query("SELECT error_text FROM experiment5_pipeline_runs")[0]["error_text"] == nasty
+        assert d1.query("SELECT COUNT(*) AS n FROM sqlite_master WHERE name = 'research_hypotheses'")[0]["n"] == 1
+
+    def test_run_ts_is_exactly_the_supplied_clock_for_both_outcomes_and_no_wall_clock_is_read(self, monkeypatch):
+        import time
+
+        def forbidden(*a, **k):
+            raise AssertionError("wall clock read")
+        monkeypatch.setattr(time, "time", forbidden)
+        monkeypatch.setattr(time, "time_ns", forbidden)
+        ok = FakeD1(); apply_run_table_migration(ok)
+        ep.run_pipeline_recorded(ok.query, ok.execute, now_ts=123 * HOUR)
+        assert ok.query("SELECT run_ts, status FROM experiment5_pipeline_runs") == [{"run_ts": 123 * HOUR, "status": "OK"}]
+        bad = FakeD1(); apply_run_table_migration(bad)
+        bad.conn.execute("DROP TABLE btc_data")
+        with pytest.raises(sqlite3.OperationalError):
+            ep.run_pipeline_recorded(bad.query, bad.execute, now_ts=124 * HOUR)
+        assert bad.query("SELECT run_ts, status FROM experiment5_pipeline_runs") == [{"run_ts": 124 * HOUR, "status": "FAILED"}]
+
+    def test_counters_on_an_OK_record_equal_the_summary_and_a_FAILED_record_has_none(self):
+        d1 = FakeD1()
+        apply_run_table_migration(d1)
+        for i in range(4):
+            insert_history(d1, i * HOUR, 50, {"onchain": 50 + i * 10})
+        insert_history(d1, 4 * HOUR, 50, {"onchain": 10})
+        d1.conn.execute("INSERT INTO history (ts, score, sources_json) VALUES (?, 50, '{bad')", (90 * 60000,))
+        d1.conn.commit()
+        insert_btc(d1, 4 * HOUR, 100.0)
+        r = ep.run_pipeline_recorded(d1.query, d1.execute, now_ts=10 * HOUR)
+        row = d1.query("SELECT * FROM experiment5_pipeline_runs")[0]
+        for column, key in (("history_rows_read", "history_rows_read"), ("btc_rows_read", "btc_rows_read"), ("newly_archived", "newly_archived"),
+                            ("archive_rows_observed", "archive_rows_observed"), ("observations_without_sources", "observations_without_sources"),
+                            ("observations_rejected_malformed", "observations_rejected_malformed"),
+                            ("decisions_replayed", "decisions_replayed"), ("decisions_created", "decisions_created"),
+                            ("decisions_skipped_duplicate", "decisions_skipped_duplicate"), ("decisions_evaluated", "decisions_evaluated")):
+            assert row[column] == r[key], column
+        assert row["decisions_created"] == 1 and row["observations_rejected_malformed"] == 1
+        assert row["status"] == "OK" and row["error_text"] is None
+        assert row["decisions_evaluated"] == row["evaluated_passed"] + row["evaluated_failed"] + row["evaluated_inconclusive"]
+
+
+class TestTelemetryFailureHandling:
+    def test_missing_table_is_never_reported_as_recorded_and_the_experiment_still_ran(self):
+        d1 = FakeD1()
+        insert_history(d1, 0, 50, {"fng": 50})
+        r = ep.run_pipeline_recorded(d1.query, d1.execute, now_ts=HOUR)
+        assert r["run_record"] == "SKIPPED_TABLE_MISSING" and r["run_record"] != "WRITTEN"
+        assert r["newly_archived"] == 1
+        assert not [s for s in d1.executed_sql if "experiment5_pipeline_runs" in s]
+
+    def test_a_success_whose_telemetry_write_fails_is_reported_WRITE_FAILED_not_WRITTEN_and_does_not_fail_the_run(self, capsys):
+        d1 = FakeD1()
+        apply_run_table_migration(d1)
+        insert_history(d1, 0, 50, {"fng": 50})
+
+        def failing_execute(sql):
+            if "INSERT INTO experiment5_pipeline_runs" in sql:
+                raise RuntimeError("D1 write failed")
+            d1.execute(sql)
+
+        r = ep.run_pipeline_recorded(d1.query, failing_execute, now_ts=HOUR)   # must not raise
+        assert r["run_record"] == "WRITE_FAILED"
+        assert r["run_record_error"].startswith("RuntimeError: D1 write failed")
+        assert r["newly_archived"] == 1 and d1.query("SELECT COUNT(*) AS n FROM research_sentiment_archive")[0]["n"] == 1
+        assert d1.query("SELECT COUNT(*) AS n FROM experiment5_pipeline_runs")[0]["n"] == 0
+        assert "TELEMETRY WRITE FAILED" in capsys.readouterr().err
+
+    def test_a_transient_failure_of_the_table_existence_check_on_success_is_WRITE_FAILED_not_skipped(self):
+        d1 = FakeD1()
+        apply_run_table_migration(d1)
+        insert_history(d1, 0, 50, {"fng": 50})
+
+        def flaky_query(sql):
+            if "sqlite_master" in sql and "experiment5_pipeline_runs" in sql:
+                raise RuntimeError("D1 timeout")
+            return d1.query(sql)
+
+        r = ep.run_pipeline_recorded(flaky_query, d1.execute, now_ts=HOUR)
+        assert r["run_record"] == "WRITE_FAILED"   # unknown is not "table missing"
+
+    def test_a_pipeline_failure_whose_record_also_fails_still_raises_the_ORIGINAL_error(self, capsys):
+        d1 = FakeD1()
+        apply_run_table_migration(d1)
+        d1.conn.execute("DROP TABLE btc_data")
+
+        def failing_execute(sql):
+            if "experiment5_pipeline_runs" in sql:
+                raise RuntimeError("telemetry down")
+            d1.execute(sql)
+
+        with pytest.raises(sqlite3.OperationalError, match="btc_data"):
+            ep.run_pipeline_recorded(d1.query, failing_execute, now_ts=HOUR)
+        assert "ALSO FAILED to record" in capsys.readouterr().err
+
+    def test_a_pipeline_failure_when_the_table_check_itself_fails_still_raises_the_ORIGINAL_error(self):
+        d1 = FakeD1()
+        d1.conn.execute("DROP TABLE btc_data")
+
+        def query(sql):
+            if "experiment5_pipeline_runs" in sql:
+                raise RuntimeError("D1 down")
+            return d1.query(sql)
+
+        with pytest.raises(sqlite3.OperationalError, match="btc_data"):
+            ep.run_pipeline_recorded(query, d1.execute, now_ts=HOUR)
+
+    def test_run_py_warns_loudly_when_a_run_was_not_recorded(self, monkeypatch, capsys):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "exp5_run_script", os.path.join(os.path.dirname(__file__), "..", "scripts", "experiment5-agent", "run.py"))
+        run = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(run)
+        summary = {
+            "history_rows_read": 1, "btc_rows_read": 1, "newly_archived": 0, "decisions_created": 0, "decisions_skipped_duplicate": 0,
+            "decisions_evaluated": 0, "observations_rejected_malformed": 0, "rejected_observation_ts_sample": [], "agent_cycle": {},
+        }
+        for record, needle in (("SKIPPED_TABLE_MISSING", "migration 0019"), ("WRITE_FAILED", "boom")):
+            extra = {"run_record_error": "boom"} if record == "WRITE_FAILED" else {}
+            monkeypatch.setattr(run.ep, "run_pipeline_recorded", lambda q, e, n, record=record, extra=extra: {**summary, "run_record": record, **extra})
+            run.main()
+            out = capsys.readouterr().out
+            assert f"::warning title=Experiment 5 run not recorded::{record}" in out and needle in out
+        monkeypatch.setattr(run.ep, "run_pipeline_recorded", lambda q, e, n: {**summary, "run_record": "WRITTEN"})
+        run.main()
+        assert "::warning" not in capsys.readouterr().out

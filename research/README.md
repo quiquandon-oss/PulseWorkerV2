@@ -1766,6 +1766,16 @@ catch-up run can never write an outcome against a local id that aliases a differ
 (`TestSameRunDecisionIdAliasing`). A malformed `sources_json` observation is excluded, counted and listed in the
 run record rather than aborting the run; it is never rewritten or deleted.
 
+**Idempotency and resolution safety (pre-merge review).** A decision's natural identity is `(subject, anchor_ts)`:
+re-running the pipeline on the same observation never persists a second decision for it (counted as
+`decisions_skipped_duplicate`; resolved decisions count too). The outcome `UPDATE` only applies to an *unresolved*
+`experiment5:%` row (`out_of_sample_status IS NULL`), so the first resolution wins and no other row can be touched.
+Diagnostics about "what the agent saw" describe the agent's 14-day observe window; malformed rows older than that
+are reported separately (`observations_rejected_malformed_outside_observe_window`). A telemetry write that fails
+after a successful run is reported `run_record = WRITE_FAILED` (never `WRITTEN`, never silently dropped) and does not
+turn the run red; a missing table is `SKIPPED_TABLE_MISSING`. A conflicting duplicate `history` timestamp still aborts
+the run loudly (`ArchiveConflictError`, by design) until it ages out of the read window.
+
 **Naming.** README "Experiment 5" (this agentic experiment) is *not* the registry entry `EXP-005` (source
 effectiveness, migrations 0010/0011).
 

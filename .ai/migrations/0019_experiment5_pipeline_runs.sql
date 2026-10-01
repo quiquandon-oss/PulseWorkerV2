@@ -24,22 +24,24 @@ CREATE TABLE experiment5_pipeline_runs (
   run_id INTEGER PRIMARY KEY AUTOINCREMENT,
   run_ts INTEGER NOT NULL,              -- the pipeline's supplied now_ts: the run's own clock
                                          -- (read once by the runner; no module reads the wall clock)
-  status TEXT NOT NULL,                 -- OK | FAILED
+  status TEXT NOT NULL CHECK (status IN ('OK', 'FAILED')),  -- a run record is either a success or a failure
   error_text TEXT,                      -- truncated "<ExceptionType>: <message>" when FAILED
   pipeline_version TEXT NOT NULL,       -- experiment5_pipeline.PIPELINE_VERSION
   constants_json TEXT NOT NULL,         -- the windows / horizon / tolerance in force for this run
   history_rows_read INTEGER,
   btc_rows_read INTEGER,
   newly_archived INTEGER,
-  archive_rows_observed INTEGER,        -- observations the agent could actually observe this run
-  observations_without_sources INTEGER, -- present but empty sources_json: nothing to classify
-  observations_rejected_malformed INTEGER, -- sources_json not valid JSON object: excluded, listed below
-  rejected_observation_ts_json TEXT,    -- first rejected observation_ts values (bounded sample)
+  archive_rows_observed INTEGER,        -- observations inside the AGENT'S observe window (what it could see)
+  observations_without_sources INTEGER, -- (same window) present but empty sources_json: nothing to classify
+  observations_rejected_malformed INTEGER, -- (same window) sources_json not a valid JSON object: excluded, sampled below
+  observations_rejected_outside_window INTEGER, -- malformed rows older than the observe window (archive-only population)
+  rejected_observation_ts_json TEXT,    -- first rejected observation_ts values inside the window (bounded sample)
   sources_observed INTEGER,
   candidate_new_sources_json TEXT,
   agent_status TEXT,                    -- OK | INSUFFICIENT_ARCHIVE_DATA
   decisions_replayed INTEGER,           -- pending decisions loaded back from D1 under their real ids
   decisions_created INTEGER,            -- new decisions persisted this run
+  decisions_skipped_duplicate INTEGER,  -- new decisions NOT persisted: same (subject, anchor_ts) already exists
   decisions_evaluated INTEGER,          -- replayed decisions whose outcome resolved this run
   evaluated_passed INTEGER,
   evaluated_failed INTEGER,

@@ -232,6 +232,9 @@ def test_main_passes_exactly_window_ms_to_the_detector_never_window_plus_lookbac
     def fake_run_d1(sql):
         if "sqlite_master" in sql:
             return [{"name": t} for t in rs.REQUIRED_STAGE7_TABLES]
+        if "pragma_table_info" in sql:
+            table = sql.split("pragma_table_info('")[1].split("')")[0]
+            return [{"name": c} for c in rs.REQUIRED_STAGE7_COLUMNS.get(table, {})]
         return []  # history/btc_data/predictions/research_events all empty
 
     def fake_build_dataset(conn, start_ts, end_ts):
@@ -264,6 +267,9 @@ def test_main_fetch_queries_use_a_wider_lookback_inclusive_bound_than_the_detect
     def fake_run_d1(sql):
         if "sqlite_master" in sql:
             return [{"name": t} for t in rs.REQUIRED_STAGE7_TABLES]
+        if "pragma_table_info" in sql:
+            table = sql.split("pragma_table_info('")[1].split("')")[0]
+            return [{"name": c} for c in rs.REQUIRED_STAGE7_COLUMNS.get(table, {})]
         if "BETWEEN" in sql:
             fetch_sqls.append(sql)
         return []
@@ -659,7 +665,9 @@ def _existing_candidate_row(**overrides):
     return row
 
 
-def _run_main_with_fakes(monkeypatch, existing_requests_rows, existing_candidates_rows=(), publish_request_file=None):
+def _run_main_with_fakes(monkeypatch, existing_requests_rows, existing_candidates_rows=(), publish_request_file=None,
+                         validated_rows=(), previous_sentiment_rows=(), inserted_sentiment_rows=(),
+                         present_columns=None, compute_result=None, idempotent_repeat=True):
     """Drives the real rs.main() through exactly one eligible event
     (event_id=42), with every D1 read/write and the real git-publish call
     faked -- isolating the one thing under test here: main()'s own
@@ -672,6 +680,11 @@ def _run_main_with_fakes(monkeypatch, existing_requests_rows, existing_candidate
     def fake_run_d1(sql):
         if "sqlite_master" in sql:
             return [{"name": t} for t in rs.REQUIRED_STAGE7_TABLES]
+        if "pragma_table_info" in sql:
+            table = sql.split("pragma_table_info('")[1].split("')")[0]
+            columns = (present_columns if present_columns is not None
+                       else {t: set(c) for t, c in rs.REQUIRED_STAGE7_COLUMNS.items()})
+            return [{"name": c} for c in sorted(columns.get(table, set()))]
         if "FROM research_events WHERE" in sql:
             return [{"event_id": 42, "event_ts": event_ts}]
         if "FROM history WHERE" in sql or "FROM btc_data WHERE" in sql or "FROM predictions WHERE" in sql:
@@ -683,9 +696,11 @@ def _run_main_with_fakes(monkeypatch, existing_requests_rows, existing_candidate
         if "FROM stage7_research_candidates" in sql:
             return list(existing_candidates_rows)
         if "FROM stage7_research_responses" in sql:
-            return []  # no validated human response for this event
+            return list(validated_rows)  # default: no validated human response for this event
+        if "SELECT id FROM stage7_event_sentiment" in sql:
+            return list(inserted_sentiment_rows)
         if "FROM stage7_event_sentiment" in sql:
-            return []  # no previous sentiment row
+            return list(previous_sentiment_rows)  # default: no previous sentiment row
         raise AssertionError(f"unexpected run_d1 call: {sql}")
 
     def fake_build_dataset(conn, start_ts, end_ts):
@@ -721,22 +736,24 @@ def _run_main_with_fakes(monkeypatch, existing_requests_rows, existing_candidate
             "questions": ["what happened?"], "missing_categories": ["primary_reporting"],
         },
     )
-    monkeypatch.setattr(
-        rs.sr, "compute_event_sentiment",
-        lambda *a, **kw: {
-            "formula_version": "v1", "evidence_sufficiency": "INSUFFICIENT_EVIDENCE",
-            "sentiment_label": None, "sentiment_score": None, "v1_macro_context": {},
-            "evidence_interpretation": {}, "contributing_evidence_ids": [], "excluded_evidence": [],
-            "duplicate_handling": {}, "ai_research_response_id": None, "previous_sentiment_id": None,
-            "input_fingerprint": "fp-fixed",
-        },
-    )
+    default_result = {
+        "formula_version": "v1", "evidence_sufficiency": "INSUFFICIENT_EVIDENCE",
+        "sentiment_label": None, "sentiment_score": None, "v1_macro_context": {},
+        "evidence_interpretation": {}, "contributing_evidence_ids": [], "excluded_evidence": [],
+        "duplicate_handling": {}, "ai_research_response_id": None, "previous_sentiment_id": None,
+        "input_fingerprint": "fp-fixed",
+    }
+    if callable(compute_result):
+        compute_fn = compute_result
+    else:
+        compute_fn = lambda *a, **kw: dict(default_result, **(compute_result or {}))
+    monkeypatch.setattr(rs.sr, "compute_event_sentiment", compute_fn)
     # Forced True regardless of `previous` -- this suite is about request/
     # candidate routing, not sentiment-row idempotency (already covered
     # elsewhere), so the sentiment INSERT is deliberately suppressed here
     # to keep each test's d1_api_query calls attributable to the request/
     # candidate write path alone.
-    monkeypatch.setattr(rs.sr, "is_idempotent_repeat", lambda *a, **kw: True)
+    monkeypatch.setattr(rs.sr, "is_idempotent_repeat", lambda *a, **kw: idempotent_repeat)
 
     result = rs.main()
     return result, d1_api_calls, publish_calls
@@ -915,3 +932,156 @@ def test_main_marks_a_stale_candidate_when_its_event_ages_out_of_eligibility(mon
     sql, params = stale_updates[0]
     assert "STALE" in sql
     assert params[1] == "stage7-cand-999"
+
+
+# ---------------------------------------------------------------------------
+# Stage 7.2: persisted recalculation lifecycle (migration 0018). A human-
+# requested recalculation moves REQUESTED -> RUNNING -> COMPLETED | FAILED,
+# each transition written by run_stage7.py, never inferred.
+# ---------------------------------------------------------------------------
+
+def _validated_row(status="REQUESTED", request_id="stage7-req-42-1", event_id=42):
+    return {
+        "event_id": event_id, "response_id": f"stage7-resp-{request_id}", "request_id": request_id,
+        "validation_status": "VALIDATED", "recalculation_status": status,
+        "findings_json": '{"sentiment_assessment": "POSITIVE", "summary": "s"}', "sources_json": "[]",
+    }
+
+
+def _writes(d1_api_calls, fragment):
+    return [(sql, params) for sql, params in d1_api_calls if fragment in sql]
+
+
+def test_find_missing_stage7_columns_names_the_migration_for_each_gap():
+    present = {t: set(cols) for t, cols in rs.REQUIRED_STAGE7_COLUMNS.items()}
+    assert rs.find_missing_stage7_columns(present) == []
+    present["stage7_research_requests"].discard("recalculation_status")
+    present["stage7_research_responses"].discard("raw_response_text")
+    assert sorted(rs.find_missing_stage7_columns(present)) == [
+        ("stage7_research_requests", "recalculation_status", "0018"),
+        ("stage7_research_responses", "raw_response_text", "0017"),
+    ]
+
+
+def test_main_refuses_to_run_when_migration_0018_columns_are_missing(monkeypatch):
+    columns = {t: set(c) for t, c in rs.REQUIRED_STAGE7_COLUMNS.items()}
+    columns["stage7_research_requests"].discard("recalculation_status")
+    with pytest.raises(RuntimeError, match=r"recalculation_status \(migration 0018\)"):
+        _run_main_with_fakes(monkeypatch, existing_requests_rows=[], present_columns=columns)
+
+
+def test_requested_recalculation_runs_inserts_one_row_and_is_marked_completed(monkeypatch):
+    result, calls, _ = _run_main_with_fakes(
+        monkeypatch, existing_requests_rows=[], validated_rows=[_validated_row("REQUESTED")],
+        idempotent_repeat=False, inserted_sentiment_rows=[{"id": 7}],
+    )
+    running = _writes(calls, "recalculation_status = 'RUNNING'")
+    completed = _writes(calls, "recalculation_status = 'COMPLETED'")
+    inserts = _writes(calls, "INSERT INTO stage7_event_sentiment")
+    assert len(running) == 1 and len(inserts) == 1 and len(completed) == 1
+    assert calls.index(running[0]) < calls.index(inserts[0]) < calls.index(completed[0])
+    assert completed[0][1][1] == 7  # recalculation_sentiment_id = the id of the row just written
+    assert "INTEGRATION_REVIEW" in completed[0][0]
+    assert result["recalculations_attempted"] == 1 and result["recalculations_completed"] == 1
+    assert result["ok"] is True and result["recalculation_failures"] == 0
+
+
+def test_previous_sentiment_id_is_actually_passed_to_the_calculation(monkeypatch):
+    # Regression: the previous-sentiment query omitted `id`, so previous_sentiment_id
+    # was always None and every recalculation looked like the event's first.
+    seen = {}
+
+    def compute(*args, **kwargs):
+        seen.update(kwargs)
+        return {
+            "formula_version": "v1", "evidence_sufficiency": "SUFFICIENT", "sentiment_label": "POSITIVE",
+            "sentiment_score": 100.0, "v1_macro_context": {}, "evidence_interpretation": {},
+            "contributing_evidence_ids": [], "excluded_evidence": [], "duplicate_handling": {},
+            "ai_research_response_id": "r", "previous_sentiment_id": kwargs.get("previous_sentiment_id"),
+            "input_fingerprint": "fp-new",
+        }
+
+    _, calls, _ = _run_main_with_fakes(
+        monkeypatch, existing_requests_rows=[], validated_rows=[_validated_row("REQUESTED")],
+        previous_sentiment_rows=[{"id": 41, "event_id": 42, "input_fingerprint": "fp-old"}],
+        compute_result=compute, idempotent_repeat=False, inserted_sentiment_rows=[{"id": 42}],
+    )
+    assert seen["previous_sentiment_id"] == 41
+    insert = _writes(calls, "INSERT INTO stage7_event_sentiment")[0]
+    assert 41 in insert[1]  # persisted as previous_sentiment_id
+
+
+def test_recalculation_failure_is_isolated_recorded_and_surfaced(monkeypatch):
+    def boom(*args, **kwargs):
+        raise ValueError("source cutoff check exploded")
+
+    result, calls, _ = _run_main_with_fakes(
+        monkeypatch, existing_requests_rows=[], validated_rows=[_validated_row("REQUESTED")],
+        compute_result=boom, idempotent_repeat=False,
+    )
+    failed = _writes(calls, "recalculation_status = 'FAILED'")
+    assert len(failed) == 1 and "ValueError: source cutoff check exploded" in failed[0][1][1]
+    assert not _writes(calls, "recalculation_status = 'COMPLETED'")
+    assert result["ok"] is False and result["status"] == "COMPLETED_WITH_FAILURES"
+    assert result["recalculation_failures"] == 1 and rs.exit_code_for(result) == 1
+
+
+def test_exit_code_is_zero_when_nothing_failed():
+    assert rs.exit_code_for({"recalculation_failures": 0}) == 0
+    assert rs.exit_code_for({}) == 0
+
+
+def test_a_failure_for_an_event_nobody_requested_is_never_swallowed(monkeypatch):
+    def boom(*args, **kwargs):
+        raise ValueError("unexpected baseline failure")
+
+    with pytest.raises(ValueError, match="unexpected baseline failure"):
+        _run_main_with_fakes(monkeypatch, existing_requests_rows=[], validated_rows=[], compute_result=boom)
+
+
+def test_a_failed_recalculation_is_not_retried_automatically(monkeypatch):
+    calls_made = []
+
+    def compute(*args, **kwargs):
+        calls_made.append(1)
+        raise AssertionError("must not be recomputed")
+
+    result, calls, _ = _run_main_with_fakes(
+        monkeypatch, existing_requests_rows=[], validated_rows=[_validated_row("FAILED")], compute_result=compute,
+    )
+    assert calls_made == []
+    assert not _writes(calls, "recalculation_status")
+    assert result["recalculations_attempted"] == 0
+
+
+def test_a_completed_recalculation_is_not_touched_again(monkeypatch):
+    result, calls, _ = _run_main_with_fakes(
+        monkeypatch, existing_requests_rows=[], validated_rows=[_validated_row("COMPLETED")],
+    )
+    assert not _writes(calls, "recalculation_status")
+    assert not _writes(calls, "INSERT INTO stage7_event_sentiment")
+    assert result["recalculations_attempted"] == 0
+
+
+def test_an_interrupted_run_converges_without_a_duplicate_sentiment_row(monkeypatch):
+    # A previous run wrote the sentiment row but died before bookkeeping: the
+    # request is still RUNNING and the recomputed result is an idempotent repeat.
+    result, calls, _ = _run_main_with_fakes(
+        monkeypatch, existing_requests_rows=[], validated_rows=[_validated_row("RUNNING")],
+        previous_sentiment_rows=[{"id": 5, "event_id": 42, "input_fingerprint": "fp-fixed"}],
+        idempotent_repeat=True,
+    )
+    assert not _writes(calls, "INSERT INTO stage7_event_sentiment")
+    completed = _writes(calls, "recalculation_status = 'COMPLETED'")
+    assert len(completed) == 1 and completed[0][1][1] == 5
+    assert _writes(calls, "recalculation_attempts = recalculation_attempts + 1")  # the retry is counted
+
+
+def test_a_request_whose_event_left_the_evidence_window_fails_visibly_instead_of_hanging(monkeypatch):
+    result, calls, _ = _run_main_with_fakes(
+        monkeypatch, existing_requests_rows=[],
+        validated_rows=[_validated_row("REQUESTED", request_id="stage7-req-999-1", event_id=999)],
+    )
+    failed = _writes(calls, "recalculation_status = 'FAILED'")
+    assert len(failed) == 1 and "EVENT_NOT_ELIGIBLE" in failed[0][1][1]
+    assert result["recalculation_failures"] == 1 and rs.exit_code_for(result) == 1

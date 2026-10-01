@@ -475,6 +475,75 @@ def retry_stage7_request_publish(existing_request, event, now_ts):
     return publish_result["published"]
 
 
+# Columns this script needs beyond 0016's tables, per the migration that adds
+# them. A table-level check alone cannot see a missing COLUMN -- without this
+# a staging database stuck at 0016/0017 would fail deep inside a query with an
+# opaque "no such column", or (worse) silently skip recalculation bookkeeping.
+REQUIRED_STAGE7_COLUMNS = {
+    "stage7_research_requests": {
+        "candidate_id": "0017", "prompt_text": "0017", "recalculation_requested_ts": "0017",
+        "recalculation_status": "0018", "recalculation_started_ts": "0018",
+        "recalculation_completed_ts": "0018", "recalculation_error": "0018",
+        "recalculation_attempts": "0018", "recalculation_sentiment_id": "0018",
+    },
+    "stage7_research_responses": {"raw_response_text": "0017", "human_confirmed_ts": "0018"},
+}
+
+# A request whose recalculation a human asked for and that this script has not
+# yet finished. NULL covers a request flagged before 0018 existed. FAILED is
+# deliberately absent: a failed recalculation is never retried automatically
+# (that would loop on a permanent error); a human re-requests it, which sets
+# the status back to REQUESTED.
+RECALC_ACTIVE_STATUSES = (None, "REQUESTED", "RUNNING")
+MAX_RECALC_ERROR_CHARS = 500
+
+
+def find_missing_stage7_columns(present_columns_by_table):
+    """present_columns_by_table: {table: set(column names)} as found in the
+    database. Returns [(table, column, migration)] for every required column
+    that is absent -- empty when the schema is complete."""
+    missing = []
+    for table, columns in REQUIRED_STAGE7_COLUMNS.items():
+        present = present_columns_by_table.get(table, set())
+        for column, migration in columns.items():
+            if column not in present:
+                missing.append((table, column, migration))
+    return missing
+
+
+def recalculation_needs_work(response_row):
+    return response_row.get("recalculation_status") in RECALC_ACTIVE_STATUSES
+
+
+def mark_recalculation_running(request_id, now_ts):
+    d1_api_query(
+        "UPDATE stage7_research_requests SET recalculation_status = 'RUNNING', recalculation_started_ts = ?, "
+        "recalculation_attempts = recalculation_attempts + 1, recalculation_error = NULL, updated_ts = ? "
+        "WHERE request_id = ? AND (recalculation_status IS NULL OR recalculation_status IN ('REQUESTED','RUNNING'))",
+        [now_ts, now_ts, request_id],
+    )
+
+
+def mark_recalculation_completed(request_id, sentiment_id, now_ts):
+    # status moves to INTEGRATION_REVIEW (a human decides what, if anything,
+    # follows) unless the request is already terminal.
+    d1_api_query(
+        "UPDATE stage7_research_requests SET recalculation_status = 'COMPLETED', recalculation_completed_ts = ?, "
+        "recalculation_sentiment_id = ?, recalculation_error = NULL, updated_ts = ?, "
+        "status = CASE WHEN status IN ('INTEGRATED','REJECTED') THEN status ELSE 'INTEGRATION_REVIEW' END "
+        "WHERE request_id = ?",
+        [now_ts, sentiment_id, now_ts, request_id],
+    )
+
+
+def mark_recalculation_failed(request_id, error_text, now_ts):
+    d1_api_query(
+        "UPDATE stage7_research_requests SET recalculation_status = 'FAILED', recalculation_completed_ts = ?, "
+        "recalculation_error = ?, updated_ts = ? WHERE request_id = ?",
+        [now_ts, str(error_text)[:MAX_RECALC_ERROR_CHARS], now_ts, request_id],
+    )
+
+
 def main():
     global _TARGET_CONFIG
     # Must be the very first thing main() does -- strictly before the
@@ -537,6 +606,19 @@ def main():
             "complete migration 0016 manually before re-running."
         )
 
+    present_columns = {}
+    for table in REQUIRED_STAGE7_COLUMNS:
+        present_columns[table] = {
+            r["name"] for r in run_d1(f"SELECT name FROM pragma_table_info('{table}')")
+        }
+    missing_columns = find_missing_stage7_columns(present_columns)
+    if missing_columns:
+        raise RuntimeError(
+            "Stage 7 schema is behind this script: missing column(s) "
+            + ", ".join(f"{t}.{c} (migration {m})" for t, c, m in missing_columns)
+            + ". Apply the named migration(s) to the STAGING database, then re-run. Never worked around."
+        )
+
     history_rows = run_d1(f"SELECT ts, score, technical_score, sources_json, gold_regime FROM history WHERE ts BETWEEN {fetch_start_ts} AND {end_ts} ORDER BY ts ASC")
     btc_rows = run_d1(f"SELECT ts, btc_price FROM btc_data WHERE ts BETWEEN {fetch_start_ts} AND {end_ts} ORDER BY ts ASC")
     predictions_rows = run_d1(f"SELECT ts, horizon_hours, p_up, realized_up FROM predictions WHERE ts BETWEEN {fetch_start_ts} AND {end_ts} ORDER BY ts ASC")
@@ -590,16 +672,20 @@ def main():
     latest_responses = {
         r["event_id"]: r for r in run_d1(
             "SELECT req.event_id, resp.response_id, resp.request_id, resp.validation_status, "
-            "resp.findings_json, resp.sources_json "
+            "resp.findings_json, resp.sources_json, req.recalculation_status "
             "FROM stage7_research_responses resp "
             "JOIN stage7_research_requests req ON req.request_id = resp.request_id "
             "WHERE resp.validation_status = 'VALIDATED' AND req.recalculation_requested_ts IS NOT NULL"
         )
     }
+    # id MUST be selected: previous_sentiment_id is read from it below. It was
+    # previously omitted, so previous_sentiment_id was always NULL and every
+    # recalculation looked like the event's first.
     latest_sentiment = {}
-    for r in run_d1("SELECT event_id, input_fingerprint FROM stage7_event_sentiment ORDER BY calculation_ts DESC"):
+    for r in run_d1("SELECT id, event_id, input_fingerprint FROM stage7_event_sentiment ORDER BY calculation_ts DESC, id DESC"):
         latest_sentiment.setdefault(r["event_id"], r)
 
+    recalculations_attempted, recalculations_completed, recalculation_failures = 0, 0, 0
     sentiment_rows_written, publish_failures = 0, 0
     retries_attempted, retries_succeeded = 0, 0
     candidates_proposed, candidates_marked_stale = 0, 0
@@ -609,6 +695,14 @@ def main():
         relevance_results = relevance_by_event.get(event_id, {})
         interpretation_results = interpretation_by_event.get(event_id, {})
         validated = latest_responses.get(event_id)
+        # A human-requested recalculation that already FAILED is never retried
+        # automatically (see RECALC_ACTIVE_STATUSES) -- and must not be
+        # recomputed as a side effect of the baseline pass either, or a
+        # permanent error would crash every later run. It stays FAILED, visible
+        # in the UI, until a human re-requests it.
+        if validated is not None and validated.get("recalculation_status") == "FAILED":
+            continue
+        needs_work = validated is not None and recalculation_needs_work(validated)
         validated_response = None
         if validated:
             validated_response = {
@@ -633,42 +727,66 @@ def main():
             assessment = suff.assess_evidence_sufficiency(event, evidence_rows, relevance_results, interpretation_results)
             sufficiency_status = assessment["status"]
 
-        v1_macro_context = sr.fetch_v1_macro_context(conn, event["event_ts"])
-        previous = latest_sentiment.get(event_id)
-        result = sr.compute_event_sentiment(
-            event, evidence_rows, interpretation_results, sufficiency_status, v1_macro_context,
-            validated_response=validated_response,
-            previous_sentiment_id=previous.get("id") if previous else None,
-            historical_cutoff_ts=event["event_ts"],
-        )
+        if needs_work:
+            recalculations_attempted += 1
+            mark_recalculation_running(validated["request_id"], now_ts)
 
-        if not sr.is_idempotent_repeat(result, previous):
-            d1_api_query(
-                "INSERT INTO stage7_event_sentiment (event_id, calculation_ts, formula_version, "
-                "evidence_sufficiency, sentiment_label, sentiment_score, v1_macro_context_json, "
-                "evidence_interpretation_json, contributing_evidence_ids_json, excluded_evidence_json, "
-                "duplicate_handling_json, ai_research_response_id, previous_sentiment_id, input_fingerprint) "
-                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                [event_id, now_ts, result["formula_version"], result["evidence_sufficiency"],
-                 result["sentiment_label"], result["sentiment_score"], json.dumps(result["v1_macro_context"]),
-                 json.dumps(result["evidence_interpretation"]), json.dumps(result["contributing_evidence_ids"]),
-                 json.dumps(result["excluded_evidence"]), json.dumps(result["duplicate_handling"]),
-                 result["ai_research_response_id"], result["previous_sentiment_id"], result["input_fingerprint"]],
+        try:
+            v1_macro_context = sr.fetch_v1_macro_context(conn, event["event_ts"])
+            previous = latest_sentiment.get(event_id)
+            result = sr.compute_event_sentiment(
+                event, evidence_rows, interpretation_results, sufficiency_status, v1_macro_context,
+                validated_response=validated_response,
+                previous_sentiment_id=previous.get("id") if previous else None,
+                historical_cutoff_ts=event["event_ts"],
             )
-            sentiment_rows_written += 1
-            if validated_response is not None and event_id in existing_requests:
-                # A validated human research response just drove a fresh
-                # recalculation for this event -- Stage 7's own workflow ends
-                # here (Step K: only the event-level recalc is normal Stage 7
-                # work; any weight/code-change recommendation is separate and
-                # requires its own explicit approval). The request moves to
-                # INTEGRATION_REVIEW rather than a terminal state, since only
-                # a human decides whether/how this result is acted on further.
+
+            result_sentiment_id = previous.get("id") if previous else None
+            if not sr.is_idempotent_repeat(result, previous):
                 d1_api_query(
-                    "UPDATE stage7_research_requests SET status = 'INTEGRATION_REVIEW', updated_ts = ? "
-                    "WHERE event_id = ? AND status NOT IN ('INTEGRATED','REJECTED')",
-                    [now_ts, event_id],
+                    "INSERT INTO stage7_event_sentiment (event_id, calculation_ts, formula_version, "
+                    "evidence_sufficiency, sentiment_label, sentiment_score, v1_macro_context_json, "
+                    "evidence_interpretation_json, contributing_evidence_ids_json, excluded_evidence_json, "
+                    "duplicate_handling_json, ai_research_response_id, previous_sentiment_id, input_fingerprint) "
+                    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    [event_id, now_ts, result["formula_version"], result["evidence_sufficiency"],
+                     result["sentiment_label"], result["sentiment_score"], json.dumps(result["v1_macro_context"]),
+                     json.dumps(result["evidence_interpretation"]), json.dumps(result["contributing_evidence_ids"]),
+                     json.dumps(result["excluded_evidence"]), json.dumps(result["duplicate_handling"]),
+                     result["ai_research_response_id"], result["previous_sentiment_id"], result["input_fingerprint"]],
                 )
+                sentiment_rows_written += 1
+                if needs_work:
+                    fingerprint_literal = str(result["input_fingerprint"]).replace("'", "''")
+                    inserted = run_d1(
+                        f"SELECT id FROM stage7_event_sentiment WHERE event_id = {int(event_id)} "
+                        f"AND input_fingerprint = '{fingerprint_literal}' ORDER BY id DESC LIMIT 1"
+                    )
+                    result_sentiment_id = inserted[0]["id"] if inserted else None
+                    latest_sentiment[event_id] = {"id": result_sentiment_id, "event_id": event_id,
+                                                  "input_fingerprint": result["input_fingerprint"]}
+            if needs_work:
+                # A validated human research response drove (or, on an
+                # idempotent repeat after an interrupted run, had already
+                # driven) this event's recalculation. Stage 7's workflow ends
+                # here: the request moves to INTEGRATION_REVIEW and any
+                # weight/code-change recommendation is separate and needs its
+                # own explicit approval. The bookkeeping is applied whether or
+                # not a new row was inserted, so an interrupted earlier run
+                # (row written, status not updated) converges instead of being
+                # skipped forever as an "idempotent repeat".
+                mark_recalculation_completed(validated["request_id"], result_sentiment_id, now_ts)
+                recalculations_completed += 1
+        except Exception as exc:
+            if not needs_work:
+                raise  # a baseline (not human-requested) failure is never swallowed
+            # Isolate THIS request's failure so other requests still run, but
+            # record it durably and surface it in the pipeline result and exit
+            # status -- never a silent skip.
+            mark_recalculation_failed(validated["request_id"], f"{type(exc).__name__}: {exc}", now_ts)
+            recalculation_failures += 1
+            print(f"RECALCULATION FAILED for request {validated['request_id']}: {type(exc).__name__}: {exc}", file=sys.stderr)
+            continue
 
         if sufficiency_status == "SUFFICIENT":
             continue  # resolved -- no new request needed, no retry needed
@@ -736,15 +854,43 @@ def main():
             )
             candidates_marked_stale += 1
 
+    # A human-requested recalculation whose event is no longer in this run's
+    # eligible window cannot be computed by this pipeline version (it only
+    # rebuilds evidence for events inside MAX_EVENT_AGE_FOR_STAGE7_MS). Leaving
+    # it REQUESTED forever would be a silent dead end, so it is recorded as
+    # FAILED with that exact reason -- visible in the UI, never hidden.
+    for stuck_event_id, stuck in latest_responses.items():
+        if stuck_event_id in eligible or not recalculation_needs_work(stuck):
+            continue
+        recalculations_attempted += 1
+        mark_recalculation_failed(
+            stuck["request_id"],
+            "EVENT_NOT_ELIGIBLE: the event is outside the pipeline's evidence window "
+            f"({MAX_EVENT_AGE_FOR_STAGE7_MS // 86400000} days), so it cannot be recalculated by this pipeline version.",
+            now_ts,
+        )
+        recalculation_failures += 1
+
     result = {
-        "ok": True, "status": "OK", "events_considered": len(eligible),
+        "ok": recalculation_failures == 0, "status": "OK" if recalculation_failures == 0 else "COMPLETED_WITH_FAILURES",
+        "events_considered": len(eligible),
         "candidates_proposed": candidates_proposed, "candidates_marked_stale": candidates_marked_stale,
         "publish_failures": publish_failures, "sentiment_rows_written": sentiment_rows_written,
         "retries_attempted": retries_attempted, "retries_succeeded": retries_succeeded,
+        "recalculations_attempted": recalculations_attempted,
+        "recalculations_completed": recalculations_completed,
+        "recalculation_failures": recalculation_failures,
     }
     print(json.dumps(result))
     return result
 
 
+def exit_code_for(outcome):
+    """Per-request recalculation failures are isolated in main() so one bad
+    request does not stop the others, but the run as a whole must still be
+    visibly red -- a non-zero exit fails the workflow step."""
+    return 1 if outcome.get("recalculation_failures") else 0
+
+
 if __name__ == "__main__":
-    main()
+    sys.exit(exit_code_for(main()))

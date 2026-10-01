@@ -6670,8 +6670,14 @@ async function getResearchLabStage7Overview(env) {
               r.historical_cutoff_ts, r.evidence_snapshot_json, r.prompt_text,
               r.created_ts, r.updated_ts, r.github_path, r.github_published_ts, r.github_publish_error,
               r.recalculation_requested_ts, r.recalculation_requested_by,
+              r.recalculation_status, r.recalculation_started_ts, r.recalculation_completed_ts,
+              r.recalculation_error, r.recalculation_attempts, r.recalculation_sentiment_id,
               resp.response_id AS response_id, resp.validation_status AS response_validation_status,
-              resp.registered_ts AS response_registered_ts
+              resp.registered_ts AS response_registered_ts, resp.provider AS response_provider,
+              resp.findings_json AS response_findings_json, resp.sources_json AS response_sources_json,
+              resp.source_validation_json AS response_source_validation_json,
+              resp.raw_response_text AS response_raw_text, resp.human_confirmed_ts AS response_human_confirmed_ts,
+              resp.human_review_note AS response_human_review_note
        FROM stage7_research_requests r
        LEFT JOIN research_events re ON re.event_id = r.event_id
        LEFT JOIN stage7_research_responses resp ON resp.request_id = r.request_id
@@ -6707,7 +6713,44 @@ async function getResearchLabStage7Overview(env) {
     ).all(),
   ]);
 
-  const openRequests = ((openRequestsResult && openRequestsResult.results) || []).map((row) => ({
+  const rawOpenRequests = (openRequestsResult && openRequestsResult.results) || [];
+  const rawSentimentRows = (sentimentResult && sentimentResult.results) || [];
+  // One lookup for every sentiment row the page needs beyond "latest per
+  // event": the previous row of each latest calculation, and the exact row
+  // each request's recalculation produced (plus THAT row's previous). Fired
+  // only when there is something to look up.
+  const lookupIds = [...new Set([
+    ...rawSentimentRows.map((r) => r.previous_sentiment_id),
+    ...rawOpenRequests.map((r) => r.recalculation_sentiment_id),
+  ].filter((id) => id != null))];
+  let sentimentById = {};
+  if (lookupIds.length) {
+    const placeholders = lookupIds.map(() => '?').join(',');
+    const lookedUp = await env.DB.prepare(
+      `SELECT id, event_id, sentiment_label, sentiment_score, calculation_ts, formula_version, evidence_sufficiency,
+              previous_sentiment_id, contributing_evidence_ids_json, excluded_evidence_json
+         FROM stage7_event_sentiment WHERE id IN (${placeholders})`
+    ).bind(...lookupIds).all();
+    for (const row of (lookedUp && lookedUp.results) || []) sentimentById[row.id] = row;
+  }
+  // The previous row of a recalculation result may itself not be in the first
+  // lookup; fetch just those missing, again only when needed.
+  const missingPreviousIds = [...new Set(Object.values(sentimentById)
+    .map((r) => r.previous_sentiment_id).filter((id) => id != null && !sentimentById[id]))];
+  if (missingPreviousIds.length) {
+    const placeholders = missingPreviousIds.map(() => '?').join(',');
+    const lookedUp = await env.DB.prepare(
+      `SELECT id, event_id, sentiment_label, sentiment_score, calculation_ts, formula_version, evidence_sufficiency,
+              previous_sentiment_id, contributing_evidence_ids_json, excluded_evidence_json
+         FROM stage7_event_sentiment WHERE id IN (${placeholders})`
+    ).bind(...missingPreviousIds).all();
+    for (const row of (lookedUp && lookedUp.results) || []) sentimentById[row.id] = row;
+  }
+  const brief = (row) => (row ? {
+    id: row.id, sentiment_label: row.sentiment_label, sentiment_score: row.sentiment_score, calculation_ts: row.calculation_ts,
+  } : null);
+
+  const openRequests = rawOpenRequests.map((row) => ({
     request_id: row.request_id,
     event_id: row.event_id,
     event_category: row.event_category,
@@ -6732,11 +6775,51 @@ async function getResearchLabStage7Overview(env) {
     response_registered_ts: row.response_registered_ts || null,
     recalculation_requested_ts: row.recalculation_requested_ts || null,
     recalculation_requested_by: row.recalculation_requested_by || null,
+    recalculation_status: row.recalculation_status || (row.recalculation_requested_ts ? 'REQUESTED' : null),
+    recalculation_started_ts: row.recalculation_started_ts || null,
+    recalculation_completed_ts: row.recalculation_completed_ts || null,
+    recalculation_error: row.recalculation_error || null,
+    recalculation_attempts: row.recalculation_attempts || 0,
+    // The registered response, exactly as stored: the human-reviewed fields,
+    // the server's own source-validation verdict, and the verbatim paste.
+    response: row.response_id ? {
+      response_id: row.response_id,
+      provider: row.response_provider || null,
+      validation_status: row.response_validation_status,
+      registered_ts: row.response_registered_ts || null,
+      human_confirmed_ts: row.response_human_confirmed_ts || null,
+      human_review_note: row.response_human_review_note || null,
+      findings: parseStage7JsonField(row.response_findings_json, {}),
+      sources: parseStage7JsonField(row.response_sources_json, []),
+      source_validation: parseStage7JsonField(row.response_source_validation_json, []),
+      raw_response_text: row.response_raw_text || '',
+    } : null,
+    // What the staging workflow actually produced for THIS request -- only
+    // present once recalculation_status is COMPLETED. The scale note is part
+    // of the data so the UI cannot show a label without its own scale.
+    recalculation_result: (() => {
+      const result = row.recalculation_sentiment_id != null ? sentimentById[row.recalculation_sentiment_id] : null;
+      if (!result) return null;
+      return {
+        sentiment_id: result.id,
+        sentiment_label: result.sentiment_label,
+        sentiment_score: result.sentiment_score,
+        scale: 'Stage 7 per-event assessment: POSITIVE=100, MIXED=50, NEGATIVE=0, INDETERMINATE=no score. Not V1\'s composite.',
+        evidence_sufficiency: result.evidence_sufficiency,
+        formula_version: result.formula_version,
+        calculation_ts: result.calculation_ts,
+        historical_cutoff_ts: row.historical_cutoff_ts,
+        contributing_evidence_ids: parseStage7JsonField(result.contributing_evidence_ids_json, []),
+        excluded_evidence: parseStage7JsonField(result.excluded_evidence_json, []),
+        previous: brief(result.previous_sentiment_id != null ? sentimentById[result.previous_sentiment_id] : null),
+      };
+    })(),
     lifecycle_stage: deriveStage7RequestLifecycleStage({
       status: row.status,
       response_received: !!row.response_id,
       response_validation_status: row.response_validation_status || null,
       recalculation_requested_ts: row.recalculation_requested_ts || null,
+      recalculation_status: row.recalculation_status || null,
     }),
   }));
 
@@ -6755,23 +6838,10 @@ async function getResearchLabStage7Overview(env) {
     proposed_ts: row.proposed_ts,
   }));
 
-  const rawSentimentRows = (sentimentResult && sentimentResult.results) || [];
-  // "Present the new result next to the previous result" (Task 3.E) --
-  // one extra, small lookup query for whichever previous_sentiment_id
-  // values are actually referenced, so the frontend never has to make a
-  // second round trip just to show what changed.
-  const previousIds = [...new Set(rawSentimentRows.map((r) => r.previous_sentiment_id).filter((id) => id != null))];
-  let previousById = {};
-  if (previousIds.length) {
-    const placeholders = previousIds.map(() => '?').join(',');
-    const previousRows = await env.DB.prepare(
-      `SELECT id, sentiment_label, sentiment_score, calculation_ts FROM stage7_event_sentiment WHERE id IN (${placeholders})`
-    ).bind(...previousIds).all();
-    for (const row of (previousRows && previousRows.results) || []) previousById[row.id] = row;
-  }
-
+  // "Present the new result next to the previous result" (Task 3.E): the
+  // previous rows were already fetched together with the request results above.
   const sentimentByEvent = rawSentimentRows.map((row) => {
-    const previous = row.previous_sentiment_id != null ? previousById[row.previous_sentiment_id] : null;
+    const previous = row.previous_sentiment_id != null ? sentimentById[row.previous_sentiment_id] : null;
     return {
       event_id: row.event_id,
       event_category: row.event_category,
@@ -6859,7 +6929,7 @@ function stage7ConstantTimeEqual(a, b) {
 // environment -- never in wrangler.toml's [vars] (plaintext, committed) and
 // never hardcoded here. The token itself is never logged or echoed back in
 // any response, including error responses.
-async function registerStage7ResearchResponse(env, { requestId, provider, submittedTs, findings, sources, confidence, validated, rawResponseText, providedToken }) {
+async function registerStage7ResearchResponse(env, { requestId, provider, submittedTs, findings, sources, confidence, validated, rawResponseText, humanConfirmed, humanReviewNote, providedToken }) {
   const configuredToken = env.STAGE7_ADMIN_TOKEN;
   if (!configuredToken) {
     return {
@@ -6901,6 +6971,17 @@ async function registerStage7ResearchResponse(env, { requestId, provider, submit
   // registered, so there is no dead end: the human corrects the sources
   // (or unchecks "validated", or submits with an empty sources list for a
   // genuine no-citations finding) and resubmits the SAME request_id.
+  // Registering as VALIDATED is a human acceptance decision, so it is refused
+  // unless the person explicitly confirmed it (the UI's review screen sets
+  // this). Enforced here, not just in the browser -- a direct API call with
+  // validated:true alone can no longer mark a response accepted.
+  if (validated === true && humanConfirmed !== true) {
+    return {
+      ok: false, status: 400,
+      error: 'human_confirmed must be true to register a response as validated: a person must explicitly confirm they reviewed it. ' +
+        'Register without validation to leave it awaiting human review.',
+    };
+  }
   const sourceList = Array.isArray(sources) ? sources : [];
   const sourceValidation = validateStage7Sources(sourceList, request.historical_cutoff_ts);
   const allProvidedSourcesFailed = sourceList.length > 0 && sourceValidation.valid_count === 0;
@@ -6918,18 +6999,22 @@ async function registerStage7ResearchResponse(env, { requestId, provider, submit
   const registeredTs = Date.now();
   const validationStatus = validated === true ? 'VALIDATED' : 'PENDING';
   const validatedTs = validated === true ? registeredTs : null;
+  const confirmedTs = validated === true ? registeredTs : null;
+  const reviewNote = typeof humanReviewNote === 'string' && humanReviewNote.trim() ? humanReviewNote.slice(0, 2000) : null;
 
   await env.DB.prepare(
     `INSERT INTO stage7_research_responses
        (response_id, request_id, provider, submitted_ts, registered_ts, findings_json, sources_json,
-        confidence, validation_status, validated_ts, validator_notes, raw_response_text, source_validation_json)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        confidence, validation_status, validated_ts, validator_notes, raw_response_text, source_validation_json,
+        human_confirmed_ts, human_review_note)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
   ).bind(
     responseId, requestId, provider || null,
     Number.isFinite(submittedTs) ? submittedTs : null, registeredTs,
     JSON.stringify(findings), JSON.stringify(sourceList),
     confidence || null, validationStatus, validatedTs,
-    null, rawResponseText, JSON.stringify(sourceValidation.results)
+    null, rawResponseText, JSON.stringify(sourceValidation.results),
+    confirmedTs, reviewNote
   ).run();
 
   // Reflects registration immediately; INTEGRATION_REVIEW (once a human
@@ -7247,7 +7332,7 @@ async function triggerStage7Recalculation(env, { requestId, requestedBy, provide
     return { ok: false, error: 'Unauthorized', status: 401 };
   }
   const request = await env.DB.prepare(
-    'SELECT request_id, status FROM stage7_research_requests WHERE request_id = ?'
+    'SELECT request_id, status, recalculation_requested_ts, recalculation_status FROM stage7_research_requests WHERE request_id = ?'
   ).bind(requestId).first();
   if (!request) return { ok: false, error: `No stage7_research_requests row exists for request_id ${requestId}`, status: 404 };
   if (request.status === 'INTEGRATED' || request.status === 'REJECTED') {
@@ -7266,17 +7351,113 @@ async function triggerStage7Recalculation(env, { requestId, requestedBy, provide
         'a human must review and validate the response before recalculation can be triggered.',
     };
   }
+
+  // Idempotent by construction: a repeated click, a double-submit or a retry
+  // after a timeout must never re-stamp the request, restart a run in
+  // progress, or queue a second calculation. A request flagged before the
+  // status column existed (status NULL but requested_ts set) counts as REQUESTED.
+  const currentStatus = request.recalculation_status || (request.recalculation_requested_ts ? 'REQUESTED' : null);
+  if (currentStatus === 'REQUESTED' || currentStatus === 'RUNNING') {
+    return {
+      ok: true, status: 200, already_requested: true, recalculation_status: currentStatus,
+      recalculation_requested_ts: request.recalculation_requested_ts || null,
+      note: currentStatus === 'RUNNING'
+        ? 'A recalculation is already RUNNING for this request. Nothing was changed.'
+        : 'Recalculation was already requested and has NOT run yet. Nothing was changed.',
+    };
+  }
+  if (currentStatus === 'COMPLETED') {
+    return {
+      ok: false, status: 409,
+      error: `Recalculation for request ${requestId} already COMPLETED. It is never recomputed in place -- ` +
+        'a new research pass needs a new request.',
+    };
+  }
+
+  // currentStatus is null (first request) or FAILED (explicit human retry).
   const nowTs = Date.now();
   await env.DB.prepare(
-    `UPDATE stage7_research_requests SET recalculation_requested_ts = ?, recalculation_requested_by = ?, updated_ts = ?
-     WHERE request_id = ? AND status NOT IN ('INTEGRATED','REJECTED')`
+    `UPDATE stage7_research_requests
+        SET recalculation_requested_ts = ?, recalculation_requested_by = ?, recalculation_status = 'REQUESTED',
+            recalculation_error = NULL, updated_ts = ?
+      WHERE request_id = ? AND status NOT IN ('INTEGRATED','REJECTED')`
   ).bind(nowTs, typeof requestedBy === 'string' ? requestedBy.slice(0, 200) : null, nowTs, requestId).run();
   return {
-    ok: true, status: 200, recalculation_requested_ts: nowTs,
-    note: 'Recalculation has been FLAGGED, not performed. It runs the next time a human dispatches ' +
+    ok: true, status: 200, recalculation_requested_ts: nowTs, recalculation_status: 'REQUESTED',
+    retry: currentStatus === 'FAILED',
+    note: 'Recalculation has been REQUESTED, not performed. It runs only when a human dispatches ' +
       'stage7-research-pipeline.yml (staging only) -- this endpoint never executes Python or writes ' +
-      'stage7_event_sentiment itself.',
+      'stage7_event_sentiment itself. Status stays REQUESTED until that workflow actually runs.',
   };
+}
+
+// Human review of a response that was registered WITHOUT validation
+// (validation_status PENDING). Without this, an unvalidated registration was a
+// dead end: the one-response-per-request rule blocked re-registering and
+// recalculation needs VALIDATED. Technical source validation is re-run here
+// server-side from the stored sources; the human's confirmation is recorded
+// separately (human_confirmed_ts) and never replaces it.
+async function reviewStage7Response(env, { requestId, decision, humanConfirmed, note, providedToken }) {
+  const configuredToken = env.STAGE7_ADMIN_TOKEN;
+  if (!configuredToken) {
+    return { ok: false, status: 503, error: 'Stage 7 review is disabled on this Worker: STAGE7_ADMIN_TOKEN is not configured.' };
+  }
+  if (typeof providedToken !== 'string' || !providedToken || !stage7ConstantTimeEqual(providedToken, configuredToken)) {
+    return { ok: false, error: 'Unauthorized', status: 401 };
+  }
+  if (decision !== 'VALIDATE' && decision !== 'REJECT') {
+    return { ok: false, status: 400, error: "decision must be 'VALIDATE' or 'REJECT'" };
+  }
+  if (humanConfirmed !== true) {
+    return { ok: false, status: 400, error: 'human_confirmed must be true: a person must explicitly confirm this review.' };
+  }
+  const row = await env.DB.prepare(
+    `SELECT resp.response_id, resp.validation_status, resp.sources_json, req.request_id, req.status AS request_status,
+            req.historical_cutoff_ts
+       FROM stage7_research_responses resp
+       JOIN stage7_research_requests req ON req.request_id = resp.request_id
+      WHERE resp.request_id = ?`
+  ).bind(requestId).first();
+  if (!row) return { ok: false, status: 404, error: `No registered response exists for request_id ${requestId}` };
+  if (row.request_status === 'INTEGRATED' || row.request_status === 'REJECTED') {
+    return { ok: false, status: 409, error: `Request ${requestId} is already terminal (${row.request_status})` };
+  }
+  if (row.validation_status !== 'PENDING') {
+    return { ok: false, status: 409, error: `Response ${row.response_id} is already ${row.validation_status}; a review decision can only be made once.` };
+  }
+
+  const nowTs = Date.now();
+  const reviewNote = typeof note === 'string' ? note.slice(0, 2000) : null;
+
+  if (decision === 'REJECT') {
+    await env.DB.prepare(
+      `UPDATE stage7_research_responses SET validation_status = 'REJECTED', validated_ts = ?, human_confirmed_ts = ?, validator_notes = ?
+        WHERE request_id = ? AND validation_status = 'PENDING'`
+    ).bind(nowTs, nowTs, reviewNote, requestId).run();
+    // Terminal for THIS request so the event can receive a fresh research pass.
+    await env.DB.prepare(
+      `UPDATE stage7_research_requests SET status = 'REJECTED', updated_ts = ? WHERE request_id = ? AND status NOT IN ('INTEGRATED','REJECTED')`
+    ).bind(nowTs, requestId).run();
+    return { ok: true, status: 200, validation_status: 'REJECTED', note: 'Response rejected. The event can be proposed again for a new research pass.' };
+  }
+
+  const sources = parseStage7JsonField(row.sources_json, []);
+  const sourceValidation = validateStage7Sources(Array.isArray(sources) ? sources : [], row.historical_cutoff_ts);
+  if (sourceValidation.results.length > 0 && sourceValidation.valid_count === 0) {
+    return {
+      ok: false, status: 422, source_validation: sourceValidation,
+      error: 'Cannot validate: every stored source failed automated validation. Reject this response and run a new research pass.',
+    };
+  }
+  await env.DB.prepare(
+    `UPDATE stage7_research_responses
+        SET validation_status = 'VALIDATED', validated_ts = ?, human_confirmed_ts = ?, validator_notes = ?, source_validation_json = ?
+      WHERE request_id = ? AND validation_status = 'PENDING'`
+  ).bind(nowTs, nowTs, reviewNote, JSON.stringify(sourceValidation.results), requestId).run();
+  await env.DB.prepare(
+    `UPDATE stage7_research_requests SET status = 'RESEARCH_COMPLETED', updated_ts = ? WHERE request_id = ? AND status NOT IN ('INTEGRATED','REJECTED')`
+  ).bind(nowTs, requestId).run();
+  return { ok: true, status: 200, validation_status: 'VALIDATED', source_validation: sourceValidation };
 }
 
 // Pure. Maps a stage7_research_requests row (plus its response state) to
@@ -7288,12 +7469,20 @@ async function triggerStage7Recalculation(env, { requestId, requestedBy, provide
 function deriveStage7RequestLifecycleStage(r) {
   if (r.status === 'FAILED_PERMANENT') return 'ERROR_PERMANENT';
   if (r.status === 'FAILED_RETRYABLE') return 'ERROR_RETRYABLE';
-  if (r.status === 'INTEGRATION_REVIEW') return 'RECALCULATED';
   if (r.status === 'APPROVED_FOR_IMPLEMENTATION' || r.status === 'INTEGRATED' || r.status === 'REJECTED') return 'HUMAN_REVIEW_OUTCOME';
+  // Recalculation states come from persisted columns written by the staging
+  // workflow (run_stage7.py), never inferred: a FAILED run is shown as failed,
+  // not as "still waiting".
+  if (r.recalculation_status === 'COMPLETED' || r.status === 'INTEGRATION_REVIEW') return 'RECALCULATED';
+  if (r.recalculation_status === 'FAILED') return 'RECALCULATION_FAILED';
+  if (r.recalculation_status === 'RUNNING') return 'RECALCULATION_RUNNING';
   if (!r.response_received) return r.status === 'PENDING_RESEARCH' ? 'REQUEST_CREATED' : 'AWAITING_RESEARCH';
   if (r.response_validation_status === 'REJECTED') return 'RESPONSE_REJECTED';
-  if (r.response_validation_status === 'VALIDATED') return r.recalculation_requested_ts ? 'AWAITING_RECALCULATION' : 'VALIDATED';
-  return 'RESPONSE_REGISTERED';
+  if (r.response_validation_status === 'VALIDATED') {
+    return (r.recalculation_status === 'REQUESTED' || r.recalculation_requested_ts) ? 'AWAITING_RECALCULATION' : 'VALIDATED';
+  }
+  // Registered but not yet validated: a person still has to review it.
+  return 'AWAITING_HUMAN_REVIEW';
 }
 
 // ---- EXPERIMENT REGISTRY ----
@@ -8261,6 +8450,16 @@ const RESEARCH_LAB_HTML = `<!DOCTYPE html>
     padding: 10px; margin-top: 6px; color: var(--text);
   }
   .item-card .s7-check { display: flex; align-items: center; gap: 6px; margin-bottom: 8px; font-size: 12.5px; }
+  .s7-note { font-size: 12px; color: var(--muted); margin: 8px 0; padding: 8px 10px; border-left: 3px solid var(--border); }
+  .s7-review { display: none; margin-top: 12px; padding: 12px; border: 1px solid var(--border); border-radius: 10px; background: var(--bg); }
+  .s7-review.open { display: block; }
+  .s7-review textarea, .s7-registered textarea { width: 100%; box-sizing: border-box; font-size: 16px; }
+  .s7-table-wrap { overflow-x: auto; -webkit-overflow-scrolling: touch; margin: 6px 0; }
+  .s7-table { border-collapse: collapse; width: 100%; font-size: 12px; min-width: 460px; }
+  .s7-table th, .s7-table td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--border); vertical-align: top; }
+  .s7-registered, .s7-result { margin-top: 10px; }
+  .s7-actions a, .s7-actions button { min-height: 40px; }
+  .s7-form textarea, .s7-form select, .s7-form input[type="text"] { font-size: 16px; }
 
   .empty { padding: 26px 16px; text-align: center; }
   .empty .headline { font-size: 14px; font-weight: 700; margin-bottom: 6px; }
@@ -9570,17 +9769,22 @@ const RESEARCH_LAB_HTML = `<!DOCTYPE html>
     var labels = {
       REQUEST_CREATED: 'REQUEST CREATED',
       AWAITING_RESEARCH: 'AWAITING EXTERNAL AI RESEARCH',
-      RESPONSE_REGISTERED: 'RESPONSE REGISTERED -- PENDING VALIDATION',
+      AWAITING_HUMAN_REVIEW: 'RESPONSE REGISTERED -- AWAITING HUMAN REVIEW',
+      RESPONSE_REGISTERED: 'RESPONSE REGISTERED -- AWAITING HUMAN REVIEW',
       RESPONSE_REJECTED: 'RESPONSE REJECTED',
-      VALIDATED: 'VALIDATED -- AWAITING TRIGGER',
-      AWAITING_RECALCULATION: 'RECALCULATION REQUESTED -- AWAITING PIPELINE RUN',
-      RECALCULATED: 'RECALCULATED',
+      VALIDATED: 'VALIDATED -- RECALCULATION NOT REQUESTED',
+      AWAITING_RECALCULATION: 'RECALCULATION REQUESTED -- NOT CALCULATED YET',
+      RECALCULATION_RUNNING: 'RECALCULATION RUNNING',
+      RECALCULATION_FAILED: 'RECALCULATION FAILED',
+      RECALCULATED: 'RECALCULATED -- COMPLETED',
       HUMAN_REVIEW_OUTCOME: 'HUMAN REVIEW OUTCOME',
       ERROR_RETRYABLE: 'ERROR -- RETRYABLE',
       ERROR_PERMANENT: 'ERROR -- PERMANENT',
     };
     var classes = {
       RECALCULATED: 'b-strong', VALIDATED: 'b-plausible', AWAITING_RECALCULATION: 'b-plausible',
+      RECALCULATION_RUNNING: 'b-plausible', RECALCULATION_FAILED: 'b-blocked',
+      AWAITING_HUMAN_REVIEW: 'b-unknown',
       ERROR_RETRYABLE: 'b-unknown', ERROR_PERMANENT: 'b-blocked', RESPONSE_REJECTED: 'b-blocked',
     };
     return badge(labels[stage] || stage, classes[stage] || 'b-outline');
@@ -9593,6 +9797,171 @@ const RESEARCH_LAB_HTML = `<!DOCTYPE html>
       var publisher = e.publisher || 'unknown publisher';
       return '<li>"' + esc(headline) + '" -- ' + esc(publisher) + '</li>';
     }).join('') + '</ul>';
+  }
+
+  // Copy text to the clipboard. navigator.clipboard needs a secure context and
+  // can reject; fall back to a hidden textarea + execCommand. Resolves true only
+  // when the browser reports success -- a copy that did not happen is never
+  // reported as done.
+  function stage7CopyText(text) {
+    function fallback() {
+      try {
+        var ta = document.createElement('textarea');
+        ta.value = text;
+        ta.setAttribute('readonly', '');
+        ta.style.position = 'fixed'; ta.style.top = '0'; ta.style.left = '0'; ta.style.opacity = '0';
+        document.body.appendChild(ta);
+        ta.focus(); ta.select();
+        var ok = document.execCommand('copy');
+        document.body.removeChild(ta);
+        return ok;
+      } catch (e) { return false; }
+    }
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      return navigator.clipboard.writeText(text).then(function () { return true; }, function () { return fallback(); });
+    }
+    return Promise.resolve(fallback());
+  }
+
+  function stage7SourceValidationHtml(results, sources) {
+    if (!results || !results.length) return '<p class="muted" style="font-size:11.5px;">No sources were submitted (a no-citations finding).</p>';
+    return '<div class="s7-table-wrap"><table class="s7-table"><thead><tr><th>#</th><th>Source URL</th><th>Technical check</th><th>Reason</th></tr></thead><tbody>' +
+      results.map(function (r, i) {
+        var idx = r.index != null ? r.index : i;
+        var src = (sources && sources[idx]) || {};
+        var cls = r.status === 'valid' ? 'b-verified' : r.status === 'questionable' ? 'b-plausible' : 'b-blocked';
+        return '<tr><td>' + esc(idx) + '</td><td style="word-break:break-all;">' + esc(src.url || r.url || '(no url)') + '</td><td>' +
+          badge(String(r.status).toUpperCase(), cls) + '</td><td>' + esc(r.reason || '') + '</td></tr>';
+      }).join('') + '</tbody></table></div>';
+  }
+
+  function stage7FindingsHtml(f) {
+    f = f || {};
+    function row(label, value) {
+      return '<div class="ev-row"><span class="k">' + esc(label) + '</span><span class="v" style="white-space:pre-wrap;">' + esc(value || '(not provided)') + '</span></div>';
+    }
+    return row('Assessment', f.sentiment_assessment) + row('Summary', f.summary) +
+      row('Transmission mechanism', f.transmission_mechanism) + row('Contradictory evidence', f.contradictory_evidence) +
+      row('Limitations', f.limitations);
+  }
+
+  // The response form: paste -> (optional) parse -> correct -> REVIEW. There is
+  // deliberately no button here that registers anything: registration only
+  // happens from the review panel, after an explicit human confirmation.
+  function stage7FormHtml(r) {
+    var id = esc(r.request_id);
+    return '<div class="s7-form" data-form="' + id + '">' +
+      '<label>Paste the full response from the external AI here (kept verbatim for auditability)</label>' +
+      '<textarea data-field="raw_response_text" style="min-height:140px;" placeholder="Paste the complete answer from Claude/ChatGPT/Gemini/Grok here"></textarea>' +
+      '<div class="s7-actions"><button data-parse-response="' + id + '">Parse response (JSON contract)</button></div>' +
+      '<div class="s7-msg" data-msg="parse-' + id + '"></div>' +
+      '<label>Provider (which AI tool actually did this research)</label>' +
+      '<select data-field="provider"><option value="">unknown</option><option value="claude">Claude</option><option value="chatgpt">ChatGPT</option><option value="gemini">Gemini</option><option value="grok">Grok</option></select>' +
+      '<label>Summary of findings</label>' +
+      '<textarea data-field="summary" placeholder="What did the AI actually find, in its own words?"></textarea>' +
+      '<label>Sentiment assessment (required)</label>' +
+      '<select data-field="sentiment_assessment"><option value="">-- choose --</option><option value="POSITIVE">POSITIVE</option><option value="NEGATIVE">NEGATIVE</option><option value="MIXED">MIXED</option><option value="INDETERMINATE">INDETERMINATE</option></select>' +
+      '<label>Transmission mechanism (optional)</label><textarea data-field="transmission_mechanism"></textarea>' +
+      '<label>Contradictory evidence / unresolved questions (optional)</label><textarea data-field="contradictory_evidence"></textarea>' +
+      '<label>Limitations / confidence (optional)</label><textarea data-field="limitations"></textarea>' +
+      '<label>Sources -- one per line: url | publisher | publication_date | claim (optional)</label><textarea data-field="sources_text"></textarea>' +
+      '<div class="s7-actions"><button data-check-sources="' + id + '">Check sources</button>' +
+      '<button class="primary" data-open-review="' + id + '">Review before registering</button></div>' +
+      '<div class="s7-msg" data-msg="sources-' + id + '"></div>' +
+      '<div class="s7-review" data-review-panel="' + id + '"></div>' +
+      '<div class="s7-msg" data-msg="' + id + '"></div>' +
+      '</div>';
+  }
+
+  // A registered response, exactly as stored, plus -- while it is still
+  // PENDING -- the human review controls (validate / reject).
+  function stage7RegisteredResponseHtml(r) {
+    var resp = r.response;
+    var id = esc(r.request_id);
+    var html = '<div class="s7-registered">' +
+      '<div class="ev-row"><span class="k">AI response</span><span class="v">' +
+        badge(resp.validation_status, resp.validation_status === 'VALIDATED' ? 'b-verified' : resp.validation_status === 'REJECTED' ? 'b-blocked' : 'b-unknown') +
+        ' registered ' + esc(fmtAgo(resp.registered_ts)) + (resp.provider ? ' &middot; provider: ' + esc(resp.provider) : '') + '</span></div>' +
+      '<div class="ev-row"><span class="k">Human confirmation</span><span class="v">' +
+        (resp.human_confirmed_ts ? badge('CONFIRMED ' + fmtTs(resp.human_confirmed_ts), 'b-verified') : badge('NOT YET CONFIRMED BY A PERSON', 'b-unknown')) + '</span></div>' +
+      (resp.human_review_note ? '<div class="ev-row"><span class="k">Review note</span><span class="v">' + esc(resp.human_review_note) + '</span></div>' : '') +
+      '<details style="margin-top:8px;"><summary style="cursor:pointer; font-size:12px;">Registered assessment, sources and the verbatim response</summary>' +
+        stage7FindingsHtml(resp.findings) +
+        '<p style="font-size:11.5px; color:var(--muted); margin:8px 0 2px;">Sources and the server\\'s technical check (a technical check is not proof a source is true):</p>' +
+        stage7SourceValidationHtml(resp.source_validation, resp.sources) +
+        '<p style="font-size:11.5px; color:var(--muted); margin:8px 0 2px;">Verbatim response as pasted:</p>' +
+        '<pre class="s7-prompt">' + esc(resp.raw_response_text || '(none stored)') + '</pre>' +
+      '</details>';
+    if (resp.validation_status === 'PENDING') {
+      html += '<div class="s7-review" style="display:block;">' +
+        '<p><b>Awaiting your review.</b> This response was saved without validation, so it cannot be used for recalculation yet. ' +
+        'Review it above, then validate or reject it.</p>' +
+        '<div class="s7-check"><input type="checkbox" id="rv-confirm-' + id + '" data-review-confirm="' + id + '"/>' +
+        '<label for="rv-confirm-' + id + '" style="display:inline; margin:0; text-transform:none;">I personally reviewed this response and its sources</label></div>' +
+        '<label>Review note (optional)</label><textarea data-review-note="' + id + '" style="min-height:50px;"></textarea>' +
+        '<div class="s7-actions"><button class="primary" data-review-decision="VALIDATE" data-req="' + id + '">Validate</button>' +
+        '<button data-review-decision="REJECT" data-req="' + id + '">Reject</button></div>' +
+        '<div class="s7-msg" data-msg="review-' + id + '"></div></div>';
+    }
+    return html + '</div>';
+  }
+
+  function stage7ResultHtml(r) {
+    var res = r.recalculation_result;
+    if (!res) return '<p class="muted" style="font-size:11.5px;">The calculation is recorded as completed, but its result row could not be found. Nothing is shown rather than guessing.</p>';
+    var prev = res.previous;
+    var excluded = res.excluded_evidence || [];
+    return '<div class="s7-result">' +
+      '<div class="ev-row"><span class="k">Resulting event sentiment</span><span class="v">' +
+        (res.sentiment_label ? badge(res.sentiment_label + ' (' + res.sentiment_score + ')', 'b-strong') : badge('NO DEFENSIBLE ASSESSMENT', 'b-unknown')) + '</span></div>' +
+      '<div class="ev-row"><span class="k">Scale</span><span class="v">' + esc(res.scale) + '</span></div>' +
+      '<div class="ev-row"><span class="k">Previous result</span><span class="v">' +
+        (prev ? (prev.sentiment_label ? esc(prev.sentiment_label + ' (' + prev.sentiment_score + ')') : 'no defensible assessment') + ' &middot; ' + esc(fmtTs(prev.calculation_ts))
+              : 'none -- this is the first calculation for the event') + '</span></div>' +
+      '<div class="ev-row"><span class="k">Evidence sufficiency</span><span class="v">' + esc(res.evidence_sufficiency) + '</span></div>' +
+      '<div class="ev-row"><span class="k">Historical cutoff</span><span class="v">' + esc(fmtTs(res.historical_cutoff_ts)) + '</span></div>' +
+      '<div class="ev-row"><span class="k">Formula version</span><span class="v">' + esc(res.formula_version) + '</span></div>' +
+      '<div class="ev-row"><span class="k">Calculated</span><span class="v">' + esc(fmtTs(res.calculation_ts)) + ' (' + esc(fmtAgo(res.calculation_ts)) + ')</span></div>' +
+      '<div class="ev-row"><span class="k">Evidence included</span><span class="v">' + esc((res.contributing_evidence_ids || []).length) + (res.contributing_evidence_ids && res.contributing_evidence_ids.length ? ' (ids: ' + esc(res.contributing_evidence_ids.join(', ')) + ')' : '') + '</span></div>' +
+      '<p style="font-size:11.5px; color:var(--muted); margin:8px 0 2px;">Evidence excluded (' + excluded.length + '):</p>' +
+      (excluded.length ? '<ul class="s7-list">' + excluded.map(function (x) { return '<li>evidence #' + esc(x.evidence_id) + ' -- ' + esc(x.reason) + '</li>'; }).join('') + '</ul>' : '<p class="muted" style="font-size:11.5px;">None excluded.</p>') +
+      '<p style="font-size:11.5px; color:var(--muted); margin:8px 0 2px;">Source provenance (the registered response the calculation used):</p>' +
+      (r.response ? stage7SourceValidationHtml(r.response.source_validation, r.response.sources) : '') +
+      '</div>';
+  }
+
+  function stage7RecalcBlockHtml(r) {
+    if (!r.response_received || !r.response || r.response.validation_status !== 'VALIDATED') return '';
+    var id = esc(r.request_id);
+    var st = r.recalculation_status;
+    var html = '<h3 style="font-size:13px; margin:14px 0 6px;">Sentiment recalculation</h3>';
+    if (!st) {
+      return html + '<div class="ev-row"><span class="k">Status</span><span class="v">' + badge('NOT REQUESTED', 'b-outline') + '</span></div>' +
+        '<p class="muted" style="font-size:11.5px;">Registering a response never recalculates anything. Requesting a recalculation is a separate, explicit step.</p>' +
+        '<div class="s7-actions"><button class="primary" data-trigger-recalc="' + id + '">Request recalculation</button></div>' +
+        '<div class="s7-msg" data-msg="recalc-' + id + '"></div>';
+    }
+    if (st === 'REQUESTED') {
+      return html + '<div class="ev-row"><span class="k">Status</span><span class="v">' + badge('REQUESTED -- NOT CALCULATED YET', 'b-plausible') + '</span></div>' +
+        '<p style="font-size:12px;">Requested ' + esc(fmtAgo(r.recalculation_requested_ts)) + '. <b>No calculation has happened.</b> It runs only when a person dispatches the ' +
+        'stage7-research-pipeline.yml workflow on staging; until then there is no result. This page will show RUNNING, then COMPLETED or FAILED, as that workflow records them.</p>';
+    }
+    if (st === 'RUNNING') {
+      return html + '<div class="ev-row"><span class="k">Status</span><span class="v">' + badge('RUNNING', 'b-plausible') + '</span></div>' +
+        '<p style="font-size:12px;">Started ' + esc(fmtAgo(r.recalculation_started_ts)) + ' (attempt ' + esc(r.recalculation_attempts) + '). ' +
+        'If this stays RUNNING after the workflow finished, it was interrupted: dispatching the workflow again resumes it without creating a duplicate result.</p>';
+    }
+    if (st === 'FAILED') {
+      return html + '<div class="ev-row"><span class="k">Status</span><span class="v">' + badge('FAILED', 'b-blocked') + '</span></div>' +
+        '<div class="ev-row"><span class="k">Error</span><span class="v">' + esc(r.recalculation_error || '(no error text recorded)') + '</span></div>' +
+        '<div class="ev-row"><span class="k">Attempts</span><span class="v">' + esc(r.recalculation_attempts) + ' &middot; failed ' + esc(fmtAgo(r.recalculation_completed_ts)) + '</span></div>' +
+        '<p class="muted" style="font-size:11.5px;">A failed recalculation is never retried automatically. After reading the error, you can request it again.</p>' +
+        '<div class="s7-actions"><button class="primary" data-trigger-recalc="' + id + '">Retry recalculation</button></div>' +
+        '<div class="s7-msg" data-msg="recalc-' + id + '"></div>';
+    }
+    // COMPLETED
+    return html + '<div class="ev-row"><span class="k">Status</span><span class="v">' + badge('COMPLETED', 'b-strong') + ' ' + esc(fmtAgo(r.recalculation_completed_ts)) + ' (attempts: ' + esc(r.recalculation_attempts) + ')</span></div>' +
+      stage7ResultHtml(r);
   }
 
   async function renderStage7() {
@@ -9647,6 +10016,10 @@ const RESEARCH_LAB_HTML = `<!DOCTYPE html>
           '<div class="ev-row"><span class="k">Sufficiency</span><span class="v">' + badgeForStage7Sufficiency(c.sufficiency_status) + '</span></div>' +
           '<div class="ev-row"><span class="k">Event time</span><span class="v">' + esc(fmtTs(c.event_ts)) + ' (' + esc(fmtAgo(c.event_ts)) + ')</span></div>' +
           '<div class="ev-row"><span class="k">Proposed</span><span class="v">' + esc(fmtTs(c.proposed_ts)) + ' (' + esc(fmtAgo(c.proposed_ts)) + ')</span></div>' +
+          '<div class="ev-row"><span class="k">Historical cutoff for research</span><span class="v">' + esc(fmtTs(c.historical_cutoff_ts)) + '</span></div>' +
+          '<p class="s7-note"><b>Why this is a candidate:</b> the event is inside the pipeline evidence window and its existing evidence is rated ' +
+          esc(c.sufficiency_status) + ' (reasons below). Events whose evidence is already sufficient, or that already have an open request, are never proposed. ' +
+          'Nothing is created until you select it and click Create.</p>' +
           '<p style="font-size:11.5px; color:var(--muted); margin:8px 0 2px;">Why existing evidence is insufficient:</p>' +
           '<ul class="s7-list">' + (c.reasons || []).map(function (x) { return '<li>' + esc(x) + '</li>'; }).join('') + '</ul>' +
           '<p style="font-size:11.5px; color:var(--muted); margin:8px 0 2px;">Missing evidence categories:</p>' +
@@ -9684,6 +10057,8 @@ const RESEARCH_LAB_HTML = `<!DOCTYPE html>
           stage7EvidenceListHtml(r.evidence_snapshot) +
           '<details style="margin-top:8px;"><summary style="cursor:pointer; font-size:12px;">Show full research prompt</summary>' +
           '<pre class="s7-prompt">' + esc(r.prompt_text || '(no prompt text stored)') + '</pre></details>' +
+          '<p class="s7-note"><b>Manual step.</b> These buttons only copy the prompt or open the AI service in a new tab. Nothing is sent for you ' +
+          'and no research has happened until YOU paste the prompt into the AI, read its answer, and paste that answer back below.</p>' +
           '<div class="s7-actions">' +
             '<button data-copy-prompt="' + esc(r.request_id) + '">Copy research prompt</button>' +
             '<a href="https://claude.ai/new" target="_blank" rel="noopener">Open Claude</a>' +
@@ -9692,40 +10067,9 @@ const RESEARCH_LAB_HTML = `<!DOCTYPE html>
             '<a href="https://grok.com" target="_blank" rel="noopener">Open Grok</a>' +
             (r.response_received ? '' : '<button class="primary" data-toggle-form="' + esc(r.request_id) + '">Register AI response</button>') +
           '</div>' +
-          (r.response_received ? (
-            '<div class="ev-row"><span class="k">AI response</span><span class="v">' +
-              badge(r.response_validation_status, r.response_validation_status === 'VALIDATED' ? 'b-verified' : 'b-outline') +
-              ' (registered ' + esc(fmtAgo(r.response_registered_ts)) + ')</span></div>' +
-            (r.response_validation_status === 'VALIDATED' && !r.recalculation_requested_ts && r.status !== 'INTEGRATION_REVIEW'
-              ? '<div class="s7-actions"><button class="primary" data-trigger-recalc="' + esc(r.request_id) + '">Trigger recalculation</button></div>' +
-                '<div class="s7-msg" data-msg="recalc-' + esc(r.request_id) + '"></div>'
-              : '') +
-            (r.recalculation_requested_ts
-              ? '<p style="font-size:11.5px; color:var(--muted);">Recalculation requested ' + esc(fmtAgo(r.recalculation_requested_ts)) + ' -- runs on the next human-dispatched stage7-research-pipeline.yml.</p>'
-              : '')
-          ) :
-            '<div class="s7-form" data-form="' + esc(r.request_id) + '">' +
-              '<label>Paste the AI\\'s full response here (kept verbatim for auditability)</label>' +
-              '<textarea data-field="raw_response_text" style="min-height:140px;" placeholder="Paste the complete answer from Claude/ChatGPT/Gemini/Grok here"></textarea>' +
-              '<div class="s7-actions"><button data-parse-response="' + esc(r.request_id) + '">Parse response (JSON contract)</button></div>' +
-              '<div class="s7-msg" data-msg="parse-' + esc(r.request_id) + '"></div>' +
-              '<label>Provider (which AI tool actually did this research)</label>' +
-              '<select data-field="provider"><option value="">unknown</option><option value="claude">Claude</option><option value="chatgpt">ChatGPT</option><option value="gemini">Gemini</option><option value="grok">Grok</option></select>' +
-              '<label>Summary of findings</label>' +
-              '<textarea data-field="summary" placeholder="What did the AI actually find, in its own words?"></textarea>' +
-              '<label>Sentiment assessment (required)</label>' +
-              '<select data-field="sentiment_assessment"><option value="">-- choose --</option><option value="POSITIVE">POSITIVE</option><option value="NEGATIVE">NEGATIVE</option><option value="MIXED">MIXED</option><option value="INDETERMINATE">INDETERMINATE</option></select>' +
-              '<label>Transmission mechanism (optional)</label><textarea data-field="transmission_mechanism"></textarea>' +
-              '<label>Contradictory evidence / unresolved questions (optional)</label><textarea data-field="contradictory_evidence"></textarea>' +
-              '<label>Limitations / confidence (optional)</label><textarea data-field="limitations"></textarea>' +
-              '<label>Sources -- one per line: url | publisher | publication_date | claim (optional)</label><textarea data-field="sources_text"></textarea>' +
-              '<div class="s7-actions"><button data-check-sources="' + esc(r.request_id) + '">Check sources</button></div>' +
-              '<div class="s7-msg" data-msg="sources-' + esc(r.request_id) + '"></div>' +
-              '<div class="s7-check"><input type="checkbox" data-field="validated" id="validated-' + esc(r.request_id) + '"/>' +
-              '<label for="validated-' + esc(r.request_id) + '" style="display:inline; margin:0; text-transform:none;">I personally reviewed this response and its citations, and confirm it is not fabricated</label></div>' +
-              '<div class="s7-actions"><button class="primary" data-submit="' + esc(r.request_id) + '">Register response</button></div>' +
-              '<div class="s7-msg" data-msg="' + esc(r.request_id) + '"></div>' +
-            '</div>') +
+          '<div class="s7-msg" data-msg="copy-' + esc(r.request_id) + '"></div>' +
+          (r.response_received ? stage7RegisteredResponseHtml(r) : stage7FormHtml(r)) +
+          stage7RecalcBlockHtml(r) +
           '</div>';
       });
     }
@@ -9799,14 +10143,19 @@ const RESEARCH_LAB_HTML = `<!DOCTYPE html>
     // ---- copy prompt: copies the SERVER-computed prompt_text verbatim ----
     app.querySelectorAll('[data-copy-prompt]').forEach(function (btn) {
       btn.addEventListener('click', function (e) {
-        var reqId = e.currentTarget.dataset.copyPrompt;
+        var button = e.currentTarget;
+        var reqId = button.dataset.copyPrompt;
         var text = (stage7RequestsById[reqId] && stage7RequestsById[reqId].prompt_text) || '';
-        if (navigator.clipboard && navigator.clipboard.writeText) {
-          navigator.clipboard.writeText(text).then(function () {
-            e.currentTarget.textContent = 'Copied!';
-            setTimeout(function () { e.currentTarget.textContent = 'Copy research prompt'; }, 1500);
-          });
-        }
+        if (!text) { stage7SetMsg('copy-' + reqId, 'No prompt text is stored for this request, so nothing was copied.', false); return; }
+        stage7CopyText(text).then(function (ok) {
+          if (ok) {
+            button.textContent = 'Copied!';
+            stage7SetMsg('copy-' + reqId, 'Prompt copied (' + text.length + ' characters). Now paste it into the AI service yourself.', true);
+            setTimeout(function () { button.textContent = 'Copy research prompt'; }, 1500);
+          } else {
+            stage7SetMsg('copy-' + reqId, 'The browser blocked copying. Open "Show full research prompt" above and select and copy the text manually.', false);
+          }
+        });
       });
     });
 
@@ -9858,53 +10207,133 @@ const RESEARCH_LAB_HTML = `<!DOCTYPE html>
       });
     });
 
-    app.querySelectorAll('[data-submit]').forEach(function (btn) {
+    // ---- read the form's current values (shared by Review and Register) ----
+    function stage7ReadForm(reqId) {
+      var form = app.querySelector('[data-form="' + reqId + '"]');
+      var get = function (field) { var el = form.querySelector('[data-field="' + field + '"]'); return el ? el.value : ''; };
+      return {
+        form: form,
+        raw: get('raw_response_text'),
+        provider: get('provider') || null,
+        sentiment: get('sentiment_assessment'),
+        findings: {
+          summary: get('summary'),
+          transmission_mechanism: get('transmission_mechanism'),
+          contradictory_evidence: get('contradictory_evidence'),
+          sentiment_assessment: get('sentiment_assessment'),
+          limitations: get('limitations'),
+        },
+        sources: stage7SourcesTextToArray(get('sources_text')),
+      };
+    }
+
+    // ---- REVIEW: nothing is saved here. Shows exactly what would be stored, with the
+    // server's own technical source check, and only then offers registration. ----
+    app.querySelectorAll('[data-open-review]').forEach(function (btn) {
       btn.addEventListener('click', function (e) {
-        var reqId = e.currentTarget.dataset.submit;
-        var form = app.querySelector('[data-form="' + reqId + '"]');
-        var get = function (field) { var el = form.querySelector('[data-field="' + field + '"]'); return el ? el.value : ''; };
-        var rawResponseText = get('raw_response_text');
-        if (!rawResponseText.trim()) { stage7SetMsg(reqId, 'Paste the AI\\'s full response first.', false); return; }
-        var sentimentAssessment = get('sentiment_assessment');
-        if (!sentimentAssessment) { stage7SetMsg(reqId, 'Sentiment assessment is required.', false); return; }
-        if (!stage7AdminToken) { stage7SetMsg(reqId, 'Admin token is required to submit.', false); return; }
-        var sources = stage7SourcesTextToArray(get('sources_text'));
-        var body = {
-          request_id: reqId,
-          provider: get('provider') || null,
-          raw_response_text: rawResponseText,
-          findings: {
-            summary: get('summary'),
-            transmission_mechanism: get('transmission_mechanism'),
-            contradictory_evidence: get('contradictory_evidence'),
-            sentiment_assessment: sentimentAssessment,
-            limitations: get('limitations'),
-          },
-          sources: sources,
-          confidence: null,
-          validated: !!form.querySelector('[data-field="validated"]').checked,
-        };
-        stage7SetMsg(reqId, 'Submitting...', null);
-        fetch('/api/research-lab/stage7-register-response', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + stage7AdminToken },
-          body: JSON.stringify(body),
-        }).then(function (res) { return res.json(); }).then(function (result) {
-          if (result.ok) {
-            stage7SetMsg(reqId, 'Registered (' + result.validation_status + ').', true);
-            renderStage7();
-          } else {
-            stage7SetMsg(reqId, result.error || 'Registration failed.', false);
-          }
+        var reqId = e.currentTarget.dataset.openReview;
+        var v = stage7ReadForm(reqId);
+        var panel = app.querySelector('[data-review-panel="' + reqId + '"]');
+        if (!v.raw.trim()) { stage7SetMsg(reqId, 'Paste the full response from the external AI first.', false); return; }
+        if (!v.sentiment) { stage7SetMsg(reqId, 'Choose a sentiment assessment first (the parse button can fill it in from the response).', false); return; }
+        stage7SetMsg(reqId, 'Checking sources for the review screen...', null);
+        var cutoff = (stage7RequestsById[reqId] && stage7RequestsById[reqId].historical_cutoff_ts) || null;
+        fetch('/api/research-lab/stage7-validate-sources', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ sources: v.sources, historical_cutoff_ts: cutoff }),
+        }).then(function (res) { return res.json(); }).then(function (check) {
+          if (!check.ok) { stage7SetMsg(reqId, check.error || 'Could not check sources.', false); return; }
+          stage7SetMsg(reqId, '', null);
+          var allFailed = v.sources.length > 0 && check.valid_count === 0;
+          panel.innerHTML =
+            '<h3 style="font-size:13px; margin:4px 0 8px;">Review before registering -- nothing has been saved yet</h3>' +
+            '<div class="ev-row"><span class="k">Historical cutoff</span><span class="v">' + esc(fmtTs(cutoff)) + '</span></div>' +
+            '<div class="ev-row"><span class="k">Provider</span><span class="v">' + esc(v.provider || 'unknown') + '</span></div>' +
+            stage7FindingsHtml(v.findings) +
+            '<p style="font-size:11.5px; color:var(--muted); margin:8px 0 2px;">Source check: ' + check.valid_count + ' valid, ' + check.excluded_count + ' excluded, ' + check.questionable_count + ' questionable. ' +
+            'This is a technical check of the URL, date, cutoff and duplicates only -- it does not prove a source says what the AI claims.</p>' +
+            stage7SourceValidationHtml(check.results, v.sources) +
+            (check.excluded_count ? '<p class="s7-msg err">' + check.excluded_count + ' source(s) are excluded and cannot support the assessment. They will still be stored, marked excluded.</p>' : '') +
+            '<details style="margin-top:8px;"><summary style="cursor:pointer; font-size:12px;">Verbatim response as pasted (' + v.raw.length + ' characters)</summary><pre class="s7-prompt">' + esc(v.raw) + '</pre></details>' +
+            (allFailed ? '<p class="s7-msg err">Every submitted source failed the technical check, so this cannot be registered as validated. Go back and correct the sources, or save it without validating.</p>' : '') +
+            '<div class="s7-check"><input type="checkbox" id="rv-new-' + esc(reqId) + '" data-confirm-register="' + esc(reqId) + '"' + (allFailed ? ' disabled' : '') + '/>' +
+            '<label for="rv-new-' + esc(reqId) + '" style="display:inline; margin:0; text-transform:none;">I personally reviewed this response and its sources, and confirm the research result is acceptable</label></div>' +
+            '<label>Review note (optional)</label><textarea data-register-note="' + esc(reqId) + '" style="min-height:50px;"></textarea>' +
+            '<div class="s7-actions">' +
+              '<button class="primary" data-submit="' + esc(reqId) + '" data-mode="validated"' + (allFailed ? ' disabled' : '') + '>Confirm and register as validated</button>' +
+              '<button data-submit="' + esc(reqId) + '" data-mode="pending">Save without validating (stays awaiting review)</button>' +
+              '<button data-close-review="' + esc(reqId) + '">Back to editing</button>' +
+            '</div>';
+          panel.classList.add('open');
+          panel.querySelector('[data-close-review]').addEventListener('click', function () { panel.classList.remove('open'); panel.innerHTML = ''; });
+          panel.querySelectorAll('[data-submit]').forEach(function (b) { b.addEventListener('click', stage7Register); });
+          panel.scrollIntoView({ block: 'nearest' });
         }).catch(function (err) { stage7SetMsg(reqId, String(err), false); });
       });
     });
 
-    // ---- explicit, separate recalculation trigger (Task 3.E) ----
+    // ---- REGISTER: only reachable from the review panel ----
+    function stage7Register(e) {
+      var reqId = e.currentTarget.dataset.submit;
+      var mode = e.currentTarget.dataset.mode;
+      var v = stage7ReadForm(reqId);
+      var panel = app.querySelector('[data-review-panel="' + reqId + '"]');
+      var confirmBox = panel.querySelector('[data-confirm-register]');
+      var note = panel.querySelector('[data-register-note]').value;
+      if (!v.raw.trim()) { stage7SetMsg(reqId, 'Paste the full response from the external AI first.', false); return; }
+      if (!v.sentiment) { stage7SetMsg(reqId, 'Sentiment assessment is required.', false); return; }
+      if (!stage7AdminToken) { stage7SetMsg(reqId, 'Admin token is required to submit.', false); return; }
+      var validated = mode === 'validated';
+      if (validated && !(confirmBox && confirmBox.checked)) {
+        stage7SetMsg(reqId, 'Tick the confirmation box: registering as validated needs your explicit confirmation.', false);
+        return;
+      }
+      var body = {
+        request_id: reqId, provider: v.provider, raw_response_text: v.raw, findings: v.findings, sources: v.sources,
+        confidence: null, validated: validated, human_confirmed: validated, human_review_note: note || null,
+      };
+      stage7SetMsg(reqId, 'Submitting...', null);
+      fetch('/api/research-lab/stage7-register-response', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + stage7AdminToken },
+        body: JSON.stringify(body),
+      }).then(function (res) { return res.json(); }).then(function (result) {
+        if (result.ok) {
+          stage7SetMsg(reqId, 'Registered (' + result.validation_status + '). No recalculation was requested or performed.', true);
+          renderStage7();
+        } else {
+          stage7SetMsg(reqId, result.error || 'Registration failed.', false);
+        }
+      }).catch(function (err) { stage7SetMsg(reqId, String(err), false); });
+    }
+
+    // ---- review of an already-registered PENDING response ----
+    app.querySelectorAll('[data-review-decision]').forEach(function (btn) {
+      btn.addEventListener('click', function (e) {
+        var reqId = e.currentTarget.dataset.req;
+        var decision = e.currentTarget.dataset.reviewDecision;
+        var confirmBox = app.querySelector('[data-review-confirm="' + reqId + '"]');
+        var note = app.querySelector('[data-review-note="' + reqId + '"]');
+        if (!(confirmBox && confirmBox.checked)) { stage7SetMsg('review-' + reqId, 'Tick the confirmation box first: this decision needs your explicit confirmation.', false); return; }
+        if (!stage7AdminToken) { stage7SetMsg('review-' + reqId, 'Admin token is required.', false); return; }
+        stage7SetMsg('review-' + reqId, 'Saving...', null);
+        fetch('/api/research-lab/stage7-review-response', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + stage7AdminToken },
+          body: JSON.stringify({ request_id: reqId, decision: decision, human_confirmed: true, note: note ? note.value : null }),
+        }).then(function (res) { return res.json(); }).then(function (result) {
+          if (result.ok) { stage7SetMsg('review-' + reqId, result.validation_status + '.', true); renderStage7(); }
+          else { stage7SetMsg('review-' + reqId, result.error || 'Review failed.', false); }
+        }).catch(function (err) { stage7SetMsg('review-' + reqId, String(err), false); });
+      });
+    });
+
+    // ---- explicit, separate recalculation request (also used for "Retry") ----
     app.querySelectorAll('[data-trigger-recalc]').forEach(function (btn) {
       btn.addEventListener('click', function (e) {
         var reqId = e.currentTarget.dataset.triggerRecalc;
         if (!stage7AdminToken) { stage7SetMsg('recalc-' + reqId, 'Admin token is required.', false); return; }
+        e.currentTarget.disabled = true; // a double click must not send two requests
         stage7SetMsg('recalc-' + reqId, 'Requesting...', null);
         fetch('/api/research-lab/stage7-trigger-recalculation', {
           method: 'POST',
@@ -10769,6 +11198,8 @@ export default {
           confidence: typeof body.confidence === 'string' ? body.confidence : null,
           validated: body.validated === true,
           rawResponseText: typeof body.raw_response_text === 'string' ? body.raw_response_text : null,
+          humanConfirmed: body.human_confirmed === true,
+          humanReviewNote: typeof body.human_review_note === 'string' ? body.human_review_note : null,
           providedToken,
         });
         return new Response(JSON.stringify(result), { status: result.status || (result.ok ? 200 : 500), headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
@@ -10834,6 +11265,30 @@ export default {
         const result = await triggerStage7Recalculation(env, {
           requestId: body.request_id,
           requestedBy: typeof body.requested_by === 'string' ? body.requested_by : null,
+          providedToken,
+        });
+        return new Response(JSON.stringify(result), { status: result.status || (result.ok ? 200 : 500), headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+      } catch (err) {
+        return new Response(JSON.stringify({ ok: false, error: String(err) }), { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+      }
+    }
+
+    // Human review of a response registered WITHOUT validation (PENDING):
+    // VALIDATE or REJECT, with an explicit human confirmation. Admin-token
+    // gated like every other Stage 7 write.
+    if (url.pathname === '/api/research-lab/stage7-review-response' && request.method === 'POST') {
+      try {
+        const authHeader = request.headers.get('Authorization') || '';
+        const providedToken = authHeader.startsWith('Bearer ') ? authHeader.slice('Bearer '.length) : null;
+        const body = await request.json();
+        if (!body || typeof body.request_id !== 'string' || !body.request_id.trim()) {
+          return new Response(JSON.stringify({ ok: false, error: 'request_id is required' }), { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+        }
+        const result = await reviewStage7Response(env, {
+          requestId: body.request_id,
+          decision: body.decision,
+          humanConfirmed: body.human_confirmed === true,
+          note: typeof body.note === 'string' ? body.note : null,
           providedToken,
         });
         return new Response(JSON.stringify(result), { status: result.status || (result.ok ? 200 : 500), headers: { ...corsHeaders, 'Content-Type': 'application/json' } });

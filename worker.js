@@ -7377,6 +7377,106 @@ async function getResearchLabExperiment5Overview(env) {
   };
 }
 
+// ---- EXPERIMENT 5: operational status vs. predictive evidence ----
+// Two deliberately separate blocks, because "the pipeline runs" and "the challenger predicts better"
+// are different claims and the first says nothing about the second:
+//   operational  -- did the pipeline run, when, did it fail, what did it process. Read from
+//                   experiment5_pipeline_runs (migration 0019, written only by
+//                   research/experiment5_pipeline.py). Absent table => run_log_available:false, never
+//                   a guess from archive timestamps.
+//   predictive   -- resolved decisions, challenger vs V1 baseline counts, read from research_hypotheses.
+//                   NO success criterion has been pre-registered for Experiment 5, so this block never
+//                   emits a verdict (success_criterion_defined is always false); the minimum-sample
+//                   gate is the pre-existing EXPERIMENT5_MIN_SAMPLE_FOR_CONCLUSION.
+// Strictly read-only (SELECT only). Never recalculates, resolves or writes anything.
+const EXPERIMENT5_EXPECTED_RUN_INTERVAL_MS = 6 * 60 * 60 * 1000;
+// The live-evidence-collection.yml cron ('0 */6 * * *') that runs scripts/experiment5-agent/run.py. A
+// run is flagged overdue after TWO missed intervals, so normal GitHub-cron jitter is not an alarm.
+const EXPERIMENT5_RECENT_RUNS_LIMIT = 10;
+
+async function getResearchLabExperiment5Status(env, now) {
+  const nowTs = typeof now === 'number' ? now : Date.now();
+  const operational = {
+    run_log_available: false,
+    reason: null,
+    runs_total: 0,
+    last_run: null,
+    last_success: null,
+    last_failure: null,
+    consecutive_failures: 0,
+    overdue: null,
+    expected_run_interval_ms: EXPERIMENT5_EXPECTED_RUN_INTERVAL_MS,
+    recent_runs: [],
+  };
+
+  const publicRun = (r) => {
+    if (!r) return null;
+    const safeJson = (text, fallback) => { try { return JSON.parse(text); } catch (_e) { return fallback; } };
+    return {
+      run_id: r.run_id, run_ts: r.run_ts, status: r.status, error_text: r.error_text || null,
+      pipeline_version: r.pipeline_version, constants: safeJson(r.constants_json, null),
+      history_rows_read: r.history_rows_read, newly_archived: r.newly_archived,
+      archive_rows_observed: r.archive_rows_observed,
+      observations_without_sources: r.observations_without_sources,
+      observations_rejected_malformed: r.observations_rejected_malformed,
+      rejected_observation_ts: safeJson(r.rejected_observation_ts_json, []),
+      sources_observed: r.sources_observed, agent_status: r.agent_status,
+      decisions_replayed: r.decisions_replayed, decisions_created: r.decisions_created,
+      decisions_evaluated: r.decisions_evaluated, evaluated_passed: r.evaluated_passed,
+      evaluated_failed: r.evaluated_failed, evaluated_inconclusive: r.evaluated_inconclusive,
+    };
+  };
+
+  try {
+    const recent = await env.DB.prepare(
+      'SELECT * FROM experiment5_pipeline_runs ORDER BY run_ts DESC, run_id DESC LIMIT ' + EXPERIMENT5_RECENT_RUNS_LIMIT
+    ).all();
+    const rows = (recent && recent.results) || [];
+    const [total, lastOk, lastFailed] = await Promise.all([
+      env.DB.prepare('SELECT COUNT(*) AS n FROM experiment5_pipeline_runs').first(),
+      env.DB.prepare("SELECT * FROM experiment5_pipeline_runs WHERE status = 'OK' ORDER BY run_ts DESC, run_id DESC LIMIT 1").first(),
+      env.DB.prepare("SELECT * FROM experiment5_pipeline_runs WHERE status = 'FAILED' ORDER BY run_ts DESC, run_id DESC LIMIT 1").first(),
+    ]);
+    operational.run_log_available = true;
+    operational.runs_total = total ? total.n : 0;
+    operational.recent_runs = rows.map(publicRun);
+    operational.last_run = operational.recent_runs[0] || null;
+    operational.last_success = publicRun(lastOk);
+    operational.last_failure = publicRun(lastFailed);
+    // Consecutive failures = FAILED runs since the most recent OK run (or all of them if never OK).
+    let streak = 0;
+    for (const r of rows) { if (r.status === 'FAILED') streak++; else break; }
+    if (streak === rows.length && rows.length === EXPERIMENT5_RECENT_RUNS_LIMIT) {
+      operational.consecutive_failures_is_lower_bound = true;
+    }
+    operational.consecutive_failures = streak;
+    if (operational.last_run) {
+      operational.overdue = (nowTs - operational.last_run.run_ts) > 2 * EXPERIMENT5_EXPECTED_RUN_INTERVAL_MS;
+    }
+  } catch (_err) {
+    operational.reason = 'Run log not available: migration 0019 (experiment5_pipeline_runs) is not applied to this database. ' +
+      'Pipeline executions are therefore not recorded and cannot be shown; this does not mean the pipeline is not running.';
+  }
+
+  const results = await getResearchLabExperiment5Results(env);
+  const predictive = {
+    activated: !!(results && results.activated),
+    success_criterion_defined: false,
+    verdict: null,
+    n_resolved: results ? results.n_resolved : 0,
+    challenger_evaluable_n: results && results.activated ? results.agent_n : 0,
+    baseline_evaluable_n: results && results.activated ? results.v1_baseline_n : 0,
+    challenger_accuracy: results && results.activated ? results.agent_accuracy : null,
+    v1_baseline_accuracy: results && results.activated ? results.v1_baseline_accuracy : null,
+    min_sample_for_conclusion: EXPERIMENT5_MIN_SAMPLE_FOR_CONCLUSION,
+    sufficient_sample: !!(results && results.sufficient_sample),
+    note: 'No pre-registered success criterion exists for Experiment 5, so no conclusion is drawn here regardless of the counts. ' +
+      'Operational health (above) does not imply predictive value. Descriptive counts only; not a significance test.',
+  };
+
+  return { ok: true, operational, predictive };
+}
+
 // Single source of truth for the /api/research-lab/experiment5-decisions
 // `status` filter's valid values -- read by the route handler (to
 // reject an unrecognized value with a 400, same convention as
@@ -8805,6 +8905,61 @@ const RESEARCH_LAB_HTML = `<!DOCTYPE html>
     return html;
   }
 
+  function exp5Num(v) { return v === null || v === undefined ? String.fromCharCode(8212) : String(v); }
+  function exp5RunRowHtml(r) {
+    return '<div class="ev-row"><span class="k">' + esc(fmtTs(r.run_ts)) + '</span><span class="v">' +
+      (r.status === 'OK' ? badge('OK', 'b-verified') : badge('FAILED', 'b-blocked')) + ' ' +
+      esc('archived ' + exp5Num(r.newly_archived) + ', created ' + exp5Num(r.decisions_created) + ', evaluated ' + exp5Num(r.decisions_evaluated)) +
+      (r.error_text ? ' ' + esc(r.error_text) : '') + '</span></div>';
+  }
+  function exp5StatusHtml(status) {
+    if (!status || !status.ok) {
+      return '<div class="card" data-testid="exp5-status"><h2 class="card-title">Pipeline status</h2>' +
+        emptyState('Status unavailable', 'The status endpoint could not be read.') + '</div>';
+    }
+    var op = status.operational, pr = status.predictive;
+    var html = '<div class="card" data-testid="exp5-operational"><h2 class="card-title">Operational status (is the pipeline running?)</h2>';
+    if (!op.run_log_available) {
+      html += emptyState('Run log not available', op.reason || '');
+    } else if (!op.last_run) {
+      html += emptyState('No runs recorded yet', 'The run log exists but the pipeline has not recorded an execution.');
+    } else {
+      html += '<div class="ev-row"><span class="k">Last run</span><span class="v">' + esc(fmtTs(op.last_run.run_ts)) + ' ' +
+        (op.last_run.status === 'OK' ? badge('OK', 'b-verified') : badge('FAILED', 'b-blocked')) +
+        (op.overdue ? ' ' + badge('OVERDUE', 'b-plausible') : '') + '</span></div>';
+      html += '<div class="ev-row"><span class="k">Last successful run</span><span class="v">' +
+        (op.last_success ? esc(fmtTs(op.last_success.run_ts)) : 'never') + '</span></div>';
+      html += '<div class="ev-row"><span class="k">Consecutive failures</span><span class="v">' + op.consecutive_failures +
+        (op.consecutive_failures_is_lower_bound ? '+' : '') + '</span></div>';
+      if (op.last_failure) {
+        html += '<div class="ev-row"><span class="k">Last failure</span><span class="v">' + esc(fmtTs(op.last_failure.run_ts)) + ' ' +
+          esc(op.last_failure.error_text || '') + '</span></div>';
+      }
+      var lr = op.last_run;
+      html += '<div class="ev-row"><span class="k">Last run: history rows read / newly archived</span><span class="v">' +
+        exp5Num(lr.history_rows_read) + ' / ' + exp5Num(lr.newly_archived) + '</span></div>';
+      html += '<div class="ev-row"><span class="k">Last run: observations used / without sources / rejected</span><span class="v">' +
+        exp5Num(lr.archive_rows_observed) + ' / ' + exp5Num(lr.observations_without_sources) + ' / ' + exp5Num(lr.observations_rejected_malformed) + '</span></div>';
+      html += '<div class="ev-row"><span class="k">Last run: decisions replayed / created / evaluated</span><span class="v">' +
+        exp5Num(lr.decisions_replayed) + ' / ' + exp5Num(lr.decisions_created) + ' / ' + exp5Num(lr.decisions_evaluated) + '</span></div>';
+      if (lr.constants) {
+        html += '<div class="ev-row"><span class="k">Pipeline version / horizon / tolerance</span><span class="v">' + esc(lr.pipeline_version) + ' / ' +
+          esc(exp5Num(lr.constants.target_horizon_hours) + 'h') + ' / ' + esc(exp5Num(lr.constants.horizon_tolerance_ms) + 'ms') + '</span></div>';
+      }
+      html += '<div class="tap-hint">Recent runs (' + op.recent_runs.length + ' of ' + op.runs_total + ')</div>' +
+        op.recent_runs.map(exp5RunRowHtml).join('');
+    }
+    html += '</div>';
+    html += '<div class="card" data-testid="exp5-predictive"><h2 class="card-title">Predictive evidence (does it predict better than V1?)</h2>' +
+      '<div class="ev-row"><span class="k">Resolved decisions</span><span class="v">' + pr.n_resolved + '</span></div>' +
+      '<div class="ev-row"><span class="k">Challenger evaluable / V1 baseline evaluable</span><span class="v">' + pr.challenger_evaluable_n + ' / ' + pr.baseline_evaluable_n + '</span></div>' +
+      '<div class="ev-row"><span class="k">Minimum sample</span><span class="v">' + pr.min_sample_for_conclusion + (pr.sufficient_sample ? ' (reached)' : ' (not reached)') + '</span></div>' +
+      '<div class="ev-row"><span class="k">Pre-registered success criterion</span><span class="v">' + (pr.success_criterion_defined ? 'defined' : 'none defined') + '</span></div>' +
+      '<div class="ev-row"><span class="k">Verdict</span><span class="v">' + badge('NO CONCLUSION', 'b-unknown') + '</span></div>' +
+      '<p>' + esc(pr.note) + '</p></div>';
+    return html;
+  }
+
   async function renderExperiment5() {
     app.innerHTML = '<div class="skeleton">Loading Experiment 5&hellip;</div>';
     var overview = await fetchJson('/api/research-lab/experiment5-overview');
@@ -8817,6 +8972,8 @@ const RESEARCH_LAB_HTML = `<!DOCTYPE html>
 
     var qs = '?limit=25' + (exp5DecisionFilter !== 'all' ? '&status=' + exp5DecisionFilter : '');
     var decisionsResp = await fetchJson('/api/research-lab/experiment5-decisions' + qs);
+    var statusResp = null;
+    try { statusResp = await fetchJson('/api/research-lab/experiment5-status'); } catch (statusErr) { statusResp = null; }
 
     var html = '<div class="card glow"><h2 class="card-title">What Experiment 5 is</h2><p>' +
       'A deterministic, zero-AI challenger that permanently archives every sentiment observation, classifies its dynamics (trend, reversal, cross-source confirmation), proposes a directional decision when the evidence is notable, and later scores that decision against what BTC price actually did ' +
@@ -8827,6 +8984,8 @@ const RESEARCH_LAB_HTML = `<!DOCTYPE html>
       html += '<div class="card"><h2 class="card-title">In plain language</h2>' +
         overview.narrative.map(function (l) { return '<p>' + esc(l) + '</p>'; }).join('') + '</div>';
     }
+
+    html += exp5StatusHtml(statusResp);
 
     html += '<div class="grid metrics">' +
       tile('Archived Observations', overview.archive.n_observations, 'research_sentiment_archive') +
@@ -10138,6 +10297,14 @@ export default {
         // this deterministic explanation logic lives.
         const resultsForNarrative = await getResearchLabExperiment5Results(env);
         result.narrative = buildExperiment5NarrativeSummary(result, resultsForNarrative);
+        return new Response(JSON.stringify(result), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+      } catch (err) {
+        return new Response(JSON.stringify({ ok: false, error: String(err) }), { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+      }
+    }
+    if (url.pathname === '/api/research-lab/experiment5-status' && request.method === 'GET') {
+      try {
+        const result = await getResearchLabExperiment5Status(env);
         return new Response(JSON.stringify(result), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
       } catch (err) {
         return new Response(JSON.stringify({ ok: false, error: String(err) }), { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });

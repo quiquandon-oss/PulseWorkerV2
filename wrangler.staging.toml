@@ -32,6 +32,10 @@ account_id = "f58e761fbc8e62dc404d8684290af264"
 
 [vars]
 GIT_COMMIT_SHA = "staging"
+# Stage 7 is OFF on any deployment that does not set this. Production's wrangler.toml never does (guarded
+# by tests/stage7-routes.test.js), so merging Stage 7 code to main -- which auto-deploys worker.js to
+# production -- cannot activate it there. Plain, non-secret switch: it never replaces STAGE7_ADMIN_TOKEN.
+STAGE7_ENABLED = "true"
 
 # The ONLY D1 binding in this file -- a brand-new, empty database created
 # specifically for this staging deployment. Binding name "DB" matches

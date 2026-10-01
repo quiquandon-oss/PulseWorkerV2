@@ -1,20 +1,34 @@
 name: Stage 7 - AI-Assisted Research & Full-Source Sentiment Recalculation
 
-# Stage 7 of the Research Lab pipeline: for each real-world event Stage 6
-# (live-evidence-collection.yml + event_source_relevance.py/event_source_
-# evidence_join.py, all UNCHANGED here) still considers live, this either
-# (a) recalculates the event's sentiment over the COMPLETE eligible source
-# set when evidence is already sufficient, or (b) publishes a structured
-# research request -- as a versioned file in this repo, via a plain git
-# commit -- for Olivier to investigate manually with an AI tool's real
-# internet-search capability.
+# Stage 7 of the Research Lab pipeline -- CONFIRMED HUMAN-CONTROLLED
+# OPERATING MODEL: a human reviews a batch of proposed candidates in the
+# app, explicitly selects which to research, copies the app-generated
+# prompt to an external AI, pastes the answer back, and explicitly
+# triggers recalculation. This workflow is the BATCH half of that loop --
+# the interactive half (browsing candidates, creating requests, pasting
+# responses, flagging for recalculation) is entirely in worker.js/D1 and
+# needs no workflow run at all. Each dispatch of THIS workflow does, for
+# events Stage 6 (live-evidence-collection.yml + event_source_relevance.py/
+# event_source_evidence_join.py, all UNCHANGED here) still considers live:
+#   (a) PROPOSE -- assess newly-insufficient/conflicting events and write
+#       them as stage7_research_candidates rows (status PROPOSED) for a
+#       human to review in the app. Never creates a request, never
+#       publishes anything.
+#   (b) PUBLISH/RETRY -- for a request a human already created via the app
+#       (PENDING_RESEARCH, prompt already generated and visible in-app) or
+#       whose prior publish failed (FAILED_RETRYABLE), commit the
+#       already-generated prompt to this repo as a durable file. This is a
+#       best-effort audit trail, never required for the interactive
+#       workflow -- the prompt is already copyable from the app regardless.
+#   (c) RECALCULATE -- for a response a human has both VALIDATED and
+#       explicitly flagged via the app's "Trigger recalculation" action
+#       (recalculation_requested_ts set), recompute that event's Stage 7
+#       sentiment over the complete eligible source set. Registering or
+#       validating a response never queues this on its own.
 #
 # Does NOT call any AI API and does NOT perform its own internet search --
 # see stage7-research-pipeline/run_stage7.py's own module docstring and
-# research/stage7_github_publisher.py. A human registers a completed AI
-# response separately via the Worker's POST /api/research-lab/stage7-
-# register-response endpoint; this workflow only reads VALIDATED responses
-# to decide whether a pending request is now resolved.
+# research/stage7_github_publisher.py.
 #
 # All new sentiment/sufficiency/publishing logic lives in, and is unit-
 # tested in, research/stage7_evidence_sufficiency.py, research/stage7_
@@ -24,35 +38,46 @@ name: Stage 7 - AI-Assisted Research & Full-Source Sentiment Recalculation
 # D1 REST-API-write pattern exp009-event-source-evidence.yml already
 # uses) and to a real git commit/push for the request file.
 #
-# Writes ONLY stage7_research_requests and stage7_event_sentiment (both
-# new, migration 0016 -- NOT yet applied to production D1 as of this
-# workflow's creation). run_stage7.py checks for that schema FIRST, before
-# touching either table: if migration 0016 has not been applied at all, it
-# prints {"status": "SKIPPED -- MIGRATION NOT APPLIED", ...} and exits 0
-# (a clean, green, no-op run -- never a daily red X while waiting on a
-# deliberate, separate migration-application step). A genuinely PARTIAL
-# schema (some but not all of the three Stage 7 tables present) or any
-# other real D1/read error still fails the job loudly, exactly as before --
-# only the single, verified "migration not applied yet" case is quiet.
-# See stage7-research-pipeline/run_stage7.py's own classify_stage7_schema_
+# Writes stage7_research_candidates, stage7_event_sentiment, and (publish/
+# retry only) UPDATEs to stage7_research_requests it did not itself create
+# (migrations 0016 + 0017 -- NOT yet applied to production D1 as of this
+# workflow's creation). It never INSERTs a stage7_research_requests row --
+# only the Worker does that, for an explicitly human-selected candidate.
+# run_stage7.py checks schema state FIRST, before touching anything: if
+# neither migration has been applied at all, it prints
+# {"status": "SKIPPED -- MIGRATION NOT APPLIED", ...} and exits 0 (a clean,
+# green, no-op run -- never a red X while waiting on a deliberate, separate
+# migration-application step). A genuinely PARTIAL schema or any other real
+# D1/read error still fails the job loudly, exactly as before -- only the
+# single, verified "migration not applied yet" case is quiet. See
+# stage7-research-pipeline/run_stage7.py's own classify_stage7_schema_
 # state() for the exact rule. Never writes research_events, research_
 # event_evidence, history, btc_data, predictions, or any other V1/V2
 # production table. stage7_research_responses is written only by a human
-# via the Worker endpoint above, never by this script.
+# via the Worker's POST /api/research-lab/stage7-register-response
+# endpoint, never by this script.
 #
 # ACTIVATION SEQUENCE (manual, deliberate -- never automatic):
 #   1. Review and apply .ai/migrations/0016_stage7_research_pipeline.sql
-#      to production D1 (`wrangler d1 execute sentiment-history --remote
-#      --file .ai/migrations/0016_stage7_research_pipeline.sql`).
+#      then .ai/migrations/0017_stage7_candidate_workflow.sql to
+#      production D1 (`wrangler d1 execute sentiment-history --remote
+#      --file <path>`, in that order).
 #   2. Set the STAGE7_ADMIN_TOKEN Worker secret (`wrangler secret put
-#      STAGE7_ADMIN_TOKEN`) -- required before POST /api/research-lab/
-#      stage7-register-response will accept any request; see that
-#      endpoint's own comment in worker.js.
+#      STAGE7_ADMIN_TOKEN`) -- required before any of the Stage 7 write
+#      endpoints (create-requests, register-response, trigger-
+#      recalculation) will accept any request; see worker.js. Stage 7 is
+#      also OFF unless the deployment sets the plain var STAGE7_ENABLED =
+#      "true" (only wrangler.staging.toml does; production's wrangler.toml
+#      never does, so merging worker.js cannot activate Stage 7 there).
 #   3. Deploy worker.js (this repo's existing deploy.yml, triggered by a
-#      push to main that touches worker.js).
-#   4. This workflow's next run (whether from the daily staging dispatcher
-#      on main or a manual workflow_dispatch) will then see schema_state
-#      == "READY" and process events normally.
+#      push to main that touches worker.js). This alone makes the
+#      interactive candidate-review/request-creation/response-registration/
+#      recalculation-trigger workflow usable end to end through the app --
+#      it does NOT require this workflow to ever run.
+#   4. Separately and explicitly decide whether/when to ever dispatch THIS
+#      workflow against production, for the batch propose/publish/
+#      recalculate steps above -- that is its own decision, not implied by
+#      steps 1-3.
 # Until step 1 is done, every run of this workflow is a safe, intentional
 # no-op.
 #
@@ -66,10 +91,12 @@ name: Stage 7 - AI-Assisted Research & Full-Source Sentiment Recalculation
 #     below, pointing at the separate pulseworker-v2-staging D1 database)
 #     and validates them against that one expected staging target BEFORE
 #     any remote D1 call -- see its own validate_staging_target().
-#   - This workflow only ever runs against the
-#     claude/stage7-research-pipeline branch (the "Enforce staging-only
-#     branch" step below, which runs before checkout/tests/anything that
-#     could touch Cloudflare or git-push), and uses the DEDICATED
+#   - This workflow only ever runs against the reviewed
+#     claude/stage7-human-controlled-workflow branch AND only for code
+#     whose full SHA a human supplies as `expected_sha` (the "Enforce
+#     staging-only branch" step and the "Verify the head is the reviewed
+#     commit" step below -- the former runs before checkout/tests/anything
+#     that could touch Cloudflare or git-push), and uses the DEDICATED
 #     STAGE7_STAGING_CLOUDFLARE_API_TOKEN secret rather than the general
 #     CLOUDFLARE_API_TOKEN production deploy uses.
 # KNOWN LIMITATION (documented, not fixed by scoping alone): Cloudflare's
@@ -90,28 +117,23 @@ name: Stage 7 - AI-Assisted Research & Full-Source Sentiment Recalculation
 # and set by a human with Cloudflare account access, same as every other
 # secret in this repo.
 #
-# NO schedule: TRIGGER HERE (Copilot-audit follow-up): a `schedule:`
-# trigger is only ever evaluated using the workflow file version on the
-# repository's DEFAULT branch (main), regardless of which branch defines
-# it -- so a schedule declared here would sit dormant and safe only for
-# as long as this file never reaches main, which is a fragile, easy-to-
-# violate invariant to depend on for something meant to run daily
-# forever. The daily 11:00 UTC cadence (originally: same reasoning as
-# every other experiment workflow in this repo -- Stage 6 evidence
-# changes every 6 hours via live-evidence-collection.yml, so a daily
-# check keeps Olivier's request queue and event sentiment reasonably
-# current; offset one hour after live-evidence-collection's own day-
-# boundary run and exp009's Monday run, purely to avoid two large jobs
-# starting at the same instant) now lives entirely in
-# .github/workflows/stage7-staging-dispatcher.yml on main instead: that
-# workflow holds no Cloudflare secret and makes no D1/Cloudflare call of
-# its own -- it only fires this workflow's own workflow_dispatch event
-# with ref=claude/stage7-research-pipeline once a day, so THIS workflow
-# only ever runs the way it always could: manually, or by explicit
-# dispatch, always subject to the branch guard below regardless of who
-# or what invoked it.
+# NO schedule: TRIGGER HERE, AND NO SCHEDULED DISPATCH EITHER. A `schedule:` trigger is only ever evaluated using
+# the workflow file on the repository's DEFAULT branch (main), so one declared here would sit dormant only for as
+# long as this file never reaches main. The human-controlled operating model (a person selects candidates,
+# validates responses and explicitly requests recalculation; this workflow only executes what they asked for) also
+# means a run must be a deliberate human act. The former daily dispatcher
+# (.github/workflows/stage7-staging-dispatcher.yml) fired this workflow on a different branch, so unreviewed code
+# kept running against staging; it is now manual-only and must be given the reviewed SHA. A run is bound to
+# reviewed code twice: the ref must be exactly refs/heads/claude/stage7-human-controlled-workflow, and a human
+# supplies `expected_sha`, which must be an ancestor of the checked-out head with nothing but publisher data
+# (research/stage7_requests/**) committed after it.
 on:
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      expected_sha:
+        description: 'Full 40-character commit SHA of the reviewed code this run is allowed to execute (see "Enforce staging-only branch" below).'
+        required: true
+        type: string
 
 concurrency:
   group: stage7-research-pipeline
@@ -142,12 +164,19 @@ jobs:
       # file ever being merged to main, from running against anything
       # but this one staging branch.
       - name: Enforce staging-only branch
+        env:
+          DISPATCH_REF: ${{ github.ref }}
+          EXPECTED_SHA: ${{ inputs.expected_sha }}
         run: |
-          if [ "${{ github.ref }}" != "refs/heads/claude/stage7-research-pipeline" ]; then
-            echo "::error::Stage 7 is staging-only. Refusing to run on ref '${{ github.ref }}' -- this workflow may only execute on refs/heads/claude/stage7-research-pipeline. Aborting before checkout, tests, Cloudflare access, or any git publish step."
+          if [ "$DISPATCH_REF" != "refs/heads/claude/stage7-human-controlled-workflow" ]; then
+            echo "::error::Stage 7 is staging-only. Refusing to run on ref '$DISPATCH_REF' -- this workflow may only execute on refs/heads/claude/stage7-human-controlled-workflow. Aborting before checkout, tests, Cloudflare access, or any git publish step."
             exit 1
           fi
-          echo "Branch guard passed: running on refs/heads/claude/stage7-research-pipeline."
+          if ! printf '%s' "$EXPECTED_SHA" | grep -Eq '^[0-9a-f]{40}$'; then
+            echo "::error::expected_sha must be a full 40-character lowercase commit SHA. Aborting before checkout, tests, Cloudflare access, or any git publish step."
+            exit 1
+          fi
+          echo "Branch guard passed: $DISPATCH_REF (reviewed SHA to be verified after checkout: $EXPECTED_SHA)."
 
       # Fail closed, not silently skip, if the dedicated staging token
       # isn't configured -- a missing secret must never be mistaken for
@@ -166,6 +195,27 @@ jobs:
 
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # The code that runs here must BE the reviewed code: expected_sha must be an ancestor of the checked-out
+      # head, and the only paths that may differ since are the request files this pipeline itself publishes
+      # (research/stage7_requests/**). Anything else means unreviewed code, so the run aborts before any
+      # Cloudflare access or publish step.
+      - name: Verify the head is the reviewed commit (only publisher data may follow it)
+        env:
+          EXPECTED_SHA: ${{ inputs.expected_sha }}
+        run: |
+          set -e
+          git cat-file -e "$EXPECTED_SHA^{commit}" || { echo "::error::expected_sha $EXPECTED_SHA is not a commit in this repository."; exit 1; }
+          git merge-base --is-ancestor "$EXPECTED_SHA" HEAD || { echo "::error::expected_sha is not an ancestor of the dispatched head; the branch was rewritten or the SHA is wrong."; exit 1; }
+          unreviewed=$(git diff --name-only "$EXPECTED_SHA" HEAD | grep -v '^research/stage7_requests/' || true)
+          if [ -n "$unreviewed" ]; then
+            echo "::error::These files changed after the reviewed commit and are not publisher data -- review them and dispatch with the new SHA:"
+            echo "$unreviewed"
+            exit 1
+          fi
+          echo "Head $(git rev-parse HEAD) contains reviewed code $EXPECTED_SHA plus, at most, publisher request files."
 
       - name: Setup Node (for wrangler)
         uses: actions/setup-node@v4

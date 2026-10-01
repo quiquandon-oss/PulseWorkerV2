@@ -27,7 +27,7 @@ WRANGLER_TOML_PATH = os.path.join(REPO_ROOT, "wrangler.toml")
 PRODUCTION_WORKER_NAME = "pulseworker-v2"
 PRODUCTION_DATABASE_NAME = "sentiment-history"
 PRODUCTION_DATABASE_ID = "f91ca980-b886-423a-bd6f-f3baea46d181"
-FEATURE_BRANCH = "claude/stage7-research-pipeline"
+FEATURE_BRANCH = "claude/stage7-human-controlled-workflow"  # the reviewed Stage 7 branch (see stage7-research-pipeline/test_branch_binding.py)
 STAGE7_WORKFLOW_FILENAME = "stage7-research-pipeline.yml"
 
 
@@ -62,34 +62,40 @@ def test_dispatcher_does_not_target_main_or_any_other_ref():
 
 
 # =====================================================================
-# Requirement #2: the daily schedule is defined ONLY in the dispatcher
-# on main (the Stage 7 workflow's own schedule: removal is verified on
-# the feature branch itself, in test_workflow_staging_guard.py).
+# Requirement #2 (revised in the PR #82 remediation): Stage 7 is
+# human-controlled, so NOTHING schedules it. The former daily 11:00 UTC cron
+# fired the pipeline on a different, older branch (unreviewed code ran on
+# schedule), and a scheduled run cannot supply the reviewed SHA the pipeline
+# now requires. The dispatcher is manual-only and forwards a human-supplied
+# expected_sha.
 # =====================================================================
 
-def test_dispatcher_has_the_daily_11_00_utc_schedule():
+def test_dispatcher_has_no_schedule_and_is_manual_dispatch_only():
     triggers = _load_dispatcher()[True]  # PyYAML parses `on:` as key True
-    assert triggers["schedule"] == [{"cron": "0 11 * * *"}]
+    assert "schedule" not in triggers
+    assert set(triggers) == {"workflow_dispatch"}
 
 
-def test_dispatcher_also_allows_manual_dispatch_for_testing():
+def test_dispatcher_requires_and_forwards_the_reviewed_sha():
     triggers = _load_dispatcher()[True]
-    assert "workflow_dispatch" in triggers
+    assert triggers["workflow_dispatch"]["inputs"]["expected_sha"]["required"] is True
+    assert 'expected_sha="$EXPECTED_SHA"' in _dispatcher_text()
 
 
-def test_no_other_workflow_on_main_defines_the_stage7_daily_schedule():
-    # Belt-and-braces: confirm this specific cron string doesn't also
-    # appear in some other main-branch workflow (which would mean the
-    # daily trigger is defined twice, not "only in the dispatcher").
+def test_no_workflow_defines_a_stage7_schedule():
+    # The former cron string must not exist in ANY workflow, so no scheduled trigger can fire Stage 7.
     workflows_dir = os.path.join(REPO_ROOT, ".github", "workflows")
     hits = []
     for name in os.listdir(workflows_dir):
         if not name.endswith((".yml", ".yaml")):
             continue
         with open(os.path.join(workflows_dir, name)) as f:
-            if "0 11 * * *" in f.read():
+            workflow = yaml.safe_load(f)
+        triggers = workflow.get(True, {}) or {}
+        for entry in (triggers.get("schedule") or []) if isinstance(triggers, dict) else []:
+            if entry.get("cron") == "0 11 * * *" and "stage7" in name:
                 hits.append(name)
-    assert hits == ["stage7-staging-dispatcher.yml"]
+    assert hits == []
 
 
 # =====================================================================

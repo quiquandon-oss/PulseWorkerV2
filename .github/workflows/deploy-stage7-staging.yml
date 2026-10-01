@@ -1,8 +1,8 @@
 name: Deploy Stage 7 Staging Worker
 
 # Manual, one-shot deploy of the Stage 7 STAGING Worker
-# (pulseworker-v2-staging) from claude/stage7-research-pipeline's own
-# worker.js + wrangler.staging.toml. This is the ONLY workflow in this
+# (pulseworker-v2-staging) from the reviewed Stage 7 branch's worker.js +
+# wrangler.staging.toml. This is the ONLY workflow in this
 # repo that deploys anything to the staging environment; production
 # deployment stays exclusively in .github/workflows/deploy.yml (push to
 # main, production wrangler.toml, the general CLOUDFLARE_API_TOKEN
@@ -14,12 +14,19 @@ name: Deploy Stage 7 Staging Worker
 #   - workflow_dispatch ONLY -- no push, no schedule. A staging Worker
 #     deploy is a deliberate, manual action, never a side effect of any
 #     commit landing on main.
-#   - Checks out claude/stage7-research-pipeline pinned to the EXACT
-#     commit verified before this workflow was written (see the
-#     checkout step below) -- never the moving branch head, so this
-#     workflow can never silently deploy code nobody reviewed. Bump the
-#     pinned SHA deliberately (a small, explicit diff to this file) when
-#     a newer verified commit should be deployed instead.
+#   - Deploys EXACTLY the code a human names. The dispatch must be run on
+#     the reviewed branch (refs/heads/claude/stage7-human-controlled-workflow)
+#     and must be given `expected_sha`, the full SHA that was reviewed. The
+#     first step rejects any other ref; after checkout, the job verifies that
+#     expected_sha is an ancestor of the checked-out head and that NOTHING
+#     but publisher data files (research/stage7_requests/**, which the Stage 7
+#     pipeline commits to this same branch) changed since -- so a moving branch
+#     head, a different branch, a mistyped SHA or an unreviewed code change can
+#     never be deployed silently. expected_sha is baked into the Worker as
+#     GIT_COMMIT_SHA (`wrangler deploy --var`), so
+#     GET /api/research-lab/stage7-overview reports
+#     `deployment.git_commit_sha` and a reviewer can confirm the running code is
+#     the reviewed code. There is no hard-coded SHA that can silently go stale.
 #   - Reads CLOUDFLARE_API_TOKEN from the DEDICATED
 #     STAGE7_STAGING_CLOUDFLARE_API_TOKEN secret only -- never the
 #     general-purpose CLOUDFLARE_API_TOKEN secret deploy.yml uses -- and
@@ -59,7 +66,12 @@ name: Deploy Stage 7 Staging Worker
 # Cloudflare token check. This does NOT trigger the Stage 7 research
 # pipeline itself -- that stays a separate, later, explicit step.
 on:
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      expected_sha:
+        description: 'Full 40-character commit SHA you reviewed and intend to deploy. Must equal the dispatched ref head.'
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -68,6 +80,23 @@ jobs:
   deploy-staging:
     runs-on: ubuntu-latest
     steps:
+      # MUST be the first step: nothing else (no secret check, no checkout, no deploy) runs for a ref or SHA
+      # that was not deliberately named. Values arrive through env, never interpolated into the script.
+      - name: Enforce reviewed branch and well-formed SHA
+        env:
+          DISPATCH_REF: ${{ github.ref }}
+          EXPECTED_SHA: ${{ inputs.expected_sha }}
+        run: |
+          if [ "$DISPATCH_REF" != "refs/heads/claude/stage7-human-controlled-workflow" ]; then
+            echo "::error::Refusing to deploy ref '$DISPATCH_REF'. Run this workflow on refs/heads/claude/stage7-human-controlled-workflow only."
+            exit 1
+          fi
+          if ! printf '%s' "$EXPECTED_SHA" | grep -Eq '^[0-9a-f]{40}$'; then
+            echo "::error::expected_sha must be a full 40-character lowercase commit SHA."
+            exit 1
+          fi
+          echo "Ref accepted: $DISPATCH_REF (reviewed SHA to be verified after checkout: $EXPECTED_SHA)."
+
       # Fail closed before checkout -- no reason to clone the repo at
       # all if this job can't proceed. Never falls back to
       # secrets.CLOUDFLARE_API_TOKEN (the production deploy token) or
@@ -97,15 +126,30 @@ jobs:
           fi
           echo "Staging admin token secret is configured."
 
-      # Pinned to the exact commit verified before this workflow was
-      # authored -- see this file's own module comment above. Update
-      # this SHA deliberately (its own small commit) to deploy a newer,
-      # separately-verified commit; never point this at a mutable branch
-      # ref for a deploy workflow.
-      - name: Checkout claude/stage7-research-pipeline at the verified commit
+      # Full history is needed to prove expected_sha is an ancestor of the head. Checks out the dispatched
+      # commit itself, never a moving ref.
+      - name: Checkout the dispatched commit (full history)
         uses: actions/checkout@v4
         with:
-          ref: 423ed051dbbb4e230bf6ea832f8c20ead591466f
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+
+      # The deployed code must BE the reviewed code: expected_sha must exist, be an ancestor of the head, and
+      # the only paths that may differ since are the Stage 7 pipeline's own published request files.
+      - name: Verify the head is the reviewed commit (only publisher data may follow it)
+        env:
+          EXPECTED_SHA: ${{ inputs.expected_sha }}
+        run: |
+          set -e
+          git cat-file -e "$EXPECTED_SHA^{commit}" || { echo "::error::expected_sha $EXPECTED_SHA is not a commit in this repository."; exit 1; }
+          git merge-base --is-ancestor "$EXPECTED_SHA" HEAD || { echo "::error::expected_sha is not an ancestor of the dispatched head; the branch was rewritten or the SHA is wrong."; exit 1; }
+          unreviewed=$(git diff --name-only "$EXPECTED_SHA" HEAD | grep -v '^research/stage7_requests/' || true)
+          if [ -n "$unreviewed" ]; then
+            echo "::error::These files changed after the reviewed commit and are not publisher data -- review them and dispatch with the new SHA:"
+            echo "$unreviewed"
+            exit 1
+          fi
+          echo "Head $(git rev-parse HEAD) contains reviewed code $EXPECTED_SHA plus, at most, publisher request files."
 
       # Belt-and-braces: confirm the checked-out wrangler.staging.toml
       # still targets exactly the staging Worker/D1 pair, and contains no
@@ -128,6 +172,14 @@ jobs:
           fi
           if grep -qE '^name = "pulseworker-v2"' wrangler.staging.toml || grep -qE '^database_name = "sentiment-history"' wrangler.staging.toml || grep -qE '^database_id = "f91ca980-b886-423a-bd6f-f3baea46d181"' wrangler.staging.toml; then
             echo "::error::wrangler.staging.toml declares a production Worker/database identifier as a real config line. Refusing to deploy."
+            exit 1
+          fi
+          if ! grep -qx 'STAGE7_ENABLED = "true"' wrangler.staging.toml; then
+            echo "::error::wrangler.staging.toml does not enable Stage 7 (STAGE7_ENABLED = \"true\"); the deployed Worker would have Stage 7 switched off."
+            exit 1
+          fi
+          if grep -q 'STAGE7_ENABLED' wrangler.toml; then
+            echo "::error::The PRODUCTION wrangler.toml must never enable Stage 7. Refusing to deploy."
             exit 1
           fi
           echo "wrangler.staging.toml target validated: pulseworker-v2-staging / 5458d504-2778-49ae-bd25-7751f1c49d50."
@@ -156,7 +208,8 @@ jobs:
       - name: Deploy to staging
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.STAGE7_STAGING_CLOUDFLARE_API_TOKEN }}
-        run: npx wrangler deploy -c wrangler.staging.toml
+          REVIEWED_SHA: ${{ inputs.expected_sha }}
+        run: npx wrangler deploy -c wrangler.staging.toml --var GIT_COMMIT_SHA:$REVIEWED_SHA
 
       # `wrangler secret put` requires the Worker to already exist --
       # this step runs after (never before) the deploy step above.

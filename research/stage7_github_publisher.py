@@ -29,7 +29,13 @@ SCHEMA_VERSION = "stage7-request-v1"
 # publish_request_file() below: the branch is checked BEFORE any file is
 # staged, committed, or pushed, and "main" is rejected by name even if it
 # were ever passed as the allowed target by mistake.
-ALLOWED_PUBLISH_BRANCH = "claude/stage7-research-pipeline"
+#
+# This is the REVIEWED Stage 7 branch -- the same one the pipeline and staging-deploy workflows are bound to
+# (stage7-research-pipeline/test_branch_binding.py asserts all of them agree). It used to name the older
+# claude/stage7-research-pipeline branch, which made publishing impossible from the reviewed branch. Published
+# request files land only under research/stage7_requests/, and both workflows accept those as the sole
+# permitted change after the reviewed commit.
+ALLOWED_PUBLISH_BRANCH = "claude/stage7-human-controlled-workflow"
 FORBIDDEN_PUBLISH_BRANCHES = ("main", "master")
 
 # A FAILED_RETRYABLE request is retried once per scheduled run (see
@@ -85,7 +91,22 @@ def build_request_file_content(request):
     original event dict and evidence rows needed for a self-contained
     research prompt -- everything Step D lists, nothing more (no bulk
     historical market data, per the explicit instruction not to use
-    GitHub as an archive for that)."""
+    GitHub as an archive for that).
+
+    CANONICAL PROMPT SOURCE (confirmed human-controlled operating model):
+    every request created via the app's candidate-review flow already has
+    an exact `prompt_text` stored on it -- generated ONCE, server-side, by
+    worker.js's buildStage7ResearchPromptText() at the moment the human's
+    "Create research requests" action ran, and shown to that human
+    verbatim in the UI. When present, that stored text is used here
+    UNCHANGED -- never regenerated -- so the file this function publishes
+    to GitHub is byte-identical to what the human actually saw and copied,
+    and there is exactly ONE prompt implementation in the whole system,
+    never two independently-maintained ones that could drift apart.
+    build_research_prompt() below is kept only as a fallback for a legacy
+    request that predates this field (request.get("prompt_text") is
+    None/absent) -- no such request has ever been created against a real
+    database as of this change."""
     return {
         "schema_version": SCHEMA_VERSION,
         "request_id": request["request_id"],
@@ -98,7 +119,7 @@ def build_request_file_content(request):
         "missing_categories": request["missing_categories"],
         "event": request["event"],
         "evidence_snapshot": request["evidence_snapshot"],
-        "research_prompt": build_research_prompt(request),
+        "research_prompt": request.get("prompt_text") or build_research_prompt(request),
     }
 
 

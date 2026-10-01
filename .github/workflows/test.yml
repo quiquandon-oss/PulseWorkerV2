@@ -38,5 +38,8 @@ jobs:
       # "No module named 'yaml'" before this line was added.
       - name: Install pytest
         run: pip install pytest pyyaml --break-system-packages
-      - name: Run Experiment 4 and research schema tests
-        run: python3 -m pytest exp004-timesfm/ research/ -v
+      # stage7-research-pipeline/ added: its tests (workflow branch/SHA binding, the Worker<->migration schema
+      # contract run in real sqlite, write boundaries, run_stage7 behaviour) are what protect the Stage 7
+      # deployment boundary, so they must gate every PR rather than only run inside the Stage 7 workflow itself.
+      - name: Run Experiment 4, research schema and Stage 7 pipeline tests
+        run: python3 -m pytest exp004-timesfm/ research/ stage7-research-pipeline/ -v

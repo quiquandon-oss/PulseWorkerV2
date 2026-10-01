@@ -6646,30 +6646,185 @@ function parseStage7JsonField(raw, fallback) {
   try { return JSON.parse(raw); } catch (_err) { return fallback; }
 }
 
+// ---- Stage 7 deployment gate, schema readiness, and safe error mapping ----
+//
+// WHY THIS EXISTS. .github/workflows/deploy.yml deploys this whole file to PRODUCTION on any push to
+// main that touches worker.js, so merging Stage 7 code ships it to production whether or not anyone
+// meant to activate it. Stage 7 is therefore OFF unless the deployment explicitly sets
+// STAGE7_ENABLED = "true". Only wrangler.staging.toml sets it; production's wrangler.toml never does
+// (guarded by a test). STAGE7_ENABLED is a plain, non-secret switch -- it never replaces authentication:
+// every write still needs STAGE7_ADMIN_TOKEN, and the token check still fails closed.
+//
+// Enabling Stage 7 on a deployment is a deliberate, separate act (config + migrations + token), never a
+// side effect of merging.
+function stage7Enabled(env) {
+  return !!env && env.STAGE7_ENABLED === 'true';
+}
+
+// Every table/column Stage 7 reads or writes, grouped by the migration that introduces it. Kept in strict
+// JSON so tests can parse it from this file and assert it matches the real migration SQL
+// (tests/stage7-schema-readiness.test.js, stage7-research-pipeline/test_worker_schema_contract.py).
+// BEGIN STAGE7_REQUIRED_SCHEMA_JSON
+const STAGE7_REQUIRED_SCHEMA = [
+  {"table": "research_events", "migration": "0005", "columns": ["event_id", "event_ts", "category"]},
+  {"table": "stage7_research_requests", "migration": "0016", "columns": ["request_id", "event_id", "created_ts", "updated_ts", "schema_version", "status", "sufficiency_status", "reasons_json", "questions_json", "missing_categories_json", "historical_cutoff_ts", "evidence_snapshot_json", "github_path", "github_published_ts", "github_publish_error", "publish_attempts", "input_fingerprint"]},
+  {"table": "stage7_research_responses", "migration": "0016", "columns": ["response_id", "request_id", "provider", "submitted_ts", "registered_ts", "findings_json", "sources_json", "confidence", "validation_status", "validated_ts", "validator_notes"]},
+  {"table": "stage7_event_sentiment", "migration": "0016", "columns": ["id", "event_id", "calculation_ts", "formula_version", "evidence_sufficiency", "sentiment_label", "sentiment_score", "v1_macro_context_json", "evidence_interpretation_json", "contributing_evidence_ids_json", "excluded_evidence_json", "duplicate_handling_json", "ai_research_response_id", "previous_sentiment_id", "input_fingerprint"]},
+  {"table": "stage7_research_candidates", "migration": "0017", "columns": ["candidate_id", "event_id", "proposed_ts", "updated_ts", "status", "sufficiency_status", "reasons_json", "questions_json", "missing_categories_json", "historical_cutoff_ts", "evidence_snapshot_json", "input_fingerprint", "request_id"]},
+  {"table": "stage7_research_requests", "migration": "0017", "columns": ["candidate_id", "prompt_text", "recalculation_requested_ts", "recalculation_requested_by"]},
+  {"table": "stage7_research_responses", "migration": "0017", "columns": ["raw_response_text", "source_validation_json"]},
+  {"table": "stage7_research_requests", "migration": "0018", "columns": ["recalculation_status", "recalculation_started_ts", "recalculation_completed_ts", "recalculation_error", "recalculation_attempts", "recalculation_sentiment_id"]},
+  {"table": "stage7_research_responses", "migration": "0018", "columns": ["human_confirmed_ts", "human_review_note"]}
+];
+// END STAGE7_REQUIRED_SCHEMA_JSON
+
+// ONE query for the whole probe: every column of every table Stage 7 depends on. A table that does
+// not exist simply yields no rows.
+const STAGE7_SCHEMA_PROBE_SQL =
+  "SELECT m.name AS tbl, p.name AS col FROM sqlite_master m JOIN pragma_table_info(m.name) p " +
+  "WHERE m.type = 'table' AND m.name IN ('research_events', 'stage7_research_requests', " +
+  "'stage7_research_responses', 'stage7_event_sentiment', 'stage7_research_candidates')";
+
+// Pure. `rows` = what the probe returned. Distinguishes "not applied", "partially applied" (some migration
+// missing) and "ready" -- and names exactly which migrations to apply, in order.
+function classifyStage7Schema(rows) {
+  const present = {};
+  for (const r of rows || []) {
+    if (!present[r.tbl]) present[r.tbl] = new Set();
+    present[r.tbl].add(r.col);
+  }
+  const missingTables = [];
+  const missingColumns = [];
+  const migrations = new Set();
+  for (const group of STAGE7_REQUIRED_SCHEMA) {
+    const have = present[group.table];
+    if (!have) {
+      if (!missingTables.includes(group.table)) missingTables.push(group.table);
+      migrations.add(group.migration);
+      continue;
+    }
+    for (const col of group.columns) {
+      if (!have.has(col)) {
+        missingColumns.push({ table: group.table, column: col, migration: group.migration });
+        migrations.add(group.migration);
+      }
+    }
+  }
+  const stage7Present = Object.keys(present).some((t) => t.startsWith('stage7_'));
+  const migrationsRequired = [...migrations].sort();
+  if (!missingTables.length && !missingColumns.length) {
+    return { ready: true, state: 'READY', missing_tables: [], missing_columns: [], migrations_required: [], message: 'Stage 7 schema is complete.' };
+  }
+  const state = stage7Present ? 'PARTIAL' : 'NOT_APPLIED';
+  return {
+    ready: false, state, missing_tables: missingTables, missing_columns: missingColumns, migrations_required: migrationsRequired,
+    message: (state === 'NOT_APPLIED'
+      ? 'Stage 7 migrations are not applied to this database.'
+      : 'Stage 7 schema is only partially applied (a migration is missing or behind).') +
+      ' Apply, in order: ' + migrationsRequired.map((m) => m).join(', ') +
+      ' (.ai/migrations). Migrations are never applied automatically.',
+  };
+}
+
+// Never lets a failed probe pass for "migration missing": a transient D1 error is reported as such.
+async function getStage7SchemaStatus(env) {
+  let rows;
+  try {
+    const res = await env.DB.prepare(STAGE7_SCHEMA_PROBE_SQL).all();
+    rows = (res && res.results) || [];
+  } catch (err) {
+    console.error('stage7 schema probe failed:', err);
+    return {
+      ready: false, state: 'CHECK_FAILED', missing_tables: [], missing_columns: [], migrations_required: [],
+      message: 'Could not verify the Stage 7 schema because the database query failed. This is NOT evidence that ' +
+        'a migration is missing; retry shortly.',
+    };
+  }
+  return classifyStage7Schema(rows);
+}
+
+// Pure. Maps ANY thrown error to a response that names a category but never echoes SQL, table internals, or
+// request content. `no such table/column` -> schema not ready (503); anything else -> generic 500 (the real
+// error goes to the Worker log only). A non-JSON request body is handled before this (see stage7WriteRoute).
+function stage7SafeError(err) {
+  const text = String(err && err.message ? err.message : err);
+  if (/no such (table|column)/i.test(text)) {
+    return { status: 503, body: { ok: false, code: 'STAGE7_SCHEMA_NOT_READY', error: 'Stage 7 schema is not ready on this database. Check GET /api/research-lab/stage7-overview for the migrations to apply.' } };
+  }
+  console.error('stage7 route error:', err);
+  return { status: 500, body: { ok: false, code: 'STAGE7_INTERNAL_ERROR', error: 'Stage 7 request failed. See the Worker logs.' } };
+}
+
+// The route-level gate every Stage 7 route runs first. Order matters: DISABLED, then (writes only)
+// authentication, THEN schema -- so an unauthenticated caller never learns anything about the schema
+// beyond what the public overview already shows. The auth messages/statuses are identical to the ones the
+// write functions return themselves (those still re-check, so a function is never callable un-authenticated).
+// Returns null when the request may proceed, else {status, body}.
+async function stage7RoutePreflight(env, { write, providedToken }) {
+  if (!stage7Enabled(env)) {
+    return {
+      status: write ? 503 : 200,
+      body: write
+        ? { ok: false, code: 'STAGE7_DISABLED', error: 'Stage 7 is not enabled on this deployment (STAGE7_ENABLED is not "true").' }
+        : { ok: true, activated: false, enabled: false, reason: 'Stage 7 is not enabled on this deployment (STAGE7_ENABLED is not "true"). Nothing is read or written.' },
+    };
+  }
+  if (write) {
+    const configuredToken = env.STAGE7_ADMIN_TOKEN;
+    if (!configuredToken) {
+      return { status: 503, body: { ok: false, code: 'STAGE7_TOKEN_NOT_CONFIGURED', error: 'Stage 7 writes are disabled on this Worker: STAGE7_ADMIN_TOKEN is not configured.' } };
+    }
+    if (typeof providedToken !== 'string' || !providedToken || !stage7ConstantTimeEqual(providedToken, configuredToken)) {
+      return { status: 401, body: { ok: false, error: 'Unauthorized' } };
+    }
+  }
+  const schema = await getStage7SchemaStatus(env);
+  if (schema.state === 'CHECK_FAILED') {
+    return { status: 503, body: { ok: false, code: 'STAGE7_SCHEMA_CHECK_FAILED', error: schema.message, schema } };
+  }
+  if (!schema.ready) {
+    return write
+      ? { status: 503, body: { ok: false, code: 'STAGE7_SCHEMA_NOT_READY', error: schema.message, schema } }
+      : { status: 200, body: { ok: true, activated: false, enabled: true, reason: schema.message, schema } };
+  }
+  return null;
+}
+
 async function getResearchLabStage7Overview(env) {
   let byStatusRows;
   try {
     byStatusRows = await env.DB.prepare(
       'SELECT status, COUNT(*) AS n FROM stage7_research_requests GROUP BY status'
     ).all();
-  } catch (_err) {
+  } catch (err) {
+    // Only a genuinely missing table means "migration not applied". Any other failure (a transient D1 error,
+    // a timeout) must NOT be reported as a missing migration -- it propagates and the route maps it.
+    if (!/no such (table|column)/i.test(String(err && err.message ? err.message : err))) throw err;
     return {
       ok: true,
       activated: false,
-      reason: 'Stage 7 migration (0016: stage7_research_requests/stage7_research_responses/stage7_event_sentiment) is not yet applied to production D1.',
+      reason: 'Stage 7 migration 0016 (stage7_research_requests/stage7_research_responses/stage7_event_sentiment) is not applied to this database.',
     };
   }
 
   const byStatus = {};
   for (const row of (byStatusRows && byStatusRows.results) || []) byStatus[row.status] = row.n;
 
-  const [openRequestsResult, sentimentResult] = await Promise.all([
+  const [openRequestsResult, sentimentResult, candidatesResult] = await Promise.all([
     env.DB.prepare(
       `SELECT r.request_id, r.event_id, re.category AS event_category, re.event_ts AS event_ts,
               r.status, r.sufficiency_status, r.reasons_json, r.questions_json, r.missing_categories_json,
+              r.historical_cutoff_ts, r.evidence_snapshot_json, r.prompt_text,
               r.created_ts, r.updated_ts, r.github_path, r.github_published_ts, r.github_publish_error,
+              r.recalculation_requested_ts, r.recalculation_requested_by,
+              r.recalculation_status, r.recalculation_started_ts, r.recalculation_completed_ts,
+              r.recalculation_error, r.recalculation_attempts, r.recalculation_sentiment_id,
               resp.response_id AS response_id, resp.validation_status AS response_validation_status,
-              resp.registered_ts AS response_registered_ts
+              resp.registered_ts AS response_registered_ts, resp.provider AS response_provider,
+              resp.findings_json AS response_findings_json, resp.sources_json AS response_sources_json,
+              resp.source_validation_json AS response_source_validation_json,
+              resp.raw_response_text AS response_raw_text, resp.human_confirmed_ts AS response_human_confirmed_ts,
+              resp.human_review_note AS response_human_review_note
        FROM stage7_research_requests r
        LEFT JOIN research_events re ON re.event_id = r.event_id
        LEFT JOIN stage7_research_responses resp ON resp.request_id = r.request_id
@@ -6683,16 +6838,66 @@ async function getResearchLabStage7Overview(env) {
     env.DB.prepare(
       `SELECT s.event_id, re.category AS event_category, re.event_ts AS event_ts,
               s.evidence_sufficiency, s.sentiment_label, s.sentiment_score, s.calculation_ts,
-              s.formula_version, s.ai_research_response_id, s.contributing_evidence_ids_json,
-              s.excluded_evidence_json
+              s.formula_version, s.ai_research_response_id, s.previous_sentiment_id,
+              s.contributing_evidence_ids_json, s.excluded_evidence_json
        FROM stage7_event_sentiment s
        LEFT JOIN research_events re ON re.event_id = s.event_id
        WHERE s.id IN (SELECT MAX(id) FROM stage7_event_sentiment GROUP BY event_id)
        ORDER BY s.calculation_ts DESC`
     ).all(),
+    // The batch a human reviews and selects from (Task 3.A). Only
+    // PROPOSED/SELECTED -- CONVERTED candidates are represented by their
+    // own request row above (via request.candidate_id), DISMISSED/STALE
+    // are terminal/informational and not part of the active review batch.
+    env.DB.prepare(
+      `SELECT c.candidate_id, c.event_id, re.category AS event_category, re.event_ts AS event_ts,
+              c.status, c.sufficiency_status, c.reasons_json, c.questions_json, c.missing_categories_json,
+              c.historical_cutoff_ts, c.evidence_snapshot_json, c.proposed_ts
+       FROM stage7_research_candidates c
+       LEFT JOIN research_events re ON re.event_id = c.event_id
+       WHERE c.status IN ('PROPOSED', 'SELECTED')
+       ORDER BY c.proposed_ts DESC`
+    ).all(),
   ]);
 
-  const openRequests = ((openRequestsResult && openRequestsResult.results) || []).map((row) => ({
+  const rawOpenRequests = (openRequestsResult && openRequestsResult.results) || [];
+  const rawSentimentRows = (sentimentResult && sentimentResult.results) || [];
+  // One lookup for every sentiment row the page needs beyond "latest per
+  // event": the previous row of each latest calculation, and the exact row
+  // each request's recalculation produced (plus THAT row's previous). Fired
+  // only when there is something to look up.
+  const lookupIds = [...new Set([
+    ...rawSentimentRows.map((r) => r.previous_sentiment_id),
+    ...rawOpenRequests.map((r) => r.recalculation_sentiment_id),
+  ].filter((id) => id != null))];
+  let sentimentById = {};
+  if (lookupIds.length) {
+    const placeholders = lookupIds.map(() => '?').join(',');
+    const lookedUp = await env.DB.prepare(
+      `SELECT id, event_id, sentiment_label, sentiment_score, calculation_ts, formula_version, evidence_sufficiency,
+              previous_sentiment_id, contributing_evidence_ids_json, excluded_evidence_json
+         FROM stage7_event_sentiment WHERE id IN (${placeholders})`
+    ).bind(...lookupIds).all();
+    for (const row of (lookedUp && lookedUp.results) || []) sentimentById[row.id] = row;
+  }
+  // The previous row of a recalculation result may itself not be in the first
+  // lookup; fetch just those missing, again only when needed.
+  const missingPreviousIds = [...new Set(Object.values(sentimentById)
+    .map((r) => r.previous_sentiment_id).filter((id) => id != null && !sentimentById[id]))];
+  if (missingPreviousIds.length) {
+    const placeholders = missingPreviousIds.map(() => '?').join(',');
+    const lookedUp = await env.DB.prepare(
+      `SELECT id, event_id, sentiment_label, sentiment_score, calculation_ts, formula_version, evidence_sufficiency,
+              previous_sentiment_id, contributing_evidence_ids_json, excluded_evidence_json
+         FROM stage7_event_sentiment WHERE id IN (${placeholders})`
+    ).bind(...missingPreviousIds).all();
+    for (const row of (lookedUp && lookedUp.results) || []) sentimentById[row.id] = row;
+  }
+  const brief = (row) => (row ? {
+    id: row.id, sentiment_label: row.sentiment_label, sentiment_score: row.sentiment_score, calculation_ts: row.calculation_ts,
+  } : null);
+
+  const openRequests = rawOpenRequests.map((row) => ({
     request_id: row.request_id,
     event_id: row.event_id,
     event_category: row.event_category,
@@ -6702,6 +6907,9 @@ async function getResearchLabStage7Overview(env) {
     reasons: parseStage7JsonField(row.reasons_json, []),
     questions: parseStage7JsonField(row.questions_json, []),
     missing_categories: parseStage7JsonField(row.missing_categories_json, []),
+    historical_cutoff_ts: row.historical_cutoff_ts,
+    evidence_snapshot: parseStage7JsonField(row.evidence_snapshot_json, []),
+    prompt_text: row.prompt_text || null,
     created_ts: row.created_ts,
     updated_ts: row.updated_ts,
     // Distinct, never-collapsed facts (see this function's own header
@@ -6712,25 +6920,101 @@ async function getResearchLabStage7Overview(env) {
     response_received: !!row.response_id,
     response_validation_status: row.response_validation_status || null,
     response_registered_ts: row.response_registered_ts || null,
+    recalculation_requested_ts: row.recalculation_requested_ts || null,
+    recalculation_requested_by: row.recalculation_requested_by || null,
+    recalculation_status: row.recalculation_status || (row.recalculation_requested_ts ? 'REQUESTED' : null),
+    recalculation_started_ts: row.recalculation_started_ts || null,
+    recalculation_completed_ts: row.recalculation_completed_ts || null,
+    recalculation_error: row.recalculation_error || null,
+    recalculation_attempts: row.recalculation_attempts || 0,
+    // The registered response, exactly as stored: the human-reviewed fields,
+    // the server's own source-validation verdict, and the verbatim paste.
+    response: row.response_id ? {
+      response_id: row.response_id,
+      provider: row.response_provider || null,
+      validation_status: row.response_validation_status,
+      registered_ts: row.response_registered_ts || null,
+      human_confirmed_ts: row.response_human_confirmed_ts || null,
+      human_review_note: row.response_human_review_note || null,
+      findings: parseStage7JsonField(row.response_findings_json, {}),
+      sources: parseStage7JsonField(row.response_sources_json, []),
+      source_validation: parseStage7JsonField(row.response_source_validation_json, []),
+      raw_response_text: row.response_raw_text || '',
+    } : null,
+    // What the staging workflow actually produced for THIS request -- only
+    // present once recalculation_status is COMPLETED. The scale note is part
+    // of the data so the UI cannot show a label without its own scale.
+    recalculation_result: (() => {
+      const result = row.recalculation_sentiment_id != null ? sentimentById[row.recalculation_sentiment_id] : null;
+      if (!result) return null;
+      return {
+        sentiment_id: result.id,
+        sentiment_label: result.sentiment_label,
+        sentiment_score: result.sentiment_score,
+        scale: 'Stage 7 per-event assessment: POSITIVE=100, MIXED=50, NEGATIVE=0, INDETERMINATE=no score. Not V1\'s composite.',
+        evidence_sufficiency: result.evidence_sufficiency,
+        formula_version: result.formula_version,
+        calculation_ts: result.calculation_ts,
+        historical_cutoff_ts: row.historical_cutoff_ts,
+        contributing_evidence_ids: parseStage7JsonField(result.contributing_evidence_ids_json, []),
+        excluded_evidence: parseStage7JsonField(result.excluded_evidence_json, []),
+        previous: brief(result.previous_sentiment_id != null ? sentimentById[result.previous_sentiment_id] : null),
+      };
+    })(),
+    lifecycle_stage: deriveStage7RequestLifecycleStage({
+      status: row.status,
+      response_received: !!row.response_id,
+      response_validation_status: row.response_validation_status || null,
+      recalculation_requested_ts: row.recalculation_requested_ts || null,
+      recalculation_status: row.recalculation_status || null,
+    }),
   }));
 
-  const sentimentByEvent = ((sentimentResult && sentimentResult.results) || []).map((row) => ({
+  const candidates = ((candidatesResult && candidatesResult.results) || []).map((row) => ({
+    candidate_id: row.candidate_id,
     event_id: row.event_id,
     event_category: row.event_category,
     event_ts: row.event_ts,
-    evidence_sufficiency: row.evidence_sufficiency,
-    sentiment_label: row.sentiment_label,
-    sentiment_score: row.sentiment_score,
-    calculation_ts: row.calculation_ts,
-    formula_version: row.formula_version,
-    ai_research_response_id: row.ai_research_response_id,
-    contributing_evidence_count: parseStage7JsonField(row.contributing_evidence_ids_json, []).length,
-    excluded_evidence_count: parseStage7JsonField(row.excluded_evidence_json, []).length,
+    status: row.status,
+    sufficiency_status: row.sufficiency_status,
+    reasons: parseStage7JsonField(row.reasons_json, []),
+    questions: parseStage7JsonField(row.questions_json, []),
+    missing_categories: parseStage7JsonField(row.missing_categories_json, []),
+    historical_cutoff_ts: row.historical_cutoff_ts,
+    evidence_snapshot: parseStage7JsonField(row.evidence_snapshot_json, []),
+    proposed_ts: row.proposed_ts,
   }));
+
+  // "Present the new result next to the previous result" (Task 3.E): the
+  // previous rows were already fetched together with the request results above.
+  const sentimentByEvent = rawSentimentRows.map((row) => {
+    const previous = row.previous_sentiment_id != null ? sentimentById[row.previous_sentiment_id] : null;
+    return {
+      event_id: row.event_id,
+      event_category: row.event_category,
+      event_ts: row.event_ts,
+      evidence_sufficiency: row.evidence_sufficiency,
+      sentiment_label: row.sentiment_label,
+      sentiment_score: row.sentiment_score,
+      calculation_ts: row.calculation_ts,
+      formula_version: row.formula_version,
+      ai_research_response_id: row.ai_research_response_id,
+      previous_sentiment_id: row.previous_sentiment_id,
+      previous_sentiment_label: previous ? previous.sentiment_label : null,
+      previous_sentiment_score: previous ? previous.sentiment_score : null,
+      previous_calculation_ts: previous ? previous.calculation_ts : null,
+      contributing_evidence_count: parseStage7JsonField(row.contributing_evidence_ids_json, []).length,
+      excluded_evidence_count: parseStage7JsonField(row.excluded_evidence_json, []).length,
+    };
+  });
 
   return {
     ok: true,
     activated: true,
+    candidates: {
+      total_open: candidates.length,
+      open: candidates,
+    },
     requests: {
       total: Object.values(byStatus).reduce((sum, n) => sum + n, 0),
       by_status: byStatus,
@@ -6792,7 +7076,7 @@ function stage7ConstantTimeEqual(a, b) {
 // environment -- never in wrangler.toml's [vars] (plaintext, committed) and
 // never hardcoded here. The token itself is never logged or echoed back in
 // any response, including error responses.
-async function registerStage7ResearchResponse(env, { requestId, provider, submittedTs, findings, sources, confidence, validated, providedToken }) {
+async function registerStage7ResearchResponse(env, { requestId, provider, submittedTs, findings, sources, confidence, validated, rawResponseText, humanConfirmed, humanReviewNote, providedToken }) {
   const configuredToken = env.STAGE7_ADMIN_TOKEN;
   if (!configuredToken) {
     return {
@@ -6806,50 +7090,586 @@ async function registerStage7ResearchResponse(env, { requestId, provider, submit
   }
 
   const request = await env.DB.prepare(
-    'SELECT request_id, status FROM stage7_research_requests WHERE request_id = ?'
+    'SELECT request_id, status, historical_cutoff_ts FROM stage7_research_requests WHERE request_id = ?'
   ).bind(requestId).first();
   if (!request) return { ok: false, error: `No stage7_research_requests row exists for request_id ${requestId}`, status: 404 };
   if (request.status === 'INTEGRATED' || request.status === 'REJECTED') {
     return { ok: false, error: `Request ${requestId} is already terminal (${request.status}) -- a new research pass requires a NEW request, never overwriting this one`, status: 409 };
   }
   const existingResponse = await env.DB.prepare(
-    'SELECT response_id FROM stage7_research_responses WHERE request_id = ?'
+    'SELECT response_id, raw_response_text, validation_status FROM stage7_research_responses WHERE request_id = ?'
   ).bind(requestId).first();
   if (existingResponse) {
-    return { ok: false, error: `Request ${requestId} already has a registered response (${existingResponse.response_id}) -- never overwritten; a new research pass requires a new request`, status: 409 };
+    // A retry of the SAME submission (a timeout after a successful save, a double click) is idempotent: it
+    // returns the already-stored response and changes nothing. A DIFFERENT submission is never allowed to
+    // overwrite what is stored.
+    if (typeof rawResponseText === 'string' && existingResponse.raw_response_text === rawResponseText) {
+      return {
+        ok: true, status: 200, already_registered: true, response_id: existingResponse.response_id,
+        validation_status: existingResponse.validation_status,
+        note: 'This exact response was already registered for this request. Nothing was changed.',
+      };
+    }
+    return { ok: false, error: `Request ${requestId} already has a registered response (${existingResponse.response_id}) with different content -- never overwritten; a new research pass requires a new request`, status: 409 };
   }
   if (!findings || !STAGE7_SENTIMENT_ASSESSMENTS.includes(findings.sentiment_assessment)) {
     return { ok: false, error: `findings.sentiment_assessment must be one of ${STAGE7_SENTIMENT_ASSESSMENTS.join(', ')}`, status: 400 };
+  }
+  if (typeof rawResponseText !== 'string' || !rawResponseText.trim()) {
+    return { ok: false, error: 'raw_response_text is required -- paste the AI\'s full answer here for auditability, even if you also fill in the structured fields below', status: 400 };
+  }
+
+  // "Do not treat the fact that a response was pasted, or a checkbox
+  // alone, as proof that every source is valid" -- computed here,
+  // server-side, from the SAME rules the read-only preview endpoint uses,
+  // never trusted from the client. If the human claims `validated: true`
+  // but every source they actually submitted failed this objective check,
+  // the submission is refused BEFORE anything is written -- nothing is
+  // registered, so there is no dead end: the human corrects the sources
+  // (or unchecks "validated", or submits with an empty sources list for a
+  // genuine no-citations finding) and resubmits the SAME request_id.
+  // Registering as VALIDATED is a human acceptance decision, so it is refused
+  // unless the person explicitly confirmed it (the UI's review screen sets
+  // this). Enforced here, not just in the browser -- a direct API call with
+  // validated:true alone can no longer mark a response accepted.
+  if (validated === true && humanConfirmed !== true) {
+    return {
+      ok: false, status: 400,
+      error: 'human_confirmed must be true to register a response as validated: a person must explicitly confirm they reviewed it. ' +
+        'Register without validation to leave it awaiting human review.',
+    };
+  }
+  const sourceList = Array.isArray(sources) ? sources : [];
+  const sourceValidation = validateStage7Sources(sourceList, request.historical_cutoff_ts);
+  const allProvidedSourcesFailed = sourceList.length > 0 && sourceValidation.valid_count === 0;
+  if (validated === true && allProvidedSourcesFailed) {
+    return {
+      ok: false, status: 422,
+      error: 'Cannot register as validated: every submitted source failed automated validation (see ' +
+        'source_validation for reasons). Correct the sources and resubmit, uncheck "validated" to register as ' +
+        'PENDING for now, or submit with an empty sources list if this is genuinely a no-citations finding.',
+      source_validation: sourceValidation,
+    };
   }
 
   const responseId = `stage7-resp-${requestId}`;
   const registeredTs = Date.now();
   const validationStatus = validated === true ? 'VALIDATED' : 'PENDING';
   const validatedTs = validated === true ? registeredTs : null;
+  const confirmedTs = validated === true ? registeredTs : null;
+  const reviewNote = typeof humanReviewNote === 'string' && humanReviewNote.trim() ? humanReviewNote.slice(0, 2000) : null;
 
-  await env.DB.prepare(
-    `INSERT INTO stage7_research_responses
-       (response_id, request_id, provider, submitted_ts, registered_ts, findings_json, sources_json,
-        confidence, validation_status, validated_ts, validator_notes)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-  ).bind(
-    responseId, requestId, provider || null,
-    Number.isFinite(submittedTs) ? submittedTs : null, registeredTs,
-    JSON.stringify(findings), JSON.stringify(Array.isArray(sources) ? sources : []),
-    confidence || null, validationStatus, validatedTs,
-    null
-  ).run();
+  try {
+    await env.DB.prepare(
+      `INSERT INTO stage7_research_responses
+         (response_id, request_id, provider, submitted_ts, registered_ts, findings_json, sources_json,
+          confidence, validation_status, validated_ts, validator_notes, raw_response_text, source_validation_json,
+          human_confirmed_ts, human_review_note)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    ).bind(
+      responseId, requestId, provider || null,
+      Number.isFinite(submittedTs) ? submittedTs : null, registeredTs,
+      JSON.stringify(findings), JSON.stringify(sourceList),
+      confidence || null, validationStatus, validatedTs,
+      null, rawResponseText, JSON.stringify(sourceValidation.results),
+      confirmedTs, reviewNote
+    ).run();
+  } catch (err) {
+    // Two concurrent submissions: the unique response_id / request_id index lets exactly one win. The loser is
+    // told so (409) rather than getting a database error -- nothing was overwritten.
+    if (/UNIQUE|constraint/i.test(String(err && err.message ? err.message : err))) {
+      return { ok: false, status: 409, error: `Request ${requestId} already has a registered response (registered concurrently) -- never overwritten; reload and review it.` };
+    }
+    throw err;
+  }
 
-  // Reflects registration immediately; INTEGRATION_REVIEW (once Stage 7's
-  // own scheduled recalculation actually runs against a VALIDATED
-  // response) is set by stage7-research-pipeline/run_stage7.py, never
-  // guessed here ahead of that recalculation actually happening.
+  // Reflects registration immediately; INTEGRATION_REVIEW (once a human
+  // separately triggers recalculation AND stage7-research-pipeline/
+  // run_stage7.py actually runs it) is set by that script, never guessed
+  // here ahead of either of those two things actually happening.
   await env.DB.prepare(
     `UPDATE stage7_research_requests SET status = ?, updated_ts = ?
      WHERE request_id = ? AND status NOT IN ('INTEGRATED', 'REJECTED')`
   ).bind(validated === true ? 'RESEARCH_COMPLETED' : 'RESEARCH_RESPONSE_RECEIVED', registeredTs, requestId).run();
 
-  return { ok: true, response_id: responseId, validation_status: validationStatus, status: 200 };
+  return {
+    ok: true, response_id: responseId, validation_status: validationStatus,
+    source_validation: sourceValidation, status: 200,
+  };
+}
+
+// =====================================================================
+// Stage 7.1 -- confirmed human-controlled candidate workflow. Reads
+// this file's own header block on registerStage7ResearchResponse above
+// for the write-path/security conventions every function below follows
+// identically: STAGE7_ADMIN_TOKEN checked FIRST (fail-closed 503 if
+// unset, constant-time 401 on mismatch) before any D1 access, nothing
+// ever executes/interprets submitted content, no field is ever trusted
+// as authorization.
+// =====================================================================
+
+// The ONE canonical Stage 7 research-prompt builder in the whole system.
+// Called ONLY here, server-side, at the moment a human converts a
+// candidate into a request (createStage7ResearchRequests below) -- the
+// result is stored VERBATIM on that request's own prompt_text column and
+// never regenerated afterward (by the UI, by a retry, or by research/
+// stage7_github_publisher.py's own build_request_file_content(), which
+// prefers this exact stored string -- see that function's own comment).
+// This is what guarantees there is exactly one prompt implementation,
+// never a second, independently-maintained one that could drift.
+//
+// `candidate` is a plain object -- {event_category, event_ts,
+// historical_cutoff_ts, reasons, questions, missing_categories,
+// evidence_snapshot, created_ts} -- deliberately NOT a live D1 row, so
+// this function stays pure/synchronous and trivially unit-testable (see
+// tests/stage7-research.test.js).
+function buildStage7ResearchPromptText(candidate) {
+  const eventTs = candidate.event_ts;
+  const cutoff = Number.isFinite(candidate.historical_cutoff_ts) ? candidate.historical_cutoff_ts : eventTs;
+  const createdTs = Number.isFinite(candidate.created_ts) ? candidate.created_ts : Date.now();
+  const ageDays = Number.isFinite(eventTs) ? Math.max(0, Math.round((createdTs - eventTs) / 86400000)) : null;
+  const evidence = Array.isArray(candidate.evidence_snapshot) ? candidate.evidence_snapshot : [];
+
+  const lines = [
+    `Research this market event for BTC using your actual internet-search capability. Event category: ` +
+      `${candidate.event_category || 'unknown'}. Event timestamp (ms since epoch): ${eventTs}` +
+      (ageDays !== null ? ` (approximately ${ageDays} day(s) before this request was created).` : '.'),
+    `Respect this historical cutoff: do not use information published after ${cutoff} (ms since epoch) -- ` +
+      `reconstruct only what was knowable at or before that time. Distinguish the EVENT's own timestamp above ` +
+      `from a SOURCE's publication date (when that source itself was published) and from the retrieval/submission ` +
+      `date (when a human enters your answer into this system) -- these three are never the same instant.`,
+    '',
+    'Why existing evidence is insufficient:',
+    ...(candidate.reasons || []).map((r) => `- ${r}`),
+    '',
+    'Missing evidence categories:',
+    ...((candidate.missing_categories && candidate.missing_categories.length) ? candidate.missing_categories.map((c) => `- ${c}`) : ['- (none specifically flagged)']),
+    '',
+    'Questions to answer:',
+    ...(candidate.questions || []).map((q) => `- ${q}`),
+    '',
+  ];
+
+  if (evidence.length) {
+    lines.push('Evidence already collected for this event (do not simply repeat this back -- explain what it fails to answer and add genuinely new sources):');
+    evidence.forEach((e) => {
+      const headline = e.headline || '(no headline recorded)';
+      const publisher = e.publisher || 'unknown publisher';
+      const url = e.article_url || e.feed_url || '(no url recorded)';
+      lines.push(`- "${headline}" -- ${publisher} -- ${url}`);
+    });
+    lines.push('');
+  } else {
+    lines.push('No prior evidence has been collected for this event at all.', '');
+  }
+
+  lines.push(
+    'Source and date requirements: every source you cite must have a verifiable URL, a named publisher, and an ' +
+    'explicit publication date. Do not cite a source you cannot date. Do not cite anything published after the ' +
+    'historical cutoff above.',
+    '',
+    'Explicitly distinguish, in your answer: (1) sourced facts you can point to a specific citation for, ' +
+    '(2) third-party claims reported by a source but not independently confirmed, (3) your own analysis/inference, ' +
+    'and (4) genuine uncertainty. Never present inference or a third-party claim as a confirmed fact. If sources ' +
+    'disagree, say so explicitly rather than picking one silently.',
+    '',
+    'Respond with EXACTLY one JSON object (no markdown, no prose outside it) in this shape:',
+    '{',
+    '  "summary": "what you found, in your own words",',
+    '  "transmission_mechanism": "how this event could plausibly affect the asset/market, without presenting speculation as fact",',
+    '  "sentiment_assessment": "POSITIVE" | "NEGATIVE" | "MIXED" | "INDETERMINATE",',
+    '  "contradictory_evidence": "contradictions or unresolved questions across your sources, if any",',
+    '  "limitations": "your own confidence and limitations",',
+    '  "sources": [',
+    '    { "url": "https://...", "publisher": "...", "publication_date": "YYYY-MM-DD", "claim": "the specific claim this source supports" }',
+    '  ]',
+    '}',
+    'Do not fabricate citations or claim a source was checked if it was not. An empty "sources" array is fine ' +
+    'ONLY if genuinely no citable source exists -- never invent one to fill the field.'
+  );
+  return lines.join('\n');
+}
+
+// Mirrors research/stage7_sentiment_recalculation.py's own
+// normalize_response_sources() rejection rules (missing/blank url,
+// unparseable publication date, published after the historical cutoff --
+// see that function's own docstring for the full rationale on why each
+// rule exists), PLUS two checks that module does not need to make at
+// paste-back time: URL syntax/protocol (only http/https are ever
+// accepted -- this function never fetches or resolves the URL, it only
+// checks it is well-formed) and duplicates within the SAME submission
+// (an exact duplicate url is excluded as redundant, kept-first; the SAME
+// claim text from two DIFFERENT urls is flagged "questionable", never
+// excluded -- two independently-reported sources corroborating the same
+// claim must survive, exactly as the Python module's own
+// "independent corroboration" rule already establishes for the later,
+// authoritative recalculation pass).
+//
+// This function makes NO claim that a URL's content or the truth of any
+// claim was independently fetched/verified -- only that the source is
+// syntactically well-formed, dated, and not post-cutoff. It is called
+// from TWO places: the read-only preview endpoint (stage7-validate-sources,
+// so a human can correct sources and re-check before ever submitting) and
+// registerStage7ResearchResponse itself (the authoritative, never-trust-
+// the-client check actually gating validation_status).
+function validateStage7Sources(sources, historicalCutoffTs) {
+  const list = Array.isArray(sources) ? sources : [];
+  const seenUrls = new Map();
+  const seenClaims = new Map();
+  const nowTs = Date.now();
+  const results = list.map((raw, index) => {
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+      return { index, url: null, status: 'excluded', reason: 'malformed source record (not an object)' };
+    }
+    const url = typeof raw.url === 'string' ? raw.url.trim() : '';
+    if (!url) return { index, url: raw.url || null, status: 'excluded', reason: 'missing a verifiable url' };
+    if (!stage7IsHttpUrl(url)) return { index, url, status: 'excluded', reason: 'url is not a valid http(s) address' };
+    const publicationTs = stage7ParseSourcePublicationTs(raw.publication_date);
+    if (publicationTs === null) return { index, url, status: 'excluded', reason: 'publication date is missing or unparseable' };
+    if (publicationTs > nowTs) return { index, url, status: 'excluded', reason: 'publication date is in the future' };
+    if (Number.isFinite(historicalCutoffTs) && publicationTs > historicalCutoffTs) {
+      return { index, url, status: 'excluded', reason: 'published after the historical cutoff' };
+    }
+    const normUrl = url.toLowerCase();
+    if (seenUrls.has(normUrl)) {
+      return { index, url, status: 'excluded', reason: `duplicate url (same as source #${seenUrls.get(normUrl)})` };
+    }
+    seenUrls.set(normUrl, index);
+    const claim = typeof raw.claim === 'string' ? raw.claim.trim().toLowerCase() : '';
+    if (claim && seenClaims.has(claim)) {
+      const firstIndex = seenClaims.get(claim);
+      return {
+        index, url, status: 'questionable',
+        reason: `same claim text as source #${firstIndex} from a different url -- allowed as independent corroboration, but worth double-checking these are not the same underlying report`,
+      };
+    }
+    if (claim) seenClaims.set(claim, index);
+    return { index, url, status: 'valid', reason: null };
+  });
+  return {
+    results,
+    valid_count: results.filter((r) => r.status === 'valid').length,
+    excluded_count: results.filter((r) => r.status === 'excluded').length,
+    questionable_count: results.filter((r) => r.status === 'questionable').length,
+  };
+}
+
+function stage7IsHttpUrl(raw) {
+  if (typeof raw !== 'string' || !raw.trim()) return false;
+  try {
+    const u = new URL(raw.trim());
+    return u.protocol === 'http:' || u.protocol === 'https:';
+  } catch (_err) {
+    return false;
+  }
+}
+
+// Fail-closed date parse -- mirrors research/stage7_sentiment_
+// recalculation.py's own _parse_source_publication_ts(): accepts an
+// already-numeric ms-epoch, or an ISO-8601 date/datetime string. A naive
+// (no timezone/offset/"Z") string is treated as UTC explicitly, never
+// the server's local timezone, matching the Python side exactly --
+// deterministic regardless of where either implementation runs. Returns
+// null on anything else; callers must treat null as "cannot verify this
+// predates the cutoff" and exclude the source, never assume it is safe.
+function stage7ParseSourcePublicationTs(raw) {
+  if (typeof raw === 'boolean') return null;
+  if (typeof raw === 'number' && Number.isFinite(raw)) return Math.trunc(raw);
+  if (typeof raw !== 'string' || !raw.trim()) return null;
+  const s = raw.trim();
+  const hasTz = /(Z|[+-]\d{2}:?\d{2})$/.test(s);
+  const iso = hasTz ? s : (s.includes('T') ? `${s}Z` : `${s}T00:00:00Z`);
+  const ms = Date.parse(iso);
+  return Number.isNaN(ms) ? null : ms;
+}
+
+// Turns a batch of PROPOSED/SELECTED candidates the human has selected in
+// the review UI into real, non-terminal stage7_research_requests rows --
+// the ONLY thing that ever creates a request in this codebase (the old
+// auto-create-on-insufficient-evidence path has been removed from
+// stage7-research-pipeline/run_stage7.py entirely; see that script's own
+// module docstring). Status is set to PENDING_RESEARCH -- the prompt is
+// already fully generated and stored (buildStage7ResearchPromptText
+// above) and visible/copyable in the app immediately; publishing it to
+// GitHub as a durable file is a SEPARATE, best-effort step performed
+// later by a human-dispatched run_stage7.py run (never required for the
+// interactive workflow to proceed).
+//
+// Never trusts a client-supplied candidate's own data for the request's
+// content -- every field is re-read from the candidate's OWN D1 row by
+// candidate_id, never taken from the request body. Processes each
+// candidate_id independently (one bad/stale/racing id must never abort
+// the rest of the batch) and never creates a second request for an event
+// that already has one -- the partial unique index on
+// stage7_research_requests(event_id) is the final, authoritative guard
+// against a race between two concurrent submissions selecting the same
+// candidate; a resulting constraint-violation exception is caught and
+// reported per-item, never a 500 for the whole batch.
+async function createStage7ResearchRequests(env, { candidateIds, providedToken }) {
+  const configuredToken = env.STAGE7_ADMIN_TOKEN;
+  if (!configuredToken) {
+    return {
+      ok: false, status: 503,
+      error: 'Stage 7 request creation is disabled on this Worker: STAGE7_ADMIN_TOKEN is not configured.',
+    };
+  }
+  if (typeof providedToken !== 'string' || !providedToken || !stage7ConstantTimeEqual(providedToken, configuredToken)) {
+    return { ok: false, error: 'Unauthorized', status: 401 };
+  }
+  const ids = Array.isArray(candidateIds) ? [...new Set(candidateIds.filter((id) => typeof id === 'string' && id.trim()))] : [];
+  if (!ids.length) return { ok: false, error: 'candidate_ids must be a non-empty array of strings', status: 400 };
+  if (ids.length > 50) return { ok: false, error: 'Refusing to create more than 50 requests in a single call.', status: 400 };
+
+  const created = [];
+  const skipped = [];
+  const nowTs = Date.now();
+
+  for (const candidateId of ids) {
+    const candidate = await env.DB.prepare(
+      `SELECT candidate_id, event_id, status, sufficiency_status, reasons_json, questions_json,
+              missing_categories_json, historical_cutoff_ts, evidence_snapshot_json, input_fingerprint
+       FROM stage7_research_candidates WHERE candidate_id = ?`
+    ).bind(candidateId).first();
+    if (!candidate) { skipped.push({ candidate_id: candidateId, reason: 'no such candidate' }); continue; }
+    if (candidate.status !== 'PROPOSED' && candidate.status !== 'SELECTED') {
+      skipped.push({ candidate_id: candidateId, reason: `candidate is already ${candidate.status}` });
+      continue;
+    }
+    const eventRow = await env.DB.prepare('SELECT category, event_ts FROM research_events WHERE event_id = ?').bind(candidate.event_id).first();
+    // Sequence = 1 + the event's existing requests (any status). A REJECTED or
+    // INTEGRATED request is kept forever, so a hard-coded "-1" would collide with it on the
+    // event's next research pass and the creation would be silently skipped.
+    const priorRequests = await env.DB.prepare(
+      'SELECT COUNT(*) AS n FROM stage7_research_requests WHERE event_id = ?'
+    ).bind(candidate.event_id).first();
+    const requestId = `stage7-req-${candidate.event_id}-${((priorRequests && priorRequests.n) || 0) + 1}`;
+    const promptText = buildStage7ResearchPromptText({
+      event_category: eventRow ? eventRow.category : null,
+      event_ts: eventRow ? eventRow.event_ts : candidate.historical_cutoff_ts,
+      historical_cutoff_ts: candidate.historical_cutoff_ts,
+      reasons: parseStage7JsonField(candidate.reasons_json, []),
+      questions: parseStage7JsonField(candidate.questions_json, []),
+      missing_categories: parseStage7JsonField(candidate.missing_categories_json, []),
+      evidence_snapshot: parseStage7JsonField(candidate.evidence_snapshot_json, []),
+      created_ts: nowTs,
+    });
+    // ONE atomic batch: the request row and the candidate's CONVERTED marker are written together or not at
+    // all, so a failure between them can never leave a candidate PROPOSED while its request already exists.
+    // The partial unique index on stage7_research_requests(event_id) remains the final guard against two
+    // concurrent submissions for the same event; the loser's batch fails as a whole and is reported per item.
+    const insertRequest = env.DB.prepare(
+      `INSERT INTO stage7_research_requests
+         (request_id, event_id, created_ts, updated_ts, schema_version, status, sufficiency_status,
+          reasons_json, questions_json, missing_categories_json, historical_cutoff_ts, evidence_snapshot_json,
+          github_path, github_published_ts, github_publish_error, publish_attempts, input_fingerprint,
+          candidate_id, prompt_text)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
+    ).bind(
+      requestId, candidate.event_id, nowTs, nowTs, 'stage7-request-v1', 'PENDING_RESEARCH',
+      candidate.sufficiency_status, candidate.reasons_json, candidate.questions_json,
+      candidate.missing_categories_json, candidate.historical_cutoff_ts, candidate.evidence_snapshot_json,
+      null, null, null, 0, candidate.input_fingerprint, candidateId, promptText
+    );
+    const markConverted = env.DB.prepare(
+      `UPDATE stage7_research_candidates SET status = 'CONVERTED', request_id = ?, updated_ts = ?
+       WHERE candidate_id = ? AND status IN ('PROPOSED','SELECTED')`
+    ).bind(requestId, nowTs, candidateId);
+    try {
+      await env.DB.batch([insertRequest, markConverted]);
+    } catch (err) {
+      console.error('stage7 create-requests batch failed for', candidateId, err);
+      skipped.push({
+        candidate_id: candidateId,
+        reason: `could not create a request for event ${candidate.event_id} -- an active request may already exist (concurrent submission). Nothing was written for this candidate.`,
+      });
+      continue;
+    }
+    created.push({ candidate_id: candidateId, request_id: requestId, event_id: candidate.event_id, prompt_text: promptText });
+  }
+  return { ok: true, status: 200, created, skipped };
+}
+
+// The explicit, separate human action that turns a VALIDATED response
+// into something stage7-research-pipeline/run_stage7.py will actually
+// recalculate on its NEXT human-dispatched run. This endpoint NEVER runs
+// Python, never touches stage7_event_sentiment, and never itself performs
+// a recalculation -- it only sets recalculation_requested_ts, which is
+// the one thing run_stage7.py's own latest_responses query now requires
+// (see that script's main(), the query comment starting "(Confirmed
+// human-controlled operating model.)"). Registering/validating a
+// response never sets this flag on its own.
+async function triggerStage7Recalculation(env, { requestId, requestedBy, providedToken }) {
+  const configuredToken = env.STAGE7_ADMIN_TOKEN;
+  if (!configuredToken) {
+    return {
+      ok: false, status: 503,
+      error: 'Stage 7 recalculation triggering is disabled on this Worker: STAGE7_ADMIN_TOKEN is not configured.',
+    };
+  }
+  if (typeof providedToken !== 'string' || !providedToken || !stage7ConstantTimeEqual(providedToken, configuredToken)) {
+    return { ok: false, error: 'Unauthorized', status: 401 };
+  }
+  const request = await env.DB.prepare(
+    'SELECT request_id, status, recalculation_requested_ts, recalculation_status FROM stage7_research_requests WHERE request_id = ?'
+  ).bind(requestId).first();
+  if (!request) return { ok: false, error: `No stage7_research_requests row exists for request_id ${requestId}`, status: 404 };
+  if (request.status === 'INTEGRATED' || request.status === 'REJECTED') {
+    return { ok: false, error: `Request ${requestId} is already terminal (${request.status})`, status: 409 };
+  }
+  const response = await env.DB.prepare(
+    'SELECT response_id, validation_status FROM stage7_research_responses WHERE request_id = ?'
+  ).bind(requestId).first();
+  if (!response) {
+    return { ok: false, error: `Request ${requestId} has no registered response yet -- nothing to recalculate from`, status: 409 };
+  }
+  if (response.validation_status !== 'VALIDATED') {
+    return {
+      ok: false, status: 409,
+      error: `Request ${requestId}'s response is not VALIDATED (currently ${response.validation_status}) -- ` +
+        'a human must review and validate the response before recalculation can be triggered.',
+    };
+  }
+
+  // Idempotent by construction: a repeated click, a double-submit or a retry
+  // after a timeout must never re-stamp the request, restart a run in
+  // progress, or queue a second calculation. A request flagged before the
+  // status column existed (status NULL but requested_ts set) counts as REQUESTED.
+  const currentStatus = request.recalculation_status || (request.recalculation_requested_ts ? 'REQUESTED' : null);
+  if (currentStatus === 'REQUESTED' || currentStatus === 'RUNNING') {
+    return {
+      ok: true, status: 200, already_requested: true, recalculation_status: currentStatus,
+      recalculation_requested_ts: request.recalculation_requested_ts || null,
+      note: currentStatus === 'RUNNING'
+        ? 'A recalculation is already RUNNING for this request. Nothing was changed.'
+        : 'Recalculation was already requested and has NOT run yet. Nothing was changed.',
+    };
+  }
+  if (currentStatus === 'COMPLETED') {
+    return {
+      ok: false, status: 409,
+      error: `Recalculation for request ${requestId} already COMPLETED. It is never recomputed in place -- ` +
+        'a new research pass needs a new request.',
+    };
+  }
+
+  // currentStatus is null (first request) or FAILED (explicit human retry). The UPDATE itself repeats that
+  // condition, so two concurrent clicks cannot both stamp the request: exactly one UPDATE changes a row, the
+  // other changes none and is reported as already-requested (nothing re-stamped, nothing queued twice).
+  const nowTs = Date.now();
+  const updated = await env.DB.prepare(
+    `UPDATE stage7_research_requests
+        SET recalculation_requested_ts = ?, recalculation_requested_by = ?, recalculation_status = 'REQUESTED',
+            recalculation_error = NULL, updated_ts = ?
+      WHERE request_id = ? AND status NOT IN ('INTEGRATED','REJECTED')
+        AND (recalculation_status = 'FAILED' OR (recalculation_status IS NULL AND recalculation_requested_ts IS NULL))`
+  ).bind(nowTs, typeof requestedBy === 'string' ? requestedBy.slice(0, 200) : null, nowTs, requestId).run();
+  if (updated && updated.meta && updated.meta.changes === 0) {
+    return {
+      ok: true, status: 200, already_requested: true, recalculation_status: 'REQUESTED',
+      note: 'Recalculation was requested concurrently or already progressed. Nothing was changed.',
+    };
+  }
+  return {
+    ok: true, status: 200, recalculation_requested_ts: nowTs, recalculation_status: 'REQUESTED',
+    retry: currentStatus === 'FAILED',
+    note: 'Recalculation has been REQUESTED, not performed. It runs only when a human dispatches ' +
+      'stage7-research-pipeline.yml (staging only) -- this endpoint never executes Python or writes ' +
+      'stage7_event_sentiment itself. Status stays REQUESTED until that workflow actually runs.',
+  };
+}
+
+// Human review of a response that was registered WITHOUT validation
+// (validation_status PENDING). Without this, an unvalidated registration was a
+// dead end: the one-response-per-request rule blocked re-registering and
+// recalculation needs VALIDATED. Technical source validation is re-run here
+// server-side from the stored sources; the human's confirmation is recorded
+// separately (human_confirmed_ts) and never replaces it.
+async function reviewStage7Response(env, { requestId, decision, humanConfirmed, note, providedToken }) {
+  const configuredToken = env.STAGE7_ADMIN_TOKEN;
+  if (!configuredToken) {
+    return { ok: false, status: 503, error: 'Stage 7 review is disabled on this Worker: STAGE7_ADMIN_TOKEN is not configured.' };
+  }
+  if (typeof providedToken !== 'string' || !providedToken || !stage7ConstantTimeEqual(providedToken, configuredToken)) {
+    return { ok: false, error: 'Unauthorized', status: 401 };
+  }
+  if (decision !== 'VALIDATE' && decision !== 'REJECT') {
+    return { ok: false, status: 400, error: "decision must be 'VALIDATE' or 'REJECT'" };
+  }
+  if (humanConfirmed !== true) {
+    return { ok: false, status: 400, error: 'human_confirmed must be true: a person must explicitly confirm this review.' };
+  }
+  const row = await env.DB.prepare(
+    `SELECT resp.response_id, resp.validation_status, resp.sources_json, req.request_id, req.status AS request_status,
+            req.historical_cutoff_ts
+       FROM stage7_research_responses resp
+       JOIN stage7_research_requests req ON req.request_id = resp.request_id
+      WHERE resp.request_id = ?`
+  ).bind(requestId).first();
+  if (!row) return { ok: false, status: 404, error: `No registered response exists for request_id ${requestId}` };
+  if (row.request_status === 'INTEGRATED' || row.request_status === 'REJECTED') {
+    return { ok: false, status: 409, error: `Request ${requestId} is already terminal (${row.request_status})` };
+  }
+  if (row.validation_status !== 'PENDING') {
+    return { ok: false, status: 409, error: `Response ${row.response_id} is already ${row.validation_status}; a review decision can only be made once.` };
+  }
+
+  const nowTs = Date.now();
+  const reviewNote = typeof note === 'string' ? note.slice(0, 2000) : null;
+
+  if (decision === 'REJECT') {
+    await env.DB.prepare(
+      `UPDATE stage7_research_responses SET validation_status = 'REJECTED', validated_ts = ?, human_confirmed_ts = ?, validator_notes = ?
+        WHERE request_id = ? AND validation_status = 'PENDING'`
+    ).bind(nowTs, nowTs, reviewNote, requestId).run();
+    // Terminal for THIS request so the event can receive a fresh research pass.
+    await env.DB.prepare(
+      `UPDATE stage7_research_requests SET status = 'REJECTED', updated_ts = ? WHERE request_id = ? AND status NOT IN ('INTEGRATED','REJECTED')`
+    ).bind(nowTs, requestId).run();
+    return { ok: true, status: 200, validation_status: 'REJECTED', note: 'Response rejected. The event can be proposed again for a new research pass.' };
+  }
+
+  const sources = parseStage7JsonField(row.sources_json, []);
+  const sourceValidation = validateStage7Sources(Array.isArray(sources) ? sources : [], row.historical_cutoff_ts);
+  if (sourceValidation.results.length > 0 && sourceValidation.valid_count === 0) {
+    return {
+      ok: false, status: 422, source_validation: sourceValidation,
+      error: 'Cannot validate: every stored source failed automated validation. Reject this response and run a new research pass.',
+    };
+  }
+  await env.DB.prepare(
+    `UPDATE stage7_research_responses
+        SET validation_status = 'VALIDATED', validated_ts = ?, human_confirmed_ts = ?, validator_notes = ?, source_validation_json = ?
+      WHERE request_id = ? AND validation_status = 'PENDING'`
+  ).bind(nowTs, nowTs, reviewNote, JSON.stringify(sourceValidation.results), requestId).run();
+  await env.DB.prepare(
+    `UPDATE stage7_research_requests SET status = 'RESEARCH_COMPLETED', updated_ts = ? WHERE request_id = ? AND status NOT IN ('INTEGRATED','REJECTED')`
+  ).bind(nowTs, requestId).run();
+  return { ok: true, status: 200, validation_status: 'VALIDATED', source_validation: sourceValidation };
+}
+
+// Pure. Maps a stage7_research_requests row (plus its response state) to
+// one label from the lifecycle Task F asks for: PROPOSED is a candidate-
+// only concept (never returned here -- see the candidates section of
+// getResearchLabStage7Overview instead). Every other stage a request can
+// be in has exactly one label below, so the UI never has to re-derive
+// this from raw status/response fields itself.
+function deriveStage7RequestLifecycleStage(r) {
+  if (r.status === 'FAILED_PERMANENT') return 'ERROR_PERMANENT';
+  if (r.status === 'FAILED_RETRYABLE') return 'ERROR_RETRYABLE';
+  if (r.status === 'APPROVED_FOR_IMPLEMENTATION' || r.status === 'INTEGRATED' || r.status === 'REJECTED') return 'HUMAN_REVIEW_OUTCOME';
+  // Recalculation states come from persisted columns written by the staging
+  // workflow (run_stage7.py), never inferred: a FAILED run is shown as failed,
+  // not as "still waiting".
+  if (r.recalculation_status === 'COMPLETED' || r.status === 'INTEGRATION_REVIEW') return 'RECALCULATED';
+  if (r.recalculation_status === 'FAILED') return 'RECALCULATION_FAILED';
+  if (r.recalculation_status === 'RUNNING') return 'RECALCULATION_RUNNING';
+  if (!r.response_received) return r.status === 'PENDING_RESEARCH' ? 'REQUEST_CREATED' : 'AWAITING_RESEARCH';
+  if (r.response_validation_status === 'REJECTED') return 'RESPONSE_REJECTED';
+  if (r.response_validation_status === 'VALIDATED') {
+    return (r.recalculation_status === 'REQUESTED' || r.recalculation_requested_ts) ? 'AWAITING_RECALCULATION' : 'VALIDATED';
+  }
+  // Registered but not yet validated: a person still has to review it.
+  return 'AWAITING_HUMAN_REVIEW';
 }
 
 // ---- EXPERIMENT REGISTRY ----
@@ -7811,6 +8631,25 @@ const RESEARCH_LAB_HTML = `<!DOCTYPE html>
   .s7-msg { font-size: 12px; margin-top: 8px; font-weight: 700; }
   .s7-msg.ok { color: #5fd88a; }
   .s7-msg.err { color: #ff7a7a; }
+  .s7-prompt {
+    white-space: pre-wrap; word-break: break-word; font-size: 11.5px; max-height: 280px;
+    overflow-y: auto; background: var(--bg); border: 1px solid var(--border); border-radius: 8px;
+    padding: 10px; margin-top: 6px; color: var(--text);
+  }
+  .item-card .s7-check { display: flex; align-items: center; gap: 6px; margin-bottom: 8px; font-size: 12.5px; }
+  .s7-note { font-size: 12px; color: var(--muted); margin: 8px 0; padding: 8px 10px; border-left: 3px solid var(--border); }
+  .s7-review { display: none; margin-top: 12px; padding: 12px; border: 1px solid var(--border); border-radius: 10px; background: var(--bg); }
+  .s7-review.open { display: block; }
+  .s7-review textarea, .s7-registered textarea { width: 100%; box-sizing: border-box; font-size: 16px; }
+  .s7-table-wrap { overflow-x: auto; -webkit-overflow-scrolling: touch; margin: 6px 0; }
+  .s7-table { border-collapse: collapse; width: 100%; font-size: 12px; min-width: 460px; }
+  .s7-table th, .s7-table td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--border); vertical-align: top; }
+  .s7-registered, .s7-result { margin-top: 10px; }
+  .s7-actions a, .s7-actions button { min-height: 40px; }
+  .s7-form textarea, .s7-form select, .s7-form input[type="text"] { font-size: 16px; }
+  #s7-admin-token { font-size: 16px; min-height: 40px; box-sizing: border-box; background: var(--bg); border: 1px solid var(--border);
+    border-radius: 8px; color: var(--text); padding: 8px 10px; font-family: inherit; }
+  .s7-token-label { display: block; font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.04em; margin: 10px 0 4px; }
 
   .empty { padding: 26px 16px; text-align: center; }
   .empty .headline { font-size: 14px; font-weight: 700; margin-bottom: 6px; }
@@ -7915,11 +8754,22 @@ const RESEARCH_LAB_HTML = `<!DOCTYPE html>
 <script>
 (function () {
   var PAGES = ['Dashboard', 'Experiment 5', 'Sentiment', 'Market', 'Results', 'Timeline', 'Methodology', 'Events', 'Evidence', 'Sources', 'Pipeline', 'Stage 7'];
-  // Populated by renderStage7() with {event_category, event_ts, reasons,
-  // questions} per open request_id -- read back by the copy-prompt button
-  // handler so the prompt text never has to round-trip through an HTML
-  // attribute.
+  // Populated by renderStage7() with the full request row per open
+  // request_id -- read back by the copy-prompt button (copies the
+  // SERVER-computed prompt_text verbatim -- see buildStage7ResearchPromptText
+  // in the backend section of this file, the one canonical implementation)
+  // and by the paste-back form so the prompt/response text never has to
+  // round-trip through an HTML attribute.
   var stage7RequestsById = {};
+  // In-memory only for the lifetime of this page load -- never persisted
+  // to localStorage/sessionStorage, never embedded in this script -- read
+  // once from the page's own password-type input and reused across the
+  // create-requests/register-response/trigger-recalculation actions so a
+  // human does not have to retype it for every action in one session.
+  var stage7AdminToken = '';
+  // One-shot confirmation shown at the top of the page after an action that re-renders it
+  // (the re-render would otherwise erase the message before anyone could read it).
+  var stage7Flash = null;
   var nav = document.getElementById('nav');
   var app = document.getElementById('app');
   var current = 'Dashboard';
@@ -8612,7 +9462,7 @@ const RESEARCH_LAB_HTML = `<!DOCTYPE html>
   // and "N request(s) open" are reported as separate facts, never merged.
   function badgeForStage7(stage7) {
     if (!stage7 || stage7.ok === false) return badge('UNKNOWN', 'b-unknown');
-    if (!stage7.activated) return badge('NOT ACTIVATED -- MIGRATION 0016 NOT APPLIED', 'b-unknown');
+    if (!stage7.activated) return badge(stage7.enabled === false ? 'NOT ENABLED ON THIS DEPLOYMENT' : 'NOT ACTIVE -- SCHEMA NOT READY', 'b-unknown');
     var recalculated = stage7.sentiment.total_events_recalculated;
     var openCount = stage7.requests.open.length;
     var byStatus = stage7.requests.by_status || {};
@@ -8681,7 +9531,7 @@ const RESEARCH_LAB_HTML = `<!DOCTYPE html>
     if (!stage7 || !stage7.ok) {
       html += emptyState('Status unknown.', 'Could not read stage7_research_requests/stage7_event_sentiment.');
     } else if (!stage7.activated) {
-      html += emptyState('Not activated.', stage7.reason || 'Migration 0016 is not yet applied to production D1.');
+      html += emptyState('Not active.', stage7.reason || 'Stage 7 is not active on this deployment.');
     } else {
       html += '<div class="ev-row"><span class="k">Events recalculated</span><span class="v">' + esc(stage7.sentiment.total_events_recalculated) + '</span></div>' +
         '<div class="ev-row"><span class="k">Requests open</span><span class="v">' + esc(stage7.requests.open.length) + '</span></div>' +
@@ -9028,37 +9878,67 @@ const RESEARCH_LAB_HTML = `<!DOCTYPE html>
     app.innerHTML = html;
   }
 
-  // Deterministic mirror of research/stage7_github_publisher.py's own
-  // build_research_prompt() -- same wording, same 7 numbered points, same
-  // historical-cutoff framing. Duplicated for display only (same
-  // established convention as this file's own classifyExp009Freshness /
-  // events-without-evidence query mirrors above); Python's version
-  // remains the one actually published to GitHub. BTC is Stage 7's only
-  // covered asset today (event dicts carry no distinct coin field),
-  // matching Python's own event.get('coin', 'BTC') default.
-  function buildStage7ResearchPromptText(req) {
-    var lines = [
-      'Research this market event for BTC using your actual internet-search capability. ' +
-        'Event category: ' + (req.event_category || 'unknown') + '. Event timestamp (ms): ' + req.event_ts + '.',
-      'Respect this historical cutoff: do not use information published after ' + req.event_ts +
-        ' (ms since epoch) -- reconstruct only what was knowable at or before that time.',
-      '',
-      'Why existing evidence is insufficient:',
-    ];
-    (req.reasons || []).forEach(function (r) { lines.push('- ' + r); });
-    lines.push('', 'Questions to answer:');
-    (req.questions || []).forEach(function (q) { lines.push('- ' + q); });
-    lines.push(
-      '',
-      'For your findings, explicitly state: (1) what existing sources failed to explain, (2) relevant ' +
-      'primary sources and independent reporting with verifiable URLs/publishers/dates, (3) the event\\'s ' +
-      'relevance to the affected asset and broader market, (4) a plausible transmission mechanism without ' +
-      'presenting speculation as fact, (5) whether the implications are POSITIVE, NEGATIVE, MIXED, or ' +
-      'INDETERMINATE, (6) contradictory evidence and unresolved questions, and (7) your confidence and ' +
-      'limitations. Distinguish sourced facts, third-party claims, analysis, and uncertainty. Do not ' +
-      'fabricate citations or claim a source was checked if it was not.'
-    );
-    return lines.join('\\n');
+  // Parses a pasted AI response into the documented JSON response
+  // contract (see the canonical buildStage7ResearchPromptText() in this
+  // file's backend section, which asks for exactly this shape). Pure,
+  // deterministic, NEVER another AI call -- a markdown code fence around
+  // the JSON (common even when a prompt asks for none) is stripped first;
+  // anything else that fails to parse returns a clear error and the
+  // caller falls back to the existing manual fields, never silently
+  // drops data.
+  function parseStage7AIResponse(rawText) {
+    if (typeof rawText !== 'string' || !rawText.trim()) {
+      return { ok: false, error: 'Paste the AI\\'s response first.' };
+    }
+    var text = rawText.trim();
+    var fenced = text.match(/^\`\`\`[a-zA-Z]*\\n([\\s\\S]*?)\\n?\`\`\`$/);
+    if (fenced) text = fenced[1].trim();
+    var parsed;
+    try {
+      parsed = JSON.parse(text);
+    } catch (err) {
+      return { ok: false, error: 'Could not parse as JSON (' + err.message + '). Fill in the fields below manually instead.' };
+    }
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      return { ok: false, error: 'Parsed JSON is not an object -- expected the documented response contract. Fill in the fields below manually instead.' };
+    }
+    var sources = Array.isArray(parsed.sources) ? parsed.sources.map(function (s) {
+      return {
+        url: typeof (s && s.url) === 'string' ? s.url : '',
+        publisher: typeof (s && s.publisher) === 'string' ? s.publisher : '',
+        publication_date: typeof (s && s.publication_date) === 'string' ? s.publication_date : '',
+        claim: typeof (s && s.claim) === 'string' ? s.claim : '',
+      };
+    }) : [];
+    return {
+      ok: true,
+      findings: {
+        summary: typeof parsed.summary === 'string' ? parsed.summary : '',
+        transmission_mechanism: typeof parsed.transmission_mechanism === 'string' ? parsed.transmission_mechanism : '',
+        sentiment_assessment: typeof parsed.sentiment_assessment === 'string' ? parsed.sentiment_assessment.toUpperCase().trim() : '',
+        contradictory_evidence: typeof parsed.contradictory_evidence === 'string' ? parsed.contradictory_evidence : '',
+        limitations: typeof parsed.limitations === 'string' ? parsed.limitations : '',
+      },
+      sources: sources,
+    };
+  }
+
+  // Reused by BOTH the manual "one per line: url | publisher | date | claim"
+  // textarea AND parseStage7AIResponse's own re-serialized output (so a
+  // parsed-then-edited response and a fully-manual one go through the
+  // identical sources_text -> sources-array conversion at submit time --
+  // never two divergent parsers for the same textarea).
+  function stage7SourcesTextToArray(sourcesText) {
+    return (sourcesText || '').split('\\n').map(function (line) { return line.trim(); }).filter(Boolean).map(function (line) {
+      var parts = line.split('|').map(function (p) { return p.trim(); });
+      return { url: parts[0] || null, publisher: parts[1] || null, publication_date: parts[2] || null, claim: parts[3] || null };
+    });
+  }
+
+  function stage7SourcesArrayToText(sources) {
+    return (sources || []).map(function (s) {
+      return [s.url || '', s.publisher || '', s.publication_date || '', s.claim || ''].join(' | ');
+    }).join('\\n');
   }
 
   function badgeForStage7RequestStatus(status) {
@@ -9075,20 +9955,233 @@ const RESEARCH_LAB_HTML = `<!DOCTYPE html>
     return badge(status, 'b-unknown');
   }
 
+  // One label per Task F lifecycle stage (see deriveStage7RequestLifecycleStage
+  // in the backend section, which computes this server-side so the UI never
+  // has to re-derive it from raw status/response fields itself).
+  function badgeForStage7Lifecycle(stage) {
+    var labels = {
+      REQUEST_CREATED: 'REQUEST CREATED',
+      AWAITING_RESEARCH: 'AWAITING EXTERNAL AI RESEARCH',
+      AWAITING_HUMAN_REVIEW: 'RESPONSE REGISTERED -- AWAITING HUMAN REVIEW',
+      RESPONSE_REGISTERED: 'RESPONSE REGISTERED -- AWAITING HUMAN REVIEW',
+      RESPONSE_REJECTED: 'RESPONSE REJECTED',
+      VALIDATED: 'VALIDATED -- RECALCULATION NOT REQUESTED',
+      AWAITING_RECALCULATION: 'RECALCULATION REQUESTED -- NOT CALCULATED YET',
+      RECALCULATION_RUNNING: 'RECALCULATION RUNNING',
+      RECALCULATION_FAILED: 'RECALCULATION FAILED',
+      RECALCULATED: 'RECALCULATED -- COMPLETED',
+      HUMAN_REVIEW_OUTCOME: 'HUMAN REVIEW OUTCOME',
+      ERROR_RETRYABLE: 'ERROR -- RETRYABLE',
+      ERROR_PERMANENT: 'ERROR -- PERMANENT',
+    };
+    var classes = {
+      RECALCULATED: 'b-strong', VALIDATED: 'b-plausible', AWAITING_RECALCULATION: 'b-plausible',
+      RECALCULATION_RUNNING: 'b-plausible', RECALCULATION_FAILED: 'b-blocked',
+      AWAITING_HUMAN_REVIEW: 'b-unknown',
+      ERROR_RETRYABLE: 'b-unknown', ERROR_PERMANENT: 'b-blocked', RESPONSE_REJECTED: 'b-blocked',
+    };
+    return badge(labels[stage] || stage, classes[stage] || 'b-outline');
+  }
+
+  function stage7EvidenceListHtml(evidence) {
+    if (!evidence || !evidence.length) return '<p class="muted" style="font-size:11.5px;">No prior evidence collected for this event.</p>';
+    return '<ul class="s7-list">' + evidence.map(function (e) {
+      var headline = e.headline || '(no headline recorded)';
+      var publisher = e.publisher || 'unknown publisher';
+      return '<li>"' + esc(headline) + '" -- ' + esc(publisher) + '</li>';
+    }).join('') + '</ul>';
+  }
+
+  // Copy text to the clipboard. navigator.clipboard needs a secure context and
+  // can reject; fall back to a hidden textarea + execCommand. Resolves true only
+  // when the browser reports success -- a copy that did not happen is never
+  // reported as done.
+  function stage7CopyText(text) {
+    function fallback() {
+      try {
+        var ta = document.createElement('textarea');
+        ta.value = text;
+        ta.setAttribute('readonly', '');
+        ta.style.position = 'fixed'; ta.style.top = '0'; ta.style.left = '0'; ta.style.opacity = '0';
+        document.body.appendChild(ta);
+        ta.focus(); ta.select();
+        var ok = document.execCommand('copy');
+        document.body.removeChild(ta);
+        return ok;
+      } catch (e) { return false; }
+    }
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      return navigator.clipboard.writeText(text).then(function () { return true; }, function () { return fallback(); });
+    }
+    return Promise.resolve(fallback());
+  }
+
+  function stage7SourceValidationHtml(results, sources) {
+    if (!results || !results.length) return '<p class="muted" style="font-size:11.5px;">No sources were submitted (a no-citations finding).</p>';
+    return '<div class="s7-table-wrap"><table class="s7-table"><thead><tr><th>#</th><th>Source URL</th><th>Technical check</th><th>Reason</th></tr></thead><tbody>' +
+      results.map(function (r, i) {
+        var idx = r.index != null ? r.index : i;
+        var src = (sources && sources[idx]) || {};
+        var cls = r.status === 'valid' ? 'b-plausible' : r.status === 'questionable' ? 'b-plausible' : 'b-blocked';
+        // "valid" is the API value; it only ever means the record is well-formed, so the screen says so.
+        var label = r.status === 'valid' ? 'FORMAT OK' : String(r.status).toUpperCase();
+        return '<tr><td>' + esc(idx) + '</td><td style="word-break:break-all;">' + esc(src.url || r.url || '(no url)') + '</td><td>' +
+          badge(label, cls) + '</td><td>' + esc(r.reason || '') + '</td></tr>';
+      }).join('') + '</tbody></table></div>' +
+      '<p class="s7-format-only" style="font-size:11.5px; color:var(--muted); margin:6px 0 2px;">Format check only: URL syntax, publication date, historical cutoff and duplicate URLs. ' +
+      'The URL was not opened and no claim was compared with its source, so FORMAT OK does not mean the source is real or says what the AI reported.</p>';
+  }
+
+  function stage7FindingsHtml(f) {
+    f = f || {};
+    function row(label, value) {
+      return '<div class="ev-row"><span class="k">' + esc(label) + '</span><span class="v" style="white-space:pre-wrap;">' + esc(value || '(not provided)') + '</span></div>';
+    }
+    return row('Assessment', f.sentiment_assessment) + row('Summary', f.summary) +
+      row('Transmission mechanism', f.transmission_mechanism) + row('Contradictory evidence', f.contradictory_evidence) +
+      row('Limitations', f.limitations);
+  }
+
+  // The response form: paste -> (optional) parse -> correct -> REVIEW. There is
+  // deliberately no button here that registers anything: registration only
+  // happens from the review panel, after an explicit human confirmation.
+  function stage7FormHtml(r) {
+    var id = esc(r.request_id);
+    return '<div class="s7-form" data-form="' + id + '">' +
+      '<label>Paste the full response from the external AI here (kept verbatim for auditability)</label>' +
+      '<textarea data-field="raw_response_text" style="min-height:140px;" placeholder="Paste the complete answer from Claude/ChatGPT/Gemini/Grok here"></textarea>' +
+      '<div class="s7-actions"><button data-parse-response="' + id + '">Parse response (JSON contract)</button></div>' +
+      '<div class="s7-msg" data-msg="parse-' + id + '"></div>' +
+      '<label>Provider (which AI tool actually did this research)</label>' +
+      '<select data-field="provider"><option value="">unknown</option><option value="claude">Claude</option><option value="chatgpt">ChatGPT</option><option value="gemini">Gemini</option><option value="grok">Grok</option></select>' +
+      '<label>Summary of findings</label>' +
+      '<textarea data-field="summary" placeholder="What did the AI actually find, in its own words?"></textarea>' +
+      '<label>Sentiment assessment (required)</label>' +
+      '<select data-field="sentiment_assessment"><option value="">-- choose --</option><option value="POSITIVE">POSITIVE</option><option value="NEGATIVE">NEGATIVE</option><option value="MIXED">MIXED</option><option value="INDETERMINATE">INDETERMINATE</option></select>' +
+      '<label>Transmission mechanism (optional)</label><textarea data-field="transmission_mechanism"></textarea>' +
+      '<label>Contradictory evidence / unresolved questions (optional)</label><textarea data-field="contradictory_evidence"></textarea>' +
+      '<label>Limitations / confidence (optional)</label><textarea data-field="limitations"></textarea>' +
+      '<label>Sources -- one per line: url | publisher | publication_date | claim (optional)</label><textarea data-field="sources_text"></textarea>' +
+      '<div class="s7-actions"><button data-check-sources="' + id + '">Check sources</button>' +
+      '<button class="primary" data-open-review="' + id + '">Review before registering</button></div>' +
+      '<div class="s7-msg" data-msg="sources-' + id + '"></div>' +
+      '<div class="s7-review" data-review-panel="' + id + '"></div>' +
+      '<div class="s7-msg" data-msg="' + id + '"></div>' +
+      '</div>';
+  }
+
+  // A registered response, exactly as stored, plus -- while it is still
+  // PENDING -- the human review controls (validate / reject).
+  function stage7RegisteredResponseHtml(r) {
+    var resp = r.response;
+    var id = esc(r.request_id);
+    var html = '<div class="s7-registered">' +
+      '<div class="ev-row"><span class="k">AI response</span><span class="v">' +
+        badge(resp.validation_status, resp.validation_status === 'VALIDATED' ? 'b-verified' : resp.validation_status === 'REJECTED' ? 'b-blocked' : 'b-unknown') +
+        ' registered ' + esc(fmtAgo(resp.registered_ts)) + (resp.provider ? ' &middot; provider: ' + esc(resp.provider) : '') + '</span></div>' +
+      (resp.validation_status === 'VALIDATED' ? '<p class="s7-format-only" style="font-size:11.5px; color:var(--muted); margin:2px 0 6px;">VALIDATED means a person accepted this response after a format-only source check. The sources were not independently verified.</p>' : '') +
+      '<div class="ev-row"><span class="k">Human confirmation</span><span class="v">' +
+        (resp.human_confirmed_ts ? badge('CONFIRMED ' + fmtTs(resp.human_confirmed_ts), 'b-verified') : badge('NOT YET CONFIRMED BY A PERSON', 'b-unknown')) + '</span></div>' +
+      (resp.human_review_note ? '<div class="ev-row"><span class="k">Review note</span><span class="v">' + esc(resp.human_review_note) + '</span></div>' : '') +
+      '<details style="margin-top:8px;"><summary style="cursor:pointer; font-size:12px;">Registered assessment, sources and the verbatim response</summary>' +
+        stage7FindingsHtml(resp.findings) +
+        '<p style="font-size:11.5px; color:var(--muted); margin:8px 0 2px;">Sources and the server\\'s technical check (a technical check is not proof a source is true):</p>' +
+        stage7SourceValidationHtml(resp.source_validation, resp.sources) +
+        '<p style="font-size:11.5px; color:var(--muted); margin:8px 0 2px;">Verbatim response as pasted:</p>' +
+        '<pre class="s7-prompt">' + esc(resp.raw_response_text || '(none stored)') + '</pre>' +
+      '</details>';
+    if (resp.validation_status === 'PENDING') {
+      html += '<div class="s7-review" style="display:block;">' +
+        '<p><b>Awaiting your review.</b> This response was saved without validation, so it cannot be used for recalculation yet. ' +
+        'Review it above, then validate or reject it.</p>' +
+        '<div class="s7-check"><input type="checkbox" id="rv-confirm-' + id + '" data-review-confirm="' + id + '"/>' +
+        '<label for="rv-confirm-' + id + '" style="display:inline; margin:0; text-transform:none;">I personally reviewed this response and its sources</label></div>' +
+        '<label>Review note (optional)</label><textarea data-review-note="' + id + '" style="min-height:50px;"></textarea>' +
+        '<div class="s7-actions"><button class="primary" data-review-decision="VALIDATE" data-req="' + id + '">Validate</button>' +
+        '<button data-review-decision="REJECT" data-req="' + id + '">Reject</button></div>' +
+        '<div class="s7-msg" data-msg="review-' + id + '"></div></div>';
+    }
+    return html + '</div>';
+  }
+
+  function stage7ResultHtml(r) {
+    var res = r.recalculation_result;
+    if (!res) return '<p class="muted" style="font-size:11.5px;">The calculation is recorded as completed, but its result row could not be found. Nothing is shown rather than guessing.</p>';
+    var prev = res.previous;
+    var excluded = res.excluded_evidence || [];
+    return '<div class="s7-result">' +
+      '<div class="ev-row"><span class="k">Resulting event sentiment</span><span class="v">' +
+        (res.sentiment_label ? badge(res.sentiment_label + ' (' + res.sentiment_score + ')', 'b-strong') : badge('NO DEFENSIBLE ASSESSMENT', 'b-unknown')) + '</span></div>' +
+      '<div class="ev-row"><span class="k">Scale</span><span class="v">' + esc(res.scale) + '</span></div>' +
+      '<div class="ev-row"><span class="k">Previous result</span><span class="v">' +
+        (prev ? (prev.sentiment_label ? esc(prev.sentiment_label + ' (' + prev.sentiment_score + ')') : 'no defensible assessment') + ' &middot; ' + esc(fmtTs(prev.calculation_ts))
+              : 'none -- this is the first calculation for the event') + '</span></div>' +
+      '<div class="ev-row"><span class="k">Evidence sufficiency</span><span class="v">' + esc(res.evidence_sufficiency) + '</span></div>' +
+      '<div class="ev-row"><span class="k">Historical cutoff</span><span class="v">' + esc(fmtTs(res.historical_cutoff_ts)) + '</span></div>' +
+      '<div class="ev-row"><span class="k">Formula version</span><span class="v">' + esc(res.formula_version) + '</span></div>' +
+      '<div class="ev-row"><span class="k">Calculated</span><span class="v">' + esc(fmtTs(res.calculation_ts)) + ' (' + esc(fmtAgo(res.calculation_ts)) + ')</span></div>' +
+      '<div class="ev-row"><span class="k">Evidence included</span><span class="v">' + esc((res.contributing_evidence_ids || []).length) + (res.contributing_evidence_ids && res.contributing_evidence_ids.length ? ' (ids: ' + esc(res.contributing_evidence_ids.join(', ')) + ')' : '') + '</span></div>' +
+      '<p style="font-size:11.5px; color:var(--muted); margin:8px 0 2px;">Evidence excluded (' + excluded.length + '):</p>' +
+      (excluded.length ? '<ul class="s7-list">' + excluded.map(function (x) { return '<li>evidence #' + esc(x.evidence_id) + ' -- ' + esc(x.reason) + '</li>'; }).join('') + '</ul>' : '<p class="muted" style="font-size:11.5px;">None excluded.</p>') +
+      '<p style="font-size:11.5px; color:var(--muted); margin:8px 0 2px;">Source provenance (the registered response the calculation used):</p>' +
+      (r.response ? stage7SourceValidationHtml(r.response.source_validation, r.response.sources) : '') +
+      '</div>';
+  }
+
+  function stage7RecalcBlockHtml(r) {
+    if (!r.response_received || !r.response || r.response.validation_status !== 'VALIDATED') return '';
+    var id = esc(r.request_id);
+    var st = r.recalculation_status;
+    var html = '<h3 style="font-size:13px; margin:14px 0 6px;">Sentiment recalculation</h3>';
+    if (!st) {
+      return html + '<div class="ev-row"><span class="k">Status</span><span class="v">' + badge('NOT REQUESTED', 'b-outline') + '</span></div>' +
+        '<p class="muted" style="font-size:11.5px;">Registering a response never recalculates anything. Requesting a recalculation is a separate, explicit step.</p>' +
+        '<div class="s7-actions"><button class="primary" data-trigger-recalc="' + id + '">Request recalculation</button></div>' +
+        '<div class="s7-msg" data-msg="recalc-' + id + '"></div>';
+    }
+    if (st === 'REQUESTED') {
+      return html + '<div class="ev-row"><span class="k">Status</span><span class="v">' + badge('REQUESTED -- NOT CALCULATED YET', 'b-plausible') + '</span></div>' +
+        '<p style="font-size:12px;">Requested ' + esc(fmtAgo(r.recalculation_requested_ts)) + '. <b>No calculation has happened.</b> It runs only when a person dispatches the ' +
+        'stage7-research-pipeline.yml workflow on staging; until then there is no result. This page will show RUNNING, then COMPLETED or FAILED, as that workflow records them.</p>';
+    }
+    if (st === 'RUNNING') {
+      return html + '<div class="ev-row"><span class="k">Status</span><span class="v">' + badge('RUNNING', 'b-plausible') + '</span></div>' +
+        '<p style="font-size:12px;">Started ' + esc(fmtAgo(r.recalculation_started_ts)) + ' (attempt ' + esc(r.recalculation_attempts) + '). ' +
+        'If this stays RUNNING after the workflow finished, it was interrupted: dispatching the workflow again resumes it without creating a duplicate result.</p>';
+    }
+    if (st === 'FAILED') {
+      return html + '<div class="ev-row"><span class="k">Status</span><span class="v">' + badge('FAILED', 'b-blocked') + '</span></div>' +
+        '<div class="ev-row"><span class="k">Error</span><span class="v">' + esc(r.recalculation_error || '(no error text recorded)') + '</span></div>' +
+        '<div class="ev-row"><span class="k">Attempts</span><span class="v">' + esc(r.recalculation_attempts) + ' &middot; failed ' + esc(fmtAgo(r.recalculation_completed_ts)) + '</span></div>' +
+        '<p class="muted" style="font-size:11.5px;">A failed recalculation is never retried automatically. After reading the error, you can request it again.</p>' +
+        '<div class="s7-actions"><button class="primary" data-trigger-recalc="' + id + '">Retry recalculation</button></div>' +
+        '<div class="s7-msg" data-msg="recalc-' + id + '"></div>';
+    }
+    // COMPLETED
+    return html + '<div class="ev-row"><span class="k">Status</span><span class="v">' + badge('COMPLETED', 'b-strong') + ' ' + esc(fmtAgo(r.recalculation_completed_ts)) + ' (attempts: ' + esc(r.recalculation_attempts) + ')</span></div>' +
+      stage7ResultHtml(r);
+  }
+
   async function renderStage7() {
     app.innerHTML = '<div class="skeleton">Loading Stage 7&hellip;</div>';
     var s = await fetchJson('/api/research-lab/stage7-overview');
     stage7RequestsById = {};
 
     var html = '<div class="card"><h2 class="card-title">Stage 7 -- AI-assisted research &amp; sentiment recalculation</h2>' +
-      '<p>Human-triggered research, human-approved integration. This page never calls an AI API itself and never ' +
-      'claims research happened merely because a request was published or a link was opened -- only a registered, ' +
-      'human-reviewed response can drive a sentiment recalculation.</p>' +
+      '<p>Human-controlled: this page proposes candidates, you select which to research, generates the prompt, ' +
+      'you copy it to an external AI and paste the answer back, this page validates it, and YOU explicitly trigger ' +
+      'recalculation. It never calls an AI API itself and never claims research happened merely because a request ' +
+      'was created or a link was opened.</p>' +
       '<p><b>This is not V1\\'s composite score.</b> The "Sentiment" value below is a Stage 7, per-EVENT assessment, ' +
       'set only from a human-validated AI research response\\'s own POSITIVE/NEGATIVE/MIXED/INDETERMINATE judgment, ' +
       'on Stage 7\\'s own 0/50/100 scale. It never changes V1\\'s market-wide composite (shown on the Dashboard tab), ' +
       'global source weights, or any production prediction, and nothing here does so automatically -- any such ' +
-      'change would be a separate, explicitly-approved decision.</p></div>';
+      'change would be a separate, explicitly-approved decision.</p>' +
+      '<label class="s7-token-label">Admin token (required to create requests, register responses, or trigger recalculation -- never ' +
+      'stored by this page; re-enter after a reload)</label>' +
+      '<input type="password" id="s7-admin-token" autocomplete="off" style="width:100%;max-width:380px;" />' +
+      '<div class="s7-msg" data-msg="flash" role="status"></div>' +
+      '</div>';
 
     if (!s || !s.ok) {
       html += emptyState('Could not load Stage 7 status', '');
@@ -9096,35 +10189,75 @@ const RESEARCH_LAB_HTML = `<!DOCTYPE html>
       return;
     }
     if (!s.activated) {
-      html += emptyState('Not activated.', s.reason || 'Migration 0016 is not yet applied to production D1.');
+      html += emptyState('Not active.', s.reason || 'Stage 7 is not active on this deployment.');
       app.innerHTML = html;
       return;
     }
 
-    html += '<h2 class="section-title">Open research requests (' + s.requests.open.length + ')</h2>';
-    if (!s.requests.open.length) {
-      html += '<div class="card">' + emptyState('None open', 'Every event either has sufficient existing evidence or its request already reached a terminal state.') + '</div>';
+    // ---- 1. Candidates awaiting review (Task 3.A) ----
+    var candidates = (s.candidates && s.candidates.open) || [];
+    html += '<h2 class="section-title">Candidates awaiting your review (' + candidates.length + ')</h2>';
+    if (!candidates.length) {
+      html += '<div class="card">' + emptyState('No candidates proposed',
+        'Every currently-eligible event either has sufficient evidence already or already has an open request. ' +
+        'New candidates appear after a human dispatches stage7-research-pipeline.yml.') + '</div>';
     } else {
-      for (var i = 0; i < s.requests.open.length; i++) {
-        var r = s.requests.open[i];
-        stage7RequestsById[r.request_id] = { event_category: r.event_category, event_ts: r.event_ts, reasons: r.reasons, questions: r.questions };
+      html += '<div class="card"><div class="s7-actions">' +
+        '<button data-select-all-candidates>Select all</button>' +
+        '<button data-clear-candidate-selection>Clear selection</button>' +
+        '<button class="primary" data-create-requests>Create research requests for selected</button>' +
+        '</div><div class="s7-msg" data-msg="create-requests"></div></div>';
+      candidates.forEach(function (c) {
+        html += '<div class="item-card">' +
+          '<div class="s7-check"><input type="checkbox" data-candidate-checkbox value="' + esc(c.candidate_id) + '" id="cand-' + esc(c.candidate_id) + '"/>' +
+          '<label for="cand-' + esc(c.candidate_id) + '" style="display:inline; margin:0; text-transform:none;">Select for research</label></div>' +
+          '<div class="ev-row"><span class="k">Event #' + esc(c.event_id) + '</span><span class="v">' + esc(c.event_category) + '</span></div>' +
+          '<div class="ev-row"><span class="k">Sufficiency</span><span class="v">' + badgeForStage7Sufficiency(c.sufficiency_status) + '</span></div>' +
+          '<div class="ev-row"><span class="k">Event time</span><span class="v">' + esc(fmtTs(c.event_ts)) + ' (' + esc(fmtAgo(c.event_ts)) + ')</span></div>' +
+          '<div class="ev-row"><span class="k">Proposed</span><span class="v">' + esc(fmtTs(c.proposed_ts)) + ' (' + esc(fmtAgo(c.proposed_ts)) + ')</span></div>' +
+          '<div class="ev-row"><span class="k">Historical cutoff for research</span><span class="v">' + esc(fmtTs(c.historical_cutoff_ts)) + '</span></div>' +
+          '<p class="s7-note"><b>Why this is a candidate:</b> the event is inside the pipeline evidence window and its existing evidence is rated ' +
+          esc(c.sufficiency_status) + ' (reasons below). Events whose evidence is already sufficient, or that already have an open request, are never proposed. ' +
+          'Nothing is created until you select it and click Create.</p>' +
+          '<p style="font-size:11.5px; color:var(--muted); margin:8px 0 2px;">Why existing evidence is insufficient:</p>' +
+          '<ul class="s7-list">' + (c.reasons || []).map(function (x) { return '<li>' + esc(x) + '</li>'; }).join('') + '</ul>' +
+          '<p style="font-size:11.5px; color:var(--muted); margin:8px 0 2px;">Missing evidence categories:</p>' +
+          '<ul class="s7-list">' + (c.missing_categories && c.missing_categories.length ? c.missing_categories.map(function (x) { return '<li>' + esc(x) + '</li>'; }).join('') : '<li>(none specifically flagged)</li>') + '</ul>' +
+          '<p style="font-size:11.5px; color:var(--muted); margin:8px 0 2px;">Open questions:</p>' +
+          '<ul class="s7-list">' + (c.questions || []).map(function (x) { return '<li>' + esc(x) + '</li>'; }).join('') + '</ul>' +
+          '<p style="font-size:11.5px; color:var(--muted); margin:8px 0 2px;">Existing evidence (' + (c.evidence_snapshot ? c.evidence_snapshot.length : 0) + '):</p>' +
+          stage7EvidenceListHtml(c.evidence_snapshot) +
+          '</div>';
+      });
+    }
+
+    // ---- 2. Active research requests (Task 3.B/C/D/E/F) ----
+    var requests = s.requests.open || [];
+    html += '<h2 class="section-title">Active research requests (' + requests.length + ')</h2>';
+    if (!requests.length) {
+      html += '<div class="card">' + emptyState('None active', 'Select one or more candidates above and click "Create research requests" to start one.') + '</div>';
+    } else {
+      requests.forEach(function (r) {
+        stage7RequestsById[r.request_id] = r;
         html += '<div class="item-card">' +
           '<div class="ev-row"><span class="k">Event #' + esc(r.event_id) + '</span><span class="v">' + esc(r.event_category) + '</span></div>' +
-          '<div class="ev-row"><span class="k">Status</span><span class="v">' + badgeForStage7RequestStatus(r.status) + '</span></div>' +
+          '<div class="ev-row"><span class="k">Lifecycle</span><span class="v">' + badgeForStage7Lifecycle(r.lifecycle_stage) + '</span></div>' +
+          '<div class="ev-row"><span class="k">Raw status</span><span class="v">' + badgeForStage7RequestStatus(r.status) + '</span></div>' +
           '<div class="ev-row"><span class="k">Sufficiency</span><span class="v">' + badgeForStage7Sufficiency(r.sufficiency_status) + '</span></div>' +
-          '<div class="ev-row"><span class="k">Event time</span><span class="v">' + esc(fmtTs(r.event_ts)) + '</span></div>' +
+          '<div class="ev-row"><span class="k">Event time / historical cutoff</span><span class="v">' + esc(fmtTs(r.event_ts)) + ' / ' + esc(fmtTs(r.historical_cutoff_ts)) + '</span></div>' +
           '<div class="ev-row"><span class="k">Requested</span><span class="v">' + esc(fmtTs(r.created_ts)) + ' (' + esc(fmtAgo(r.created_ts)) + ')</span></div>' +
-          '<div class="ev-row"><span class="k">Published to GitHub</span><span class="v">' +
-            (r.github_published ? badge('YES: ' + r.github_path, 'b-verified') : (r.github_publish_error ? badge('FAILED -- RETRYABLE', 'b-unknown') : badge('NOT YET', 'b-outline'))) +
+          '<div class="ev-row"><span class="k">Published to GitHub (durability, optional)</span><span class="v">' +
+            (r.github_published ? badge('YES: ' + r.github_path, 'b-verified') : (r.github_publish_error ? badge('FAILED -- RETRYABLE', 'b-unknown') : badge('NOT YET (prompt is still available below)', 'b-outline'))) +
             '</span></div>' +
           (r.github_publish_error ? '<div class="ev-row"><span class="k">Publish error</span><span class="v">' + esc(r.github_publish_error) + '</span></div>' : '') +
-          '<div class="ev-row"><span class="k">AI response registered</span><span class="v">' +
-            (r.response_received ? badge('YES (' + r.response_validation_status + ')', r.response_validation_status === 'VALIDATED' ? 'b-verified' : 'b-outline') : badge('NOT YET', 'b-outline')) +
-            '</span></div>' +
-          '<p style="font-size:11.5px; color:var(--muted); margin:8px 0 2px;">Why existing evidence is insufficient:</p>' +
-          '<ul class="s7-list">' + (r.reasons || []).map(function (x) { return '<li>' + esc(x) + '</li>'; }).join('') + '</ul>' +
-          '<p style="font-size:11.5px; color:var(--muted); margin:8px 0 2px;">Open questions:</p>' +
-          '<ul class="s7-list">' + (r.questions || []).map(function (x) { return '<li>' + esc(x) + '</li>'; }).join('') + '</ul>' +
+          '<p style="font-size:11.5px; color:var(--muted); margin:8px 0 2px;">Missing evidence categories:</p>' +
+          '<ul class="s7-list">' + (r.missing_categories && r.missing_categories.length ? r.missing_categories.map(function (x) { return '<li>' + esc(x) + '</li>'; }).join('') : '<li>(none specifically flagged)</li>') + '</ul>' +
+          '<p style="font-size:11.5px; color:var(--muted); margin:8px 0 2px;">Existing evidence:</p>' +
+          stage7EvidenceListHtml(r.evidence_snapshot) +
+          '<details style="margin-top:8px;"><summary style="cursor:pointer; font-size:12px;">Show full research prompt</summary>' +
+          '<pre class="s7-prompt">' + esc(r.prompt_text || '(no prompt text stored)') + '</pre></details>' +
+          '<p class="s7-note"><b>Manual step.</b> These buttons only copy the prompt or open the AI service in a new tab. Nothing is sent for you ' +
+          'and no research has happened until YOU paste the prompt into the AI, read its answer, and paste that answer back below.</p>' +
           '<div class="s7-actions">' +
             '<button data-copy-prompt="' + esc(r.request_id) + '">Copy research prompt</button>' +
             '<a href="https://claude.ai/new" target="_blank" rel="noopener">Open Claude</a>' +
@@ -9133,137 +10266,289 @@ const RESEARCH_LAB_HTML = `<!DOCTYPE html>
             '<a href="https://grok.com" target="_blank" rel="noopener">Open Grok</a>' +
             (r.response_received ? '' : '<button class="primary" data-toggle-form="' + esc(r.request_id) + '">Register AI response</button>') +
           '</div>' +
-          (r.response_received ? '' :
-            '<div class="s7-form" data-form="' + esc(r.request_id) + '">' +
-              '<label>Provider (which AI tool actually did this research)</label>' +
-              '<select data-field="provider"><option value="">unknown</option><option value="claude">Claude</option><option value="chatgpt">ChatGPT</option><option value="gemini">Gemini</option><option value="grok">Grok</option></select>' +
-              '<label>Summary of findings</label>' +
-              '<textarea data-field="summary" placeholder="What did the AI actually find, in its own words?"></textarea>' +
-              '<label>Sentiment assessment (required)</label>' +
-              '<select data-field="sentiment_assessment"><option value="">-- choose --</option><option value="POSITIVE">POSITIVE</option><option value="NEGATIVE">NEGATIVE</option><option value="MIXED">MIXED</option><option value="INDETERMINATE">INDETERMINATE</option></select>' +
-              '<label>Transmission mechanism (optional)</label><textarea data-field="transmission_mechanism"></textarea>' +
-              '<label>Contradictory evidence / unresolved questions (optional)</label><textarea data-field="contradictory_evidence"></textarea>' +
-              '<label>Limitations / confidence (optional)</label><textarea data-field="limitations"></textarea>' +
-              '<label>Sources -- one per line: url | publisher | publication_date | claim (optional)</label><textarea data-field="sources_text"></textarea>' +
-              '<div class="s7-check"><input type="checkbox" data-field="validated" id="validated-' + esc(r.request_id) + '"/>' +
-              '<label for="validated-' + esc(r.request_id) + '" style="display:inline; margin:0; text-transform:none;">I personally reviewed this response and its citations, and confirm it is not fabricated</label></div>' +
-              '<label>Admin token (required -- never stored by this page; ask whoever holds STAGE7_ADMIN_TOKEN)</label>' +
-              '<input type="password" data-field="admin_token" autocomplete="off"/>' +
-              '<div class="s7-actions"><button class="primary" data-submit="' + esc(r.request_id) + '">Submit response</button></div>' +
-              '<div class="s7-msg" data-msg="' + esc(r.request_id) + '"></div>' +
-            '</div>') +
+          '<div class="s7-msg" data-msg="copy-' + esc(r.request_id) + '"></div>' +
+          (r.response_received ? stage7RegisteredResponseHtml(r) : stage7FormHtml(r)) +
+          stage7RecalcBlockHtml(r) +
           '</div>';
-      }
+      });
     }
 
+    // ---- 3. Recalculated event sentiment, new vs. previous (Task 3.E) ----
     html += '<h2 class="section-title">Recalculated event sentiment (' + s.sentiment.total_events_recalculated + ')</h2>';
     if (!s.sentiment.latest_by_event.length) {
-      html += '<div class="card">' + emptyState('None yet', 'No event has had sufficient (or AI-validated) evidence to recalculate against yet.') + '</div>';
+      html += '<div class="card">' + emptyState('None yet', 'No event has had a human-triggered recalculation yet.') + '</div>';
     } else {
-      for (var j = 0; j < s.sentiment.latest_by_event.length; j++) {
-        var ev = s.sentiment.latest_by_event[j];
+      s.sentiment.latest_by_event.forEach(function (ev) {
         html += '<div class="item-card">' +
           '<div class="ev-row"><span class="k">Event #' + esc(ev.event_id) + '</span><span class="v">' + esc(ev.event_category) + '</span></div>' +
           '<div class="ev-row"><span class="k">Evidence sufficiency</span><span class="v">' + badgeForStage7Sufficiency(ev.evidence_sufficiency) + '</span></div>' +
           '<div class="ev-row"><span class="k">Stage 7 event sentiment (not V1)</span><span class="v">' +
             (ev.sentiment_label ? badge(ev.sentiment_label + ' (' + ev.sentiment_score + ')', 'b-strong') : badge('NO DEFENSIBLE ASSESSMENT YET', 'b-unknown')) +
+            (ev.previous_sentiment_id != null
+              ? ' <span class="muted" style="font-size:11.5px;">(previous: ' + esc(ev.previous_sentiment_label || 'none') + (ev.previous_sentiment_score != null ? ' (' + esc(ev.previous_sentiment_score) + ')' : '') + ')</span>'
+              : ' <span class="muted" style="font-size:11.5px;">(first calculation for this event)</span>') +
             '</span></div>' +
           '<div class="ev-row"><span class="k">Contributing / excluded evidence</span><span class="v">' + esc(ev.contributing_evidence_count) + ' / ' + esc(ev.excluded_evidence_count) + '</span></div>' +
           '<div class="ev-row"><span class="k">Calculated</span><span class="v">' + esc(fmtTs(ev.calculation_ts)) + ' (' + esc(fmtAgo(ev.calculation_ts)) + ')</span></div>' +
           '<div class="ev-row"><span class="k">Formula version</span><span class="v">' + esc(ev.formula_version) + '</span></div>' +
           '</div>';
-      }
+      });
     }
 
     app.innerHTML = html;
 
-    var copyBtns = app.querySelectorAll('[data-copy-prompt]');
-    for (var ci = 0; ci < copyBtns.length; ci++) {
-      copyBtns[ci].addEventListener('click', function (e) {
-        var reqId = e.currentTarget.dataset.copyPrompt;
-        var text = buildStage7ResearchPromptText(stage7RequestsById[reqId] || {});
-        if (navigator.clipboard && navigator.clipboard.writeText) {
-          navigator.clipboard.writeText(text).then(function () {
-            e.currentTarget.textContent = 'Copied!';
-            setTimeout(function () { e.currentTarget.textContent = 'Copy research prompt'; }, 1500);
-          });
-        }
-      });
+    var tokenInput = app.querySelector('#s7-admin-token');
+    if (tokenInput) {
+      tokenInput.value = stage7AdminToken;
+      tokenInput.addEventListener('input', function (e) { stage7AdminToken = e.target.value; });
     }
 
-    var toggleBtns = app.querySelectorAll('[data-toggle-form]');
-    for (var ti = 0; ti < toggleBtns.length; ti++) {
-      toggleBtns[ti].addEventListener('click', function (e) {
+    function stage7SetMsg(key, text, ok) {
+      var el = app.querySelector('[data-msg="' + key + '"]');
+      if (el) { el.textContent = text; el.className = 's7-msg ' + (ok === true ? 'ok' : ok === false ? 'err' : ''); }
+    }
+    if (stage7Flash) { var flashText = stage7Flash; stage7Flash = null; stage7SetMsg('flash', flashText, true); }
+
+    // ---- candidate selection + create-requests ----
+    var selectAllBtn = app.querySelector('[data-select-all-candidates]');
+    if (selectAllBtn) selectAllBtn.addEventListener('click', function () {
+      app.querySelectorAll('[data-candidate-checkbox]').forEach(function (cb) { cb.checked = true; });
+    });
+    var clearSelBtn = app.querySelector('[data-clear-candidate-selection]');
+    if (clearSelBtn) clearSelBtn.addEventListener('click', function () {
+      app.querySelectorAll('[data-candidate-checkbox]').forEach(function (cb) { cb.checked = false; });
+    });
+    var createReqBtn = app.querySelector('[data-create-requests]');
+    if (createReqBtn) createReqBtn.addEventListener('click', function () {
+      var ids = Array.prototype.slice.call(app.querySelectorAll('[data-candidate-checkbox]:checked')).map(function (cb) { return cb.value; });
+      if (!ids.length) { stage7SetMsg('create-requests', 'Select at least one candidate first.', false); return; }
+      if (!stage7AdminToken) { stage7SetMsg('create-requests', 'Admin token is required.', false); return; }
+      stage7SetMsg('create-requests', 'Creating ' + ids.length + ' request(s)...', null);
+      fetch('/api/research-lab/stage7-create-requests', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + stage7AdminToken },
+        body: JSON.stringify({ candidate_ids: ids }),
+      }).then(function (res) { return res.json(); }).then(function (result) {
+        if (result.ok) {
+          var msg = 'Created ' + result.created.length + ' request(s).';
+          if (result.skipped.length) msg += ' Skipped ' + result.skipped.length + ': ' + result.skipped.map(function (x) { return x.reason; }).join('; ');
+          stage7Flash = msg;
+          renderStage7();
+        } else {
+          stage7SetMsg('create-requests', result.error || 'Request creation failed.', false);
+        }
+      }).catch(function (err) { stage7SetMsg('create-requests', String(err), false); });
+    });
+
+    // ---- copy prompt: copies the SERVER-computed prompt_text verbatim ----
+    app.querySelectorAll('[data-copy-prompt]').forEach(function (btn) {
+      btn.addEventListener('click', function (e) {
+        var button = e.currentTarget;
+        var reqId = button.dataset.copyPrompt;
+        var text = (stage7RequestsById[reqId] && stage7RequestsById[reqId].prompt_text) || '';
+        if (!text) { stage7SetMsg('copy-' + reqId, 'No prompt text is stored for this request, so nothing was copied.', false); return; }
+        stage7CopyText(text).then(function (ok) {
+          if (ok) {
+            button.textContent = 'Copied!';
+            stage7SetMsg('copy-' + reqId, 'Prompt copied (' + text.length + ' characters). Now paste it into the AI service yourself.', true);
+            setTimeout(function () { button.textContent = 'Copy research prompt'; }, 1500);
+          } else {
+            stage7SetMsg('copy-' + reqId, 'The browser blocked copying. Open "Show full research prompt" above and select and copy the text manually.', false);
+          }
+        });
+      });
+    });
+
+    app.querySelectorAll('[data-toggle-form]').forEach(function (btn) {
+      btn.addEventListener('click', function (e) {
         var reqId = e.currentTarget.dataset.toggleForm;
         var form = app.querySelector('[data-form="' + reqId + '"]');
         if (form) form.classList.toggle('open');
       });
+    });
+
+    // ---- parse pasted response into the structured fields (review/correct before submit) ----
+    app.querySelectorAll('[data-parse-response]').forEach(function (btn) {
+      btn.addEventListener('click', function (e) {
+        var reqId = e.currentTarget.dataset.parseResponse;
+        var form = app.querySelector('[data-form="' + reqId + '"]');
+        var raw = form.querySelector('[data-field="raw_response_text"]').value;
+        var parsed = parseStage7AIResponse(raw);
+        if (!parsed.ok) { stage7SetMsg('parse-' + reqId, parsed.error, false); return; }
+        form.querySelector('[data-field="summary"]').value = parsed.findings.summary;
+        form.querySelector('[data-field="transmission_mechanism"]').value = parsed.findings.transmission_mechanism;
+        form.querySelector('[data-field="contradictory_evidence"]').value = parsed.findings.contradictory_evidence;
+        form.querySelector('[data-field="limitations"]').value = parsed.findings.limitations;
+        var sentSelect = form.querySelector('[data-field="sentiment_assessment"]');
+        if (['POSITIVE', 'NEGATIVE', 'MIXED', 'INDETERMINATE'].indexOf(parsed.findings.sentiment_assessment) !== -1) sentSelect.value = parsed.findings.sentiment_assessment;
+        form.querySelector('[data-field="sources_text"]').value = stage7SourcesArrayToText(parsed.sources);
+        stage7SetMsg('parse-' + reqId, 'Parsed. Review every field below (including sources) before registering -- correct anything the parse got wrong.', true);
+      });
+    });
+
+    // ---- check sources: preview only, no D1 write, correct + re-check freely ----
+    app.querySelectorAll('[data-check-sources]').forEach(function (btn) {
+      btn.addEventListener('click', function (e) {
+        var reqId = e.currentTarget.dataset.checkSources;
+        var form = app.querySelector('[data-form="' + reqId + '"]');
+        var sources = stage7SourcesTextToArray(form.querySelector('[data-field="sources_text"]').value);
+        var cutoff = (stage7RequestsById[reqId] && stage7RequestsById[reqId].historical_cutoff_ts) || null;
+        stage7SetMsg('sources-' + reqId, 'Checking...', null);
+        fetch('/api/research-lab/stage7-validate-sources', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ sources: sources, historical_cutoff_ts: cutoff }),
+        }).then(function (res) { return res.json(); }).then(function (result) {
+          if (!result.ok) { stage7SetMsg('sources-' + reqId, result.error || 'Could not check sources.', false); return; }
+          var summary = result.valid_count + ' valid, ' + result.excluded_count + ' excluded, ' + result.questionable_count + ' questionable.';
+          var details = result.results.filter(function (r) { return r.status !== 'valid'; })
+            .map(function (r) { return '#' + r.index + ' (' + r.status + '): ' + r.reason; }).join(' | ');
+          stage7SetMsg('sources-' + reqId, summary + (details ? ' -- ' + details : ''), result.excluded_count === 0);
+        }).catch(function (err) { stage7SetMsg('sources-' + reqId, String(err), false); });
+      });
+    });
+
+    // ---- read the form's current values (shared by Review and Register) ----
+    function stage7ReadForm(reqId) {
+      var form = app.querySelector('[data-form="' + reqId + '"]');
+      var get = function (field) { var el = form.querySelector('[data-field="' + field + '"]'); return el ? el.value : ''; };
+      return {
+        form: form,
+        raw: get('raw_response_text'),
+        provider: get('provider') || null,
+        sentiment: get('sentiment_assessment'),
+        findings: {
+          summary: get('summary'),
+          transmission_mechanism: get('transmission_mechanism'),
+          contradictory_evidence: get('contradictory_evidence'),
+          sentiment_assessment: get('sentiment_assessment'),
+          limitations: get('limitations'),
+        },
+        sources: stage7SourcesTextToArray(get('sources_text')),
+      };
     }
 
-    var submitBtns = app.querySelectorAll('[data-submit]');
-    for (var si = 0; si < submitBtns.length; si++) {
-      submitBtns[si].addEventListener('click', function (e) {
-        var reqId = e.currentTarget.dataset.submit;
-        var form = app.querySelector('[data-form="' + reqId + '"]');
-        var msg = app.querySelector('[data-msg="' + reqId + '"]');
-        var get = function (field) { var el = form.querySelector('[data-field="' + field + '"]'); return el ? el.value : ''; };
-        var sentimentAssessment = get('sentiment_assessment');
-        if (!sentimentAssessment) {
-          msg.textContent = 'Sentiment assessment is required.';
-          msg.className = 's7-msg err';
-          return;
+    // ---- REVIEW: nothing is saved here. Shows exactly what would be stored, with the
+    // server's own technical source check, and only then offers registration. ----
+    app.querySelectorAll('[data-open-review]').forEach(function (btn) {
+      btn.addEventListener('click', function (e) {
+        var reqId = e.currentTarget.dataset.openReview;
+        var v = stage7ReadForm(reqId);
+        var panel = app.querySelector('[data-review-panel="' + reqId + '"]');
+        if (!v.raw.trim()) { stage7SetMsg(reqId, 'Paste the full response from the external AI first.', false); return; }
+        if (!v.sentiment) { stage7SetMsg(reqId, 'Choose a sentiment assessment first (the parse button can fill it in from the response).', false); return; }
+        stage7SetMsg(reqId, 'Checking sources for the review screen...', null);
+        var cutoff = (stage7RequestsById[reqId] && stage7RequestsById[reqId].historical_cutoff_ts) || null;
+        fetch('/api/research-lab/stage7-validate-sources', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ sources: v.sources, historical_cutoff_ts: cutoff }),
+        }).then(function (res) { return res.json(); }).then(function (check) {
+          if (!check.ok) { stage7SetMsg(reqId, check.error || 'Could not check sources.', false); return; }
+          stage7SetMsg(reqId, '', null);
+          var allFailed = v.sources.length > 0 && check.valid_count === 0;
+          panel.innerHTML =
+            '<h3 style="font-size:13px; margin:4px 0 8px;">Review before registering -- nothing has been saved yet</h3>' +
+            '<div class="ev-row"><span class="k">Historical cutoff</span><span class="v">' + esc(fmtTs(cutoff)) + '</span></div>' +
+            '<div class="ev-row"><span class="k">Provider</span><span class="v">' + esc(v.provider || 'unknown') + '</span></div>' +
+            stage7FindingsHtml(v.findings) +
+            '<p style="font-size:11.5px; color:var(--muted); margin:8px 0 2px;">Source check: ' + check.valid_count + ' valid, ' + check.excluded_count + ' excluded, ' + check.questionable_count + ' questionable. ' +
+            'This is a technical check of the URL, date, cutoff and duplicates only -- it does not prove a source says what the AI claims.</p>' +
+            stage7SourceValidationHtml(check.results, v.sources) +
+            (check.excluded_count ? '<p class="s7-msg err">' + check.excluded_count + ' source(s) are excluded and cannot support the assessment. They will still be stored, marked excluded.</p>' : '') +
+            '<details style="margin-top:8px;"><summary style="cursor:pointer; font-size:12px;">Verbatim response as pasted (' + v.raw.length + ' characters)</summary><pre class="s7-prompt">' + esc(v.raw) + '</pre></details>' +
+            (allFailed ? '<p class="s7-msg err">Every submitted source failed the technical check, so this cannot be registered as validated. Go back and correct the sources, or save it without validating.</p>' : '') +
+            '<div class="s7-check"><input type="checkbox" id="rv-new-' + esc(reqId) + '" data-confirm-register="' + esc(reqId) + '"' + (allFailed ? ' disabled' : '') + '/>' +
+            '<label for="rv-new-' + esc(reqId) + '" style="display:inline; margin:0; text-transform:none;">I personally reviewed this response and its sources, and confirm the research result is acceptable</label></div>' +
+            '<label>Review note (optional)</label><textarea data-register-note="' + esc(reqId) + '" style="min-height:50px;"></textarea>' +
+            '<div class="s7-actions">' +
+              '<button class="primary" data-submit="' + esc(reqId) + '" data-mode="validated"' + (allFailed ? ' disabled' : '') + '>Confirm and register as validated</button>' +
+              '<button data-submit="' + esc(reqId) + '" data-mode="pending">Save without validating (stays awaiting review)</button>' +
+              '<button data-close-review="' + esc(reqId) + '">Back to editing</button>' +
+            '</div>';
+          panel.classList.add('open');
+          panel.querySelector('[data-close-review]').addEventListener('click', function () { panel.classList.remove('open'); panel.innerHTML = ''; });
+          panel.querySelectorAll('[data-submit]').forEach(function (b) { b.addEventListener('click', stage7Register); });
+          panel.scrollIntoView({ block: 'nearest' });
+        }).catch(function (err) { stage7SetMsg(reqId, String(err), false); });
+      });
+    });
+
+    // ---- REGISTER: only reachable from the review panel ----
+    function stage7Register(e) {
+      var reqId = e.currentTarget.dataset.submit;
+      var mode = e.currentTarget.dataset.mode;
+      var v = stage7ReadForm(reqId);
+      var panel = app.querySelector('[data-review-panel="' + reqId + '"]');
+      var confirmBox = panel.querySelector('[data-confirm-register]');
+      var note = panel.querySelector('[data-register-note]').value;
+      if (!v.raw.trim()) { stage7SetMsg(reqId, 'Paste the full response from the external AI first.', false); return; }
+      if (!v.sentiment) { stage7SetMsg(reqId, 'Sentiment assessment is required.', false); return; }
+      if (!stage7AdminToken) { stage7SetMsg(reqId, 'Admin token is required to submit.', false); return; }
+      var validated = mode === 'validated';
+      if (validated && !(confirmBox && confirmBox.checked)) {
+        stage7SetMsg(reqId, 'Tick the confirmation box: registering as validated needs your explicit confirmation.', false);
+        return;
+      }
+      var body = {
+        request_id: reqId, provider: v.provider, raw_response_text: v.raw, findings: v.findings, sources: v.sources,
+        confidence: null, validated: validated, human_confirmed: validated, human_review_note: note || null,
+      };
+      stage7SetMsg(reqId, 'Submitting...', null);
+      fetch('/api/research-lab/stage7-register-response', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + stage7AdminToken },
+        body: JSON.stringify(body),
+      }).then(function (res) { return res.json(); }).then(function (result) {
+        if (result.ok) {
+          stage7Flash = 'Response registered (' + result.validation_status + ') for ' + reqId + '. No recalculation was requested or performed.';
+          renderStage7();
+        } else {
+          stage7SetMsg(reqId, result.error || 'Registration failed.', false);
         }
-        var adminToken = get('admin_token');
-        if (!adminToken) {
-          msg.textContent = 'Admin token is required to submit.';
-          msg.className = 's7-msg err';
-          return;
-        }
-        var sourcesText = get('sources_text');
-        var sources = sourcesText.split('\\n').map(function (line) { return line.trim(); }).filter(Boolean).map(function (line) {
-          var parts = line.split('|').map(function (p) { return p.trim(); });
-          return { url: parts[0] || null, publisher: parts[1] || null, publication_date: parts[2] || null, claim: parts[3] || null };
-        });
-        var body = {
-          request_id: reqId,
-          provider: get('provider') || null,
-          findings: {
-            summary: get('summary'),
-            transmission_mechanism: get('transmission_mechanism'),
-            contradictory_evidence: get('contradictory_evidence'),
-            sentiment_assessment: sentimentAssessment,
-            limitations: get('limitations'),
-          },
-          sources: sources,
-          confidence: null,
-          validated: !!form.querySelector('[data-field="validated"]').checked,
-        };
-        msg.textContent = 'Submitting…';
-        msg.className = 's7-msg';
-        // adminToken is read once from this page's own password-type input
-        // (never pre-filled, never persisted to localStorage/sessionStorage,
-        // never embedded in this script) and sent only as this one request's
-        // Authorization header -- see registerStage7ResearchResponse's own
-        // header comment in the Worker for the server-side enforcement.
-        fetch('/api/research-lab/stage7-register-response', {
+      }).catch(function (err) { stage7SetMsg(reqId, String(err), false); });
+    }
+
+    // ---- review of an already-registered PENDING response ----
+    app.querySelectorAll('[data-review-decision]').forEach(function (btn) {
+      btn.addEventListener('click', function (e) {
+        var reqId = e.currentTarget.dataset.req;
+        var decision = e.currentTarget.dataset.reviewDecision;
+        var confirmBox = app.querySelector('[data-review-confirm="' + reqId + '"]');
+        var note = app.querySelector('[data-review-note="' + reqId + '"]');
+        if (!(confirmBox && confirmBox.checked)) { stage7SetMsg('review-' + reqId, 'Tick the confirmation box first: this decision needs your explicit confirmation.', false); return; }
+        if (!stage7AdminToken) { stage7SetMsg('review-' + reqId, 'Admin token is required.', false); return; }
+        stage7SetMsg('review-' + reqId, 'Saving...', null);
+        fetch('/api/research-lab/stage7-review-response', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + adminToken },
-          body: JSON.stringify(body),
+          headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + stage7AdminToken },
+          body: JSON.stringify({ request_id: reqId, decision: decision, human_confirmed: true, note: note ? note.value : null }),
+        }).then(function (res) { return res.json(); }).then(function (result) {
+          if (result.ok) { stage7Flash = 'Review saved for ' + reqId + ': ' + result.validation_status + '.'; renderStage7(); }
+          else { stage7SetMsg('review-' + reqId, result.error || 'Review failed.', false); }
+        }).catch(function (err) { stage7SetMsg('review-' + reqId, String(err), false); });
+      });
+    });
+
+    // ---- explicit, separate recalculation request (also used for "Retry") ----
+    app.querySelectorAll('[data-trigger-recalc]').forEach(function (btn) {
+      btn.addEventListener('click', function (e) {
+        var reqId = e.currentTarget.dataset.triggerRecalc;
+        if (!stage7AdminToken) { stage7SetMsg('recalc-' + reqId, 'Admin token is required.', false); return; }
+        e.currentTarget.disabled = true; // a double click must not send two requests
+        stage7SetMsg('recalc-' + reqId, 'Requesting...', null);
+        fetch('/api/research-lab/stage7-trigger-recalculation', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + stage7AdminToken },
+          body: JSON.stringify({ request_id: reqId }),
         }).then(function (res) { return res.json(); }).then(function (result) {
           if (result.ok) {
-            msg.textContent = 'Registered (' + result.validation_status + ').';
-            msg.className = 's7-msg ok';
+            stage7Flash = (result.note || 'Recalculation requested.') + ' (' + reqId + ')';
             renderStage7();
           } else {
-            msg.textContent = result.error || 'Registration failed.';
-            msg.className = 's7-msg err';
+            stage7SetMsg('recalc-' + reqId, result.error || 'Could not request recalculation.', false);
           }
-        }).catch(function (err) {
-          msg.textContent = String(err);
-          msg.className = 's7-msg err';
-        });
+        }).catch(function (err) { stage7SetMsg('recalc-' + reqId, String(err), false); });
       });
-    }
+    });
   }
 
   async function render() {
@@ -10066,45 +11351,60 @@ export default {
       }
     }
 
-    // ---- Stage 7 (research-lab UI layer): getResearchLabStage7Overview
-    // already returns activated:false gracefully on its own when
-    // migration 0016 is not yet applied -- this outer try/catch is only a
-    // last-resort safety net against a genuinely unexpected error, same
-    // convention as Experiment 5 immediately below. ----
+    // ---- Stage 7 routes. Every one runs stage7RoutePreflight first: disabled deployment -> nothing is read or
+    // written; writes then require STAGE7_ADMIN_TOKEN (fail closed); then the schema must be complete. See the
+    // comments on stage7Enabled / stage7RoutePreflight. Errors are mapped by stage7SafeError (no SQL or request
+    // content is ever echoed back). ----
+    const stage7Json = (status, body) => new Response(JSON.stringify(body), { status, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+    const stage7Bearer = () => {
+      const authHeader = request.headers.get('Authorization') || '';
+      return authHeader.startsWith('Bearer ') ? authHeader.slice('Bearer '.length) : null;
+    };
+    // Shared by the four admin-token-gated writes. `run(body, providedToken)` returns the function's own
+    // {ok, status, ...} result.
+    const stage7WriteRoute = async (run) => {
+      try {
+        const providedToken = stage7Bearer();
+        const blocked = await stage7RoutePreflight(env, { write: true, providedToken });
+        if (blocked) return stage7Json(blocked.status, blocked.body);
+        let body;
+        try { body = await request.json(); } catch (_e) {
+          return stage7Json(400, { ok: false, code: 'INVALID_JSON', error: 'The request body must be valid JSON.' });
+        }
+        const result = await run(body, providedToken);
+        return stage7Json(result.status || (result.ok ? 200 : 500), result);
+      } catch (err) {
+        const mapped = stage7SafeError(err);
+        return stage7Json(mapped.status, mapped.body);
+      }
+    };
+
     if (url.pathname === '/api/research-lab/stage7-overview' && request.method === 'GET') {
       try {
+        const blocked = await stage7RoutePreflight(env, { write: false });
+        if (blocked) return stage7Json(blocked.status, blocked.body);
         const result = await getResearchLabStage7Overview(env);
-        return new Response(JSON.stringify(result), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+        // Which code is actually running here -- lets a human confirm the deployed identity during acceptance.
+        result.deployment = { git_commit_sha: currentGitSha(env), stage7_enabled: true };
+        return stage7Json(200, result);
       } catch (err) {
-        return new Response(JSON.stringify({ ok: false, error: String(err) }), { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+        const mapped = stage7SafeError(err);
+        return stage7Json(mapped.status, mapped.body);
       }
     }
 
-    // Human registers a completed AI research response. Never executes,
-    // evaluates, or interprets the submitted content in any way -- every
-    // field is stored as inert JSON text (see registerStage7ResearchResponse's
-    // own header comment). This is the ONLY write path for
-    // stage7_research_responses; the scheduled stage7-research-pipeline/
-    // run_stage7.py never writes to that table, only reads VALIDATED rows.
-    //
-    // SECURITY: requires `Authorization: Bearer <STAGE7_ADMIN_TOKEN>`,
-    // checked by registerStage7ResearchResponse itself before any D1 call
-    // -- see that function's own header comment for the full rationale.
-    // The token is read here and passed straight through; it is never
-    // logged, and the error responses below never echo request headers or
-    // body content back to the caller.
+    // Human registers a completed AI research response. Never executes, evaluates, or interprets the submitted
+    // content -- every field is stored as inert JSON text (see registerStage7ResearchResponse's header). The
+    // ONLY write path for stage7_research_responses; run_stage7.py only reads VALIDATED rows.
     if (url.pathname === '/api/research-lab/stage7-register-response' && request.method === 'POST') {
-      try {
-        const authHeader = request.headers.get('Authorization') || '';
-        const providedToken = authHeader.startsWith('Bearer ') ? authHeader.slice('Bearer '.length) : null;
-        const body = await request.json();
+      return stage7WriteRoute(async (body, providedToken) => {
         if (!body || typeof body.request_id !== 'string' || !body.request_id.trim()) {
-          return new Response(JSON.stringify({ ok: false, error: 'request_id is required' }), { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+          return { ok: false, status: 400, error: 'request_id is required' };
         }
         if (!body.findings || typeof body.findings !== 'object') {
-          return new Response(JSON.stringify({ ok: false, error: 'findings object is required' }), { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+          return { ok: false, status: 400, error: 'findings object is required' };
         }
-        const result = await registerStage7ResearchResponse(env, {
+        return registerStage7ResearchResponse(env, {
           requestId: body.request_id,
           provider: typeof body.provider === 'string' ? body.provider : null,
           submittedTs: Number.isFinite(body.submitted_ts) ? body.submitted_ts : null,
@@ -10112,16 +11412,73 @@ export default {
           sources: body.sources,
           confidence: typeof body.confidence === 'string' ? body.confidence : null,
           validated: body.validated === true,
+          rawResponseText: typeof body.raw_response_text === 'string' ? body.raw_response_text : null,
+          humanConfirmed: body.human_confirmed === true,
+          humanReviewNote: typeof body.human_review_note === 'string' ? body.human_review_note : null,
           providedToken,
         });
-        return new Response(JSON.stringify(result), { status: result.status || (result.ok ? 200 : 500), headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+      });
+    }
+
+    // Read-only preview of the technical source check (URL syntax, date, cutoff, duplicates). No D1 access, no
+    // auth (nothing is written or disclosed beyond an echo of the caller's own input) -- but still off when
+    // Stage 7 is not enabled on this deployment.
+    if (url.pathname === '/api/research-lab/stage7-validate-sources' && request.method === 'POST') {
+      try {
+        if (!stage7Enabled(env)) {
+          return stage7Json(503, { ok: false, code: 'STAGE7_DISABLED', error: 'Stage 7 is not enabled on this deployment (STAGE7_ENABLED is not "true").' });
+        }
+        let body;
+        try { body = await request.json(); } catch (_e) {
+          return stage7Json(400, { ok: false, code: 'INVALID_JSON', error: 'The request body must be valid JSON.' });
+        }
+        const sources = Array.isArray(body && body.sources) ? body.sources : [];
+        const cutoff = Number.isFinite(body && body.historical_cutoff_ts) ? body.historical_cutoff_ts : null;
+        return stage7Json(200, { ok: true, ...validateStage7Sources(sources, cutoff) });
       } catch (err) {
-        // Never echo the caught error's own message verbatim here if it
-        // could ever originate from something request-controlled; today
-        // it cannot (JSON.parse failures and D1 errors only), but the
-        // token itself never flows through `err` in any code path above.
-        return new Response(JSON.stringify({ ok: false, error: String(err) }), { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+        const mapped = stage7SafeError(err);
+        return stage7Json(mapped.status, mapped.body);
       }
+    }
+
+    // Turns human-selected candidates into real, non-terminal requests -- the ONLY thing that creates a
+    // stage7_research_requests row.
+    if (url.pathname === '/api/research-lab/stage7-create-requests' && request.method === 'POST') {
+      return stage7WriteRoute((body, providedToken) => createStage7ResearchRequests(env, {
+        candidateIds: body && body.candidate_ids, providedToken,
+      }));
+    }
+
+    // The explicit, separate human action that flags a VALIDATED response as ready for recalculation. Never
+    // performs the recalculation itself.
+    if (url.pathname === '/api/research-lab/stage7-trigger-recalculation' && request.method === 'POST') {
+      return stage7WriteRoute((body, providedToken) => {
+        if (!body || typeof body.request_id !== 'string' || !body.request_id.trim()) {
+          return { ok: false, status: 400, error: 'request_id is required' };
+        }
+        return triggerStage7Recalculation(env, {
+          requestId: body.request_id,
+          requestedBy: typeof body.requested_by === 'string' ? body.requested_by : null,
+          providedToken,
+        });
+      });
+    }
+
+    // Human review of a response registered WITHOUT validation (PENDING): VALIDATE or REJECT, with an explicit
+    // human confirmation.
+    if (url.pathname === '/api/research-lab/stage7-review-response' && request.method === 'POST') {
+      return stage7WriteRoute((body, providedToken) => {
+        if (!body || typeof body.request_id !== 'string' || !body.request_id.trim()) {
+          return { ok: false, status: 400, error: 'request_id is required' };
+        }
+        return reviewStage7Response(env, {
+          requestId: body.request_id,
+          decision: body.decision,
+          humanConfirmed: body.human_confirmed === true,
+          note: typeof body.note === 'string' ? body.note : null,
+          providedToken,
+        });
+      });
     }
 
     // ---- Experiment 5 (research-lab UI layer): every handler already

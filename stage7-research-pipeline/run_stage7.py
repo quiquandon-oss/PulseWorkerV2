@@ -1,17 +1,44 @@
 #!/usr/bin/env python3
 """
 Stage 7 -- AI-Assisted Internet Research & Full-Source Sentiment
-Recalculation. Scheduled orchestration script.
+Recalculation. Human-triggered orchestration script (workflow_dispatch
+only -- see .github/workflows/stage7-research-pipeline.yml; no
+`schedule:` trigger exists or should ever be added).
 
-RESEARCH-ONLY WRITE SURFACE: stage7_research_requests, stage7_event_
-sentiment (both new, migration 0016). Never writes research_events,
-research_event_evidence (Stage 6's own tables), history, btc_data,
-predictions, challenger_predictions, selection_decisions, or any V1/V2
-production table. stage7_research_responses is written only by a human
-via the Worker's POST /api/research-lab/stage7-register-response
-endpoint (worker.js) -- never by this scheduled script, which only
-READS responses to decide whether a validated one now resolves a
-pending request.
+CONFIRMED HUMAN-CONTROLLED OPERATING MODEL: this script never creates a
+research request and never decides to recalculate sentiment on its own
+initiative. Each run does exactly three things, none of which requires
+or waits on a human mid-run:
+  1. PROPOSE -- assesses currently-eligible events and writes any newly
+     insufficient/conflicting one as a row in stage7_research_candidates
+     (status PROPOSED). A human reviews these in the app and explicitly
+     selects which to research; see worker.js's createStage7ResearchRequests().
+  2. PUBLISH/RETRY -- for requests a human has already created (via the
+     Worker, status PENDING_RESEARCH) or that previously failed to
+     publish (FAILED_RETRYABLE), attempts to commit the already-generated
+     prompt file to GitHub for durability. A human can review/copy the
+     prompt directly from the app without waiting for this step.
+  3. RECALCULATE -- for a response a human has both VALIDATED and
+     explicitly flagged via "Trigger recalculation"
+     (recalculation_requested_ts IS NOT NULL), recomputes that event's
+     Stage 7 sentiment. Merely registering/validating a response does
+     NOT, by itself, queue a recalculation.
+
+RESEARCH-ONLY WRITE SURFACE: stage7_research_candidates, stage7_research_
+requests, stage7_event_sentiment (all new, migrations 0016/0017). Never
+writes research_events, research_event_evidence (Stage 6's own tables),
+history, btc_data, predictions, challenger_predictions, selection_
+decisions, or any V1/V2 production table. stage7_research_requests is
+ALSO written directly by the Worker (candidate selection -> request
+creation, and the recalculation-trigger flag) -- see worker.js's
+createStage7ResearchRequests()/triggerStage7Recalculation(); this script
+only ever UPDATEs a request it did not itself create (publish/retry) or
+INSERTs a stage7_event_sentiment row, never a stage7_research_requests
+row directly. stage7_research_responses is written only by a human via
+the Worker's POST /api/research-lab/stage7-register-response endpoint
+(worker.js) -- never by this scheduled script, which only READS
+responses to decide whether an explicitly-flagged, validated one now
+resolves a pending request.
 
 Mirrors exp009-event-source-evidence/run_experiment.py's own structure
 deliberately: same dual D1 access pattern (wrangler CLI for reads,
@@ -360,17 +387,41 @@ def resolve_real_event_ids(events_by_ts, research_events_rows):
     }
 
 
+def build_candidate_id(event_id, sequence=1):
+    """Deterministic, not random -- same rationale as pub.build_request_id():
+    a repeated propose run for the same event computes the identical id,
+    which is what makes propose idempotent at the D1 layer (on top of
+    idx_stage7_candidates_active_event's own uniqueness guard).
+
+    `sequence` is 1 for an event's first-ever candidate (the original
+    `stage7-cand-<event_id>` format, unchanged) and n+1 when the event already
+    has n candidate rows in ANY status. A CONVERTED/STALE/DISMISSED row is kept
+    forever, so re-proposing the same event (e.g. after its request was
+    REJECTED, or a stale candidate whose event is eligible again) with the
+    first-proposal id would collide with that retained row's PRIMARY KEY and
+    crash the pipeline."""
+    return f"stage7-cand-{event_id}" if sequence <= 1 else f"stage7-cand-{event_id}-{sequence}"
+
+
 def build_retry_request(existing_request, event):
     """Pure. Reconstructs the exact request dict pub.publish_request_file()
-    needs to retry a FAILED_RETRYABLE row's publish, from that row's own
-    persisted columns plus the current `event` dict (event/coin/category
-    are not persisted on the row itself -- see stage7_github_publisher.
+    needs to (re)publish a request's file, from that row's own persisted
+    columns plus the current `event` dict (event/coin/category are not
+    persisted on the row itself -- see stage7_github_publisher.
     build_request_file_content()). Deliberately reuses the ORIGINAL
     created_ts/reasons/questions/missing_categories/evidence_snapshot
     exactly as first computed, never today's now_ts or freshly re-queried
-    evidence -- a retried publish must write the same file a successful
-    first attempt would have, per evidence_snapshot_json's own "a stable
-    summary at request-creation time" contract (migration 0016)."""
+    evidence -- a (re)published file must be identical to what a
+    successful first attempt would have written, per evidence_snapshot_
+    json's own "a stable summary at request-creation time" contract
+    (migration 0016). Also passes through `prompt_text` when the row
+    already has one stored (every request created via the human-controlled
+    candidate flow does, worker.js's createStage7ResearchRequests()) --
+    stage7_github_publisher.build_request_file_content() prefers this
+    stored value over recomputing its own build_research_prompt(), which
+    is what keeps the published file's prompt IDENTICAL to the one the
+    human actually saw and copied, rather than a second, independently
+    generated (and potentially divergent) version."""
     return {
         "request_id": existing_request["request_id"],
         "event_id": existing_request["event_id"],
@@ -382,21 +433,32 @@ def build_retry_request(existing_request, event):
         "missing_categories": json.loads(existing_request["missing_categories_json"]),
         "event": event,
         "evidence_snapshot": json.loads(existing_request["evidence_snapshot_json"]),
+        "prompt_text": existing_request.get("prompt_text"),
     }
 
 
 def retry_stage7_request_publish(existing_request, event, now_ts):
-    """Retries publishing a single FAILED_RETRYABLE request's file on this
+    """Publishes (or retries publishing) a single request's file on this
     run, UPDATING that same row in place -- never INSERTing a new
     stage7_research_requests row (the partial unique index on
     (event_id) WHERE status NOT IN ('INTEGRATED','REJECTED') would reject
     one anyway while this row stays non-terminal, so this is belt-and-
-    braces, not the only guard). Goes through the exact same
-    pub.publish_request_file() the original, request-creation-time
-    publish used -- so the same branch guard (never main/master) and the
-    same idempotent/never-overwrite disk-content checks apply identically
-    to a retry. The `WHERE ... AND status = 'FAILED_RETRYABLE'` on the
-    UPDATE is a defensive no-op guard against acting on a row that
+    braces, not the only guard). Handles two distinct origins identically,
+    since the underlying operation (publish + record the outcome) is the
+    same either way:
+    - PENDING_RESEARCH: a human created this request via the Worker/
+      candidate flow (worker.js's createStage7ResearchRequests()) and it
+      has never been attempted at all yet (publish_attempts starts at 0
+      for these rows) -- this is that FIRST attempt.
+    - FAILED_RETRYABLE: a previous attempt (of either origin) failed and
+      is eligible for another try, per pub.decide_retry_outcome()'s own
+      MAX_PUBLISH_ATTEMPTS gate.
+
+    Goes through the exact same pub.publish_request_file() the original
+    legacy auto-publish path used -- so the same branch guard (never
+    main/master) and the same idempotent/never-overwrite disk-content
+    checks apply identically here. The `WHERE ... AND status IN (...)` on
+    the UPDATE is a defensive no-op guard against acting on a row that
     concurrently left that state (e.g. a human registered a response
     against it between this function's caller reading it and this call).
 
@@ -411,7 +473,7 @@ def retry_stage7_request_publish(existing_request, event, now_ts):
     d1_api_query(
         "UPDATE stage7_research_requests SET status = ?, updated_ts = ?, publish_attempts = ?, "
         "github_path = ?, github_published_ts = ?, github_publish_error = ? "
-        "WHERE request_id = ? AND status = 'FAILED_RETRYABLE'",
+        "WHERE request_id = ? AND status IN ('PENDING_RESEARCH', 'FAILED_RETRYABLE')",
         [new_status, now_ts, new_attempts,
          publish_result["path"] if publish_result["published"] else None,
          now_ts if publish_result["published"] else None,
@@ -419,6 +481,86 @@ def retry_stage7_request_publish(existing_request, event, now_ts):
          existing_request["request_id"]],
     )
     return publish_result["published"]
+
+
+# Columns this script needs beyond 0016's tables, per the migration that adds
+# them. A table-level check alone cannot see a missing COLUMN -- without this
+# a staging database stuck at 0016/0017 would fail deep inside a query with an
+# opaque "no such column", or (worse) silently skip recalculation bookkeeping.
+REQUIRED_STAGE7_COLUMNS = {
+    "stage7_research_requests": {
+        "candidate_id": "0017", "prompt_text": "0017", "recalculation_requested_ts": "0017",
+        "recalculation_status": "0018", "recalculation_started_ts": "0018",
+        "recalculation_completed_ts": "0018", "recalculation_error": "0018",
+        "recalculation_attempts": "0018", "recalculation_sentiment_id": "0018",
+    },
+    "stage7_research_responses": {"raw_response_text": "0017", "human_confirmed_ts": "0018"},
+}
+
+# A request whose recalculation a human asked for and that this script has not
+# yet finished. NULL covers a request flagged before 0018 existed. FAILED is
+# deliberately absent: a failed recalculation is never retried automatically
+# (that would loop on a permanent error); a human re-requests it, which sets
+# the status back to REQUESTED.
+RECALC_ACTIVE_STATUSES = (None, "REQUESTED", "RUNNING")
+MAX_RECALC_ERROR_CHARS = 500
+
+
+# Tables introduced after 0016. Checked together with the columns so a database that is missing the candidates
+# table (migration 0017) fails with an actionable message instead of a raw D1 "no such table" mid-run.
+REQUIRED_STAGE7_LATER_TABLES = {"stage7_research_candidates": "0017"}
+
+
+def find_missing_stage7_tables(existing_table_names):
+    """Pure. [(table, migration)] for every post-0016 Stage 7 table that is absent."""
+    present = set(existing_table_names)
+    return [(t, m) for t, m in REQUIRED_STAGE7_LATER_TABLES.items() if t not in present]
+
+
+def find_missing_stage7_columns(present_columns_by_table):
+    """present_columns_by_table: {table: set(column names)} as found in the
+    database. Returns [(table, column, migration)] for every required column
+    that is absent -- empty when the schema is complete."""
+    missing = []
+    for table, columns in REQUIRED_STAGE7_COLUMNS.items():
+        present = present_columns_by_table.get(table, set())
+        for column, migration in columns.items():
+            if column not in present:
+                missing.append((table, column, migration))
+    return missing
+
+
+def recalculation_needs_work(response_row):
+    return response_row.get("recalculation_status") in RECALC_ACTIVE_STATUSES
+
+
+def mark_recalculation_running(request_id, now_ts):
+    d1_api_query(
+        "UPDATE stage7_research_requests SET recalculation_status = 'RUNNING', recalculation_started_ts = ?, "
+        "recalculation_attempts = recalculation_attempts + 1, recalculation_error = NULL, updated_ts = ? "
+        "WHERE request_id = ? AND (recalculation_status IS NULL OR recalculation_status IN ('REQUESTED','RUNNING'))",
+        [now_ts, now_ts, request_id],
+    )
+
+
+def mark_recalculation_completed(request_id, sentiment_id, now_ts):
+    # status moves to INTEGRATION_REVIEW (a human decides what, if anything,
+    # follows) unless the request is already terminal.
+    d1_api_query(
+        "UPDATE stage7_research_requests SET recalculation_status = 'COMPLETED', recalculation_completed_ts = ?, "
+        "recalculation_sentiment_id = ?, recalculation_error = NULL, updated_ts = ?, "
+        "status = CASE WHEN status IN ('INTEGRATED','REJECTED') THEN status ELSE 'INTEGRATION_REVIEW' END "
+        "WHERE request_id = ?",
+        [now_ts, sentiment_id, now_ts, request_id],
+    )
+
+
+def mark_recalculation_failed(request_id, error_text, now_ts):
+    d1_api_query(
+        "UPDATE stage7_research_requests SET recalculation_status = 'FAILED', recalculation_completed_ts = ?, "
+        "recalculation_error = ?, updated_ts = ? WHERE request_id = ?",
+        [now_ts, str(error_text)[:MAX_RECALC_ERROR_CHARS], now_ts, request_id],
+    )
 
 
 def main():
@@ -468,9 +610,10 @@ def main():
         result = {
             "ok": True, "status": "SKIPPED -- MIGRATION NOT APPLIED",
             "reason": "None of stage7_research_requests/stage7_research_responses/stage7_event_sentiment "
-                      "exist yet. Apply .ai/migrations/0016_stage7_research_pipeline.sql to production D1, "
-                      "then re-run -- see this workflow file's own ACTIVATION SEQUENCE comment.",
-            "events_considered": 0, "requests_created": 0, "publish_failures": 0, "sentiment_rows_written": 0,
+                      "exist yet in the STAGING database. Apply .ai/migrations/0016, then 0017, then 0018 to it "
+                      "(a human step, never automatic), then re-run.",
+            "events_considered": 0, "candidates_proposed": 0, "candidates_marked_stale": 0,
+            "publish_failures": 0, "sentiment_rows_written": 0, "retries_attempted": 0, "retries_succeeded": 0,
         }
         print(json.dumps(result))
         return result
@@ -480,6 +623,27 @@ def main():
             "stage7_research_responses / stage7_event_sentiment exist: "
             f"found {sorted(existing_stage7_tables)}). Never treated as 'migration not applied' -- fix or "
             "complete migration 0016 manually before re-running."
+        )
+
+    present_columns = {}
+    for table in REQUIRED_STAGE7_COLUMNS:
+        present_columns[table] = {
+            r["name"] for r in run_d1(f"SELECT name FROM pragma_table_info('{table}')")
+        }
+    existing_later_tables = {
+        r["name"] for r in run_d1(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name IN "
+            f"({','.join(repr(t) for t in REQUIRED_STAGE7_LATER_TABLES)})"
+        )
+    }
+    missing_tables = find_missing_stage7_tables(existing_later_tables)
+    missing_columns = find_missing_stage7_columns(present_columns)
+    if missing_tables or missing_columns:
+        raise RuntimeError(
+            "Stage 7 schema is behind this script: missing "
+            + ", ".join([f"table {t} (migration {m})" for t, m in missing_tables]
+                        + [f"column {t}.{c} (migration {m})" for t, c, m in missing_columns])
+            + ". Apply the named migration(s) to the STAGING database, in order, then re-run. Never worked around."
         )
 
     history_rows = run_d1(f"SELECT ts, score, technical_score, sources_json, gold_regime FROM history WHERE ts BETWEEN {fetch_start_ts} AND {end_ts} ORDER BY ts ASC")
@@ -510,30 +674,68 @@ def main():
     existing_requests = {r["event_id"]: r for r in run_d1(
         "SELECT event_id, request_id, status, publish_attempts, created_ts, historical_cutoff_ts, "
         "sufficiency_status, reasons_json, questions_json, missing_categories_json, "
-        "evidence_snapshot_json FROM stage7_research_requests "
+        "evidence_snapshot_json, prompt_text FROM stage7_research_requests "
         "WHERE status NOT IN ('INTEGRATED','REJECTED')"
     )}
+    # PROPOSED/SELECTED candidates already open for an event -- checked so
+    # a repeated propose pass never inserts a second candidate row for the
+    # same event (belt-and-braces on top of idx_stage7_candidates_active_event,
+    # which would reject the INSERT anyway) and so a candidate whose event
+    # already has its own non-terminal request is never re-surfaced (the
+    # confirmed requirement's own "an event with an open request is not
+    # proposed as a duplicate").
+    existing_candidates = {r["event_id"]: r for r in run_d1(
+        "SELECT event_id, candidate_id, status FROM stage7_research_candidates "
+        "WHERE status IN ('PROPOSED','SELECTED')"
+    )}
+    # How many candidate rows (ANY status) each event already has -- the next
+    # proposal's sequence number, so a retained CONVERTED/STALE/DISMISSED row
+    # never collides with the new row's primary key (see build_candidate_id).
+    candidate_counts = {r["event_id"]: r["n"] for r in run_d1(
+        "SELECT event_id, COUNT(*) AS n FROM stage7_research_candidates GROUP BY event_id"
+    )}
+    # (Confirmed human-controlled operating model.) A validated response no
+    # longer implicitly queues a recalculation merely by existing -- only
+    # once a human has explicitly clicked "Trigger recalculation" for that
+    # SPECIFIC request (worker.js's triggerStage7Recalculation(), which
+    # sets recalculation_requested_ts) does this query -- and therefore
+    # the whole compute_event_sentiment() call below -- ever consider it.
+    # Registering a response with the validated checkbox checked is, by
+    # itself, no longer sufficient to trigger a recalculation on this run.
     latest_responses = {
         r["event_id"]: r for r in run_d1(
             "SELECT req.event_id, resp.response_id, resp.request_id, resp.validation_status, "
-            "resp.findings_json, resp.sources_json "
+            "resp.findings_json, resp.sources_json, req.recalculation_status "
             "FROM stage7_research_responses resp "
             "JOIN stage7_research_requests req ON req.request_id = resp.request_id "
-            "WHERE resp.validation_status = 'VALIDATED'"
+            "WHERE resp.validation_status = 'VALIDATED' AND req.recalculation_requested_ts IS NOT NULL"
         )
     }
+    # id MUST be selected: previous_sentiment_id is read from it below. It was
+    # previously omitted, so previous_sentiment_id was always NULL and every
+    # recalculation looked like the event's first.
     latest_sentiment = {}
-    for r in run_d1("SELECT event_id, input_fingerprint FROM stage7_event_sentiment ORDER BY calculation_ts DESC"):
+    for r in run_d1("SELECT id, event_id, input_fingerprint FROM stage7_event_sentiment ORDER BY calculation_ts DESC, id DESC"):
         latest_sentiment.setdefault(r["event_id"], r)
 
-    requests_created, sentiment_rows_written, publish_failures = 0, 0, 0
+    recalculations_attempted, recalculations_completed, recalculation_failures = 0, 0, 0
+    sentiment_rows_written, publish_failures = 0, 0
     retries_attempted, retries_succeeded = 0, 0
+    candidates_proposed, candidates_marked_stale = 0, 0
 
     for event_id, event in eligible.items():
         evidence_rows = evidence_by_event.get(event_id, [])
         relevance_results = relevance_by_event.get(event_id, {})
         interpretation_results = interpretation_by_event.get(event_id, {})
         validated = latest_responses.get(event_id)
+        # A human-requested recalculation that already FAILED is never retried
+        # automatically (see RECALC_ACTIVE_STATUSES) -- and must not be
+        # recomputed as a side effect of the baseline pass either, or a
+        # permanent error would crash every later run. It stays FAILED, visible
+        # in the UI, until a human re-requests it.
+        if validated is not None and validated.get("recalculation_status") == "FAILED":
+            continue
+        needs_work = validated is not None and recalculation_needs_work(validated)
         validated_response = None
         if validated:
             validated_response = {
@@ -558,42 +760,66 @@ def main():
             assessment = suff.assess_evidence_sufficiency(event, evidence_rows, relevance_results, interpretation_results)
             sufficiency_status = assessment["status"]
 
-        v1_macro_context = sr.fetch_v1_macro_context(conn, event["event_ts"])
-        previous = latest_sentiment.get(event_id)
-        result = sr.compute_event_sentiment(
-            event, evidence_rows, interpretation_results, sufficiency_status, v1_macro_context,
-            validated_response=validated_response,
-            previous_sentiment_id=previous.get("id") if previous else None,
-            historical_cutoff_ts=event["event_ts"],
-        )
+        if needs_work:
+            recalculations_attempted += 1
+            mark_recalculation_running(validated["request_id"], now_ts)
 
-        if not sr.is_idempotent_repeat(result, previous):
-            d1_api_query(
-                "INSERT INTO stage7_event_sentiment (event_id, calculation_ts, formula_version, "
-                "evidence_sufficiency, sentiment_label, sentiment_score, v1_macro_context_json, "
-                "evidence_interpretation_json, contributing_evidence_ids_json, excluded_evidence_json, "
-                "duplicate_handling_json, ai_research_response_id, previous_sentiment_id, input_fingerprint) "
-                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                [event_id, now_ts, result["formula_version"], result["evidence_sufficiency"],
-                 result["sentiment_label"], result["sentiment_score"], json.dumps(result["v1_macro_context"]),
-                 json.dumps(result["evidence_interpretation"]), json.dumps(result["contributing_evidence_ids"]),
-                 json.dumps(result["excluded_evidence"]), json.dumps(result["duplicate_handling"]),
-                 result["ai_research_response_id"], result["previous_sentiment_id"], result["input_fingerprint"]],
+        try:
+            v1_macro_context = sr.fetch_v1_macro_context(conn, event["event_ts"])
+            previous = latest_sentiment.get(event_id)
+            result = sr.compute_event_sentiment(
+                event, evidence_rows, interpretation_results, sufficiency_status, v1_macro_context,
+                validated_response=validated_response,
+                previous_sentiment_id=previous.get("id") if previous else None,
+                historical_cutoff_ts=event["event_ts"],
             )
-            sentiment_rows_written += 1
-            if validated_response is not None and event_id in existing_requests:
-                # A validated human research response just drove a fresh
-                # recalculation for this event -- Stage 7's own workflow ends
-                # here (Step K: only the event-level recalc is normal Stage 7
-                # work; any weight/code-change recommendation is separate and
-                # requires its own explicit approval). The request moves to
-                # INTEGRATION_REVIEW rather than a terminal state, since only
-                # a human decides whether/how this result is acted on further.
+
+            result_sentiment_id = previous.get("id") if previous else None
+            if not sr.is_idempotent_repeat(result, previous):
                 d1_api_query(
-                    "UPDATE stage7_research_requests SET status = 'INTEGRATION_REVIEW', updated_ts = ? "
-                    "WHERE event_id = ? AND status NOT IN ('INTEGRATED','REJECTED')",
-                    [now_ts, event_id],
+                    "INSERT INTO stage7_event_sentiment (event_id, calculation_ts, formula_version, "
+                    "evidence_sufficiency, sentiment_label, sentiment_score, v1_macro_context_json, "
+                    "evidence_interpretation_json, contributing_evidence_ids_json, excluded_evidence_json, "
+                    "duplicate_handling_json, ai_research_response_id, previous_sentiment_id, input_fingerprint) "
+                    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    [event_id, now_ts, result["formula_version"], result["evidence_sufficiency"],
+                     result["sentiment_label"], result["sentiment_score"], json.dumps(result["v1_macro_context"]),
+                     json.dumps(result["evidence_interpretation"]), json.dumps(result["contributing_evidence_ids"]),
+                     json.dumps(result["excluded_evidence"]), json.dumps(result["duplicate_handling"]),
+                     result["ai_research_response_id"], result["previous_sentiment_id"], result["input_fingerprint"]],
                 )
+                sentiment_rows_written += 1
+                if needs_work:
+                    fingerprint_literal = str(result["input_fingerprint"]).replace("'", "''")
+                    inserted = run_d1(
+                        f"SELECT id FROM stage7_event_sentiment WHERE event_id = {int(event_id)} "
+                        f"AND input_fingerprint = '{fingerprint_literal}' ORDER BY id DESC LIMIT 1"
+                    )
+                    result_sentiment_id = inserted[0]["id"] if inserted else None
+                    latest_sentiment[event_id] = {"id": result_sentiment_id, "event_id": event_id,
+                                                  "input_fingerprint": result["input_fingerprint"]}
+            if needs_work:
+                # A validated human research response drove (or, on an
+                # idempotent repeat after an interrupted run, had already
+                # driven) this event's recalculation. Stage 7's workflow ends
+                # here: the request moves to INTEGRATION_REVIEW and any
+                # weight/code-change recommendation is separate and needs its
+                # own explicit approval. The bookkeeping is applied whether or
+                # not a new row was inserted, so an interrupted earlier run
+                # (row written, status not updated) converges instead of being
+                # skipped forever as an "idempotent repeat".
+                mark_recalculation_completed(validated["request_id"], result_sentiment_id, now_ts)
+                recalculations_completed += 1
+        except Exception as exc:
+            if not needs_work:
+                raise  # a baseline (not human-requested) failure is never swallowed
+            # Isolate THIS request's failure so other requests still run, but
+            # record it durably and surface it in the pipeline result and exit
+            # status -- never a silent skip.
+            mark_recalculation_failed(validated["request_id"], f"{type(exc).__name__}: {exc}", now_ts)
+            recalculation_failures += 1
+            print(f"RECALCULATION FAILED for request {validated['request_id']}: {type(exc).__name__}: {exc}", file=sys.stderr)
+            continue
 
         if sufficiency_status == "SUFFICIENT":
             continue  # resolved -- no new request needed, no retry needed
@@ -602,55 +828,102 @@ def main():
         if existing_request is not None:
             # A non-terminal request is already open for this event.
             # Never create a second row (the partial unique index would
-            # reject it anyway) -- retry the SAME row's publish only while
-            # it is FAILED_RETRYABLE; any other open status (already
+            # reject it anyway) -- attempt this SAME row's publish only
+            # while it is PENDING_RESEARCH (a human created it via the
+            # Worker/candidate flow and it has never been published to
+            # GitHub at all yet -- see build_retry_request()'s own
+            # docstring) or FAILED_RETRYABLE (a previous publish attempt,
+            # for either origin, failed); any other open status (already
             # published, awaiting a response, in integration review, ...)
-            # needs no action here.
-            if existing_request["status"] == "FAILED_RETRYABLE":
+            # needs no action here. retry_stage7_request_publish() is
+            # reused unchanged for both cases -- a "first attempt" and a
+            # "retry" are the identical operation (publish + record the
+            # outcome), just starting from a different publish_attempts count.
+            if existing_request["status"] in ("PENDING_RESEARCH", "FAILED_RETRYABLE"):
                 retries_attempted += 1
                 if retry_stage7_request_publish(existing_request, event, now_ts):
                     retries_succeeded += 1
             continue
 
-        # assessment is always populated here: reaching this line means
-        # validated_response was None (the only case that skips computing
-        # it above and forces sufficiency_status == "SUFFICIENT", which
-        # already continued past this point).
-        request_id = pub.build_request_id(event_id)
-        request = {
-            "request_id": request_id, "event_id": event_id, "created_ts": now_ts,
-            "historical_cutoff_ts": event["event_ts"], "sufficiency_status": assessment["status"],
-            "reasons": assessment["reasons"], "questions": assessment["questions"],
-            "missing_categories": assessment["missing_categories"],
-            "event": event, "evidence_snapshot": evidence_rows,
-        }
-        publish_result = pub.publish_request_file(request, repo_dir=os.getcwd())
-        d1_api_query(
-            "INSERT INTO stage7_research_requests (request_id, event_id, created_ts, updated_ts, "
-            "schema_version, status, sufficiency_status, reasons_json, questions_json, "
-            "missing_categories_json, historical_cutoff_ts, evidence_snapshot_json, github_path, "
-            "github_published_ts, github_publish_error, publish_attempts, input_fingerprint) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-            [request_id, event_id, now_ts, now_ts, pub.SCHEMA_VERSION,
-             "RESEARCH_REQUEST_PUBLISHED" if publish_result["published"] else "FAILED_RETRYABLE",
-             assessment["status"], json.dumps(assessment["reasons"]), json.dumps(assessment["questions"]),
-             json.dumps(assessment["missing_categories"]), event["event_ts"], json.dumps(evidence_rows),
-             publish_result["path"] if publish_result["published"] else None,
-             now_ts if publish_result["published"] else None, publish_result["error"], 1,
-             result["input_fingerprint"]],
+        # (Confirmed human-controlled operating model.) This event has
+        # insufficient/conflicting evidence and no request is open for it
+        # yet -- propose it as a CANDIDATE for a human to review and
+        # explicitly select, never auto-create a request or publish
+        # anything here. assessment is always populated when reaching this
+        # line: validated_response was None (the only case that skips
+        # computing it, which forces sufficiency_status == "SUFFICIENT",
+        # already continued past this point above).
+        if event_id in existing_candidates:
+            continue  # already proposed (PROPOSED or SELECTED) -- never a duplicate candidate row
+        candidate_id = build_candidate_id(event_id, candidate_counts.get(event_id, 0) + 1)
+        candidate_fingerprint = sr.compute_input_fingerprint(
+            event_id, [r["evidence_id"] for r in evidence_rows], assessment["status"], None
         )
-        requests_created += 1
-        if not publish_result["published"]:
-            publish_failures += 1
+        d1_api_query(
+            "INSERT INTO stage7_research_candidates (candidate_id, event_id, proposed_ts, updated_ts, "
+            "status, sufficiency_status, reasons_json, questions_json, missing_categories_json, "
+            "historical_cutoff_ts, evidence_snapshot_json, input_fingerprint) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+            [candidate_id, event_id, now_ts, now_ts, "PROPOSED", assessment["status"],
+             json.dumps(assessment["reasons"]), json.dumps(assessment["questions"]),
+             json.dumps(assessment["missing_categories"]), event["event_ts"], json.dumps(evidence_rows),
+             candidate_fingerprint],
+        )
+        candidates_proposed += 1
+
+    # A PROPOSED/SELECTED candidate whose event is no longer in this run's
+    # own `eligible` set (aged out past MAX_EVENT_AGE_FOR_STAGE7_MS, or a
+    # concurrent change already resolved it) is marked STALE -- informational,
+    # never re-surfaced as an active candidate, but never silently deleted
+    # either. A CONVERTED candidate is excluded from existing_candidates
+    # already (its own query only selects PROPOSED/SELECTED), so this can
+    # never mark one stale merely because its event is no longer eligible.
+    for stale_event_id, stale_candidate in existing_candidates.items():
+        if stale_event_id not in eligible:
+            d1_api_query(
+                "UPDATE stage7_research_candidates SET status = 'STALE', updated_ts = ? "
+                "WHERE candidate_id = ? AND status IN ('PROPOSED','SELECTED')",
+                [now_ts, stale_candidate["candidate_id"]],
+            )
+            candidates_marked_stale += 1
+
+    # A human-requested recalculation whose event is no longer in this run's
+    # eligible window cannot be computed by this pipeline version (it only
+    # rebuilds evidence for events inside MAX_EVENT_AGE_FOR_STAGE7_MS). Leaving
+    # it REQUESTED forever would be a silent dead end, so it is recorded as
+    # FAILED with that exact reason -- visible in the UI, never hidden.
+    for stuck_event_id, stuck in latest_responses.items():
+        if stuck_event_id in eligible or not recalculation_needs_work(stuck):
+            continue
+        recalculations_attempted += 1
+        mark_recalculation_failed(
+            stuck["request_id"],
+            "EVENT_NOT_ELIGIBLE: the event is outside the pipeline's evidence window "
+            f"({MAX_EVENT_AGE_FOR_STAGE7_MS // 86400000} days), so it cannot be recalculated by this pipeline version.",
+            now_ts,
+        )
+        recalculation_failures += 1
 
     result = {
-        "ok": True, "status": "OK", "events_considered": len(eligible), "requests_created": requests_created,
+        "ok": recalculation_failures == 0, "status": "OK" if recalculation_failures == 0 else "COMPLETED_WITH_FAILURES",
+        "events_considered": len(eligible),
+        "candidates_proposed": candidates_proposed, "candidates_marked_stale": candidates_marked_stale,
         "publish_failures": publish_failures, "sentiment_rows_written": sentiment_rows_written,
         "retries_attempted": retries_attempted, "retries_succeeded": retries_succeeded,
+        "recalculations_attempted": recalculations_attempted,
+        "recalculations_completed": recalculations_completed,
+        "recalculation_failures": recalculation_failures,
     }
     print(json.dumps(result))
     return result
 
 
+def exit_code_for(outcome):
+    """Per-request recalculation failures are isolated in main() so one bad
+    request does not stop the others, but the run as a whole must still be
+    visibly red -- a non-zero exit fails the workflow step."""
+    return 1 if outcome.get("recalculation_failures") else 0
+
+
 if __name__ == "__main__":
-    main()
+    sys.exit(exit_code_for(main()))

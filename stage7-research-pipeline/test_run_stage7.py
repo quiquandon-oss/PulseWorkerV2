@@ -667,7 +667,8 @@ def _existing_candidate_row(**overrides):
 
 def _run_main_with_fakes(monkeypatch, existing_requests_rows, existing_candidates_rows=(), publish_request_file=None,
                          validated_rows=(), previous_sentiment_rows=(), inserted_sentiment_rows=(),
-                         present_columns=None, compute_result=None, idempotent_repeat=True):
+                         present_columns=None, compute_result=None, idempotent_repeat=True,
+                         candidate_counts_rows=()):
     """Drives the real rs.main() through exactly one eligible event
     (event_id=42), with every D1 read/write and the real git-publish call
     faked -- isolating the one thing under test here: main()'s own
@@ -693,6 +694,8 @@ def _run_main_with_fakes(monkeypatch, existing_requests_rows, existing_candidate
             return []
         if "publish_attempts" in sql and "FROM stage7_research_requests" in sql:
             return existing_requests_rows
+        if "FROM stage7_research_candidates" in sql and "COUNT(*)" in sql:
+            return list(candidate_counts_rows)
         if "FROM stage7_research_candidates" in sql:
             return list(existing_candidates_rows)
         if "FROM stage7_research_responses" in sql:
@@ -1085,3 +1088,29 @@ def test_a_request_whose_event_left_the_evidence_window_fails_visibly_instead_of
     failed = _writes(calls, "recalculation_status = 'FAILED'")
     assert len(failed) == 1 and "EVENT_NOT_ELIGIBLE" in failed[0][1][1]
     assert result["recalculation_failures"] == 1 and rs.exit_code_for(result) == 1
+
+
+def test_build_candidate_id_keeps_the_original_format_for_the_first_proposal():
+    assert rs.build_candidate_id(42) == "stage7-cand-42"
+    assert rs.build_candidate_id(42, 1) == "stage7-cand-42"
+    assert rs.build_candidate_id(42, 2) == "stage7-cand-42-2"
+
+
+def test_reproposing_an_event_with_a_retained_non_open_candidate_does_not_reuse_its_primary_key(monkeypatch):
+    # Regression (found by the local browser-acceptance run): event 42 already has a
+    # CONVERTED candidate (its request was later rejected). The event is eligible and
+    # evidence-insufficient again, so it is proposed again -- with the SAME deterministic
+    # id the INSERT hit the retained row's PRIMARY KEY and crashed the whole pipeline.
+    result, calls, _ = _run_main_with_fakes(
+        monkeypatch, existing_requests_rows=[], existing_candidates_rows=[],
+        candidate_counts_rows=[{"event_id": 42, "n": 1}],
+    )
+    inserts = _writes(calls, "INSERT INTO stage7_research_candidates")
+    assert len(inserts) == 1
+    assert inserts[0][1][0] == "stage7-cand-42-2"
+    assert result["candidates_proposed"] == 1
+
+
+def test_a_first_ever_proposal_still_uses_the_original_candidate_id(monkeypatch):
+    _, calls, _ = _run_main_with_fakes(monkeypatch, existing_requests_rows=[], existing_candidates_rows=[])
+    assert _writes(calls, "INSERT INTO stage7_research_candidates")[0][1][0] == "stage7-cand-42"

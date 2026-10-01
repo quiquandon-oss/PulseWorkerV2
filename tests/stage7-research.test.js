@@ -956,6 +956,7 @@ describe('Stage 7 — AI-assisted research & sentiment recalculation (research-l
           historical_cutoff_ts: 1000, evidence_snapshot_json: '[]', input_fingerprint: 'fp-1',
         } },
         { first: { category: 'LARGE_MOVE', event_ts: 1000 } }, // research_events lookup
+        { first: { n: 0 } }, // existing requests for the event (sequence number)
         { run: { success: true } }, // INSERT stage7_research_requests
         { run: { success: true } }, // UPDATE stage7_research_candidates
       ]);
@@ -964,17 +965,34 @@ describe('Stage 7 — AI-assisted research & sentiment recalculation (research-l
       expect(result.created).toEqual([{ candidate_id: 'stage7-cand-1', request_id: 'stage7-req-1-1', event_id: 1, prompt_text: expect.any(String) }]);
       expect(result.skipped).toEqual([]);
 
-      const insertCall = db.calls[2];
+      const insertCall = db.calls[3];
       expect(insertCall.sql).toMatch(/INSERT INTO stage7_research_requests/);
       expect(insertCall.args).toContain('PENDING_RESEARCH');
       expect(insertCall.args).toContain('stage7-cand-1'); // candidate_id column
       expect(insertCall.args).toContain(0); // publish_attempts starts at 0 -- never attempted yet
       expect(insertCall.args).toContain('fp-1'); // reuses the candidate's own input_fingerprint
 
-      const updateCall = db.calls[3];
+      const updateCall = db.calls[4];
       expect(updateCall.sql).toMatch(/UPDATE stage7_research_candidates SET status = 'CONVERTED'/);
       expect(updateCall.args).toContain('stage7-req-1-1');
       expect(updateCall.args).toContain('stage7-cand-1');
+    });
+
+    it('a second research pass for an event gets the NEXT request id, never colliding with the kept first request', async () => {
+      const db = makeDb([
+        { first: {
+          candidate_id: 'stage7-cand-1-2', event_id: 1, status: 'PROPOSED', sufficiency_status: 'INSUFFICIENT_EVIDENCE',
+          reasons_json: '[]', questions_json: '[]', missing_categories_json: '[]',
+          historical_cutoff_ts: 1000, evidence_snapshot_json: '[]', input_fingerprint: 'fp-1',
+        } },
+        { first: { category: 'LARGE_MOVE', event_ts: 1000 } },
+        { first: { n: 1 } }, // the event already has one (REJECTED) request
+        { run: { success: true } },
+        { run: { success: true } },
+      ]);
+      const result = await scope.createStage7ResearchRequests(envOf(db), { candidateIds: ['stage7-cand-1-2'], providedToken: ADMIN_TOKEN });
+      expect(result.created.map((c) => c.request_id)).toEqual(['stage7-req-1-2']);
+      expect(result.skipped).toEqual([]);
     });
 
     it('a concurrent duplicate creation (D1 unique-index violation on INSERT) is caught and reported per-item, never a 500 for the whole batch', async () => {

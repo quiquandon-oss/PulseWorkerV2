@@ -387,12 +387,20 @@ def resolve_real_event_ids(events_by_ts, research_events_rows):
     }
 
 
-def build_candidate_id(event_id):
+def build_candidate_id(event_id, sequence=1):
     """Deterministic, not random -- same rationale as pub.build_request_id():
     a repeated propose run for the same event computes the identical id,
     which is what makes propose idempotent at the D1 layer (on top of
-    idx_stage7_candidates_active_event's own uniqueness guard)."""
-    return f"stage7-cand-{event_id}"
+    idx_stage7_candidates_active_event's own uniqueness guard).
+
+    `sequence` is 1 for an event's first-ever candidate (the original
+    `stage7-cand-<event_id>` format, unchanged) and n+1 when the event already
+    has n candidate rows in ANY status. A CONVERTED/STALE/DISMISSED row is kept
+    forever, so re-proposing the same event (e.g. after its request was
+    REJECTED, or a stale candidate whose event is eligible again) with the
+    first-proposal id would collide with that retained row's PRIMARY KEY and
+    crash the pipeline."""
+    return f"stage7-cand-{event_id}" if sequence <= 1 else f"stage7-cand-{event_id}-{sequence}"
 
 
 def build_retry_request(existing_request, event):
@@ -661,6 +669,12 @@ def main():
         "SELECT event_id, candidate_id, status FROM stage7_research_candidates "
         "WHERE status IN ('PROPOSED','SELECTED')"
     )}
+    # How many candidate rows (ANY status) each event already has -- the next
+    # proposal's sequence number, so a retained CONVERTED/STALE/DISMISSED row
+    # never collides with the new row's primary key (see build_candidate_id).
+    candidate_counts = {r["event_id"]: r["n"] for r in run_d1(
+        "SELECT event_id, COUNT(*) AS n FROM stage7_research_candidates GROUP BY event_id"
+    )}
     # (Confirmed human-controlled operating model.) A validated response no
     # longer implicitly queues a recalculation merely by existing -- only
     # once a human has explicitly clicked "Trigger recalculation" for that
@@ -822,7 +836,7 @@ def main():
         # already continued past this point above).
         if event_id in existing_candidates:
             continue  # already proposed (PROPOSED or SELECTED) -- never a duplicate candidate row
-        candidate_id = build_candidate_id(event_id)
+        candidate_id = build_candidate_id(event_id, candidate_counts.get(event_id, 0) + 1)
         candidate_fingerprint = sr.compute_input_fingerprint(
             event_id, [r["evidence_id"] for r in evidence_rows], assessment["status"], None
         )

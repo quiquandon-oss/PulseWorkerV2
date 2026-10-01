@@ -7270,7 +7270,13 @@ async function createStage7ResearchRequests(env, { candidateIds, providedToken }
       continue;
     }
     const eventRow = await env.DB.prepare('SELECT category, event_ts FROM research_events WHERE event_id = ?').bind(candidate.event_id).first();
-    const requestId = `stage7-req-${candidate.event_id}-1`;
+    // Sequence = 1 + the event's existing requests (any status). A REJECTED or
+    // INTEGRATED request is kept forever, so a hard-coded "-1" would collide with it on the
+    // event's next research pass and the creation would be silently skipped.
+    const priorRequests = await env.DB.prepare(
+      'SELECT COUNT(*) AS n FROM stage7_research_requests WHERE event_id = ?'
+    ).bind(candidate.event_id).first();
+    const requestId = `stage7-req-${candidate.event_id}-${((priorRequests && priorRequests.n) || 0) + 1}`;
     const promptText = buildStage7ResearchPromptText({
       event_category: eventRow ? eventRow.category : null,
       event_ts: eventRow ? eventRow.event_ts : candidate.historical_cutoff_ts,
@@ -8460,6 +8466,7 @@ const RESEARCH_LAB_HTML = `<!DOCTYPE html>
   .s7-registered, .s7-result { margin-top: 10px; }
   .s7-actions a, .s7-actions button { min-height: 40px; }
   .s7-form textarea, .s7-form select, .s7-form input[type="text"] { font-size: 16px; }
+  #s7-admin-token { font-size: 16px; min-height: 40px; box-sizing: border-box; }
 
   .empty { padding: 26px 16px; text-align: center; }
   .empty .headline { font-size: 14px; font-weight: 700; margin-bottom: 6px; }
@@ -8577,6 +8584,9 @@ const RESEARCH_LAB_HTML = `<!DOCTYPE html>
   // create-requests/register-response/trigger-recalculation actions so a
   // human does not have to retype it for every action in one session.
   var stage7AdminToken = '';
+  // One-shot confirmation shown at the top of the page after an action that re-renders it
+  // (the re-render would otherwise erase the message before anyone could read it).
+  var stage7Flash = null;
   var nav = document.getElementById('nav');
   var app = document.getElementById('app');
   var current = 'Dashboard';
@@ -9982,6 +9992,7 @@ const RESEARCH_LAB_HTML = `<!DOCTYPE html>
       '<label>Admin token (required to create requests, register responses, or trigger recalculation -- never ' +
       'stored by this page; re-enter after a reload)</label>' +
       '<input type="password" id="s7-admin-token" autocomplete="off" style="width:100%;max-width:380px;" />' +
+      '<div class="s7-msg" data-msg="flash" role="status"></div>' +
       '</div>';
 
     if (!s || !s.ok) {
@@ -10108,6 +10119,7 @@ const RESEARCH_LAB_HTML = `<!DOCTYPE html>
       var el = app.querySelector('[data-msg="' + key + '"]');
       if (el) { el.textContent = text; el.className = 's7-msg ' + (ok === true ? 'ok' : ok === false ? 'err' : ''); }
     }
+    if (stage7Flash) { var flashText = stage7Flash; stage7Flash = null; stage7SetMsg('flash', flashText, true); }
 
     // ---- candidate selection + create-requests ----
     var selectAllBtn = app.querySelector('[data-select-all-candidates]');
@@ -10132,7 +10144,7 @@ const RESEARCH_LAB_HTML = `<!DOCTYPE html>
         if (result.ok) {
           var msg = 'Created ' + result.created.length + ' request(s).';
           if (result.skipped.length) msg += ' Skipped ' + result.skipped.length + ': ' + result.skipped.map(function (x) { return x.reason; }).join('; ');
-          stage7SetMsg('create-requests', msg, true);
+          stage7Flash = msg;
           renderStage7();
         } else {
           stage7SetMsg('create-requests', result.error || 'Request creation failed.', false);
@@ -10299,7 +10311,7 @@ const RESEARCH_LAB_HTML = `<!DOCTYPE html>
         body: JSON.stringify(body),
       }).then(function (res) { return res.json(); }).then(function (result) {
         if (result.ok) {
-          stage7SetMsg(reqId, 'Registered (' + result.validation_status + '). No recalculation was requested or performed.', true);
+          stage7Flash = 'Response registered (' + result.validation_status + ') for ' + reqId + '. No recalculation was requested or performed.';
           renderStage7();
         } else {
           stage7SetMsg(reqId, result.error || 'Registration failed.', false);
@@ -10322,7 +10334,7 @@ const RESEARCH_LAB_HTML = `<!DOCTYPE html>
           headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + stage7AdminToken },
           body: JSON.stringify({ request_id: reqId, decision: decision, human_confirmed: true, note: note ? note.value : null }),
         }).then(function (res) { return res.json(); }).then(function (result) {
-          if (result.ok) { stage7SetMsg('review-' + reqId, result.validation_status + '.', true); renderStage7(); }
+          if (result.ok) { stage7Flash = 'Review saved for ' + reqId + ': ' + result.validation_status + '.'; renderStage7(); }
           else { stage7SetMsg('review-' + reqId, result.error || 'Review failed.', false); }
         }).catch(function (err) { stage7SetMsg('review-' + reqId, String(err), false); });
       });
@@ -10341,7 +10353,7 @@ const RESEARCH_LAB_HTML = `<!DOCTYPE html>
           body: JSON.stringify({ request_id: reqId }),
         }).then(function (res) { return res.json(); }).then(function (result) {
           if (result.ok) {
-            stage7SetMsg('recalc-' + reqId, result.note || 'Recalculation requested.', true);
+            stage7Flash = (result.note || 'Recalculation requested.') + ' (' + reqId + ')';
             renderStage7();
           } else {
             stage7SetMsg('recalc-' + reqId, result.error || 'Could not request recalculation.', false);

@@ -1752,6 +1752,16 @@ production predictions. It shares no table with Stage 7 (per-event research sent
 output. No module reads the wall clock; replaying a run with the same inputs and `now_ts` reproduces the same
 writes (guarded by `TestDeterminism`).
 
+**Staging-only runner.** `experiment5-staging-runner/run_staging.py` runs the same, unchanged
+`run_pipeline_recorded()` against the STAGING D1 database only, from the manual-only
+`.github/workflows/exp005-staging-runner.yml` (`workflow_dispatch` with a required `expected_sha`; no schedule;
+read-only repository permissions). Before any SQL it (1) validates the exact staging (account, name, id) triple
+from its own `EXP5_STAGING_*` variables, refusing production's name or id under any spelling and never falling
+back to `CLOUDFLARE_API_TOKEN`, then (2) asks Cloudflare to confirm the database's uuid and name. It talks to the
+D1 HTTP API directly, never through wrangler (which resolves databases through production's `wrangler.toml`). A
+run whose operational record was not `WRITTEN` exits non-zero. The production path
+(`live-evidence-collection.yml` -> `scripts/experiment5-agent/run.py`) is untouched.
+
 **Operational success is not predictive performance.** The status endpoint returns two independent blocks.
 `operational` answers "is the pipeline running" (last run, last success, consecutive failures, rows
 processed/rejected, decisions replayed/created/evaluated, constants in force). `predictive` reports resolved

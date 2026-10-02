@@ -39,4 +39,4 @@ jobs:
       - name: Install pytest
         run: pip install pytest pyyaml --break-system-packages
       - name: Run Experiment 4 and research schema tests
-        run: python3 -m pytest exp004-timesfm/ research/ -v
+        run: python3 -m pytest exp004-timesfm/ research/ experiment5-staging-runner/ -v

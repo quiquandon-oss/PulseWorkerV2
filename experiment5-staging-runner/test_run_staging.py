@@ -27,22 +27,65 @@ import run_staging as rs  # noqa: E402
 HOUR = 3600000
 STAGING_TOKEN = "staging-token-value-for-tests"
 
+PRODUCTION_TOKEN = "production-token-value-for-tests"
+TEST_PROXY = "http://proxy.invalid:3128"
+
 VALID_ENV = {
     rs.ENV_ACCOUNT_ID: rs.EXPECTED_STAGING_ACCOUNT_ID,
     rs.ENV_DATABASE_NAME: rs.EXPECTED_STAGING_DATABASE_NAME,
     rs.ENV_DATABASE_ID: rs.EXPECTED_STAGING_DATABASE_ID,
+    rs.ENV_AUTH_MODE: rs.AUTH_MODE_TOKEN,
     rs.ENV_API_TOKEN: STAGING_TOKEN,
 }
 
+PROXY_ENV = {
+    rs.ENV_ACCOUNT_ID: rs.EXPECTED_STAGING_ACCOUNT_ID,
+    rs.ENV_DATABASE_NAME: rs.EXPECTED_STAGING_DATABASE_NAME,
+    rs.ENV_DATABASE_ID: rs.EXPECTED_STAGING_DATABASE_ID,
+    rs.ENV_AUTH_MODE: rs.AUTH_MODE_PROXY,
+    "HTTPS_PROXY": TEST_PROXY,
+}
 
-def env_with(**overrides):
-    env = dict(VALID_ENV)
+
+def env_with(base=None, **overrides):
+    env = dict(VALID_ENV if base is None else base)
     for key, value in overrides.items():
         if value is None:
             env.pop(key, None)
         else:
             env[key] = value
     return env
+
+
+class TokenGuardedEnv(dict):
+    """An environment in which reading either token variable fails the test -- even when both are present."""
+
+    def _guard(self, key):
+        if key in rs.TOKEN_ENV_VARS:
+            raise AssertionError(f"proxy mode read {key}")
+
+    def get(self, key, default=None):
+        self._guard(key)
+        return super().get(key, default)
+
+    def __getitem__(self, key):
+        self._guard(key)
+        return super().__getitem__(key)
+
+    def __contains__(self, key):
+        self._guard(key)
+        return super().__contains__(key)
+
+
+def proxy_env_with_tokens_present(**overrides):
+    """Proxy mode with BOTH token variables set, so any read or fallback would be caught."""
+    return TokenGuardedEnv(env_with(PROXY_ENV, **{rs.ENV_API_TOKEN: STAGING_TOKEN,
+                                                  rs.PRODUCTION_TOKEN_ENV_VAR: PRODUCTION_TOKEN}, **overrides))
+
+
+def _auth_headers(request):
+    """Every Authorization-type header on the request, including unredirected ones, case-insensitively."""
+    return {k.lower(): v for k, v in request.header_items() if k.lower() in ("authorization", "proxy-authorization")}
 
 
 class ExplodingOpener:
@@ -103,7 +146,8 @@ class FakeCloudflare:
         url = request.full_url
         auth = request.get_header("Authorization")
         sql = json.loads(request.data)["sql"] if request.data else None
-        self.requests.append({"method": request.get_method(), "url": url, "auth": auth, "sql": sql})
+        self.requests.append({"method": request.get_method(), "url": url, "auth": auth, "sql": sql,
+                              "auth_headers": _auth_headers(request), "timeout": timeout})
         expected_prefix = (f"{rs.API_BASE}/accounts/{rs.EXPECTED_STAGING_ACCOUNT_ID}"
                            f"/d1/database/{rs.EXPECTED_STAGING_DATABASE_ID}")
         assert url.startswith(expected_prefix), f"request left the staging target: {url}"
@@ -171,7 +215,7 @@ class TestProductionRejectedBeforeAnyNetworkCall:
         assert run_main(env_with(**overrides), opener, 10 * HOUR)[0] == rs.EXIT_TARGET_REFUSED
         assert opener.calls == 0
 
-    @pytest.mark.parametrize("var", rs.REQUIRED_ENV_VARS)
+    @pytest.mark.parametrize("var", rs.REQUIRED_ENV_VARS_TOKEN_MODE)
     @pytest.mark.parametrize("value", [None, "", "   "])
     def test_missing_or_empty_configuration_fails_closed(self, var, value):
         opener = ExplodingOpener()
@@ -212,6 +256,7 @@ class TestValidStagingConfigResolvesOnlyToStaging:
         env = {k: f"  {v}  " for k, v in VALID_ENV.items()}
         target = rs.validate_staging_target(env)
         assert target.database_id == rs.EXPECTED_STAGING_DATABASE_ID and target.api_token == STAGING_TOKEN
+        assert target.auth_mode == rs.AUTH_MODE_TOKEN
 
     def test_every_request_url_is_the_staging_database(self):
         fake = FakeCloudflare()
@@ -286,6 +331,222 @@ class TestTransport:
         with pytest.raises(rs.D1RequestError) as excinfo:
             query("SELECT 1")
         assert STAGING_TOKEN not in str(excinfo.value)
+
+
+# ---------------------------------------------------------------------------------------------------------------
+# 3b. Authentication modes: EXP5_STAGING_AUTH_MODE is explicit; proxy mode carries no credential of its own.
+# ---------------------------------------------------------------------------------------------------------------
+class TestAuthModeSelection:
+    @pytest.mark.parametrize("value", [None, "", "   "])
+    def test_missing_auth_mode_fails_closed_even_with_a_token_present(self, value):
+        opener = ExplodingOpener()
+        env = env_with(**{rs.ENV_AUTH_MODE: value})  # token still set: must NOT be inferred as token mode
+        with pytest.raises(rs.StagingTargetError, match=rs.ENV_AUTH_MODE):
+            rs.validate_staging_target(env)
+        assert run_main(env, opener, 10 * HOUR)[0] == rs.EXIT_TARGET_REFUSED
+        assert opener.calls == 0
+
+    def test_missing_auth_mode_with_a_proxy_and_no_token_is_not_inferred_as_proxy(self):
+        opener = ExplodingOpener()
+        env = env_with(PROXY_ENV, **{rs.ENV_AUTH_MODE: None})
+        with pytest.raises(rs.StagingTargetError, match=rs.ENV_AUTH_MODE):
+            rs.validate_staging_target(env)
+        assert run_main(env, opener, 10 * HOUR)[0] == rs.EXIT_TARGET_REFUSED
+        assert opener.calls == 0
+
+    @pytest.mark.parametrize("value", ["PROXY", "Token", "tokens", "auto", "none", "bearer", "proxy,token",
+                                       "token proxy", STAGING_TOKEN])
+    @pytest.mark.parametrize("base", [VALID_ENV, PROXY_ENV], ids=["token-set", "proxy-set"])
+    def test_invalid_auth_mode_fails_closed_without_echoing_the_value(self, value, base):
+        opener = ExplodingOpener()
+        env = env_with(base, **{rs.ENV_AUTH_MODE: value})
+        with pytest.raises(rs.StagingTargetError, match="must be exactly one of token, proxy"):
+            rs.validate_staging_target(env)
+        code, out = run_main(env, opener, 10 * HOUR)
+        assert code == rs.EXIT_TARGET_REFUSED and opener.calls == 0
+        assert value not in out
+
+    def test_target_with_an_unknown_mode_never_reaches_the_network(self):
+        target = rs.StagingTarget(rs.EXPECTED_STAGING_ACCOUNT_ID, rs.EXPECTED_STAGING_DATABASE_NAME,
+                                  rs.EXPECTED_STAGING_DATABASE_ID, "none", STAGING_TOKEN)
+        opener = ExplodingOpener()
+        with pytest.raises(rs.StagingTargetError, match="no valid authentication mode"):
+            rs.verify_remote_identity(target, opener=opener)
+        assert opener.calls == 0
+
+    def test_token_mode_without_a_token_value_never_sends_a_request(self):
+        target = rs.StagingTarget(rs.EXPECTED_STAGING_ACCOUNT_ID, rs.EXPECTED_STAGING_DATABASE_NAME,
+                                  rs.EXPECTED_STAGING_DATABASE_ID, rs.AUTH_MODE_TOKEN, None)
+        opener = ExplodingOpener()
+        with pytest.raises(rs.StagingTargetError):
+            rs.verify_remote_identity(target, opener=opener)
+        assert opener.calls == 0
+
+
+class TestTokenMode:
+    def test_sends_the_staging_bearer_token_on_every_request_with_the_existing_timeout(self):
+        fake = FakeCloudflare()
+        seed_market(fake)
+        assert run_main(dict(VALID_ENV), fake, 3 * HOUR)[0] == rs.EXIT_OK
+        assert fake.requests[0]["method"] == "GET" and fake.sql_sent()
+        assert all(r["auth_headers"] == {"authorization": f"Bearer {STAGING_TOKEN}"} for r in fake.requests)
+        assert all(r["timeout"] == rs.HTTP_TIMEOUT_S == 60 for r in fake.requests)
+
+    def test_does_not_require_a_proxy(self):
+        target = rs.validate_staging_target(env_with(HTTPS_PROXY=None))
+        assert target.auth_mode == rs.AUTH_MODE_TOKEN
+
+    def test_production_token_is_never_used_even_when_the_staging_token_is_present(self):
+        fake = FakeCloudflare()
+        assert run_main(env_with(CLOUDFLARE_API_TOKEN=PRODUCTION_TOKEN), fake, 10 * HOUR)[0] == rs.EXIT_OK
+        assert not any(PRODUCTION_TOKEN in str(r["auth_headers"]) for r in fake.requests)
+
+
+class TestProxyMode:
+    def test_resolves_without_either_token_variable(self):
+        env = env_with(PROXY_ENV)
+        assert rs.ENV_API_TOKEN not in env and rs.PRODUCTION_TOKEN_ENV_VAR not in env
+        target = rs.validate_staging_target(env)
+        assert target.auth_mode == rs.AUTH_MODE_PROXY and target.api_token is None
+        assert (target.account_id, target.database_name, target.database_id) == (
+            rs.EXPECTED_STAGING_ACCOUNT_ID, rs.EXPECTED_STAGING_DATABASE_NAME, rs.EXPECTED_STAGING_DATABASE_ID)
+
+    def test_never_reads_either_token_variable_even_when_both_are_set(self):
+        target = rs.validate_staging_target(proxy_env_with_tokens_present())
+        assert target.api_token is None
+        assert STAGING_TOKEN not in repr(target) and PRODUCTION_TOKEN not in repr(target)
+
+    def test_full_run_sends_no_authorization_header_on_any_request(self):
+        fake = FakeCloudflare()
+        seed_market(fake)
+        code, out = run_main(proxy_env_with_tokens_present(), fake, 3 * HOUR)
+        assert code == rs.EXIT_OK, out
+        assert fake.requests[0]["method"] == "GET" and fake.sql_sent()
+        assert all(r["auth_headers"] == {} and r["auth"] is None for r in fake.requests)
+        assert all(r["timeout"] == rs.HTTP_TIMEOUT_S for r in fake.requests)
+        assert all(r["url"].startswith(f"{rs.API_BASE}/accounts/{rs.EXPECTED_STAGING_ACCOUNT_ID}"
+                                       f"/d1/database/{rs.EXPECTED_STAGING_DATABASE_ID}") for r in fake.requests)
+        assert "auth_mode=proxy" in out
+        assert STAGING_TOKEN not in out and PRODUCTION_TOKEN not in out and TEST_PROXY not in out
+
+    def test_works_with_no_token_variables_at_all(self):
+        fake = FakeCloudflare()
+        seed_market(fake)
+        assert run_main(env_with(PROXY_ENV), fake, 3 * HOUR)[0] == rs.EXIT_OK
+        assert all(r["auth_headers"] == {} for r in fake.requests)
+
+    @pytest.mark.parametrize("overrides", [
+        {"HTTPS_PROXY": None},
+        {"HTTPS_PROXY": "   "},
+        {"NO_PROXY": "localhost,.cloudflare.com"},
+        {"NO_PROXY": "api.cloudflare.com"},
+        {"no_proxy": "*"},
+    ])
+    def test_refused_without_an_https_proxy_for_the_api_host(self, overrides):
+        opener = ExplodingOpener()
+        env = TokenGuardedEnv(env_with(PROXY_ENV, **overrides))
+        with pytest.raises(rs.StagingTargetError, match="no HTTPS proxy is configured"):
+            rs.validate_staging_target(env)
+        code, out = run_main(env, opener, 10 * HOUR)
+        assert code == rs.EXIT_TARGET_REFUSED and opener.calls == 0
+        assert TEST_PROXY not in out
+
+    def test_lowercase_proxy_variable_and_unrelated_no_proxy_are_accepted(self):
+        env = env_with(PROXY_ENV, HTTPS_PROXY=None, https_proxy=TEST_PROXY, NO_PROXY="localhost,example.com")
+        assert rs.validate_staging_target(env).auth_mode == rs.AUTH_MODE_PROXY
+
+    @pytest.mark.parametrize("overrides,match", [
+        ({rs.ENV_DATABASE_NAME: "sentiment-history"}, "PRODUCTION"),
+        ({rs.ENV_DATABASE_ID: " F91CA980-B886-423A-BD6F-F3BAEA46D181 "}, "PRODUCTION"),
+        ({rs.ENV_ACCOUNT_ID: "0000000000000000000000000000000a"}, "not the expected staging database"),
+        ({rs.ENV_DATABASE_NAME: "pulseworker-v2-staging-copy"}, "not the expected staging database"),
+        ({rs.ENV_DATABASE_ID: "00000000-0000-0000-0000-000000000000"}, "not the expected staging database"),
+    ])
+    def test_production_and_wrong_staging_identifiers_are_refused_before_any_request(self, overrides, match):
+        opener = ExplodingOpener()
+        env = proxy_env_with_tokens_present(**overrides)
+        with pytest.raises(rs.StagingTargetError, match=match):
+            rs.validate_staging_target(env)
+        assert run_main(env, opener, 10 * HOUR)[0] == rs.EXIT_TARGET_REFUSED
+        assert opener.calls == 0
+
+    @pytest.mark.parametrize("var", rs.TARGET_ENV_VARS)
+    def test_missing_target_variable_fails_closed(self, var):
+        opener = ExplodingOpener()
+        env = proxy_env_with_tokens_present(**{var: None})
+        with pytest.raises(rs.StagingTargetError, match=var):
+            rs.validate_staging_target(env)
+        assert run_main(env, opener, 10 * HOUR)[0] == rs.EXIT_TARGET_REFUSED and opener.calls == 0
+
+    @pytest.mark.parametrize("uuid,name", [
+        (rs.EXPECTED_STAGING_DATABASE_ID, "sentiment-history"),
+        ("f91ca980-b886-423a-bd6f-f3baea46d181", rs.EXPECTED_STAGING_DATABASE_NAME),
+        (rs.EXPECTED_STAGING_DATABASE_ID, "some-other-db"),
+    ])
+    def test_identity_check_is_still_mandatory_before_any_sql(self, uuid, name):
+        fake = FakeCloudflare(report_uuid=uuid, report_name=name)
+        code, out = run_main(proxy_env_with_tokens_present(), fake, 10 * HOUR)
+        assert code == rs.EXIT_TARGET_REFUSED
+        assert [r["method"] for r in fake.requests] == ["GET"] and fake.sql_sent() == []
+        assert "No SQL was sent" in out
+
+
+class TestProxyFailureNeverFallsBackToAToken:
+    """Proxy mode with both token variables present (and unreadable): every failure ends the run after the one
+    identity GET, with no Authorization header on it and no second attempt."""
+
+    @staticmethod
+    def _failing(exc_factory):
+        requests = []
+
+        def opener(request, timeout=None):
+            requests.append(request)
+            raise exc_factory(request)
+        return opener, requests
+
+    @pytest.mark.parametrize("exc_factory", [
+        lambda r: urllib.error.HTTPError(r.full_url, 401, "Unauthorized", {}, io.BytesIO(b'{"success":false}')),
+        lambda r: urllib.error.HTTPError(r.full_url, 403, "Forbidden", {}, io.BytesIO(b'{"success":false}')),
+        lambda r: urllib.error.HTTPError(r.full_url, 407, "Proxy Authentication Required", {}, io.BytesIO(b"")),
+        lambda r: urllib.error.HTTPError(r.full_url, 502, "Bad Gateway", {}, io.BytesIO(b"proxy error")),
+        lambda r: urllib.error.URLError(ConnectionRefusedError(111, "Connection refused")),
+        lambda r: urllib.error.URLError("Tunnel connection failed: 403 Forbidden"),
+    ], ids=["401", "403", "407", "502", "proxy-refused", "tunnel-failed"])
+    def test_failure_aborts_with_one_unauthenticated_request(self, exc_factory):
+        opener, requests = self._failing(exc_factory)
+        code, out = run_main(proxy_env_with_tokens_present(), opener, 10 * HOUR)
+        assert code == rs.EXIT_TARGET_REFUSED
+        assert len(requests) == 1 and requests[0].get_method() == "GET"
+        assert _auth_headers(requests[0]) == {}
+        assert "STAGING TARGET REFUSED" in out
+        assert STAGING_TOKEN not in out and PRODUCTION_TOKEN not in out
+
+    def test_unsuccessful_json_body_aborts_with_one_unauthenticated_request(self):
+        requests = []
+
+        def opener(request, timeout=None):
+            requests.append(request)
+            return _Response(200, {"success": False, "errors": [{"code": 10000, "message": "Authentication error"}]})
+        code, out = run_main(proxy_env_with_tokens_present(), opener, 10 * HOUR)
+        assert code == rs.EXIT_TARGET_REFUSED and len(requests) == 1
+        assert _auth_headers(requests[0]) == {} and "Authentication error" in out
+
+    def test_failure_during_sql_does_not_retry_with_a_token(self):
+        fake = FakeCloudflare()
+        seed_market(fake)
+        calls = {"n": 0}
+
+        def opener(request, timeout=None):
+            calls["n"] += 1
+            if request.get_method() == "POST" and calls["n"] == 3:
+                fake.requests.append({"method": "POST", "url": request.full_url, "auth": None, "sql": None,
+                                      "auth_headers": _auth_headers(request), "timeout": timeout})
+                raise urllib.error.HTTPError(request.full_url, 401, "Unauthorized", {}, io.BytesIO(b""))
+            return fake(request, timeout)
+        code, out = run_main(proxy_env_with_tokens_present(), opener, 3 * HOUR)
+        assert code == rs.EXIT_PIPELINE_FAILED
+        assert all(r["auth_headers"] == {} for r in fake.requests)
+        assert STAGING_TOKEN not in out and PRODUCTION_TOKEN not in out
 
 
 # ---------------------------------------------------------------------------------------------------------------

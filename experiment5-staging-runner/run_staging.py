@@ -8,11 +8,14 @@ CLOUDFLARE_API_TOKEN) is left exactly as it is; nothing here imports it, wraps i
 
 What this runner guarantees, in order, before the pipeline touches anything:
 
-1. validate_staging_target() -- pure, no network. Reads ONLY the EXP5_STAGING_* variables below. Fails closed
-   when any is missing or empty, when the database name or id is production's (under any spelling), when the
-   (account, name, id) triple is not exactly the expected staging triple, or when the staging token is the same
-   value as a CLOUDFLARE_API_TOKEN present in the environment (the production secret's name). There is no
-   default value for any identifier and no fallback to CLOUDFLARE_API_TOKEN or any other credential.
+1. validate_staging_target() -- pure, no network. Reads ONLY the EXP5_STAGING_* variables below (plus, in proxy
+   mode, the HTTPS proxy variables). Fails closed when any required one is missing or empty, when
+   EXP5_STAGING_AUTH_MODE is not exactly `token` or `proxy`, when the database name or id is production's (under
+   any spelling), when the (account, name, id) triple is not exactly the expected staging triple, in token mode
+   when the staging token is the same value as a CLOUDFLARE_API_TOKEN present in the environment (the production
+   secret's name), and in proxy mode when no HTTPS proxy is configured for the Cloudflare API host. There is no
+   default value for any identifier or for the auth mode, and no fallback to CLOUDFLARE_API_TOKEN or any other
+   credential.
 2. verify_remote_identity() -- one read-only metadata GET for exactly that account/database id; the database
    Cloudflare returns must report the same uuid AND the staging name, or the run aborts before any SQL.
 3. Only then experiment5_pipeline.run_pipeline_recorded() runs -- unchanged, so its idempotency (archive by
@@ -20,9 +23,18 @@ What this runner guarantees, in order, before the pipeline touches anything:
    decisions and observe-window bounds are exactly the reviewed behaviour. Its run record is written to
    migration 0019's experiment5_pipeline_runs table.
 
-Transport: the Cloudflare D1 HTTP API (/query) with the validated account id, database id and token -- never
-wrangler, which resolves a database through wrangler.toml (production's config). Errors name the HTTP status and
+Transport: the Cloudflare D1 HTTP API (/query) with the validated account id and database id -- never wrangler,
+which resolves a database through wrangler.toml (production's config). Errors name the HTTP status and
 Cloudflare's error messages; the token is never printed (and is redacted from any message as a safeguard).
+
+Authentication (EXP5_STAGING_AUTH_MODE, required, no default):
+- `token`: the runner sends `Authorization: Bearer <EXP5_STAGING_CLOUDFLARE_API_TOKEN>` on every request.
+  Requires EXP5_STAGING_CLOUDFLARE_API_TOKEN and refuses a value equal to CLOUDFLARE_API_TOKEN.
+- `proxy`: the runner sends NO Authorization header and never reads EXP5_STAGING_CLOUDFLARE_API_TOKEN or
+  CLOUDFLARE_API_TOKEN. Requests go through the HTTPS proxy configured in the environment (urllib's standard
+  HTTPS_PROXY / NO_PROXY handling), and that proxy must inject the Cloudflare credential for api.cloudflare.com
+  itself. If it does not, Cloudflare rejects the identity lookup and the run aborts before any SQL; there is no
+  retry with, or fallback to, a token.
 
 Stricter than the production adapter by design: a run whose operational record was not WRITTEN (migration 0019
 missing on staging, or the record write failed) exits non-zero, because recording the run is part of what a
@@ -52,10 +64,21 @@ ENV_ACCOUNT_ID = "EXP5_STAGING_ACCOUNT_ID"
 ENV_DATABASE_NAME = "EXP5_STAGING_DATABASE_NAME"
 ENV_DATABASE_ID = "EXP5_STAGING_DATABASE_ID"
 ENV_API_TOKEN = "EXP5_STAGING_CLOUDFLARE_API_TOKEN"
-REQUIRED_ENV_VARS = (ENV_ACCOUNT_ID, ENV_DATABASE_NAME, ENV_DATABASE_ID, ENV_API_TOKEN)
+ENV_AUTH_MODE = "EXP5_STAGING_AUTH_MODE"
 PRODUCTION_TOKEN_ENV_VAR = "CLOUDFLARE_API_TOKEN"
 
-API_BASE = "https://api.cloudflare.com/client/v4"
+AUTH_MODE_TOKEN = "token"
+AUTH_MODE_PROXY = "proxy"
+AUTH_MODES = (AUTH_MODE_TOKEN, AUTH_MODE_PROXY)
+
+TARGET_ENV_VARS = (ENV_ACCOUNT_ID, ENV_DATABASE_NAME, ENV_DATABASE_ID)
+REQUIRED_ENV_VARS_TOKEN_MODE = TARGET_ENV_VARS + (ENV_AUTH_MODE, ENV_API_TOKEN)
+REQUIRED_ENV_VARS_PROXY_MODE = TARGET_ENV_VARS + (ENV_AUTH_MODE,)
+# Names the runner must never read in proxy mode.
+TOKEN_ENV_VARS = (ENV_API_TOKEN, PRODUCTION_TOKEN_ENV_VAR)
+
+API_HOST = "api.cloudflare.com"
+API_BASE = f"https://{API_HOST}/client/v4"
 HTTP_TIMEOUT_S = 60
 MAX_ERROR_CHARS = 1000
 
@@ -76,13 +99,14 @@ class D1RequestError(RuntimeError):
 class StagingTarget:
     """The single validated target every remote call reads from. Only built by validate_staging_target()."""
 
-    __slots__ = ("account_id", "database_name", "database_id", "_api_token")
+    __slots__ = ("account_id", "database_name", "database_id", "auth_mode", "_api_token")
 
-    def __init__(self, account_id, database_name, database_id, api_token):
+    def __init__(self, account_id, database_name, database_id, auth_mode, api_token):
         self.account_id = account_id
         self.database_name = database_name
         self.database_id = database_id
-        self._api_token = api_token
+        self.auth_mode = auth_mode
+        self._api_token = api_token  # None in proxy mode: the runner never holds a credential there
 
     @property
     def api_token(self):
@@ -90,7 +114,7 @@ class StagingTarget:
 
     def __repr__(self):
         return (f"StagingTarget(account_id={self.account_id!r}, database_name={self.database_name!r}, "
-                f"database_id={self.database_id!r}, api_token=<redacted>)")
+                f"database_id={self.database_id!r}, auth_mode={self.auth_mode!r}, api_token=<redacted>)")
 
     __str__ = __repr__
 
@@ -99,10 +123,30 @@ def _norm(value):
     return (value or "").strip()
 
 
+def _first_env(env, *names):
+    for name in names:
+        value = _norm(env.get(name))
+        if value:
+            return value
+    return ""
+
+
+def _https_proxy_configured(env):
+    """True when urllib's environment proxy handling would route https://api.cloudflare.com through a proxy.
+    Mirrors urllib.request.getproxies_environment() (lowercase wins) over `env`; the proxy URL is never echoed."""
+    if not _first_env(env, "https_proxy", "HTTPS_PROXY"):
+        return False
+    no_proxy = _first_env(env, "no_proxy", "NO_PROXY")
+    return not (no_proxy and urllib.request.proxy_bypass_environment(API_HOST, {"no": no_proxy}))
+
+
 def validate_staging_target(env=None):
-    """Pure and fail-closed. Returns a StagingTarget or raises StagingTargetError. Never touches the network."""
+    """Pure and fail-closed. Returns a StagingTarget or raises StagingTargetError. Never touches the network.
+    In proxy mode neither token variable is read."""
     env = os.environ if env is None else env
-    missing = [name for name in REQUIRED_ENV_VARS if not _norm(env.get(name))]
+    auth_mode = _norm(env.get(ENV_AUTH_MODE))
+    required = REQUIRED_ENV_VARS_TOKEN_MODE if auth_mode == AUTH_MODE_TOKEN else REQUIRED_ENV_VARS_PROXY_MODE
+    missing = [name for name in required if not _norm(env.get(name))]
     if missing:
         hint = ""
         if ENV_API_TOKEN in missing and _norm(env.get(PRODUCTION_TOKEN_ENV_VAR)):
@@ -113,10 +157,16 @@ def validate_staging_target(env=None):
             "Aborted before any remote access."
         )
 
+    if auth_mode not in AUTH_MODES:
+        # The value is not echoed: a misplaced secret must never reach the log.
+        raise StagingTargetError(
+            f"Refusing to run: {ENV_AUTH_MODE} must be exactly one of {', '.join(AUTH_MODES)}. "
+            "Aborted before any remote access."
+        )
+
     account_id = _norm(env[ENV_ACCOUNT_ID])
     database_name = _norm(env[ENV_DATABASE_NAME])
     database_id = _norm(env[ENV_DATABASE_ID])
-    api_token = env[ENV_API_TOKEN].strip()
 
     if database_name.lower() == PRODUCTION_DATABASE_NAME or database_id.lower() == PRODUCTION_DATABASE_ID:
         raise StagingTargetError(
@@ -133,6 +183,16 @@ def validate_staging_target(env=None):
             "Aborted before any remote access."
         )
 
+    if auth_mode == AUTH_MODE_PROXY:
+        if not _https_proxy_configured(env):
+            raise StagingTargetError(
+                f"Refusing to run: {ENV_AUTH_MODE}={AUTH_MODE_PROXY} but no HTTPS proxy is configured for "
+                f"{API_HOST} (HTTPS_PROXY unset, or the host is excluded by NO_PROXY). Proxy mode sends no "
+                "credential of its own. Aborted before any remote access."
+            )
+        return StagingTarget(account_id, database_name, database_id, AUTH_MODE_PROXY, None)
+
+    api_token = env[ENV_API_TOKEN].strip()
     production_token = _norm(env.get(PRODUCTION_TOKEN_ENV_VAR))
     if production_token and production_token == api_token:
         raise StagingTargetError(
@@ -140,7 +200,7 @@ def validate_staging_target(env=None):
             "credential's name). Use the dedicated staging token. Aborted before any remote access."
         )
 
-    return StagingTarget(account_id, database_name, database_id, api_token)
+    return StagingTarget(account_id, database_name, database_id, AUTH_MODE_TOKEN, api_token)
 
 
 def _redact(text, target):
@@ -151,15 +211,22 @@ def _redact(text, target):
     return text[:MAX_ERROR_CHARS]
 
 
+def _headers(target):
+    """Token mode: the staging bearer token. Proxy mode: no Authorization header at all. Anything else: refused."""
+    headers = {"Content-Type": "application/json"}
+    if target.auth_mode == AUTH_MODE_TOKEN and target.api_token:
+        headers["Authorization"] = f"Bearer {target.api_token}"
+    elif target.auth_mode != AUTH_MODE_PROXY:
+        raise StagingTargetError("Refusing to run: the staging target has no valid authentication mode.")
+    return headers
+
+
 def _call(target, method, path, payload=None, opener=None):
     """One D1 HTTP API call. `opener` is urllib.request.urlopen unless a test injects a fake."""
     opener = opener or urllib.request.urlopen
     url = f"{API_BASE}/accounts/{target.account_id}/d1/database/{target.database_id}{path}"
     data = None if payload is None else json.dumps(payload).encode("utf-8")
-    request = urllib.request.Request(
-        url, data=data, method=method,
-        headers={"Authorization": f"Bearer {target.api_token}", "Content-Type": "application/json"},
-    )
+    request = urllib.request.Request(url, data=data, method=method, headers=_headers(target))
     try:
         with opener(request, timeout=HTTP_TIMEOUT_S) as response:
             status = response.status
@@ -222,7 +289,7 @@ def main(env=None, opener=None, now_ms=None, out=None):
         print(f"STAGING TARGET REFUSED: {e}", file=out)
         return EXIT_TARGET_REFUSED
     print(f"Validated staging target: account={target.account_id} database={target.database_name} "
-          f"id={target.database_id}", file=out)
+          f"id={target.database_id} auth_mode={target.auth_mode}", file=out)
 
     try:
         identity = verify_remote_identity(target, opener=opener)

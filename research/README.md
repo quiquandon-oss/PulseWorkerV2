@@ -1762,6 +1762,26 @@ D1 HTTP API directly, never through wrangler (which resolves databases through p
 run whose operational record was not `WRITTEN` exits non-zero. The production path
 (`live-evidence-collection.yml` -> `scripts/experiment5-agent/run.py`) is untouched.
 
+*Staging runner authentication.* `EXP5_STAGING_AUTH_MODE` is required and has no default; any value other than
+exactly `token` or `proxy` (after trimming whitespace) is refused before any remote access, and the value itself is
+never echoed. Both modes require `EXP5_STAGING_ACCOUNT_ID`, `EXP5_STAGING_DATABASE_NAME` and
+`EXP5_STAGING_DATABASE_ID` (the exact staging triple), and both keep the production refusal and the read-only
+Cloudflare identity check before any SQL.
+
+| Mode | Additionally required | Authorization header sent by the runner | Token variables read |
+|---|---|---|---|
+| `token` | `EXP5_STAGING_CLOUDFLARE_API_TOKEN` (must differ from `CLOUDFLARE_API_TOKEN`) | `Bearer` staging token | `EXP5_STAGING_CLOUDFLARE_API_TOKEN`, and `CLOUDFLARE_API_TOKEN` only to refuse an equal value |
+| `proxy` | `HTTPS_PROXY` (or `https_proxy`) covering `api.cloudflare.com`, i.e. not excluded by `NO_PROXY` | none | none |
+
+Proxy mode is for execution environments whose outbound HTTPS proxy **automatically injects** the Cloudflare
+credential into requests for `api.cloudflare.com` (such as a credential-injecting agent proxy). The runner holds no
+credential in this mode and relies entirely on that injection; it uses urllib's standard environment proxy handling
+and the same 60 s timeout as token mode. If the proxy does not inject a credential (or is unreachable), Cloudflare or
+the proxy rejects the identity lookup and the run exits `2` before any SQL. There is never a retry with, or fallback
+to, a token in either mode. Proxy mode does not work on a plain GitHub-hosted runner (no injecting proxy), and the
+`exp005-staging-runner.yml` workflow does not yet set `EXP5_STAGING_AUTH_MODE`, so a dispatch of the current
+workflow is refused by the runner until that variable is added there (`token`).
+
 **Operational success is not predictive performance.** The status endpoint returns two independent blocks.
 `operational` answers "is the pipeline running" (last run, last success, consecutive failures, rows
 processed/rejected, decisions replayed/created/evaluated, constants in force). `predictive` reports resolved

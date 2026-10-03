@@ -1,0 +1,143 @@
+name: Staging collector (STAGING only, manual)
+
+# Real public data -> the STAGING D1 database only (staging-collector/collector.py). Never production:
+#   * the collector accepts exactly pulseworker-v2-staging / 5458d504-2778-49ae-bd25-7751f1c49d50, asks Cloudflare
+#     to confirm it before any SQL, and can only send its fixed INSERT/SELECT templates;
+#   * its network allowlist is Hyperliquid's public info API, Coinbase's public spot price and that one database;
+#   * the history job runs the unmodified pinned CryptoPulse page with a deny-by-default browser policy: every
+#     production Worker request (including the /history POST) and script.google.com is captured, answered
+#     locally or aborted -- nothing is sent to production.
+#
+# Manual only (workflow_dispatch). A schedule is added only when recurring collection is explicitly authorized.
+# Kill switch: repository variable STAGING_COLLECTION_ENABLED must be exactly 'true', otherwise every job is skipped.
+# Credential: the dedicated STAGING_COLLECTOR_CLOUDFLARE_API_TOKEN secret only; there is no fallback to any other.
+on:
+  workflow_dispatch:
+    inputs:
+      expected_sha:
+        description: 'Full 40-character commit SHA you reviewed. Must equal the dispatched ref head.'
+        required: true
+        type: string
+      mode:
+        description: 'btc | history | both'
+        required: true
+        default: both
+        type: choice
+        options: [btc, history, both]
+
+concurrency:
+  group: staging-collector
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  STAGING_COLLECTOR_ACCOUNT_ID: f58e761fbc8e62dc404d8684290af264
+  STAGING_COLLECTOR_DATABASE_NAME: pulseworker-v2-staging
+  STAGING_COLLECTOR_DATABASE_ID: 5458d504-2778-49ae-bd25-7751f1c49d50
+  CRYPTOPULSE_COMMIT: 0a1dfb8ce88883336ee2e712a84e49be857b1724
+
+jobs:
+  btc:
+    if: vars.STAGING_COLLECTION_ENABLED == 'true' && (inputs.mode == 'btc' || inputs.mode == 'both')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Verify the staging collector token is configured
+        env:
+          STAGING_COLLECTOR_CLOUDFLARE_API_TOKEN: ${{ secrets.STAGING_COLLECTOR_CLOUDFLARE_API_TOKEN }}
+        run: |
+          if [ -z "$STAGING_COLLECTOR_CLOUDFLARE_API_TOKEN" ]; then
+            echo "::error::STAGING_COLLECTOR_CLOUDFLARE_API_TOKEN is missing. There is no fallback credential."
+            exit 1
+          fi
+      - uses: actions/checkout@v4
+      - name: Verify the head is the reviewed commit
+        env:
+          EXPECTED_SHA: ${{ inputs.expected_sha }}
+        run: |
+          printf '%s' "$EXPECTED_SHA" | grep -Eq '^[0-9a-f]{40}$' || { echo "::error::expected_sha must be a full SHA"; exit 1; }
+          [ "$(git rev-parse HEAD)" = "$EXPECTED_SHA" ] || { echo "::error::head is not the reviewed commit"; exit 1; }
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Collector safety tests (never collect on red tests)
+        run: |
+          pip install pytest pyyaml --break-system-packages
+          python3 -m pytest staging-collector/ -q
+      - name: Collect one BTC observation into STAGING
+        env:
+          STAGING_COLLECTOR_CLOUDFLARE_API_TOKEN: ${{ secrets.STAGING_COLLECTOR_CLOUDFLARE_API_TOKEN }}
+          STAGING_COLLECTOR_GIT_SHA: ${{ inputs.expected_sha }}
+          STAGING_COLLECTOR_RUN_ID: gha:${{ github.run_id }}:${{ github.run_attempt }}
+        run: |
+          set +e
+          python3 staging-collector/collector.py btc-tick
+          code=$?
+          # 0 WRITTEN, 5 SKIPPED_DUPLICATE (slot already collected) are expected outcomes; anything else fails.
+          [ "$code" = "0" ] || [ "$code" = "5" ] || exit "$code"
+
+  history:
+    needs: btc
+    if: >-
+      always() && vars.STAGING_COLLECTION_ENABLED == 'true' &&
+      (inputs.mode == 'history' || (inputs.mode == 'both' && needs.btc.result == 'success'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Verify the staging collector token is configured
+        env:
+          STAGING_COLLECTOR_CLOUDFLARE_API_TOKEN: ${{ secrets.STAGING_COLLECTOR_CLOUDFLARE_API_TOKEN }}
+        run: |
+          [ -n "$STAGING_COLLECTOR_CLOUDFLARE_API_TOKEN" ] || { echo "::error::token missing; no fallback"; exit 1; }
+      - uses: actions/checkout@v4
+      - name: Verify the head is the reviewed commit
+        env:
+          EXPECTED_SHA: ${{ inputs.expected_sha }}
+        run: |
+          printf '%s' "$EXPECTED_SHA" | grep -Eq '^[0-9a-f]{40}$' || { echo "::error::expected_sha must be a full SHA"; exit 1; }
+          [ "$(git rev-parse HEAD)" = "$EXPECTED_SHA" ] || { echo "::error::head is not the reviewed commit"; exit 1; }
+      - name: Checkout the pinned CryptoPulse page (read-only, public)
+        uses: actions/checkout@v4
+        with:
+          repository: quiquandon-oss/CryptoPulse
+          ref: 0a1dfb8ce88883336ee2e712a84e49be857b1724
+          path: cryptopulse-pinned
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install Playwright (Chromium only)
+        run: |
+          pip install pytest pyyaml playwright==1.56.0 --break-system-packages
+          python3 -m playwright install --with-deps chromium
+      - name: Collector safety tests, including the offline run of the pinned page
+        env:
+          CRYPTOPULSE_INDEX_FILE: cryptopulse-pinned/index.html
+        run: python3 -m pytest staging-collector/ -q
+      - name: Capture the composite (nothing is sent to production)
+        run: |
+          set +e
+          python3 staging-collector/history_harness.py --index-file cryptopulse-pinned/index.html --out capture.json
+          code=$?
+          # 0 CAPTURED, 7 NO_OBSERVATION (recorded by the ingest step); anything else fails.
+          [ "$code" = "0" ] || [ "$code" = "7" ] || exit "$code"
+      - name: Ingest the capture into STAGING history
+        env:
+          STAGING_COLLECTOR_CLOUDFLARE_API_TOKEN: ${{ secrets.STAGING_COLLECTOR_CLOUDFLARE_API_TOKEN }}
+          STAGING_COLLECTOR_GIT_SHA: ${{ inputs.expected_sha }}
+          STAGING_COLLECTOR_RUN_ID: gha:${{ github.run_id }}:${{ github.run_attempt }}
+        run: |
+          set +e
+          python3 staging-collector/collector.py history-ingest capture.json
+          code=$?
+          [ "$code" = "0" ] || [ "$code" = "5" ] || exit "$code"
+      - name: Keep the capture and its complete request log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: history-capture-${{ github.run_id }}
+          path: capture.json
+          if-no-files-found: ignore
+          retention-days: 30

@@ -38,7 +38,9 @@ Authentication (EXP5_STAGING_AUTH_MODE, required, no default):
 
 Stricter than the production adapter by design: a run whose operational record was not WRITTEN (migration 0019
 missing on staging, or the record write failed) exits non-zero, because recording the run is part of what a
-staging run is for.
+staging run is for. So does a recorded run in which the agent had no usable input (agent_cycle status
+INSUFFICIENT_ARCHIVE_DATA): it exits 5 with RESULT: NO_USABLE_INPUT, so "status OK, nothing processed" can never
+show as a green experiment run. Exit 0 always prints RESULT: PROCESSED.
 
 This file contains no GitHub API access and no ability to dispatch any workflow.
 """
@@ -86,6 +88,10 @@ EXIT_OK = 0
 EXIT_TARGET_REFUSED = 2
 EXIT_PIPELINE_FAILED = 3
 EXIT_RUN_NOT_RECORDED = 4
+EXIT_NO_USABLE_INPUT = 5   # recorded, but the agent had nothing to work on: not a successful experiment run
+
+INPUT_PROCESSED = "PROCESSED"
+INPUT_NONE = "NO_USABLE_INPUT"
 
 
 class StagingTargetError(RuntimeError):
@@ -280,6 +286,15 @@ def make_d1_functions(target, opener=None):
     return d1_query, d1_execute
 
 
+def classify_input(summary):
+    """Separates "the pipeline ran" from "the experiment had data". A run whose agent cycle reports
+    INSUFFICIENT_ARCHIVE_DATA processed nothing, however clean the pipeline status is."""
+    agent_status = (summary.get("agent_cycle") or {}).get("status")
+    if agent_status == "OK":
+        return INPUT_PROCESSED, agent_status
+    return INPUT_NONE, agent_status
+
+
 def main(env=None, opener=None, now_ms=None, out=None):
     """Returns a process exit code. Every refusal happens before the pipeline is called."""
     out = out or sys.stdout
@@ -312,6 +327,16 @@ def main(env=None, opener=None, now_ms=None, out=None):
         reason = summary.get("run_record_error") or "migration 0019 (experiment5_pipeline_runs) is not applied"
         print(f"RUN NOT RECORDED: {summary.get('run_record')}: {_redact(reason, target)}", file=out)
         return EXIT_RUN_NOT_RECORDED
+    input_state, agent_status = classify_input(summary)
+    if input_state == INPUT_NONE:
+        print(f"RESULT: {INPUT_NONE} (readiness: COLLECTING) -- the run was recorded, but Experiment 5 had no usable "
+              f"observations (agent_status={agent_status}, history_rows_read={summary.get('history_rows_read')}, "
+              f"archive_rows_observed={summary.get('archive_rows_observed')}). This is not a successful experiment "
+              f"run; collect more staging data first.", file=out)
+        return EXIT_NO_USABLE_INPUT
+    print(f"RESULT: {INPUT_PROCESSED} -- {summary.get('archive_rows_observed')} observation(s) processed, "
+          f"{summary.get('decisions_created')} decision(s) created, {summary.get('decisions_evaluated')} evaluated. "
+          "Operational success only; this is not a predictive verdict.", file=out)
     return EXIT_OK
 
 

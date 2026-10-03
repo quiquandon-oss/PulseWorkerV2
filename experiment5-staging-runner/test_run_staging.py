@@ -261,7 +261,7 @@ class TestValidStagingConfigResolvesOnlyToStaging:
     def test_every_request_url_is_the_staging_database(self):
         fake = FakeCloudflare()
         code, _ = run_main(dict(VALID_ENV), fake, 10 * HOUR)
-        assert code == rs.EXIT_OK
+        assert code == rs.EXIT_NO_USABLE_INPUT  # empty staging data: recorded, but nothing to process
         assert fake.requests and all(rs.EXPECTED_STAGING_DATABASE_ID in r["url"] for r in fake.requests)
         assert not any(rs.PRODUCTION_DATABASE_ID in r["url"] for r in fake.requests)
         assert all(r["auth"] == f"Bearer {STAGING_TOKEN}" for r in fake.requests)
@@ -398,7 +398,7 @@ class TestTokenMode:
 
     def test_production_token_is_never_used_even_when_the_staging_token_is_present(self):
         fake = FakeCloudflare()
-        assert run_main(env_with(CLOUDFLARE_API_TOKEN=PRODUCTION_TOKEN), fake, 10 * HOUR)[0] == rs.EXIT_OK
+        assert run_main(env_with(CLOUDFLARE_API_TOKEN=PRODUCTION_TOKEN), fake, 10 * HOUR)[0] == rs.EXIT_NO_USABLE_INPUT
         assert not any(PRODUCTION_TOKEN in str(r["auth_headers"]) for r in fake.requests)
 
 
@@ -736,3 +736,35 @@ class TestWorkflowGuard:
     def test_production_workflow_still_calls_only_the_production_adapter(self):
         text = open(os.path.join(ROOT, ".github", "workflows", "live-evidence-collection.yml")).read()
         assert "run_staging" not in text and "EXP5_STAGING" not in text
+
+
+class TestNoUsableInputIsNeverGreen:
+    """status=OK with agent_status=INSUFFICIENT_ARCHIVE_DATA used to exit 0 and look like a successful run."""
+
+    def test_empty_staging_data_is_recorded_but_exits_no_usable_input(self):
+        fake = FakeCloudflare()
+        code, out = run_main(dict(VALID_ENV), fake, now_ms=3 * HOUR)
+        assert code == rs.EXIT_NO_USABLE_INPUT == 5
+        assert "RESULT: NO_USABLE_INPUT (readiness: COLLECTING)" in out and "INSUFFICIENT_ARCHIVE_DATA" in out
+        assert "RESULT: PROCESSED" not in out
+        assert fake.conn.execute("SELECT status FROM experiment5_pipeline_runs").fetchone()[0] == "OK"
+
+    def test_a_single_observation_is_still_no_usable_input(self):
+        fake = FakeCloudflare()
+        seed_market(fake, hours=1)
+        assert run_main(dict(VALID_ENV), fake, now_ms=1 * HOUR)[0] == rs.EXIT_NO_USABLE_INPUT
+
+    def test_processed_data_prints_processed_and_exits_zero(self):
+        fake = FakeCloudflare()
+        seed_market(fake)
+        code, out = run_main(dict(VALID_ENV), fake, now_ms=3 * HOUR)
+        assert code == rs.EXIT_OK and "RESULT: PROCESSED" in out and "not a predictive verdict" in out
+
+    @pytest.mark.parametrize("summary,expected", [
+        ({"agent_cycle": {"status": "OK"}}, rs.INPUT_PROCESSED),
+        ({"agent_cycle": {"status": "INSUFFICIENT_ARCHIVE_DATA"}}, rs.INPUT_NONE),
+        ({"agent_cycle": {}}, rs.INPUT_NONE),
+        ({}, rs.INPUT_NONE),
+    ])
+    def test_classify_input(self, summary, expected):
+        assert rs.classify_input(summary)[0] == expected

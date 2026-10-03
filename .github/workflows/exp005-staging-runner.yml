@@ -73,6 +73,7 @@ jobs:
 
       - name: Run Experiment 5 pipeline against STAGING
         env:
+          EXP5_STAGING_AUTH_MODE: token
           EXP5_STAGING_ACCOUNT_ID: f58e761fbc8e62dc404d8684290af264
           EXP5_STAGING_DATABASE_NAME: pulseworker-v2-staging
           EXP5_STAGING_DATABASE_ID: 5458d504-2778-49ae-bd25-7751f1c49d50

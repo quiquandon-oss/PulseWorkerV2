@@ -703,6 +703,30 @@ class TestWorkflowGuard:
         assert env["EXP5_STAGING_DATABASE_ID"] == rs.EXPECTED_STAGING_DATABASE_ID
         assert env["EXP5_STAGING_CLOUDFLARE_API_TOKEN"] == "${{ secrets.STAGE7_STAGING_CLOUDFLARE_API_TOKEN }}"
 
+    def test_workflow_uses_token_auth_mode_and_never_proxy(self, workflow):
+        steps = workflow["jobs"]["run-staging"]["steps"]
+        run_env = next(s["env"] for s in steps if "run_staging.py" in s.get("run", ""))
+        # Explicitly token mode: GitHub-hosted runners have no credential-injecting proxy.
+        assert run_env[rs.ENV_AUTH_MODE] == rs.AUTH_MODE_TOKEN == "token"
+        # proxy is never configured anywhere in the workflow -- not at workflow, job or any step level.
+        env_blocks = [workflow.get("env", {}), workflow["jobs"]["run-staging"].get("env", {})]
+        env_blocks += [s.get("env", {}) for s in steps]
+        for env in env_blocks:
+            assert str(env.get(rs.ENV_AUTH_MODE, "token")).strip() == "token"
+            assert not {k.lower() for k in env} & {"https_proxy", "http_proxy", "all_proxy", "no_proxy"}
+        assert rs.AUTH_MODE_PROXY not in [str(v).strip().lower() for env in env_blocks for v in env.values()]
+
+    def test_staging_secret_mapping_schedule_and_permissions_are_unchanged(self, workflow):
+        steps = workflow["jobs"]["run-staging"]["steps"]
+        secret_refs = {k: v for s in steps for k, v in s.get("env", {}).items() if "secrets." in str(v)}
+        # Exactly the dedicated staging secret, mapped to the runner's own token name, in the guard and run steps.
+        assert secret_refs == {rs.ENV_API_TOKEN: "${{ secrets.STAGE7_STAGING_CLOUDFLARE_API_TOKEN }}"}
+        assert sum(rs.ENV_API_TOKEN in s.get("env", {}) for s in steps) == 2
+        triggers = workflow.get(True, workflow.get("on"))
+        assert "schedule" not in triggers and set(triggers) == {"workflow_dispatch"}
+        assert workflow["permissions"] == {"contents": "read"}
+        assert "permissions" not in workflow["jobs"]["run-staging"]
+
     def test_reviewed_sha_is_enforced_before_the_runner(self, workflow):
         steps = workflow["jobs"]["run-staging"]["steps"]
         names = [s.get("name", "") for s in steps]

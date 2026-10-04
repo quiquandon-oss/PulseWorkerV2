@@ -1,3 +1,8 @@
+// Research Lab learning loop (MARKET -> RESEARCH -> LEARNING): see learning/learning-core.js.
+import { parseAiResearchResponse } from './learning/learning-core.js';
+import { getLearningMarket, getLearningCase, confirmLearningFinding } from './learning/learning-api.js';
+import { LEARNING_LAB_HTML } from './learning/learning-ui.js';
+import { listCandidates, getCandidate, createCandidate, updateCandidate, decideCandidate, listVersions } from './learning/learning-candidates.js';
 // ---- BTC k-NN historical analog model ----
 // Feature vector: the 4 headline gauges already computed and logged by the
 // original CryptoPulse pipeline every cycle (sentiment composite, technical
@@ -9993,8 +9998,79 @@ export default {
     // ---- Research Lab (read-only, PR-7) — see the dedicated section
     // above `export default` for every function/constant these routes
     // call. No route below ever writes to D1. ----
+    // Primary Research Lab = the learning loop (Market -> Research -> Learning). The previous technical page is
+    // unchanged at /research-lab/advanced.
     if (url.pathname === '/research-lab' && request.method === 'GET') {
+      return new Response(LEARNING_LAB_HTML, { headers: { ...corsHeaders, 'Content-Type': 'text/html; charset=utf-8' } });
+    }
+    if (url.pathname === '/research-lab/advanced' && request.method === 'GET') {
       return new Response(RESEARCH_LAB_HTML, { headers: { ...corsHeaders, 'Content-Type': 'text/html; charset=utf-8' } });
+    }
+
+    // ---- Learning loop API. GETs and /parse are read-only. Every POST that writes is STAGE7_ADMIN_TOKEN-gated and
+    // writes only Stage 7 research rows (/findings), learning_candidates (/candidates, /candidate/update) or an
+    // APPROVED-but-inactive v1_methodology_versions row (/candidate/decide). Nothing here touches V1 weights,
+    // predictions or sentiment rows, and nothing activates a methodology version. ----
+    if (url.pathname.startsWith('/api/learning/')) {
+      const json = (body, status = 200) => new Response(JSON.stringify(body), { status, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+      try {
+        if (url.pathname === '/api/learning/market' && request.method === 'GET') {
+          return json(await getLearningMarket(env));
+        }
+        if (url.pathname === '/api/learning/case' && request.method === 'GET') {
+          const eventId = Number(url.searchParams.get('event_id'));
+          if (!Number.isInteger(eventId) || eventId <= 0) return json({ ok: false, error: 'event_id must be a positive integer' }, 400);
+          const result = await getLearningCase(env, eventId);
+          return json(result, result.ok ? 200 : (result.status || 500));
+        }
+        if (url.pathname === '/api/learning/parse' && request.method === 'POST') {
+          let body = null;
+          try { body = await request.json(); } catch (_e) { return json({ ok: false, error: 'Invalid JSON body' }, 400); }
+          return json(parseAiResearchResponse(body && body.text));
+        }
+        const bearer = () => { const h = request.headers.get('Authorization') || ''; return h.startsWith('Bearer ') ? h.slice(7) : null; };
+        const readBody = async () => { try { return await request.json(); } catch (_e) { return null; } };
+        const positiveInt = (v) => { const n = Number(v); return Number.isInteger(n) && n > 0 ? n : null; };
+        const send = (result) => json(result, result.ok ? 200 : (result.status || 500));
+        if (url.pathname === '/api/learning/candidates' && request.method === 'GET') return json(await listCandidates(env));
+        if (url.pathname === '/api/learning/versions' && request.method === 'GET') return json(await listVersions(env));
+        if (url.pathname === '/api/learning/candidate' && request.method === 'GET') {
+          const id = positiveInt(url.searchParams.get('id'));
+          if (!id) return json({ ok: false, error: 'id must be a positive integer' }, 400);
+          return send(await getCandidate(env, id));
+        }
+        if (url.pathname === '/api/learning/candidates' && request.method === 'POST') {
+          const body = await readBody();
+          const eventId = positiveInt(body && body.event_id);
+          if (!eventId) return json({ ok: false, error: 'event_id must be a positive integer' }, 400);
+          return send(await createCandidate(env, { eventId, providedToken: bearer() }));
+        }
+        if (url.pathname === '/api/learning/candidate/update' && request.method === 'POST') {
+          const body = await readBody();
+          const id = positiveInt(body && body.candidate_id);
+          if (!id) return json({ ok: false, error: 'candidate_id must be a positive integer' }, 400);
+          return send(await updateCandidate(env, { candidateId: id, fields: body.fields, adjustment: body.adjustment, submit: body.submit === true, providedToken: bearer() }));
+        }
+        if (url.pathname === '/api/learning/candidate/decide' && request.method === 'POST') {
+          const body = await readBody();
+          const id = positiveInt(body && body.candidate_id);
+          if (!id) return json({ ok: false, error: 'candidate_id must be a positive integer' }, 400);
+          return send(await decideCandidate(env, { candidateId: id, decision: body.decision, approver: body.approver, note: body.note, acknowledgeUnsupported: body.acknowledge_unsupported === true, providedToken: bearer() }));
+        }
+        if (url.pathname === '/api/learning/findings' && request.method === 'POST') {
+          let body = null;
+          try { body = await request.json(); } catch (_e) { return json({ ok: false, error: 'Invalid JSON body' }, 400); }
+          const eventId = Number(body && body.event_id);
+          if (!Number.isInteger(eventId) || eventId <= 0) return json({ ok: false, error: 'event_id must be a positive integer' }, 400);
+          const authHeader = request.headers.get('Authorization') || '';
+          const providedToken = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : null;
+          const result = await confirmLearningFinding(env, { eventId, provider: body.provider, finding: body.finding, providedToken }, { registerStage7ResearchResponse });
+          return json(result, result.ok ? 200 : (result.status || 500));
+        }
+      } catch (err) {
+        return json({ ok: false, error: String(err) }, 500);
+      }
+      return json({ ok: false, error: 'not_found' }, 404);
     }
 
     if (url.pathname === '/api/research-lab/dashboard' && request.method === 'GET') {

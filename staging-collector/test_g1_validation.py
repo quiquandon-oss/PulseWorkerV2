@@ -63,10 +63,12 @@ def _job():
 
 
 def test_job_runs_only_on_manual_dispatch_with_read_only_permissions_and_no_secret():
-    text, job = _job()
-    assert job["if"] == "github.event_name == 'workflow_dispatch'"
+    yaml = pytest.importorskip("yaml")
+    _, job = _job()
+    assert job["if"] == "github.event_name == 'workflow_dispatch' && inputs.job == 'g1-live-validation'"
     assert job["permissions"] == {"contents": "read"}
-    assert "secrets." not in text, "test.yml must not reference any secret"
+    assert "environment" not in job
+    assert "secrets." not in yaml.safe_dump(job), "the G1 job must not reference any secret"
 
 
 def test_job_uses_the_reviewed_commit_and_the_pinned_page():

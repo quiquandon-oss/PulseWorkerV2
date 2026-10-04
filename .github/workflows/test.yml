@@ -5,6 +5,13 @@ on:
     branches: [main]
   pull_request:
   workflow_dispatch:
+    inputs:
+      job:
+        description: 'Which manual job to run (the test job always runs). Nothing else is ever selected implicitly.'
+        required: true
+        default: g1-live-validation
+        type: choice
+        options: [g1-live-validation, staging-single-tick]
 
 jobs:
   test:
@@ -48,7 +55,7 @@ jobs:
   # in-memory replica), writes neither staging nor production, and blocks every production Worker / Apps Script
   # request twice: in /etc/hosts and in the browser harness's deny-by-default policy.
   g1-live-validation:
-    if: github.event_name == 'workflow_dispatch'
+    if: github.event_name == 'workflow_dispatch' && inputs.job == 'g1-live-validation'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:
@@ -138,5 +145,121 @@ jobs:
             capture-dryrun.json
             btc-dryrun.txt
             history-dryrun.txt
+          if-no-files-found: warn
+          retention-days: 30
+
+  # ONE real STAGING collector tick, by the collector code exactly at the reviewed commit ddf48ca. Manual dispatch with
+  # job=staging-single-tick only -- never on push / pull_request, never on a schedule. Runs, in this order and failing
+  # fast: open-period -> btc-tick -> capture -> history-ingest -> verify -> status.
+  # Writes ONLY to the staging D1 database: the collector itself accepts only account f58e761f... / database
+  # pulseworker-v2-staging / 5458d504-..., asks Cloudflare to confirm it before any SQL, and its request allowlist
+  # reaches api.cloudflare.com only on that database's own path. The secret is passed only to the collector steps and is
+  # never printed. Every production Worker host, the staging Worker and Apps Script are sinkholed in /etc/hosts, and the
+  # pinned page runs under the harness's deny-by-default policy, exactly as in g1-live-validation.
+  staging-single-tick:
+    if: github.event_name == 'workflow_dispatch' && inputs.job == 'staging-single-tick'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment: staging-collection
+    permissions:
+      contents: read
+    concurrency:
+      group: staging-collector
+      cancel-in-progress: false
+    env:
+      REVIEWED_SHA: ddf48cad109f306fe76f2c701ce8736369247f92
+      CRYPTOPULSE_COMMIT: 0a1dfb8ce88883336ee2e712a84e49be857b1724
+      CRYPTOPULSE_INDEX_SHA256: 06e97b2dd8c0623ff7a87640720512a19914e3762f2aef13ff9514d803c9fe4a
+      STAGING_COLLECTOR_ACCOUNT_ID: f58e761fbc8e62dc404d8684290af264
+      STAGING_COLLECTOR_DATABASE_NAME: pulseworker-v2-staging
+      STAGING_COLLECTOR_DATABASE_ID: 5458d504-2778-49ae-bd25-7751f1c49d50
+      STAGING_COLLECTOR_GIT_SHA: ddf48cad109f306fe76f2c701ce8736369247f92
+      STAGING_COLLECTOR_RUN_ID: gha:${{ github.run_id }}:${{ github.run_attempt }}
+    steps:
+      - name: Fail fast unless the staging collector secret is available (value never printed)
+        env:
+          STAGING_COLLECTOR_CLOUDFLARE_API_TOKEN: ${{ secrets.STAGING_COLLECTOR_CLOUDFLARE_API_TOKEN }}
+        run: |
+          if [ -z "$STAGING_COLLECTOR_CLOUDFLARE_API_TOKEN" ]; then
+            echo "::error::STAGING_COLLECTOR_CLOUDFLARE_API_TOKEN is missing or empty in environment staging-collection. No fallback."
+            exit 1
+          fi
+          echo "staging collector secret is present (value not shown)"
+      - name: Checkout the reviewed collector commit
+        uses: actions/checkout@v4
+        with:
+          ref: ddf48cad109f306fe76f2c701ce8736369247f92
+          path: reviewed
+          persist-credentials: false
+      - name: Checkout the pinned CryptoPulse page (public, read-only)
+        uses: actions/checkout@v4
+        with:
+          repository: quiquandon-oss/CryptoPulse
+          ref: 0a1dfb8ce88883336ee2e712a84e49be857b1724
+          path: cryptopulse-pinned
+          persist-credentials: false
+      - name: Verify reviewed commit, collector file hashes and pinned page
+        run: |
+          [ "$(git -C reviewed rev-parse HEAD)" = "$REVIEWED_SHA" ] || { echo "::error::reviewed checkout is not $REVIEWED_SHA"; exit 1; }
+          [ "$(git -C cryptopulse-pinned rev-parse HEAD)" = "$CRYPTOPULSE_COMMIT" ] || { echo "::error::CryptoPulse is not $CRYPTOPULSE_COMMIT"; exit 1; }
+          echo "$CRYPTOPULSE_INDEX_SHA256  cryptopulse-pinned/index.html" | sha256sum -c -
+          cd reviewed/staging-collector && sha256sum -c - <<'SUMS'
+          387c8d1c877c1b1b49b9561c36fd1c9a68d2385d1d967fbd42cc55ff5ad33185  collector.py
+          b607f4579f908f0cd97993d6c0fc4ce8b74a849bb168c0e6fadfca8a3cdd04f4  history_harness.py
+          1336e4aa963fefcc50dbdba5729bce58e0b33d95c881fc3225c5cd7449cd9476  harness_policy.py
+          e73fad4a13c95f732ddf41823c4640721f39fcb27fe3cfa4c83581a2317e2278  relay_shims.py
+          SUMS
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install pytest and Playwright Chromium
+        run: |
+          pip install pytest pyyaml playwright==1.56.0 --break-system-packages
+          python3 -m playwright install --with-deps chromium
+      - name: Reviewed collector tests, including the offline run of the pinned page (never write on red tests)
+        env:
+          CRYPTOPULSE_INDEX_FILE: ${{ github.workspace }}/cryptopulse-pinned/index.html
+        run: python3 -m pytest reviewed/staging-collector/ -q -p no:cacheprovider
+      - name: Lock out production and the staging Worker (api.cloudflare.com stays reachable for the collector only)
+        run: |
+          printf '0.0.0.0 %s\n' sentiment-ff75.quiquandon.workers.dev pulseworker-v2.quiquandon.workers.dev \
+            pulseworker-v2-staging.quiquandon.workers.dev script.google.com script.googleusercontent.com | sudo tee -a /etc/hosts
+          for h in sentiment-ff75.quiquandon.workers.dev pulseworker-v2.quiquandon.workers.dev script.google.com; do
+            [ "$(getent hosts "$h" | awk '{print $1}')" = "0.0.0.0" ] || { echo "::error::$h not sinkholed"; exit 1; }
+          done
+          if env | grep -qiE '^(CLOUDFLARE_API_TOKEN|EXP5_STAGING_CLOUDFLARE_API_TOKEN)='; then
+            echo "::error::an unexpected Cloudflare credential is present"; exit 1
+          fi
+      - name: 1/6 open-period
+        env:
+          STAGING_COLLECTOR_CLOUDFLARE_API_TOKEN: ${{ secrets.STAGING_COLLECTOR_CLOUDFLARE_API_TOKEN }}
+        run: python3 reviewed/staging-collector/collector.py open-period --period-id "single-tick-${{ github.run_id }}" --note "single-tick validation"
+      - name: 2/6 btc-tick
+        env:
+          STAGING_COLLECTOR_CLOUDFLARE_API_TOKEN: ${{ secrets.STAGING_COLLECTOR_CLOUDFLARE_API_TOKEN }}
+        run: python3 reviewed/staging-collector/collector.py btc-tick
+      - name: 3/6 capture (pinned page, nothing sent to production)
+        run: python3 reviewed/staging-collector/history_harness.py --index-file cryptopulse-pinned/index.html --out capture.json
+      - name: 4/6 history-ingest
+        env:
+          STAGING_COLLECTOR_CLOUDFLARE_API_TOKEN: ${{ secrets.STAGING_COLLECTOR_CLOUDFLARE_API_TOKEN }}
+        run: python3 reviewed/staging-collector/collector.py history-ingest capture.json
+      - name: 5/6 verify
+        env:
+          STAGING_COLLECTOR_CLOUDFLARE_API_TOKEN: ${{ secrets.STAGING_COLLECTOR_CLOUDFLARE_API_TOKEN }}
+        run: python3 reviewed/staging-collector/collector.py verify --json-out verify.json
+      - name: 6/6 status
+        env:
+          STAGING_COLLECTOR_CLOUDFLARE_API_TOKEN: ${{ secrets.STAGING_COLLECTOR_CLOUDFLARE_API_TOKEN }}
+        run: python3 reviewed/staging-collector/collector.py status
+      - name: Keep the capture, its request log and the verify report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: staging-single-tick-${{ github.run_id }}
+          path: |
+            capture.json
+            verify.json
           if-no-files-found: warn
           retention-days: 30

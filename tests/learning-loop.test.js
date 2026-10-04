@@ -567,7 +567,7 @@ describe('served pages', () => {
 
 describe('production setup job guard (.github/workflows/test.yml)', () => {
   const wf = readFileSync(join(__dirname, '..', '.github', 'workflows', 'test.yml'), 'utf8');
-  const job = wf.slice(wf.indexOf('  production-learning-setup:'));
+  const job = wf.slice(wf.indexOf('  production-learning-setup:'), wf.indexOf('  # PRODUCTION, manual only, from main (job=production-session-smoke)'));
   it('is manual-only from main, sets only the admin secret, never deploys or touches D1', () => {
     expect(job).toContain("if: github.event_name == 'workflow_dispatch' && inputs.job == 'production-learning-setup' && github.ref == 'refs/heads/main'");
     expect(job.match(/wrangler@4 [^\n]+/g)).toEqual(['wrangler@4 secret put STAGE7_ADMIN_TOKEN --name pulseworker-v2']);
@@ -698,5 +698,30 @@ describe('staging walkthrough job guard (.github/workflows/test.yml)', () => {
     expect(job).not.toMatch(/wrangler|CLOUDFLARE_API_TOKEN|d1 /);
     expect(script).toContain("const BASE = 'https://pulseworker-v2-staging.quiquandon.workers.dev';");
     expect(script).not.toMatch(/pulseworker-v2\.quiquandon|sentiment-ff75|console\.log\([^)]*TOKEN/);
+  });
+});
+
+describe('production session smoke job guard', () => {
+  const wf = readFileSync(join(__dirname, '..', '.github', 'workflows', 'test.yml'), 'utf8');
+  const job = wf.slice(wf.indexOf('  production-session-smoke:'));
+  const script = readFileSync(join(__dirname, 'e2e', 'production-session-smoke.cjs'), 'utf8');
+  it('is manual-only from main, never deploys, sets no secret, and only probes a non-existent event', () => {
+    expect(job).toContain("if: github.event_name == 'workflow_dispatch' && inputs.job == 'production-session-smoke' && github.ref == 'refs/heads/main'");
+    expect(job).not.toMatch(/wrangler|CLOUDFLARE_API_TOKEN|d1 /);
+    expect(script).toContain('const NO_EVENT = 999999999;');
+    const postBodies = [...script.matchAll(/post\('[^']+', (\{[^}]*\})/g)].map((m) => m[1]);
+    expect(postBodies.length).toBeGreaterThan(5);
+    for (const b of postBodies) expect(b).toContain('NO_EVENT');
+    expect(script).not.toMatch(/event_id: 15|candidate\/update|candidate\/decide|console\.log\([^)]*TOKEN/);
+  });
+  it('a session-authorized probe on a non-existent event writes nothing', async () => {
+    const ctx = makeEnv();
+    const cookie = await createSessionValue(ctx.token);
+    const before = counts(ctx.db);
+    const h = { 'Content-Type': 'application/json', Cookie: `cp_rl_session=${cookie}`, Origin: 'https://w.test', 'X-CryptoPulse-Research': '1' };
+    const f = await worker.fetch(new Request('https://w.test/api/learning/findings', { method: 'POST', headers: h, body: JSON.stringify({ event_id: 999999999, finding: { explanation: 'smoke' } }) }), ctx.env, { waitUntil() {} });
+    const k = await worker.fetch(new Request('https://w.test/api/learning/candidates', { method: 'POST', headers: h, body: JSON.stringify({ event_id: 999999999 }) }), ctx.env, { waitUntil() {} });
+    expect([f.status, k.status]).toEqual([404, 409]);
+    expect(counts(ctx.db)).toEqual(before);
   });
 });

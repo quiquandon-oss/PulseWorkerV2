@@ -64,7 +64,7 @@ export const DRIVER_CATEGORIES = Object.freeze([
   ...UNCOVERED_DRIVERS.map((d) => d.key), 'FLOWS', 'DERIVATIVES', 'MACRO', 'EQUITIES', 'NEWS', 'BREADTH', 'ONCHAIN',
   'TREASURY', 'OTHER',
 ]);
-export const FINDING_TYPES = Object.freeze(['NEW_SOURCE', 'NEW_TREND', 'NEW_SIGNAL', 'EXISTING_SOURCE_MISREAD', 'NO_NEW_DRIVER']);
+export const FINDING_TYPES = Object.freeze(['NEW_SOURCE', 'NEW_TREND', 'NEW_SIGNAL', 'MISSING_DRIVER', 'SOURCE_CLASSIFICATION', 'SOURCE_WEIGHTING', 'REGIME_SPECIFIC', 'NO_CONVINCING_EXPLANATION', 'EXISTING_SOURCE_MISREAD', 'NO_NEW_DRIVER']);
 export const CONFIDENCE_LEVELS = Object.freeze(['LOW', 'MEDIUM', 'HIGH']);
 export const SENTIMENT_ASSESSMENTS = Object.freeze(['POSITIVE', 'NEGATIVE', 'MIXED', 'INDETERMINATE']);
 
@@ -267,12 +267,13 @@ const FINDING_JSON_TEMPLATE = `{
   "explanation": "2-4 sentences: what actually drove the move",
   "primary_driver": "the single most important driver, in a few words",
   "driver_category": "${DRIVER_CATEGORIES.join(' | ')}",
-  "finding_type": "${FINDING_TYPES.join(' | ')}",
+  "finding_type": "${FINDING_TYPES.slice(0, 8).join(' | ')}",
   "covered_by_existing_v1_source": "one of the V1 source ids listed above, or \\"none\\"",
   "proposed_new_source": { "name": "", "url": "", "what_it_measures": "", "update_frequency": "", "free_or_paid": "" },
   "proposed_signal": "how that source would be turned into a 0-100 bullish/bearish reading",
   "trend": "is this a one-off or an ongoing trend? since when?",
   "evidence": [ { "claim": "", "url": "", "publisher": "", "date": "YYYY-MM-DD" } ],
+  "inference": [ "conclusions you draw from the evidence" ],
   "speculation": [ "plausible but unverified points" ],
   "alternative_explanations": [ "" ],
   "limitations": "what you could not verify",
@@ -281,40 +282,54 @@ const FINDING_JSON_TEMPLATE = `{
 }`;
 
 // The compact text the human pastes into an external AI. Plain text, no secrets, no internal URLs.
+export const CHATGPT_PROMPT = 'Analyse this CryptoPulse research case. Identify the most likely missing market explanation and determine whether CryptoPulse is missing a source, trend, signal or regime-specific factor. Separate evidence from speculation and propose concrete sources/signals that could be added to V1.';
+
 export function buildResearchPack(described, assessment, researchCase, evidence) {
   const L = [];
   const v = (x) => (x === null || x === undefined ? 'n/a' : x);
-  L.push('I am researching a BTC market event for CryptoPulse, a sentiment model ("V1") that scores BTC sentiment 0-100 (50 = neutral) as a weighted average of 21 sources. Help me find what V1 is missing.');
+  const iso = (ts) => new Date(ts).toISOString().replace('.000Z', 'Z');
+  const supported = assessment.sources.filter((s) => s.verdict === 'EXPLAINS' || s.verdict === 'PARTIAL');
+  const contradicted = assessment.sources.filter((s) => s.verdict === 'CONTRADICTS');
+  L.push(CHATGPT_PROMPT);
   L.push('');
+  L.push('=== CRYPTOPULSE RESEARCH CASE ===');
+  L.push('CryptoPulse V1 scores BTC market sentiment 0-100 (50 = neutral) as a weighted average of 21 sources. A score >= 50 is read as an UP call, below 50 as DOWN.');
+  L.push('');
+  L.push(`EVENT ID: ${described.event_id}`);
+  L.push(`EVENT CATEGORY: ${described.category}`);
   L.push(`EVENT: ${described.headline}`);
-  L.push(`DATE/TIME: ${new Date(described.event_ts).toISOString().replace('.000Z', 'Z')}`);
-  L.push(`MARKET MOVE: ${described.btc_move_text}`);
-  L.push(`V1 SENTIMENT: ${v(assessment.v1_score_before)}/100 about 24h before (${v(assessment.v1_lean_before)}), ${v(assessment.v1_score_at)}/100 at the event. Our verdict: ${VERDICT_TEXT[assessment.verdict]} (${assessment.explained_share}% of V1 weight pointed the way BTC moved).`);
+  L.push(`EVENT TIME: ${iso(described.event_ts)}`);
+  L.push(`MARKET PERIOD STUDIED: ${iso(described.event_ts - 24 * 3600000)} to ${iso(described.event_ts)}`);
+  L.push(`PRICE MOVE: ${described.btc_move_text}`);
+  L.push(`V1 SENTIMENT: ${v(assessment.v1_score_before)}/100 about 24h before, ${v(assessment.v1_score_at)}/100 at the event.`);
+  L.push(`V1 PREDICTION BEFORE THE MOVE: ${assessment.v1_score_before === null ? 'n/a' : assessment.v1_score_before >= 50 ? 'UP' : 'DOWN'} (lean: ${v(assessment.v1_lean_before)}). ACTUAL: ${v(assessment.actual_direction)}.`);
+  L.push(`OUR VERDICT: ${VERDICT_TEXT[assessment.verdict]}. ${assessment.explained_share}% of V1's source weight pointed the way BTC moved.`);
   L.push('');
-  L.push('V1 SOURCE CONTRIBUTIONS (source [group] weight-share: reading 24h before -> at event = verdict)');
+  L.push('V1 SOURCES (id [group] share of V1 weight: reading 24h before -> at event = verdict)');
   for (const s of assessment.sources) L.push(`- ${s.id} [${SOURCE_GROUP_LABELS[s.group]}] ${s.weight_share}%: ${v(s.score_before)} -> ${v(s.score_at)} = ${s.verdict}`);
   L.push('');
-  L.push(`EXISTING EXPLANATIONS: ${researchCase.explained_by.length ? researchCase.explained_by.join(', ') : 'none of V1\'s sources pointed the right way'}.`);
-  L.push(`UNEXPLAINED AREA: ${researchCase.reasons.join(' ')} Weak or silent: ${researchCase.weak_or_missing_areas.join(', ') || 'none'}. V1 has no source at all for: ${UNCOVERED_DRIVERS.map((d) => d.label.split(' (')[0]).join('; ')}.`);
+  L.push(`SOURCES THAT SUPPORTED THE MOVE: ${supported.length ? supported.map((s) => s.id).join(', ') : 'none'}`);
+  L.push(`SOURCES THAT CONTRADICTED IT: ${contradicted.length ? contradicted.map((s) => s.id).join(', ') : 'none'}`);
+  L.push(`UNEXPLAINED AREA: ${researchCase.reasons.join(' ')} Weak or silent groups: ${researchCase.weak_or_missing_areas.join(', ') || 'none'}.`);
+  L.push(`EXISTING SOURCE LIMITATIONS: V1 has no source at all for ${UNCOVERED_DRIVERS.map((d) => d.label.split(' (')[0].toLowerCase()).join('; ')}. News sources are keyword/sentiment scores of headlines, not event detection. V1 readings are recorded only a few times a day.`);
   L.push('');
   if (evidence.length) {
-    L.push(`AVAILABLE EVIDENCE (${evidence.length} headlines collected around the event; first ${Math.min(evidence.length, 12)}):`);
+    L.push(`EVIDENCE WE COLLECTED (${evidence.length} headlines around the event; first ${Math.min(evidence.length, 12)}):`);
     for (const e of evidence.slice(0, 12)) L.push(`- [${(e.evidence_relation || '').replace('_', '-').toLowerCase()}] ${e.publisher}: ${String(e.headline).slice(0, 160)}`);
   } else {
-    L.push('AVAILABLE EVIDENCE: none collected.');
+    L.push('EVIDENCE WE COLLECTED: none.');
   }
   L.push('');
   L.push(`RESEARCH QUESTION: ${researchCase.question}`);
   L.push('');
-  L.push('PLEASE:');
+  L.push('INSTRUCTIONS');
+  L.push('Identify what CryptoPulse is currently missing. The answer may be one of: a missing source, a missing trend, a missing signal, a missing market driver, a source classification problem, a source weighting problem, regime-specific behaviour, or no convincing explanation.');
   L.push('1. Explain the event in plain language.');
-  L.push('2. Identify the explanations V1 is missing.');
-  L.push('3. Name potential NEW data sources that would have captured it (exact provider and URL).');
-  L.push('4. Name potential new trends or signals, and how each would become a 0-100 bullish/bearish reading.');
-  L.push('5. Separate verified evidence from speculation.');
-  L.push('6. Give checkable URLs and dates for every factual claim. Do not invent sources or numbers.');
-  L.push('7. State your confidence.');
-  L.push('8. End with EXACTLY ONE JSON block in this format (keep every key; use "" or [] when unknown):');
+  L.push('2. Name the most likely missing explanation and why V1 did not capture it.');
+  L.push('3. Propose concrete data sources (exact provider and URL) and how each would become a 0-100 bullish/bearish reading.');
+  L.push('4. Label every point as EVIDENCE (verifiable, with URL and date), INFERENCE (your reasoning from evidence) or SPECULATION (plausible but unverified). Never invent sources or numbers.');
+  L.push('5. List alternative explanations and state your confidence.');
+  L.push('6. End with EXACTLY ONE JSON block in this format (keep every key; use "" or [] when unknown):');
   L.push('```json');
   L.push(FINDING_JSON_TEMPLATE);
   L.push('```');
@@ -377,6 +392,7 @@ export function parseAiResearchResponse(rawText, v1SourceIds = V1_METHODOLOGY_V1
     evidence: (Array.isArray(obj.evidence) ? obj.evidence : []).slice(0, 20).map((e) => ({
       claim: str(e && e.claim, 500), url: httpUrl(e && e.url), publisher: str(e && e.publisher, 120), date: str(e && e.date, 20),
     })).filter((e) => e.claim || e.url),
+    inference: (Array.isArray(obj.inference) ? obj.inference : []).map((a) => str(a, 500)).filter(Boolean).slice(0, 10),
     speculation: (Array.isArray(obj.speculation) ? obj.speculation : []).map((a) => str(a, 500)).filter(Boolean).slice(0, 10),
     alternative_explanations: (Array.isArray(obj.alternative_explanations) ? obj.alternative_explanations : []).map((a) => str(a, 500)).filter(Boolean).slice(0, 10),
     limitations: str(obj.limitations, 1000),
@@ -395,7 +411,7 @@ export function emptyFinding(explanation = '') {
   return {
     explanation, primary_driver: '', driver_category: 'OTHER', finding_type: 'NEW_SOURCE', covered_by_existing_v1_source: 'none',
     proposed_new_source: { name: '', url: '', what_it_measures: '', update_frequency: '', free_or_paid: '' },
-    proposed_signal: '', trend: '', evidence: [], speculation: [], alternative_explanations: [], limitations: '', confidence: 'LOW',
+    proposed_signal: '', trend: '', evidence: [], inference: [], speculation: [], alternative_explanations: [], limitations: '', confidence: 'LOW',
     sentiment_assessment: 'INDETERMINATE',
   };
 }

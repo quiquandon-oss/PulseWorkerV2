@@ -169,10 +169,10 @@ describe('buildResearchPack', () => {
     const pack = buildResearchPack(d, a, buildResearchCase(d, a, []), [{ publisher: 'CoinDesk', headline: 'BTC slides', evidence_relation: 'PRE_EVENT' }]);
     expect(pack).toMatch(/BTC fell 4\.0%/);
     for (const s of V1_METHODOLOGY_V1.sources) expect(pack).toContain(`- ${s.id} [`);
-    expect(pack).toMatch(/Options positioning/);
+    expect(pack).toMatch(/options positioning/i);
     expect(pack).toMatch(/"proposed_new_source"/);
     expect(pack).toMatch(/\[pre-event\] CoinDesk: BTC slides/);
-    for (const section of ['EVENT:', 'DATE/TIME:', 'MARKET MOVE:', 'V1 SENTIMENT:', 'V1 SOURCE CONTRIBUTIONS', 'EXISTING EXPLANATIONS:', 'UNEXPLAINED AREA:', 'AVAILABLE EVIDENCE', 'RESEARCH QUESTION:', '5. Separate verified evidence from speculation.', '"speculation"']) expect(pack).toContain(section);
+    for (const section of ['Analyse this CryptoPulse research case.', 'EVENT ID: 15', 'EVENT CATEGORY: LARGE_MOVE', 'EVENT TIME:', 'MARKET PERIOD STUDIED:', 'PRICE MOVE:', 'V1 SENTIMENT:', 'V1 PREDICTION BEFORE THE MOVE: UP', 'V1 SOURCES', 'SOURCES THAT SUPPORTED THE MOVE:', 'SOURCES THAT CONTRADICTED IT:', 'UNEXPLAINED AREA:', 'EXISTING SOURCE LIMITATIONS:', 'EVIDENCE WE COLLECTED', 'RESEARCH QUESTION:', 'Identify what CryptoPulse is currently missing.', 'EVIDENCE (verifiable', 'INFERENCE', 'SPECULATION', '"inference"', '"speculation"']) expect(pack).toContain(section);
     expect(pack).not.toMatch(/workers\.dev|STAGE7|token|\bD1\b|sqlite|stage7_/i);
   });
 });
@@ -534,5 +534,24 @@ describe('Full journey: finding -> candidate -> adjustment -> recalculation -> v
     expect((await call(bare.env, '/api/learning/candidates', { method: 'POST', body: { event_id: 15 }, token: bare.token })).status).toBe(503);
     expect((await call(bare.env, '/api/learning/market')).json.ok).toBe(true);
     expect((await call(bare.env, '/api/learning/versions')).json.versions[0].version_id).toBe('v1.0');
+  });
+});
+
+describe('staging deploy job guard (.github/workflows/test.yml)', () => {
+  const wf = readFileSync(join(__dirname, '..', '.github', 'workflows', 'test.yml'), 'utf8');
+  const job = wf.slice(wf.indexOf('  staging-deploy-learning:'));
+  it('runs only on an explicit manual dispatch and targets only the staging Worker', () => {
+    expect(job).toContain("if: github.event_name == 'workflow_dispatch' && inputs.job == 'staging-deploy-learning'");
+    expect(job.match(/wrangler@4 (deploy|secret put STAGE7_ADMIN_TOKEN) -c wrangler\.staging\.toml/g)).toHaveLength(2);
+    expect(job).not.toMatch(/-c wrangler\.toml|--config wrangler\.toml/);
+    expect(job).not.toMatch(/secrets\.CLOUDFLARE_API_TOKEN/);
+    expect([...job.matchAll(/secrets\.([A-Z0-9_]+)/g)].map((m) => m[1]).every((s) => s.startsWith('STAGE7_STAGING_'))).toBe(true);
+    expect(job).not.toMatch(/d1 (execute|migrations)/);
+  });
+  it('wrangler.staging.toml binds only the staging database and defines no cron', () => {
+    const toml = readFileSync(join(__dirname, '..', 'wrangler.staging.toml'), 'utf8').split('\n').filter((l) => !l.trim().startsWith('#')).join('\n');
+    expect(toml).toMatch(/^name = "pulseworker-v2-staging"$/m);
+    expect(toml).toMatch(/^database_id = "5458d504-2778-49ae-bd25-7751f1c49d50"$/m);
+    expect(toml).not.toMatch(/f91ca980-b886-423a-bd6f-f3baea46d181|sentiment-history|\[triggers\]/);
   });
 });

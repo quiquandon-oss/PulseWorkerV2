@@ -100,6 +100,14 @@ export const LEARNING_LAB_HTML = `<!DOCTYPE html>
     var e = focusEvent();
     var html = '<div class="card"><h2>Right now</h2><div class="row"><div class="kv"><div class="k">BTC</div><div class="v">' + (market.latest.btc ? '$' + Math.round(market.latest.btc.btc_price).toLocaleString('en-US') : '&ndash;') + '</div></div>' +
       '<div class="kv"><div class="k">V1 sentiment</div><div class="v">' + (market.latest.v1 ? esc(market.latest.v1.score) + ' / 100' : '&ndash;') + '</div></div></div></div>';
+    html += '<details class="card"><summary><b>How to use this (with ChatGPT)</b></summary><ol class="small">' +
+      '<li>Market: choose an event and read what happened.</li><li>Check whether V1\'s current sources explain it.</li>' +
+      '<li>Research: press COPY RESEARCH PACK and paste it into ChatGPT (the pack already starts with the instructions).</li>' +
+      '<li>Review ChatGPT\'s answer yourself, then paste the whole answer back with PASTE AI RESULT.</li>' +
+      '<li>Check every field and URL, tick the review box and press CONFIRM FINDING.</li>' +
+      '<li>Create the learning candidate and set the V1 source adjustment.</li><li>Read current vs proposed V1 and the validation verdict.</li>' +
+      '<li>Submit for review, then approve, reject or investigate more. Approval creates a READY V1 version; it never changes production V1.</li></ol>' +
+      '<p class="small muted">Writing needs the admin token (top right). It stays in this page only.</p></details>';
     if (!e) { app.innerHTML = html + '<div class="card muted">No market events recorded yet.</div>'; return; }
     html += journeyCard(e.journey);
     html += '<div class="card"><h2>What happened</h2><p class="headline">' + esc(e.headline) + '</p><p class="muted small">' + esc(e.btc_move_text) + '</p>' +
@@ -129,13 +137,14 @@ export const LEARNING_LAB_HTML = `<!DOCTYPE html>
       (f.trend ? '<tr><td class="muted small">Trend</td><td>' + esc(f.trend) + '</td></tr>' : '') +
       '<tr><td class="muted small">Confidence</td><td>' + esc(f.confidence) + '</td></tr></table>';
     if (f.evidence && f.evidence.length) h += '<label>Evidence</label><ul>' + f.evidence.map(function (x) { return '<li>' + esc(x.claim) + ' ' + (x.url ? '(' + link(x.url, x.publisher || 'source') + (x.date ? ', ' + esc(x.date) : '') + ')' : '<span class="warn">(no link)</span>') + '</li>'; }).join('') + '</ul>';
+    if (f.inference && f.inference.length) h += '<label>Inference</label><ul class="small">' + f.inference.map(function (x) { return '<li>' + esc(x) + '</li>'; }).join('') + '</ul>';
     if (f.speculation && f.speculation.length) h += '<label>Speculation (unverified)</label><ul class="small">' + f.speculation.map(function (x) { return '<li>' + esc(x) + '</li>'; }).join('') + '</ul>';
     if (f.alternative_explanations && f.alternative_explanations.length) h += '<label>Alternative explanations</label><ul class="small">' + f.alternative_explanations.map(function (x) { return '<li>' + esc(x) + '</li>'; }).join('') + '</ul>';
     if (meta) h += '<p class="small muted">Researched with ' + esc(meta.provider || 'an external AI') + ' &middot; confirmed ' + esc(day(meta.registered_ts)) + '</p>';
     return h;
   }
   var CATS = ['OPTIONS','LIQUIDATIONS','STABLECOIN_FLOWS','WHALES_MINERS','SPECIFIC_CATALYST','FLOWS','DERIVATIVES','MACRO','EQUITIES','NEWS','BREADTH','ONCHAIN','TREASURY','OTHER'];
-  var FTYPES = ['NEW_SOURCE','NEW_TREND','NEW_SIGNAL','EXISTING_SOURCE_MISREAD','NO_NEW_DRIVER'];
+  var FTYPES = ['NEW_SOURCE','NEW_TREND','NEW_SIGNAL','MISSING_DRIVER','SOURCE_CLASSIFICATION','SOURCE_WEIGHTING','REGIME_SPECIFIC','NO_CONVINCING_EXPLANATION','EXISTING_SOURCE_MISREAD','NO_NEW_DRIVER'];
   function draftForm(c) {
     var f = draft, s = f.proposed_new_source || {};
     var v1ids = ['none'].concat(c.assessment.sources.map(function (x) { return x.id; }));
@@ -148,19 +157,20 @@ export const LEARNING_LAB_HTML = `<!DOCTYPE html>
       '<label>Potential signal (how it becomes a 0-100 reading)</label><textarea data-f="proposed_signal">' + esc(f.proposed_signal) + '</textarea>' +
       '<label>Trend</label><input data-f="trend" value="' + esc(f.trend) + '">' +
       '<label>Evidence &mdash; one per line: claim | url | publisher | date</label><textarea data-list="evidence">' + esc((f.evidence || []).map(function (e) { return [e.claim, e.url, e.publisher, e.date].join(' | '); }).join('\\n')) + '</textarea>' +
+      '<label>Inference &mdash; one per line</label><textarea data-list="inference">' + esc((f.inference || []).join('\\n')) + '</textarea>' +
       '<label>Speculation (unverified) &mdash; one per line</label><textarea data-list="speculation">' + esc((f.speculation || []).join('\\n')) + '</textarea>' +
       '<label>Alternative explanations &mdash; one per line</label><textarea data-list="alternative_explanations">' + esc((f.alternative_explanations || []).join('\\n')) + '</textarea>' +
       '<div class="grid2"><div><label>Confidence</label><select data-f="confidence">' + opt(['LOW','MEDIUM','HIGH'], f.confidence) + '</select></div><div><label>Sentiment for BTC</label><select data-f="sentiment_assessment">' + opt(['POSITIVE','NEGATIVE','MIXED','INDETERMINATE'], f.sentiment_assessment) + '</select></div></div>' +
       '<label>Limitations</label><input data-f="limitations" value="' + esc(f.limitations) + '"></div>' +
       '<div class="card"><h2>4. Confirm</h2><label style="text-transform:none; font-size:14px; color:var(--text)"><input type="checkbox" id="reviewed" style="width:auto"> I checked this finding and its citations. It is not fabricated.</label>' +
-      '<div class="btns"><button class="btn" id="confirm">Confirm finding</button></div><div id="confirmMsg" class="small"></div></div>';
+      '<div class="btns"><button class="btn" id="confirm">CONFIRM FINDING</button></div><div id="confirmMsg" class="small"></div></div>';
   }
   function readDraft() {
     var f = JSON.parse(JSON.stringify(draft));
     var els = app.querySelectorAll('[data-f]'); for (var i = 0; i < els.length; i++) f[els[i].dataset.f] = els[i].value;
     var ss = app.querySelectorAll('[data-s]'); f.proposed_new_source = f.proposed_new_source || {}; for (var j = 0; j < ss.length; j++) f.proposed_new_source[ss[j].dataset.s] = ss[j].value;
     f.evidence = app.querySelector('[data-list="evidence"]').value.split('\\n').filter(function (l) { return l.trim(); }).map(function (l) { var p = l.split('|').map(function (x) { return x.trim(); }); return { claim: p[0] || '', url: p[1] || '', publisher: p[2] || '', date: p[3] || '' }; });
-    ['speculation', 'alternative_explanations'].forEach(function (k) { f[k] = app.querySelector('[data-list="' + k + '"]').value.split('\\n').map(function (x) { return x.trim(); }).filter(Boolean); });
+    ['inference', 'speculation', 'alternative_explanations'].forEach(function (k) { f[k] = app.querySelector('[data-list="' + k + '"]').value.split('\\n').map(function (x) { return x.trim(); }).filter(Boolean); });
     return f;
   }
   function renderResearch() {
@@ -186,11 +196,11 @@ export const LEARNING_LAB_HTML = `<!DOCTYPE html>
       return;
     }
     html += '<div class="card"><h2>1. Ask an external AI</h2><p class="small muted">Copy the research pack and paste it into one of these tools. Nothing is sent automatically.</p>' +
-      '<div class="btns"><button class="btn" id="copyPack">Copy AI research pack</button><a class="btn secondary" href="https://chatgpt.com" target="_blank" rel="noopener">ChatGPT</a><a class="btn secondary" href="https://claude.ai/new" target="_blank" rel="noopener">Claude</a><a class="btn secondary" href="https://gemini.google.com" target="_blank" rel="noopener">Gemini</a><a class="btn secondary" href="https://grok.com" target="_blank" rel="noopener">Grok</a></div>' +
+      '<div class="btns"><button class="btn" id="copyPack">COPY RESEARCH PACK</button><a class="btn secondary" href="https://chatgpt.com" target="_blank" rel="noopener">ChatGPT</a><a class="btn secondary" href="https://claude.ai/new" target="_blank" rel="noopener">Claude</a><a class="btn secondary" href="https://gemini.google.com" target="_blank" rel="noopener">Gemini</a><a class="btn secondary" href="https://grok.com" target="_blank" rel="noopener">Grok</a></div>' +
       '<div id="copyMsg" class="small"></div><details style="margin-top:10px"><summary>Preview the pack</summary><pre id="pack">' + esc(c.research_pack) + '</pre></details></div>';
-    html += '<div class="card"><h2>2. Paste the AI answer</h2><textarea id="aiText" placeholder="Paste the full answer, including the JSON block at the end"></textarea>' +
+    html += '<div class="card"><h2>2. Paste AI result</h2><textarea id="aiText" placeholder="Paste the full answer, including the JSON block at the end"></textarea>' +
       '<div class="grid2"><div><label>Which AI?</label><select id="provider">' + opt(['chatgpt','claude','gemini','grok','other'], (draft && draft._provider) || 'chatgpt') + '</select></div><div></div></div>' +
-      '<div class="btns"><button class="btn" id="parse">Structure the answer</button></div><div id="parseMsg" class="small"></div></div>';
+      '<div class="btns"><button class="btn" id="parse">PASTE AI RESULT &rarr; structure it</button></div><div id="parseMsg" class="small"></div></div>';
     if (draft) html += draftForm(c);
     app.innerHTML = html;
     document.getElementById('copyPack').onclick = function () {

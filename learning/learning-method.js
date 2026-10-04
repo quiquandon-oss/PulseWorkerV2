@@ -53,12 +53,18 @@ export function candidateFromFinding(finding, config = baselineConfig()) {
   let candidateType;
   if (f.finding_type === 'NEW_SIGNAL') candidateType = 'NEW_SIGNAL';
   else if (f.finding_type === 'NEW_TREND') candidateType = 'NEW_TREND';
-  else if (f.finding_type === 'EXISTING_SOURCE_MISREAD' && covered) candidateType = 'SOURCE_WEIGHT_ADJUSTMENT';
+  else if ((f.finding_type === 'EXISTING_SOURCE_MISREAD' || f.finding_type === 'SOURCE_WEIGHTING') && covered) candidateType = 'SOURCE_WEIGHT_ADJUSTMENT';
+  else if (f.finding_type === 'SOURCE_CLASSIFICATION' && covered) candidateType = 'SOURCE_RECLASSIFICATION';
+  else if (f.finding_type === 'REGIME_SPECIFIC' && covered) candidateType = 'REGIME_SPECIFIC_SIGNAL';
   else candidateType = 'NEW_SOURCE';
   const src = f.proposed_new_source || {};
   let adjustment;
   if (candidateType === 'SOURCE_WEIGHT_ADJUSTMENT') {
     adjustment = { type: 'CHANGE_WEIGHT', source_id: covered.id, weight: covered.weight, confidence: covered.confidence };
+  } else if (candidateType === 'SOURCE_RECLASSIFICATION') {
+    adjustment = { type: 'CHANGE_CLASSIFICATION', source_id: covered.id, group: covered.group, invert: false };
+  } else if (candidateType === 'REGIME_SPECIFIC_SIGNAL') {
+    adjustment = { type: 'ADD_REGIME_CONDITION', source_id: covered.id, metric: REGIME_METRICS.BTC_24H_CHANGE_PCT, op: '<=', value: -2, multiplier: 2 };
   } else if (candidateType === 'NEW_SOURCE') {
     adjustment = {
       type: 'ADD_SOURCE', source_id: slugId(src.name || f.primary_driver), label: clean(src.name || f.primary_driver, 120) || 'New source',
@@ -78,7 +84,9 @@ export function candidateFromFinding(finding, config = baselineConfig()) {
     reason: clean(f.explanation, 2000),
     expected_effect: candidateType === 'NEW_SOURCE'
       ? `Give V1 a reading on "${adjustment.label}", so moves driven by it are no longer missed.`
-      : candidateType === 'SOURCE_WEIGHT_ADJUSTMENT' ? `Change how much "${covered.label}" counts in V1.` : `Add "${adjustment.label}" as a V1 signal.`,
+      : candidateType === 'SOURCE_WEIGHT_ADJUSTMENT' ? `Change how much "${covered.label}" counts in V1.`
+        : candidateType === 'SOURCE_RECLASSIFICATION' ? `Reclassify how V1 reads "${covered.label}".`
+          : candidateType === 'REGIME_SPECIFIC_SIGNAL' ? `Make "${covered.label}" count more in a specific market regime.` : `Add "${adjustment.label}" as a V1 signal.`,
     confidence: f.confidence || 'LOW',
     evidence: Array.isArray(f.evidence) ? f.evidence.slice(0, 20) : [],
     adjustment,

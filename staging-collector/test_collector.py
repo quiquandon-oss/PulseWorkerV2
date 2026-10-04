@@ -553,19 +553,4 @@ def test_single_tick_delta_accepts_exactly_the_expected_changes(db):
                                                                   "s7_sentiment_max_id changed: None -> 8"]
 
 
-def test_workflow_is_staging_only_manual_and_holds_only_the_collector_secret():
-    yaml = pytest.importorskip("yaml")
-    path = os.path.join(HERE, "..", ".github", "workflows", "staging-collector.yml")
-    with open(path) as f:
-        text = f.read()
-    wf = yaml.safe_load(text)
-    triggers = wf.get(True) or wf.get("on")
-    assert set(triggers) == {"workflow_dispatch"}, "no schedule/push trigger until activation is authorized"
-    assert wf["permissions"] == {"contents": "read"}
-    assert set(re.findall(r"secrets\.([A-Z0-9_]+)", text)) == {"STAGING_COLLECTOR_CLOUDFLARE_API_TOKEN"}
-    assert "CLOUDFLARE_API_TOKEN:" not in text.replace("STAGING_COLLECTOR_CLOUDFLARE_API_TOKEN:", "")
-    code = "\n".join(line for line in text.splitlines() if not line.lstrip().startswith("#"))
-    for forbidden in ("wrangler", "workers.dev", "script.google", c.PRODUCTION_DATABASE_ID, c.PRODUCTION_DATABASE_NAME):
-        assert forbidden not in code
-    assert "vars.STAGING_COLLECTION_ENABLED == 'true'" in text
-    assert c.PINNED_CRYPTOPULSE_COMMIT in text
+# The staging-collector.yml workflow guards live in test_staging_collector_workflow.py.

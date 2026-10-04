@@ -22,7 +22,7 @@ every other production Worker path, any `*.workers.dev` host and `script.google.
 | `harness_fixtures.py` | offline self-test responses; captures made with them are refused by the collector |
 | `run-local.ps1` | PC runner: `-Mode DryRun` (G1-A/G1-B, no writes) and `-Mode SingleTick` (controlled staging test) |
 | `../.ai/migrations/0020_staging_ingest_ledger.sql` | provenance ledger + collection periods (staging only) |
-| `../.github/workflows/staging-collector.yml` | manual-only workflow, kill switch `STAGING_COLLECTION_ENABLED` |
+| `../.github/workflows/staging-collector.yml` | recurring collector: hourly at :07 UTC (fires only once on the default branch) + manual `tick`/`open-period`/`close-period`; runs the reviewed `ddf48ca` collector; kill switch `STAGING_COLLECTION_ENABLED`; environment `staging-collection` |
 
 **Rules enforced in code.**
 - **Idempotency:** every data INSERT is guarded by NOT EXISTS on its own table for the current slot, computed from the

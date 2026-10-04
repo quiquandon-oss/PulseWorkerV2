@@ -44,7 +44,7 @@ def test_only_this_job_and_only_its_collector_steps_consume_the_secret():
     text, wf, job = _load()
     assert set(re.findall(r"secrets\.([A-Za-z0-9_]+)", text)) == {SECRET}
     for name, other in wf["jobs"].items():
-        if name != "staging-single-tick":
+        if name not in ("staging-single-tick", "staging-credential-check"):
             assert "secrets." not in yaml.safe_dump(other), name
     assert "secrets." not in yaml.safe_dump(job.get("env", {}))
     for step in job["steps"]:

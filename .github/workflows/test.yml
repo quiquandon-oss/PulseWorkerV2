@@ -11,7 +11,7 @@ on:
         required: true
         default: g1-live-validation
         type: choice
-        options: [g1-live-validation, staging-single-tick]
+        options: [g1-live-validation, staging-single-tick, staging-credential-check]
 
 jobs:
   test:
@@ -263,3 +263,52 @@ jobs:
             verify.json
           if-no-files-found: warn
           retention-days: 30
+
+  # READ-ONLY credential check for the staging collector token. Manual dispatch with job=staging-credential-check only.
+  # Runs the reviewed collector's own target validation and its single identity GET of the staging database
+  # (staging-collector/credential_check.py); sends no SQL and writes nothing. Same pins, environment and sinkholes as
+  # staging-single-tick.
+  staging-credential-check:
+    if: github.event_name == 'workflow_dispatch' && inputs.job == 'staging-credential-check'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: staging-collection
+    permissions:
+      contents: read
+    env:
+      REVIEWED_SHA: ddf48cad109f306fe76f2c701ce8736369247f92
+      STAGING_COLLECTOR_ACCOUNT_ID: f58e761fbc8e62dc404d8684290af264
+      STAGING_COLLECTOR_DATABASE_NAME: pulseworker-v2-staging
+      STAGING_COLLECTOR_DATABASE_ID: 5458d504-2778-49ae-bd25-7751f1c49d50
+    steps:
+      - name: Fail fast unless the staging collector secret is available (value never printed)
+        env:
+          STAGING_COLLECTOR_CLOUDFLARE_API_TOKEN: ${{ secrets.STAGING_COLLECTOR_CLOUDFLARE_API_TOKEN }}
+        run: |
+          if [ -z "$STAGING_COLLECTOR_CLOUDFLARE_API_TOKEN" ]; then
+            echo "::error::STAGING_COLLECTOR_CLOUDFLARE_API_TOKEN is missing or empty in environment staging-collection."
+            exit 1
+          fi
+          echo "staging collector secret is present (value not shown, length ${#STAGING_COLLECTOR_CLOUDFLARE_API_TOKEN})"
+      - name: Checkout (credential check script)
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Checkout the reviewed collector commit
+        uses: actions/checkout@v4
+        with:
+          ref: ddf48cad109f306fe76f2c701ce8736369247f92
+          path: reviewed
+          persist-credentials: false
+      - name: Verify reviewed commit and collector hash
+        run: |
+          [ "$(git -C reviewed rev-parse HEAD)" = "$REVIEWED_SHA" ] || { echo "::error::reviewed checkout is not $REVIEWED_SHA"; exit 1; }
+          echo "387c8d1c877c1b1b49b9561c36fd1c9a68d2385d1d967fbd42cc55ff5ad33185  reviewed/staging-collector/collector.py" | sha256sum -c -
+      - name: Lock out production and the staging Worker
+        run: |
+          printf '0.0.0.0 %s\n' sentiment-ff75.quiquandon.workers.dev pulseworker-v2.quiquandon.workers.dev \
+            pulseworker-v2-staging.quiquandon.workers.dev script.google.com script.googleusercontent.com | sudo tee -a /etc/hosts
+      - name: Read-only identity check (no SQL)
+        env:
+          STAGING_COLLECTOR_CLOUDFLARE_API_TOKEN: ${{ secrets.STAGING_COLLECTOR_CLOUDFLARE_API_TOKEN }}
+        run: python3 staging-collector/credential_check.py reviewed/staging-collector

@@ -2,6 +2,7 @@
 import { parseAiResearchResponse } from './learning/learning-core.js';
 import { getLearningMarket, getLearningCase, confirmLearningFinding } from './learning/learning-api.js';
 import { LEARNING_LAB_HTML } from './learning/learning-ui.js';
+import { authorizeWrite, getSessionState, signIn, clearedCookieHeader, SIGNIN_HTML } from './learning/learning-session.js';
 import { listCandidates, getCandidate, createCandidate, updateCandidate, decideCandidate, listVersions } from './learning/learning-candidates.js';
 // ---- BTC k-NN historical analog model ----
 // Feature vector: the 4 headline gauges already computed and logged by the
@@ -10003,6 +10004,27 @@ export default {
     if (url.pathname === '/research-lab' && request.method === 'GET') {
       return new Response(LEARNING_LAB_HTML, { headers: { ...corsHeaders, 'Content-Type': 'text/html; charset=utf-8' } });
     }
+    // Single-user device sign-in for Research Lab writes (see learning/learning-session.js).
+    if (url.pathname === '/research-lab/signin' && request.method === 'GET') {
+      return new Response(SIGNIN_HTML, { headers: { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' } });
+    }
+    if (url.pathname === '/research-lab/signin' && request.method === 'POST') {
+      let body = null;
+      try { body = await request.json(); } catch (_e) { body = null; }
+      const r = await signIn(env, request, body);
+      const headers = { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' };
+      if (r.ok) headers['Set-Cookie'] = r.setCookie;
+      return new Response(JSON.stringify(r.ok ? { ok: true, expires_ts: r.expires_ts } : { ok: false, error: r.error }), { status: r.status, headers });
+    }
+    if (url.pathname === '/research-lab/signout' && (request.method === 'POST' || request.method === 'GET')) {
+      // Clearing a cookie is harmless, so GET works as a plain link; nothing else happens here.
+      return new Response(request.method === 'GET' ? null : JSON.stringify({ ok: true }), {
+        status: request.method === 'GET' ? 303 : 200,
+        headers: request.method === 'GET'
+          ? { 'Set-Cookie': clearedCookieHeader(), Location: '/research-lab', 'Cache-Control': 'no-store' }
+          : { 'Set-Cookie': clearedCookieHeader(), 'Content-Type': 'application/json', 'Cache-Control': 'no-store' },
+      });
+    }
     if (url.pathname === '/research-lab/advanced' && request.method === 'GET') {
       return new Response(RESEARCH_LAB_HTML, { headers: { ...corsHeaders, 'Content-Type': 'text/html; charset=utf-8' } });
     }
@@ -10028,7 +10050,20 @@ export default {
           try { body = await request.json(); } catch (_e) { return json({ ok: false, error: 'Invalid JSON body' }, 400); }
           return json(parseAiResearchResponse(body && body.text));
         }
-        const bearer = () => { const h = request.headers.get('Authorization') || ''; return h.startsWith('Bearer ') ? h.slice(7) : null; };
+        if (url.pathname === '/api/learning/session' && request.method === 'GET') {
+          return new Response(JSON.stringify({ ok: true, ...(await getSessionState(env, request)) }), { headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' } });
+        }
+        // Every learning write passes authorizeWrite() first (signed session cookie + same Origin + custom header, or
+        // Bearer token), before any body parsing or database access. After that gate the request is acting as the
+        // single authorized user, so the existing token-checked functions receive the configured token server-side.
+        const WRITE_ROUTES = ['/api/learning/findings', '/api/learning/candidates', '/api/learning/candidate/update', '/api/learning/candidate/decide'];
+        let authorizedToken = null;
+        if (request.method === 'POST' && WRITE_ROUTES.includes(url.pathname)) {
+          const gate = await authorizeWrite(env, request);
+          if (!gate.ok) return json({ ok: false, error: gate.error }, gate.status);
+          authorizedToken = env.STAGE7_ADMIN_TOKEN;
+        }
+        const bearer = () => authorizedToken;
         const readBody = async () => { try { return await request.json(); } catch (_e) { return null; } };
         const positiveInt = (v) => { const n = Number(v); return Number.isInteger(n) && n > 0 ? n : null; };
         const send = (result) => json(result, result.ok ? 200 : (result.status || 500));
@@ -10062,9 +10097,7 @@ export default {
           try { body = await request.json(); } catch (_e) { return json({ ok: false, error: 'Invalid JSON body' }, 400); }
           const eventId = Number(body && body.event_id);
           if (!Number.isInteger(eventId) || eventId <= 0) return json({ ok: false, error: 'event_id must be a positive integer' }, 400);
-          const authHeader = request.headers.get('Authorization') || '';
-          const providedToken = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : null;
-          const result = await confirmLearningFinding(env, { eventId, provider: body.provider, finding: body.finding, providedToken }, { registerStage7ResearchResponse });
+          const result = await confirmLearningFinding(env, { eventId, provider: body.provider, finding: body.finding, providedToken: authorizedToken }, { registerStage7ResearchResponse });
           return json(result, result.ok ? 200 : (result.status || 500));
         }
       } catch (err) {

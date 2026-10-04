@@ -11,7 +11,7 @@ on:
         required: false
         default: none
         type: choice
-        options: [none, staging-deploy-learning, production-learning-setup]
+        options: [none, staging-deploy-learning, staging-session-walkthrough, production-learning-setup, production-session-smoke]
 
 jobs:
   test:
@@ -101,6 +101,34 @@ jobs:
           curl -fsS "$base/api/learning/versions" | grep -q '"available":true'
           echo "staging Research Lab is live at $base/research-lab"
 
+  # STAGING ONLY, manual only (job=staging-session-walkthrough): drives the deployed staging Research Lab in Chromium
+  # (sign in once -> full journey -> rejected writes create no rows). Reads the staging admin token from its secret and
+  # never prints it. Touches only pulseworker-v2-staging. Guarded by tests/learning-loop.test.js.
+  staging-session-walkthrough:
+    if: github.event_name == 'workflow_dispatch' && inputs.job == 'staging-session-walkthrough'
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Install Playwright Chromium
+        run: |
+          npm install --no-save playwright@1.56.0
+          npx playwright install --with-deps chromium
+      - name: Walk the staging Research Lab as a signed-in user
+        env:
+          STAGING_ADMIN_TOKEN: ${{ secrets.STAGE7_STAGING_ADMIN_TOKEN }}
+          EVENT_ID: '999004'
+        run: node tests/e2e/staging-session-walkthrough.cjs
+
   # PRODUCTION, manual only (job=production-learning-setup): sets ONLY the STAGE7_ADMIN_TOKEN secret on the production
   # Worker pulseworker-v2 (value from STAGE7_STAGING_ADMIN_TOKEN, as authorized) and smoke-checks the live Research
   # Lab with read-only GETs plus one no-write authorization probe. It never deploys code (deploy.yml does that on
@@ -159,3 +187,31 @@ jobs:
           cat probe.json; echo
           [ "$code" = "409" ] || { echo "::error::admin token probe returned $code (expected 409)"; exit 1; }
           echo "production Research Lab is live at $base/research-lab"
+
+  # PRODUCTION, manual only, from main (job=production-session-smoke): no-write smoke check of the signed device
+  # session on pulseworker-v2. Signs in once in Chromium, then probes the save routes against a non-existent event
+  # (authorized, then refused before any write) and checks learning-table state is identical before and after.
+  # Never deploys, never sets secrets, never touches D1 directly. Guarded by tests/learning-loop.test.js.
+  production-session-smoke:
+    if: github.event_name == 'workflow_dispatch' && inputs.job == 'production-session-smoke' && github.ref == 'refs/heads/main'
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Install Playwright Chromium
+        run: |
+          npm install --no-save playwright@1.56.0
+          npx playwright install --with-deps chromium
+      - name: No-write production session smoke check
+        env:
+          PROD_ADMIN_TOKEN: ${{ secrets.STAGE7_STAGING_ADMIN_TOKEN }}
+        run: node tests/e2e/production-session-smoke.cjs

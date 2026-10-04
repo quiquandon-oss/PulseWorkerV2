@@ -539,7 +539,7 @@ describe('Full journey: finding -> candidate -> adjustment -> recalculation -> v
 
 describe('staging deploy job guard (.github/workflows/test.yml)', () => {
   const wf = readFileSync(join(__dirname, '..', '.github', 'workflows', 'test.yml'), 'utf8');
-  const job = wf.slice(wf.indexOf('  staging-deploy-learning:'), wf.indexOf('  production-learning-setup:'));
+  const job = wf.slice(wf.indexOf('  staging-deploy-learning:'), wf.indexOf('  # STAGING ONLY, manual only (job=staging-session-walkthrough)'));
   it('runs only on an explicit manual dispatch and targets only the staging Worker', () => {
     expect(job).toContain("if: github.event_name == 'workflow_dispatch' && inputs.job == 'staging-deploy-learning'");
     expect(job.match(/wrangler@4 (deploy|secret put STAGE7_ADMIN_TOKEN) -c wrangler\.staging\.toml/g)).toHaveLength(2);
@@ -567,7 +567,7 @@ describe('served pages', () => {
 
 describe('production setup job guard (.github/workflows/test.yml)', () => {
   const wf = readFileSync(join(__dirname, '..', '.github', 'workflows', 'test.yml'), 'utf8');
-  const job = wf.slice(wf.indexOf('  production-learning-setup:'));
+  const job = wf.slice(wf.indexOf('  production-learning-setup:'), wf.indexOf('  # PRODUCTION, manual only, from main (job=production-session-smoke)'));
   it('is manual-only from main, sets only the admin secret, never deploys or touches D1', () => {
     expect(job).toContain("if: github.event_name == 'workflow_dispatch' && inputs.job == 'production-learning-setup' && github.ref == 'refs/heads/main'");
     expect(job.match(/wrangler@4 [^\n]+/g)).toEqual(['wrangler@4 secret put STAGE7_ADMIN_TOKEN --name pulseworker-v2']);
@@ -575,5 +575,153 @@ describe('production setup job guard (.github/workflows/test.yml)', () => {
     expect([...job.matchAll(/secrets\.([A-Z0-9_]+)/g)].map((m) => m[1]).sort()).toEqual(['CLOUDFLARE_API_TOKEN', 'CLOUDFLARE_API_TOKEN', 'STAGE7_STAGING_ADMIN_TOKEN', 'STAGE7_STAGING_ADMIN_TOKEN', 'STAGE7_STAGING_ADMIN_TOKEN']);
     expect(job.match(/-X POST/g)).toHaveLength(1);
     expect(job).toContain('{"event_id":999999999}');
+  });
+});
+
+// ---------------- Single-user device session (learning/learning-session.js) ----------------
+import { createSessionValue, SESSION_MAX_AGE_S } from '../learning/learning-session.js';
+
+describe('Research Lab write authorization: signed device session', () => {
+  const ORIGIN = 'https://w.test';
+  async function raw(env, path, { method = 'GET', body, headers = {} } = {}) {
+    const res = await worker.fetch(new Request(ORIGIN + path, { method, headers: { 'Content-Type': 'application/json', ...headers }, body: body ? JSON.stringify(body) : undefined }), env, { waitUntil() {} });
+    const text = await res.text();
+    let json = null; try { json = JSON.parse(text); } catch (_e) { /* html */ }
+    return { status: res.status, json, text, setCookie: res.headers.get('Set-Cookie') };
+  }
+  const browser = (cookie, extra = {}) => ({ Cookie: `cp_rl_session=${cookie}`, Origin: ORIGIN, 'X-CryptoPulse-Research': '1', ...extra });
+  const finding = () => parseAiResearchResponse(GOOD_ANSWER).finding;
+  const learningRows = (db) => { const c = counts(db); return [c.stage7_research_requests, c.stage7_research_responses, c.learning_candidates, c.v1_methodology_versions]; };
+
+  it('sign-in sets a signed HttpOnly, Secure, SameSite=Strict, 180-day cookie; only from this page with the right token', async () => {
+    const ctx = makeEnv();
+    const ok = await raw(ctx.env, '/research-lab/signin', { method: 'POST', body: { token: ctx.token }, headers: { Origin: ORIGIN, 'X-CryptoPulse-Research': '1' } });
+    expect(ok.status).toBe(200);
+    expect(ok.setCookie).toMatch(/^cp_rl_session=v1\.\d{13}\.[0-9a-f]{64}; Path=\/; HttpOnly; Secure; SameSite=Strict; Max-Age=15552000$/);
+    expect(SESSION_MAX_AGE_S).toBe(180 * 24 * 3600);
+    expect(ok.text).not.toContain(ctx.token);
+    expect((await raw(ctx.env, '/research-lab/signin', { method: 'POST', body: { token: 'wrong' }, headers: { Origin: ORIGIN, 'X-CryptoPulse-Research': '1' } })).status).toBe(401);
+    expect((await raw(ctx.env, '/research-lab/signin', { method: 'POST', body: { token: ctx.token }, headers: { Origin: 'https://evil.test', 'X-CryptoPulse-Research': '1' } })).status).toBe(403);
+    expect((await raw(ctx.env, '/research-lab/signin', { method: 'POST', body: { token: ctx.token }, headers: { Origin: ORIGIN } })).status).toBe(403);
+    const signin = await raw(ctx.env, '/research-lab/signin');
+    expect(signin.text).toContain('Sign in this device');
+  });
+
+  it('a valid session saves the whole flow (finding -> candidate -> adjustment -> decision) with no token anywhere', async () => {
+    const ctx = makeEnv();
+    const cookie = await createSessionValue(ctx.token);
+    const s = await raw(ctx.env, '/api/learning/session', { headers: { Cookie: `cp_rl_session=${cookie}` } });
+    expect(s.json).toMatchObject({ ok: true, signed_in: true, writes_configured: true });
+    expect((await raw(ctx.env, '/api/learning/findings', { method: 'POST', body: { event_id: 15, provider: 'chatgpt', finding: finding() }, headers: browser(cookie) })).status).toBe(200);
+    const created = await raw(ctx.env, '/api/learning/candidates', { method: 'POST', body: { event_id: 15 }, headers: browser(cookie) });
+    expect(created.json).toMatchObject({ ok: true, created: true });
+    const id = created.json.candidate_id;
+    const upd = await raw(ctx.env, '/api/learning/candidate/update', { method: 'POST', body: { candidate_id: id, submit: true, adjustment: { type: 'CHANGE_WEIGHT', source_id: 'etfflows', weight: 3, confidence: 0.8 } }, headers: browser(cookie) });
+    expect(upd.json).toMatchObject({ ok: true, candidate_status: 'PENDING_REVIEW' });
+    const dec = await raw(ctx.env, '/api/learning/candidate/decide', { method: 'POST', body: { candidate_id: id, decision: 'REJECT', approver: 'Olivier' }, headers: browser(cookie) });
+    expect(dec.json).toMatchObject({ ok: true, candidate_status: 'REJECTED' });
+  });
+
+  it('rejects expired, tampered, wrong-origin, header-less, credential-less and rotated-token requests with zero learning writes', async () => {
+    const ctx = makeEnv();
+    const day = 24 * 3600 * 1000;
+    const valid = await createSessionValue(ctx.token);
+    const expired = await createSessionValue(ctx.token, Date.now() - 181 * day);
+    const tampered = valid.slice(0, -1) + (valid.endsWith('0') ? '1' : '0');
+    const rotated = await createSessionValue('a-previous-admin-token');
+    const before = learningRows(ctx.db);
+    const cases = [
+      ['expired session', browser(expired), 401],
+      ['tampered signature', browser(tampered), 401],
+      ['token rotation', browser(rotated), 401],
+      ['wrong Origin', browser(valid, { Origin: 'https://evil.test' }), 403],
+      ['no Origin', (() => { const h = browser(valid); delete h.Origin; return h; })(), 403],
+      ['missing custom header', (() => { const h = browser(valid); delete h['X-CryptoPulse-Research']; return h; })(), 403],
+      ['no credentials', { Origin: ORIGIN, 'X-CryptoPulse-Research': '1' }, 401],
+      ['wrong Bearer', { Authorization: 'Bearer nope' }, 401],
+      ['right Bearer from a foreign Origin', { Authorization: `Bearer ${ctx.token}`, Origin: 'https://evil.test' }, 403],
+    ];
+    const routes = [
+      ['/api/learning/findings', { event_id: 15, finding: finding() }],
+      ['/api/learning/candidates', { event_id: 15 }],
+      ['/api/learning/candidate/update', { candidate_id: 1, submit: true }],
+      ['/api/learning/candidate/decide', { candidate_id: 1, decision: 'APPROVE', approver: 'x', acknowledge_unsupported: true }],
+    ];
+    for (const [label, headers, status] of cases) {
+      for (const [path, body] of routes) {
+        const r = await raw(ctx.env, path, { method: 'POST', body, headers });
+        expect([label, path, r.status]).toEqual([label, path, status]);
+      }
+    }
+    expect(learningRows(ctx.db)).toEqual(before);
+    expect((await raw(ctx.env, '/api/learning/session', { headers: { Cookie: `cp_rl_session=${rotated}` } })).json.signed_in).toBe(false);
+  });
+
+  it('the existing Bearer token still works for CI and smoke checks (no Origin, no cookie)', async () => {
+    const ctx = makeEnv();
+    const r = await call(ctx.env, '/api/learning/findings', { method: 'POST', body: { event_id: 15, finding: finding() }, token: ctx.token });
+    expect(r.status).toBe(200);
+    const probe = await raw(ctx.env, '/api/learning/candidates', { method: 'POST', body: { event_id: 999999999 }, headers: { Authorization: `Bearer ${ctx.token}` } });
+    expect(probe.status).toBe(409);
+  });
+
+  it('without a configured admin secret, sign-in and writes fail closed', async () => {
+    const ctx = makeEnv({ token: null });
+    const cookie = await createSessionValue('anything');
+    expect((await raw(ctx.env, '/research-lab/signin', { method: 'POST', body: { token: 'anything' }, headers: { Origin: ORIGIN, 'X-CryptoPulse-Research': '1' } })).status).toBe(503);
+    expect((await raw(ctx.env, '/api/learning/findings', { method: 'POST', body: { event_id: 15, finding: finding() }, headers: browser(cookie) })).status).toBe(503);
+  });
+
+  it('sign-out clears the cookie; CORS never allows the custom header cross-origin', async () => {
+    const ctx = makeEnv();
+    expect((await raw(ctx.env, '/research-lab/signout', { method: 'POST' })).setCookie).toBe('cp_rl_session=; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=0');
+    const pre = await worker.fetch(new Request(ORIGIN + '/api/learning/findings', { method: 'OPTIONS', headers: { Origin: 'https://evil.test', 'Access-Control-Request-Headers': 'x-cryptopulse-research' } }), ctx.env, { waitUntil() {} });
+    expect((pre.headers.get('Access-Control-Allow-Headers') || '').toLowerCase()).not.toContain('x-cryptopulse-research');
+    expect(pre.headers.get('Access-Control-Allow-Credentials')).toBeNull();
+  });
+
+  it('the Research Lab page has no admin-token field and never sends a token', async () => {
+    const { LEARNING_LAB_HTML } = await import('../learning/learning-ui.js');
+    expect(LEARNING_LAB_HTML).not.toMatch(/tokenInput|type="password"|Authorization|Bearer/);
+    expect(LEARNING_LAB_HTML).toContain("'X-CryptoPulse-Research': '1'");
+    expect(LEARNING_LAB_HTML).toContain('/research-lab/signin');
+  });
+});
+
+describe('staging walkthrough job guard (.github/workflows/test.yml)', () => {
+  const wf = readFileSync(join(__dirname, '..', '.github', 'workflows', 'test.yml'), 'utf8');
+  const job = wf.slice(wf.indexOf('  staging-session-walkthrough:'), wf.indexOf('  # PRODUCTION, manual only'));
+  const script = readFileSync(join(__dirname, 'e2e', 'staging-session-walkthrough.cjs'), 'utf8');
+  it('is manual-only, uses only the staging admin secret and targets only the staging Worker', () => {
+    expect(job).toContain("if: github.event_name == 'workflow_dispatch' && inputs.job == 'staging-session-walkthrough'");
+    expect([...job.matchAll(/secrets\.([A-Z0-9_]+)/g)].map((m) => m[1])).toEqual(['STAGE7_STAGING_ADMIN_TOKEN']);
+    expect(job).not.toMatch(/wrangler|CLOUDFLARE_API_TOKEN|d1 /);
+    expect(script).toContain("const BASE = 'https://pulseworker-v2-staging.quiquandon.workers.dev';");
+    expect(script).not.toMatch(/pulseworker-v2\.quiquandon|sentiment-ff75|console\.log\([^)]*TOKEN/);
+  });
+});
+
+describe('production session smoke job guard', () => {
+  const wf = readFileSync(join(__dirname, '..', '.github', 'workflows', 'test.yml'), 'utf8');
+  const job = wf.slice(wf.indexOf('  production-session-smoke:'));
+  const script = readFileSync(join(__dirname, 'e2e', 'production-session-smoke.cjs'), 'utf8');
+  it('is manual-only from main, never deploys, sets no secret, and only probes a non-existent event', () => {
+    expect(job).toContain("if: github.event_name == 'workflow_dispatch' && inputs.job == 'production-session-smoke' && github.ref == 'refs/heads/main'");
+    expect(job).not.toMatch(/wrangler|CLOUDFLARE_API_TOKEN|d1 /);
+    expect(script).toContain('const NO_EVENT = 999999999;');
+    const postBodies = [...script.matchAll(/post\('[^']+', (\{[^}]*\})/g)].map((m) => m[1]);
+    expect(postBodies.length).toBeGreaterThan(5);
+    for (const b of postBodies) expect(b).toContain('NO_EVENT');
+    expect(script).not.toMatch(/event_id: 15|candidate\/update|candidate\/decide|console\.log\([^)]*TOKEN/);
+  });
+  it('a session-authorized probe on a non-existent event writes nothing', async () => {
+    const ctx = makeEnv();
+    const cookie = await createSessionValue(ctx.token);
+    const before = counts(ctx.db);
+    const h = { 'Content-Type': 'application/json', Cookie: `cp_rl_session=${cookie}`, Origin: 'https://w.test', 'X-CryptoPulse-Research': '1' };
+    const f = await worker.fetch(new Request('https://w.test/api/learning/findings', { method: 'POST', headers: h, body: JSON.stringify({ event_id: 999999999, finding: { explanation: 'smoke' } }) }), ctx.env, { waitUntil() {} });
+    const k = await worker.fetch(new Request('https://w.test/api/learning/candidates', { method: 'POST', headers: h, body: JSON.stringify({ event_id: 999999999 }) }), ctx.env, { waitUntil() {} });
+    expect([f.status, k.status]).toEqual([404, 409]);
+    expect(counts(ctx.db)).toEqual(before);
   });
 });

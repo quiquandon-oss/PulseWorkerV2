@@ -101,9 +101,9 @@ export const LEARNING_LAB_HTML = `<!DOCTYPE html>
     var html = '<div class="card"><h2>Right now</h2><div class="row"><div class="kv"><div class="k">BTC</div><div class="v">' + (market.latest.btc ? '$' + Math.round(market.latest.btc.btc_price).toLocaleString('en-US') : '&ndash;') + '</div></div>' +
       '<div class="kv"><div class="k">V1 sentiment</div><div class="v">' + (market.latest.v1 ? esc(market.latest.v1.score) + ' / 100' : '&ndash;') + '</div></div></div></div>';
     html += '<details class="card"><summary><b>How to use this (with ChatGPT)</b></summary><ol class="small">' +
-      '<li>Market: choose an event and read what happened.</li><li>Check whether V1\'s current sources explain it.</li>' +
+      '<li>Market: choose an event and read what happened.</li><li>Check whether V1\\'s current sources explain it.</li>' +
       '<li>Research: press COPY RESEARCH PACK and paste it into ChatGPT (the pack already starts with the instructions).</li>' +
-      '<li>Review ChatGPT\'s answer yourself, then paste the whole answer back with PASTE AI RESULT.</li>' +
+      '<li>Review ChatGPT\\'s answer yourself, then paste the whole answer back with PASTE AI RESULT.</li>' +
       '<li>Check every field and URL, tick the review box and press CONFIRM FINDING.</li>' +
       '<li>Create the learning candidate and set the V1 source adjustment.</li><li>Read current vs proposed V1 and the validation verdict.</li>' +
       '<li>Submit for review, then approve, reject or investigate more. Approval creates a READY V1 version; it never changes production V1.</li></ol>' +

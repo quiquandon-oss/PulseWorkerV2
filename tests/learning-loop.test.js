@@ -555,3 +555,12 @@ describe('staging deploy job guard (.github/workflows/test.yml)', () => {
     expect(toml).not.toMatch(/f91ca980-b886-423a-bd6f-f3baea46d181|sentiment-history|\[triggers\]/);
   });
 });
+
+describe('served pages', () => {
+  it('the Research Lab inline script compiles (catches template-literal escaping mistakes)', async () => {
+    const { LEARNING_LAB_HTML } = await import('../learning/learning-ui.js');
+    const { Script } = await import('node:vm');
+    const js = LEARNING_LAB_HTML.split('<script>')[1].split('</script>')[0];
+    expect(() => new Script(js)).not.toThrow();
+  });
+});

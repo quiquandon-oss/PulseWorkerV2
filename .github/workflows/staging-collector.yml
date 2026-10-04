@@ -1,0 +1,175 @@
+name: staging-collector
+
+# Recurring STAGING-ONLY collection for Experiment 5: one real BTC price and one CryptoPulse composite per run, written
+# only to the staging D1 database by the collector code exactly at the reviewed commit ddf48ca.
+#
+# Activation is deliberately two-locked:
+#   1. GitHub evaluates `schedule:` only on the default branch, so this hourly schedule cannot fire while the file
+#      exists only on a feature branch (no merge is authorized yet).
+#   2. Every run (scheduled or manual) is skipped unless the repository variable STAGING_COLLECTION_ENABLED is 'true'.
+#
+# Safety controls (all asserted by staging-collector/test_staging_collector_workflow.py):
+#   * collector checked out at ddf48ca and verified by commit + per-file SHA-256; CryptoPulse page pinned to 0a1dfb8c
+#     and verified by commit + index.html SHA-256; the reviewed tests run before any write;
+#   * environment staging-collection; STAGING_COLLECTOR_CLOUDFLARE_API_TOKEN passed only to collector steps, never
+#     printed; target fixed to account f58e761f... / pulseworker-v2-staging / 5458d504-...; the collector confirms it
+#     with Cloudflare before any SQL and its allowlist reaches api.cloudflare.com only on that database's path;
+#   * production Workers, the staging Worker and Apps Script sinkholed in /etc/hosts before any collector call; the
+#     page runs under the harness's deny-by-default policy (production /history POST captured, never sent);
+#   * idempotency and provenance are the collector's own: BTC 30-minute slot, history 60-minute slot, every attempt in
+#     staging_ingest_ledger. A tick requires an OPENED collection period; periods are opened/closed only manually.
+# It never runs Stage 7, Experiment 5, predictions, weight changes, deployments or any AI API.
+on:
+  schedule:
+    - cron: '7 * * * *'   # hourly at :07 UTC (inactive until this file is on the default branch)
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: 'tick (collect once) | open-period | close-period'
+        required: true
+        default: tick
+        type: choice
+        options: [tick, open-period, close-period]
+      period_id:
+        description: 'Collection period id (open-period / close-period only), e.g. recurring-2026-10'
+        required: false
+        default: ''
+        type: string
+
+concurrency:
+  group: staging-collector
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  collect:
+    if: vars.STAGING_COLLECTION_ENABLED == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: staging-collection
+    permissions:
+      contents: read
+    env:
+      MODE: ${{ inputs.mode || 'tick' }}
+      PERIOD_ID: ${{ inputs.period_id }}
+      REVIEWED_SHA: ddf48cad109f306fe76f2c701ce8736369247f92
+      CRYPTOPULSE_COMMIT: 0a1dfb8ce88883336ee2e712a84e49be857b1724
+      CRYPTOPULSE_INDEX_SHA256: 06e97b2dd8c0623ff7a87640720512a19914e3762f2aef13ff9514d803c9fe4a
+      STAGING_COLLECTOR_ACCOUNT_ID: f58e761fbc8e62dc404d8684290af264
+      STAGING_COLLECTOR_DATABASE_NAME: pulseworker-v2-staging
+      STAGING_COLLECTOR_DATABASE_ID: 5458d504-2778-49ae-bd25-7751f1c49d50
+      STAGING_COLLECTOR_GIT_SHA: ddf48cad109f306fe76f2c701ce8736369247f92
+      STAGING_COLLECTOR_RUN_ID: gha-scheduled:${{ github.run_id }}:${{ github.run_attempt }}
+    steps:
+      - name: Fail fast unless the staging collector secret is available (value never printed)
+        env:
+          STAGING_COLLECTOR_CLOUDFLARE_API_TOKEN: ${{ secrets.STAGING_COLLECTOR_CLOUDFLARE_API_TOKEN }}
+        run: |
+          if [ -z "$STAGING_COLLECTOR_CLOUDFLARE_API_TOKEN" ]; then
+            echo "::error::STAGING_COLLECTOR_CLOUDFLARE_API_TOKEN is missing or empty in environment staging-collection. No fallback."
+            exit 1
+          fi
+          echo "staging collector secret is present (value not shown)"
+      - name: Checkout the reviewed collector commit
+        uses: actions/checkout@v4
+        with:
+          ref: ddf48cad109f306fe76f2c701ce8736369247f92
+          path: reviewed
+          persist-credentials: false
+      - name: Checkout the pinned CryptoPulse page (public, read-only)
+        uses: actions/checkout@v4
+        with:
+          repository: quiquandon-oss/CryptoPulse
+          ref: 0a1dfb8ce88883336ee2e712a84e49be857b1724
+          path: cryptopulse-pinned
+          persist-credentials: false
+      - name: Verify reviewed commit, collector file hashes and pinned page
+        run: |
+          [ "$(git -C reviewed rev-parse HEAD)" = "$REVIEWED_SHA" ] || { echo "::error::reviewed checkout is not $REVIEWED_SHA"; exit 1; }
+          [ "$(git -C cryptopulse-pinned rev-parse HEAD)" = "$CRYPTOPULSE_COMMIT" ] || { echo "::error::CryptoPulse is not $CRYPTOPULSE_COMMIT"; exit 1; }
+          echo "$CRYPTOPULSE_INDEX_SHA256  cryptopulse-pinned/index.html" | sha256sum -c -
+          cd reviewed/staging-collector && sha256sum -c - <<'SUMS'
+          387c8d1c877c1b1b49b9561c36fd1c9a68d2385d1d967fbd42cc55ff5ad33185  collector.py
+          b607f4579f908f0cd97993d6c0fc4ce8b74a849bb168c0e6fadfca8a3cdd04f4  history_harness.py
+          1336e4aa963fefcc50dbdba5729bce58e0b33d95c881fc3225c5cd7449cd9476  harness_policy.py
+          e73fad4a13c95f732ddf41823c4640721f39fcb27fe3cfa4c83581a2317e2278  relay_shims.py
+          SUMS
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install pytest and Playwright Chromium
+        run: |
+          pip install pytest pyyaml playwright==1.56.0 --break-system-packages
+          python3 -m playwright install --with-deps chromium
+      - name: Reviewed collector tests, including the offline run of the pinned page (never write on red tests)
+        env:
+          CRYPTOPULSE_INDEX_FILE: ${{ github.workspace }}/cryptopulse-pinned/index.html
+        run: python3 -m pytest reviewed/staging-collector/ -q -p no:cacheprovider
+      - name: Lock out production and the staging Worker (api.cloudflare.com stays reachable for the collector only)
+        run: |
+          printf '0.0.0.0 %s\n' sentiment-ff75.quiquandon.workers.dev pulseworker-v2.quiquandon.workers.dev \
+            pulseworker-v2-staging.quiquandon.workers.dev script.google.com script.googleusercontent.com | sudo tee -a /etc/hosts
+          for h in sentiment-ff75.quiquandon.workers.dev pulseworker-v2.quiquandon.workers.dev script.google.com; do
+            [ "$(getent hosts "$h" | awk '{print $1}')" = "0.0.0.0" ] || { echo "::error::$h not sinkholed"; exit 1; }
+          done
+          if env | grep -qiE '^(CLOUDFLARE_API_TOKEN|EXP5_STAGING_CLOUDFLARE_API_TOKEN)='; then
+            echo "::error::an unexpected Cloudflare credential is present"; exit 1
+          fi
+      - name: Period event (manual dispatch only)
+        if: env.MODE == 'open-period' || env.MODE == 'close-period'
+        env:
+          STAGING_COLLECTOR_CLOUDFLARE_API_TOKEN: ${{ secrets.STAGING_COLLECTOR_CLOUDFLARE_API_TOKEN }}
+        run: |
+          printf '%s' "$PERIOD_ID" | grep -Eq '^[A-Za-z0-9._-]{1,64}$' || { echo "::error::period_id must be 1-64 chars [A-Za-z0-9._-]"; exit 1; }
+          python3 reviewed/staging-collector/collector.py "$MODE" --period-id "$PERIOD_ID" --note "manual $MODE via staging-collector"
+      - name: btc-tick
+        if: env.MODE == 'tick'
+        env:
+          STAGING_COLLECTOR_CLOUDFLARE_API_TOKEN: ${{ secrets.STAGING_COLLECTOR_CLOUDFLARE_API_TOKEN }}
+        run: |
+          set +e
+          python3 reviewed/staging-collector/collector.py btc-tick
+          code=$?
+          # 0 WRITTEN, 5 SKIPPED_DUPLICATE (slot already collected); anything else (6 REJECTED, 4 not ready, 3 failed) fails.
+          [ "$code" = "0" ] || [ "$code" = "5" ] || exit "$code"
+      - name: capture (pinned page, nothing sent to production)
+        if: env.MODE == 'tick'
+        run: |
+          set +e
+          python3 reviewed/staging-collector/history_harness.py --index-file cryptopulse-pinned/index.html --out capture.json
+          code=$?
+          # 0 CAPTURED, 7 NO_OBSERVATION (recorded in the ledger by history-ingest); anything else fails.
+          [ "$code" = "0" ] || [ "$code" = "7" ] || exit "$code"
+      - name: history-ingest
+        if: env.MODE == 'tick'
+        env:
+          STAGING_COLLECTOR_CLOUDFLARE_API_TOKEN: ${{ secrets.STAGING_COLLECTOR_CLOUDFLARE_API_TOKEN }}
+        run: |
+          set +e
+          python3 reviewed/staging-collector/collector.py history-ingest capture.json
+          code=$?
+          if [ "$code" = "7" ]; then echo "::warning::composite unavailable this hour: NO_OBSERVATION recorded"; exit 0; fi
+          [ "$code" = "0" ] || [ "$code" = "5" ] || exit "$code"
+      - name: verify
+        if: env.MODE == 'tick'
+        env:
+          STAGING_COLLECTOR_CLOUDFLARE_API_TOKEN: ${{ secrets.STAGING_COLLECTOR_CLOUDFLARE_API_TOKEN }}
+        run: python3 reviewed/staging-collector/collector.py verify --json-out verify.json
+      - name: status
+        if: env.MODE == 'tick'
+        env:
+          STAGING_COLLECTOR_CLOUDFLARE_API_TOKEN: ${{ secrets.STAGING_COLLECTOR_CLOUDFLARE_API_TOKEN }}
+        run: python3 reviewed/staging-collector/collector.py status
+      - name: Keep the capture, its request log and the verify report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: staging-collector-${{ github.run_id }}
+          path: |
+            capture.json
+            verify.json
+          if-no-files-found: ignore
+          retention-days: 14

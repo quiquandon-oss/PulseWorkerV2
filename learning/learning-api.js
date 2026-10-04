@@ -5,8 +5,9 @@
 // not configured, and touch nothing else: no V1 weights, predictions, sentiment rows or methodology.
 import {
   ASSESSMENT_RULES, V1_METHODOLOGY_V1, HOUR, nearestAtOrBefore, describeMarketEvent, assessV1Sources,
-  buildResearchCase, buildResearchPack, findingToStage7Registration, learningCycleStage, VERDICT_TEXT,
+  buildResearchCase, buildResearchPack, findingToStage7Registration, journeyProgress, VERDICT_TEXT,
 } from './learning-core.js';
+import { candidatesByEvent } from './learning-candidates.js';
 
 const BTC_MAX_GAP_MS = 4 * HOUR;
 // How far before an event we must read so the "24h before" lookups can find their nearest observation.
@@ -26,7 +27,7 @@ export function constantTimeEqual(a, b) {
   return diff === 0;
 }
 
-function checkToken(env, providedToken) {
+export function checkToken(env, providedToken) {
   if (!env.STAGE7_ADMIN_TOKEN) return { ok: false, status: 503, error: 'Writing is disabled on this Worker: STAGE7_ADMIN_TOKEN is not configured.' };
   if (typeof providedToken !== 'string' || !providedToken || !constantTimeEqual(providedToken, env.STAGE7_ADMIN_TOKEN)) {
     return { ok: false, status: 401, error: 'Unauthorized' };
@@ -49,6 +50,23 @@ async function loadV1Observations(env, fromTs, toTs) {
   for (const r of (h && h.results) || []) rows.push(r);
   rows.sort((x, y) => x.ts - y.ts);
   return rows;
+}
+
+// Every stored V1 observation (EXP-005 archive + V1 history, de-duplicated by timestamp, archive first), newest 3000.
+export async function loadAllV1Observations(env) {
+  const byTs = new Map();
+  try {
+    const a = await env.DB.prepare('SELECT observation_ts AS ts, score, sources_json FROM research_sentiment_archive ORDER BY observation_ts DESC LIMIT 3000').all();
+    for (const r of (a && a.results) || []) byTs.set(r.ts, r);
+  } catch (_e) { /* archive absent */ }
+  const h = await env.DB.prepare('SELECT ts, score, sources_json FROM history ORDER BY ts DESC LIMIT 3000').all();
+  for (const r of (h && h.results) || []) if (!byTs.has(r.ts)) byTs.set(r.ts, r);
+  return [...byTs.values()].sort((x, y) => x.ts - y.ts).map((r) => ({ ts: r.ts, stored: r.score, readings: parseJson(r.sources_json, {}) }));
+}
+
+export async function loadAllBtc(env) {
+  const r = await env.DB.prepare('SELECT ts, btc_price FROM btc_data ORDER BY ts DESC LIMIT 20000').all();
+  return ((r && r.results) || []).slice().reverse();
 }
 
 async function loadBtc(env, fromTs, toTs) {
@@ -117,11 +135,12 @@ export async function getLearningMarket(env, { limit = 15 } = {}) {
   const minTs = Math.min(...events.map((e) => e.event_ts)) - LOOKBACK_MS;
   const maxTs = Math.max(...events.map((e) => e.event_ts));
   const ids = events.map((e) => e.event_id);
-  const [v1Rows, btcRows, evCounts, stage7] = await Promise.all([
+  const [v1Rows, btcRows, evCounts, stage7, candidates] = await Promise.all([
     loadV1Observations(env, minTs, maxTs),
     loadBtc(env, minTs, maxTs),
     env.DB.prepare(`SELECT event_id, COUNT(*) AS n FROM research_event_evidence WHERE event_id IN (${ids.map(() => '?').join(',')}) GROUP BY event_id`).bind(...ids).all(),
     loadStage7ForEvents(env, ids),
+    candidatesByEvent(env, ids),
   ]);
   const counts = {};
   for (const r of (evCounts && evCounts.results) || []) counts[r.event_id] = r.n;
@@ -139,12 +158,15 @@ export async function getLearningMarket(env, { limit = 15 } = {}) {
       v1_lean_before: assessment.v1_lean_before,
       v1_called_it: assessment.v1_called_it,
       groups: assessment.groups,
-      stage: learningCycleStage(cv, cv && cv.finding),
       case: cv,
+      candidate: candidates[event.event_id] || null,
+      journey: journeyProgress({ verdict: assessment.verdict, caseView: cv, candidate: candidates[event.event_id] || null }),
     };
   });
+  // Focus: an event already in the loop (newest open candidate or confirmed finding), else the newest unexplained one.
+  const inLoop = (e) => (e.candidate && !['ACCEPTED', 'REJECTED'].includes(e.candidate.status)) || (e.case && e.case.finding && !e.candidate);
   const needsResearch = (e) => (e.verdict === 'NOT_EXPLAINED' || e.verdict === 'PARTIALLY_EXPLAINED') && !(e.case && e.case.finding);
-  const focus = out.find(needsResearch) || out[0];
+  const focus = out.find(inLoop) || out.find(needsResearch) || out[0];
   return {
     ok: true,
     latest: { btc: latestBtc || null, v1: latestV1 || null },
@@ -179,6 +201,7 @@ export async function getLearningCase(env, eventId) {
   ]);
   const { described, assessment, researchCase } = analyseEvent(event, v1Rows, btcRows, evidence);
   const cv = caseView(stage7.byEvent[eventId]);
+  const candidate = (await candidatesByEvent(env, [eventId]))[eventId] || null;
   return {
     ok: true,
     event: described,
@@ -186,8 +209,9 @@ export async function getLearningCase(env, eventId) {
     research_case: researchCase,
     research_pack: buildResearchPack(described, assessment, researchCase, evidence),
     evidence: evidence.slice(0, 50).map((e) => ({ publisher: e.publisher, headline: e.headline, url: e.article_url, relation: e.evidence_relation, publication_ts: e.publication_ts })),
-    stage: learningCycleStage(cv, cv && cv.finding),
     case: cv,
+    candidate,
+    journey: journeyProgress({ verdict: assessment.verdict, caseView: cv, candidate }),
     stage7_available: stage7.available,
   };
 }

@@ -273,6 +273,7 @@ const FINDING_JSON_TEMPLATE = `{
   "proposed_signal": "how that source would be turned into a 0-100 bullish/bearish reading",
   "trend": "is this a one-off or an ongoing trend? since when?",
   "evidence": [ { "claim": "", "url": "", "publisher": "", "date": "YYYY-MM-DD" } ],
+  "speculation": [ "plausible but unverified points" ],
   "alternative_explanations": [ "" ],
   "limitations": "what you could not verify",
   "confidence": "LOW | MEDIUM | HIGH",
@@ -281,39 +282,43 @@ const FINDING_JSON_TEMPLATE = `{
 
 // The compact text the human pastes into an external AI. Plain text, no secrets, no internal URLs.
 export function buildResearchPack(described, assessment, researchCase, evidence) {
-  const lines = [];
-  lines.push('You are helping improve a crypto market-sentiment model ("V1") that scores BTC sentiment 0-100 (50 = neutral) from 21 sources.');
-  lines.push('');
-  lines.push('EVENT');
-  lines.push(`- ${described.headline}`);
-  lines.push(`- ${described.btc_move_text}`);
-  lines.push(`- Event time: ${new Date(described.event_ts).toISOString()}`);
-  if (assessment.v1_score_before !== null) lines.push(`- V1 sentiment 24h before: ${assessment.v1_score_before}/100 (${assessment.v1_lean_before}); at the event: ${assessment.v1_score_at ?? 'n/a'}/100.`);
-  lines.push(`- Our verdict: ${VERDICT_TEXT[assessment.verdict]} (${assessment.explained_share}% of V1 source weight pointed the right way).`);
-  lines.push('');
-  lines.push('V1 SOURCES (id: reading 24h before -> at event, verdict)');
-  for (const s of assessment.sources) {
-    lines.push(`- ${s.id} [${SOURCE_GROUP_LABELS[s.group]}]: ${s.score_before ?? 'n/a'} -> ${s.score_at ?? 'n/a'}, ${s.verdict}`);
-  }
-  lines.push('');
-  lines.push('DRIVERS V1 DOES NOT MEASURE AT ALL');
-  for (const d of UNCOVERED_DRIVERS) lines.push(`- ${d.label}`);
+  const L = [];
+  const v = (x) => (x === null || x === undefined ? 'n/a' : x);
+  L.push('I am researching a BTC market event for CryptoPulse, a sentiment model ("V1") that scores BTC sentiment 0-100 (50 = neutral) as a weighted average of 21 sources. Help me find what V1 is missing.');
+  L.push('');
+  L.push(`EVENT: ${described.headline}`);
+  L.push(`DATE/TIME: ${new Date(described.event_ts).toISOString().replace('.000Z', 'Z')}`);
+  L.push(`MARKET MOVE: ${described.btc_move_text}`);
+  L.push(`V1 SENTIMENT: ${v(assessment.v1_score_before)}/100 about 24h before (${v(assessment.v1_lean_before)}), ${v(assessment.v1_score_at)}/100 at the event. Our verdict: ${VERDICT_TEXT[assessment.verdict]} (${assessment.explained_share}% of V1 weight pointed the way BTC moved).`);
+  L.push('');
+  L.push('V1 SOURCE CONTRIBUTIONS (source [group] weight-share: reading 24h before -> at event = verdict)');
+  for (const s of assessment.sources) L.push(`- ${s.id} [${SOURCE_GROUP_LABELS[s.group]}] ${s.weight_share}%: ${v(s.score_before)} -> ${v(s.score_at)} = ${s.verdict}`);
+  L.push('');
+  L.push(`EXISTING EXPLANATIONS: ${researchCase.explained_by.length ? researchCase.explained_by.join(', ') : 'none of V1\'s sources pointed the right way'}.`);
+  L.push(`UNEXPLAINED AREA: ${researchCase.reasons.join(' ')} Weak or silent: ${researchCase.weak_or_missing_areas.join(', ') || 'none'}. V1 has no source at all for: ${UNCOVERED_DRIVERS.map((d) => d.label.split(' (')[0]).join('; ')}.`);
+  L.push('');
   if (evidence.length) {
-    lines.push('');
-    lines.push(`NEWS HEADLINES WE COLLECTED AROUND THE EVENT (${evidence.length} total, first ${Math.min(evidence.length, 12)})`);
-    for (const e of evidence.slice(0, 12)) lines.push(`- [${(e.evidence_relation || '').replace('_', '-').toLowerCase()}] ${e.publisher}: ${String(e.headline).slice(0, 160)}`);
+    L.push(`AVAILABLE EVIDENCE (${evidence.length} headlines collected around the event; first ${Math.min(evidence.length, 12)}):`);
+    for (const e of evidence.slice(0, 12)) L.push(`- [${(e.evidence_relation || '').replace('_', '-').toLowerCase()}] ${e.publisher}: ${String(e.headline).slice(0, 160)}`);
+  } else {
+    L.push('AVAILABLE EVIDENCE: none collected.');
   }
-  lines.push('');
-  lines.push('QUESTION');
-  lines.push(researchCase.question);
-  lines.push('');
-  lines.push('Research the real market context around this date. Cite real, checkable sources with URLs and dates. Do not invent sources or numbers; say so when unsure. If a measurable data source would have captured this driver, name it precisely.');
-  lines.push('');
-  lines.push('END YOUR ANSWER WITH EXACTLY ONE JSON BLOCK in this format (keep the keys; use "" or [] when unknown):');
-  lines.push('```json');
-  lines.push(FINDING_JSON_TEMPLATE);
-  lines.push('```');
-  return lines.join('\n');
+  L.push('');
+  L.push(`RESEARCH QUESTION: ${researchCase.question}`);
+  L.push('');
+  L.push('PLEASE:');
+  L.push('1. Explain the event in plain language.');
+  L.push('2. Identify the explanations V1 is missing.');
+  L.push('3. Name potential NEW data sources that would have captured it (exact provider and URL).');
+  L.push('4. Name potential new trends or signals, and how each would become a 0-100 bullish/bearish reading.');
+  L.push('5. Separate verified evidence from speculation.');
+  L.push('6. Give checkable URLs and dates for every factual claim. Do not invent sources or numbers.');
+  L.push('7. State your confidence.');
+  L.push('8. End with EXACTLY ONE JSON block in this format (keep every key; use "" or [] when unknown):');
+  L.push('```json');
+  L.push(FINDING_JSON_TEMPLATE);
+  L.push('```');
+  return L.join('\n');
 }
 
 // ---- Pasted AI answer -> structured finding draft. The text is UNTRUSTED: it is only parsed as JSON data, every
@@ -372,6 +377,7 @@ export function parseAiResearchResponse(rawText, v1SourceIds = V1_METHODOLOGY_V1
     evidence: (Array.isArray(obj.evidence) ? obj.evidence : []).slice(0, 20).map((e) => ({
       claim: str(e && e.claim, 500), url: httpUrl(e && e.url), publisher: str(e && e.publisher, 120), date: str(e && e.date, 20),
     })).filter((e) => e.claim || e.url),
+    speculation: (Array.isArray(obj.speculation) ? obj.speculation : []).map((a) => str(a, 500)).filter(Boolean).slice(0, 10),
     alternative_explanations: (Array.isArray(obj.alternative_explanations) ? obj.alternative_explanations : []).map((a) => str(a, 500)).filter(Boolean).slice(0, 10),
     limitations: str(obj.limitations, 1000),
     confidence: oneOf(obj.confidence, CONFIDENCE_LEVELS, 'LOW'),
@@ -389,7 +395,7 @@ export function emptyFinding(explanation = '') {
   return {
     explanation, primary_driver: '', driver_category: 'OTHER', finding_type: 'NEW_SOURCE', covered_by_existing_v1_source: 'none',
     proposed_new_source: { name: '', url: '', what_it_measures: '', update_frequency: '', free_or_paid: '' },
-    proposed_signal: '', trend: '', evidence: [], alternative_explanations: [], limitations: '', confidence: 'LOW',
+    proposed_signal: '', trend: '', evidence: [], speculation: [], alternative_explanations: [], limitations: '', confidence: 'LOW',
     sentiment_assessment: 'INDETERMINATE',
   };
 }
@@ -418,14 +424,34 @@ export function findingToStage7Registration(requestId, provider, edited) {
   };
 }
 
-export const LEARNING_CYCLE_STEPS = Object.freeze(['UNDERSTAND', 'INVESTIGATE', 'DISCOVER', 'LEARN', 'ADJUST', 'RECALCULATE', 'VALIDATE', 'APPROVE']);
-
-// Where an event is in the loop, from what is persisted today. Steps after DISCOVER arrive in later slices.
-export function learningCycleStage(caseRow, responseRow) {
-  if (responseRow && responseRow.validation_status === 'VALIDATED') return 'LEARN';
-  if (responseRow) return 'DISCOVER';
-  if (caseRow) return 'DISCOVER';
-  return 'INVESTIGATE';
+// "Where am I?" for one event: six user-facing steps, each DONE / ACTIVE / WARN / TODO / LOCKED with a short text.
+export function journeyProgress({ verdict, caseView, candidate }) {
+  const finding = caseView && caseView.finding;
+  const confirmed = finding && finding.validation_status === 'VALIDATED';
+  const a = candidate && candidate.analysis;
+  const step = (key, label, state, text) => ({ key, label, state, text });
+  const steps = [step('MARKET', 'Market', 'DONE', 'Event understood')];
+  if (confirmed) steps.push(step('RESEARCH', 'Research', 'DONE', 'Finding confirmed'));
+  else if (verdict === 'EXPLAINED') steps.push(step('RESEARCH', 'Research', 'DONE', 'Current sources explain it (research optional)'));
+  else if (verdict === 'NO_V1_DATA' || verdict === 'NO_PRICE_DATA' || verdict === 'NO_DIRECTIONAL_MOVE') steps.push(step('RESEARCH', 'Research', 'TODO', VERDICT_TEXT[verdict]));
+  else if (caseView) steps.push(step('RESEARCH', 'Research', 'ACTIVE', 'Research case open: waiting for the AI answer'));
+  else steps.push(step('RESEARCH', 'Research', 'WARN', 'Sources checked: missing explanation'));
+  if (candidate) steps.push(step('LEARNING', 'Learning', 'DONE', `Candidate #${candidate.candidate_id} created`));
+  else steps.push(step('LEARNING', 'Learning', confirmed ? 'ACTIVE' : 'TODO', confirmed ? 'Ready: create the learning candidate' : 'Candidate not yet created'));
+  if (!candidate) steps.push(step('IMPACT', 'V1 impact', 'LOCKED', 'Not calculated'));
+  else if (!a) steps.push(step('IMPACT', 'V1 impact', 'ACTIVE', 'Define the V1 adjustment'));
+  else if (!a.recalculation_possible) steps.push(step('IMPACT', 'V1 impact', 'WARN', 'Data collection required'));
+  else steps.push(step('IMPACT', 'V1 impact', 'DONE', a.event ? `Adjusted V1 calculated (${a.event.reconstructed} -> ${a.event.proposed})` : 'Adjusted V1 calculated'));
+  const vText = { NOT_ENOUGH_DATA: 'Not enough data', VALIDATING: 'Validating: more data needed', SUPPORTED: 'Supported', NOT_SUPPORTED: 'Not supported', INCONCLUSIVE: 'Inconclusive' };
+  if (!a) steps.push(step('VALIDATION', 'Validation', 'LOCKED', 'Waiting'));
+  else steps.push(step('VALIDATION', 'Validation', a.validation_status === 'SUPPORTED' ? 'DONE' : a.validation_status === 'VALIDATING' ? 'ACTIVE' : 'WARN', vText[a.validation_status] || a.validation_status));
+  if (!candidate) steps.push(step('APPROVAL', 'Approval', 'LOCKED', 'Waiting'));
+  else if (candidate.status === 'ACCEPTED') steps.push(step('APPROVAL', 'Approval', 'DONE', `Approved: V1 ${candidate.produced_version_id} ready (not active)`));
+  else if (candidate.status === 'REJECTED') steps.push(step('APPROVAL', 'Approval', 'WARN', 'Rejected'));
+  else if (candidate.status === 'NEEDS_MORE_RESEARCH') steps.push(step('APPROVAL', 'Approval', 'WARN', 'Sent back for more research'));
+  else if (candidate.status === 'PENDING_REVIEW') steps.push(step('APPROVAL', 'Approval', 'ACTIVE', 'Waiting for your decision'));
+  else steps.push(step('APPROVAL', 'Approval', 'LOCKED', 'Submit the candidate for review first'));
+  return steps;
 }
 
 export { HOUR };

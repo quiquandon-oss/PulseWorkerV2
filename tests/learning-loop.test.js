@@ -17,6 +17,7 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 // Loaded via require: Vite does not resolve the node:sqlite builtin (Node >= 22.5) as an ESM import.
 const { DatabaseSync } = createRequire(import.meta.url)('node:sqlite');
 const MIGRATION_0016 = readFileSync(join(__dirname, '..', '.ai', 'migrations', '0016_stage7_research_pipeline.sql'), 'utf8');
+const MIGRATION_0021 = readFileSync(join(__dirname, '..', '.ai', 'migrations', '0021_learning_loop.sql'), 'utf8');
 const H = 3600000;
 
 const ALL_NEUTRAL = Object.fromEntries(V1_METHODOLOGY_V1.sources.map((s) => [s.id, 50]));
@@ -171,6 +172,7 @@ describe('buildResearchPack', () => {
     expect(pack).toMatch(/Options positioning/);
     expect(pack).toMatch(/"proposed_new_source"/);
     expect(pack).toMatch(/\[pre-event\] CoinDesk: BTC slides/);
+    for (const section of ['EVENT:', 'DATE/TIME:', 'MARKET MOVE:', 'V1 SENTIMENT:', 'V1 SOURCE CONTRIBUTIONS', 'EXISTING EXPLANATIONS:', 'UNEXPLAINED AREA:', 'AVAILABLE EVIDENCE', 'RESEARCH QUESTION:', '5. Separate verified evidence from speculation.', '"speculation"']) expect(pack).toContain(section);
     expect(pack).not.toMatch(/workers\.dev|STAGE7|token|\bD1\b|sqlite|stage7_/i);
   });
 });
@@ -184,10 +186,11 @@ CREATE TABLE research_event_evidence (evidence_id INTEGER PRIMARY KEY AUTOINCREM
 CREATE TABLE research_sentiment_archive (archive_id INTEGER PRIMARY KEY AUTOINCREMENT, observation_ts INTEGER NOT NULL, sources_json TEXT, score REAL, technical_score REAL, btc_price REAL, gold_regime TEXT, source_weights_version TEXT NOT NULL, schema_version TEXT NOT NULL, written_by TEXT NOT NULL, content_hash TEXT NOT NULL, archived_ts INTEGER NOT NULL);
 `;
 
-function makeEnv({ withStage7 = true, token = 'learning-test-admin-token-7f3a' } = {}) {
+function makeEnv({ withStage7 = true, withLearning = true, token = 'learning-test-admin-token-7f3a' } = {}) {
   const db = new DatabaseSync(':memory:');
   db.exec(BASE_SCHEMA);
   if (withStage7) db.exec(MIGRATION_0016);
+  if (withStage7 && withLearning) db.exec(MIGRATION_0021);
   const E = Date.UTC(2026, 8, 28, 3, 0);
   const ins = (sql, rows) => { const st = db.prepare(sql); for (const r of rows) st.run(...r); };
   ins('INSERT INTO research_events (event_id,fingerprint,event_ts,detection_ts,category,direction,intensity,available_before_prediction,trigger_metric,trigger_threshold,trigger_version) VALUES (?,?,?,?,?,?,?,?,?,?,?)', [
@@ -232,7 +235,7 @@ async function call(env, path, { method = 'GET', body, token } = {}) {
   return { status: res.status, json, text };
 }
 
-const counts = (db) => Object.fromEntries(['history', 'btc_data', 'research_events', 'research_event_evidence', 'research_sentiment_archive', 'stage7_research_requests', 'stage7_research_responses', 'stage7_event_sentiment']
+const counts = (db) => Object.fromEntries(['history', 'btc_data', 'research_events', 'research_event_evidence', 'research_sentiment_archive', 'stage7_research_requests', 'stage7_research_responses', 'stage7_event_sentiment', 'learning_candidates', 'v1_methodology_versions']
   .map((t) => { try { return [t, db.prepare(`SELECT COUNT(*) AS n FROM ${t}`).get().n]; } catch (_e) { return [t, null]; } }));
 
 describe('Learning API + routes (real worker.js fetch, real SQLite)', () => {
@@ -258,7 +261,7 @@ describe('Learning API + routes (real worker.js fetch, real SQLite)', () => {
     expect(byId[15].actual_direction).toBe('DOWN');
     expect(byId[15].headline).toMatch(/BTC fell 4\.1%/);
     expect(byId[15].evidence_count).toBe(3);
-    expect(byId[15].stage).toBe('INVESTIGATE');
+    expect(byId[15].journey.map((s) => s.state)).toEqual(['DONE', 'WARN', 'TODO', 'LOCKED', 'LOCKED', 'LOCKED']);
     expect(json.focus_event_id).toBe(15);
     expect(json.latest.v1.score).toBe(51);
   });
@@ -315,10 +318,11 @@ describe('Learning API + routes (real worker.js fetch, real SQLite)', () => {
     expect(resp.provider).toBe('claude');
     expect(JSON.parse(resp.findings_json).proposed_new_source.name).toBe('Deribit options OI');
     const view = (await call(ctx.env, '/api/learning/case?event_id=15')).json;
-    expect(view.stage).toBe('LEARN');
+    expect(view.journey.find((s) => s.key === 'RESEARCH').text).toBe('Finding confirmed');
+    expect(view.journey.find((s) => s.key === 'LEARNING').state).toBe('ACTIVE');
     expect(view.case.finding.validation_status).toBe('VALIDATED');
     const market = (await call(ctx.env, '/api/learning/market')).json;
-    expect(market.events.find((e) => e.event_id === 15).stage).toBe('LEARN');
+    expect(market.events.find((e) => e.event_id === 15).journey[1].state).toBe('DONE');
     // A second confirmation never overwrites the first.
     const again = await call(ctx.env, '/api/learning/findings', { method: 'POST', body: { event_id: 15, finding }, token: ctx.token });
     expect(again.status).toBe(409);
@@ -338,5 +342,197 @@ describe('Learning API + routes (real worker.js fetch, real SQLite)', () => {
     expect(m.stage7_available).toBe(false);
     const r = await call(bare.env, '/api/learning/findings', { method: 'POST', body: { event_id: 15, finding: { explanation: 'x' } }, token: bare.token });
     expect(r.status).toBe(503);
+  });
+});
+
+// ---------------- Slices 2-6: candidate -> adjustment -> recalculation -> validation -> decision -> version ----------------
+import {
+  baselineConfig, applyAdjustment, normalizeAdjustment, scoreWithConfig, dataAvailability, recalculate, buildContexts,
+  validateRecalculation, candidateFromFinding, nextVersionId,
+} from '../learning/learning-method.js';
+
+describe('methodology: adjustments and scoring', () => {
+  const base = baselineConfig();
+  const readings = { ...ALL_NEUTRAL, etfflows: 90 };
+  it('baseline reproduces the slice-1 V1 composite', () => {
+    expect(scoreWithConfig(base, { readings: ALL_NEUTRAL }).score).toBe(50);
+    expect(scoreWithConfig(base, { readings }).score).toBe(v1Composite(readings).score);
+  });
+  it('every adjustment type changes the configuration as described, never in place', () => {
+    const mk = (a) => applyAdjustment(base, normalizeAdjustment(a, base).adjustment);
+    expect(mk({ type: 'ADD_SOURCE', label: 'Options OI', group: 'DERIVATIVES', weight: 5, confidence: 0.4 }).sources.map((s) => s.id)).toContain('options_oi');
+    expect(mk({ type: 'REMOVE_SOURCE', source_id: 'etfflows' }).sources.some((s) => s.id === 'etfflows')).toBe(false);
+    expect(mk({ type: 'CHANGE_WEIGHT', source_id: 'etfflows', weight: 0, confidence: 0.8 }).sources.find((s) => s.id === 'etfflows').weight).toBe(0);
+    expect(mk({ type: 'CHANGE_CLASSIFICATION', source_id: 'etfflows', group: 'NEWS', invert: true }).sources.find((s) => s.id === 'etfflows')).toMatchObject({ group: 'NEWS', invert: true });
+    expect(mk({ type: 'ADD_SIGNAL', label: 'ETF momentum', derived_from: 'etfflows', weight: 5, confidence: 0.4 }).signals).toHaveLength(1);
+    expect(mk({ type: 'ADD_REGIME_CONDITION', source_id: 'funding', op: '<=', value: -2, multiplier: 2 }).sources.find((s) => s.id === 'funding').regime).toMatchObject({ multiplier: 2 });
+    expect(base.sources.find((s) => s.id === 'etfflows').weight).toBe(10);
+  });
+  it('rejects invalid adjustments', () => {
+    expect(normalizeAdjustment({ type: 'ADD_SOURCE', label: 'etfflows', weight: 5, confidence: 0.4 }).ok).toBe(false);
+    expect(normalizeAdjustment({ type: 'CHANGE_WEIGHT', source_id: 'nope', weight: 5, confidence: 0.5 }).ok).toBe(false);
+    expect(normalizeAdjustment({ type: 'CHANGE_WEIGHT', source_id: 'fng', weight: 500, confidence: 0.5 }).ok).toBe(false);
+    expect(normalizeAdjustment({ type: 'DROP' }).ok).toBe(false);
+  });
+  it('invert, regime multiplier and derived signals score deterministically', () => {
+    const inv = applyAdjustment(base, { type: 'CHANGE_CLASSIFICATION', source_id: 'etfflows', group: 'FLOWS', invert: true });
+    expect(scoreWithConfig(inv, { readings }).exact).toBeLessThan(50);
+    const reg = applyAdjustment(base, { type: 'ADD_REGIME_CONDITION', source_id: 'etfflows', metric: 'btc_24h_change_pct', op: '<=', value: -2, multiplier: 3 });
+    expect(scoreWithConfig(reg, { readings, btc24hPct: -3 }).exact).toBeGreaterThan(scoreWithConfig(reg, { readings, btc24hPct: 1 }).exact);
+    const sig = applyAdjustment(base, { type: 'ADD_SIGNAL', signal_id: 'etf_mom', label: 'x', derived_from: 'etfflows', transform: 'momentum_24h', group: 'FLOWS', weight: 10, confidence: 1 });
+    expect(scoreWithConfig(sig, { readings, prevReadings: { etfflows: 60 } }).exact).toBeGreaterThan(scoreWithConfig(sig, { readings, prevReadings: { etfflows: 95 } }).exact);
+    expect(scoreWithConfig(sig, { readings }).used).toBe(21); // no previous reading -> signal absent, not invented
+  });
+  it('a new source without history is DATA COLLECTION REQUIRED; nothing is fabricated', () => {
+    const obs = [{ ts: 1, stored: 50, readings: ALL_NEUTRAL }];
+    const adj = normalizeAdjustment({ type: 'ADD_SOURCE', label: 'Deribit options OI', group: 'DERIVATIVES', weight: 5, confidence: 0.4 }).adjustment;
+    expect(dataAvailability(adj, obs)).toMatchObject({ status: 'NO_HISTORY', observations_with_data: 0 });
+    const r = recalculate(base, adj, buildContexts(obs, []));
+    expect(r.possible).toBe(false);
+    expect(r.availability.message).toBe('New source discovered. Historical source data is not yet available for recalculation.');
+    expect(r.event).toBeNull();
+    expect(validateRecalculation(r, []).status).toBe('NOT_ENOUGH_DATA');
+    expect(dataAvailability({ type: 'ADD_SIGNAL', signal_id: 's', derived_from: '' }, obs).status).toBe('NO_HISTORY');
+  });
+  it('keeps STORED, RECONSTRUCTED and PROPOSED apart', () => {
+    const obs = [{ ts: 0, stored: 58, readings }];
+    const r = recalculate(base, { type: 'CHANGE_WEIGHT', source_id: 'etfflows', weight: 0, confidence: 0.8 }, buildContexts(obs, []), { eventTs: 0 });
+    expect(r.event.stored).toBe(58);
+    expect(r.event.reconstructed).toBe(v1Composite(readings).score);
+    expect(r.event.proposed).toBe(50);
+    expect(r.event.delta).toBe(r.event.proposed - r.event.reconstructed);
+    expect(r.reconstruction).toMatchObject({ observations: 1, exact_matches: 0 });
+  });
+  it('maps findings to candidate types and adjustments', () => {
+    expect(candidateFromFinding(parseAiResearchResponse(GOOD_ANSWER).finding)).toMatchObject({ candidate_type: 'NEW_SOURCE', adjustment: { type: 'ADD_SOURCE', group: 'DERIVATIVES', weight: 5, confidence: 0.4 } });
+    expect(candidateFromFinding({ finding_type: 'EXISTING_SOURCE_MISREAD', covered_by_existing_v1_source: 'etfflows' })).toMatchObject({ candidate_type: 'SOURCE_WEIGHT_ADJUSTMENT', adjustment: { type: 'CHANGE_WEIGHT', source_id: 'etfflows' } });
+    expect(candidateFromFinding({ finding_type: 'NEW_SIGNAL', covered_by_existing_v1_source: 'funding', proposed_signal: 'funding momentum' }).adjustment).toMatchObject({ type: 'ADD_SIGNAL', derived_from: 'funding' });
+  });
+  it('versions increment from the highest existing v1.N', () => {
+    expect(nextVersionId(['v1.0'])).toBe('v1.1');
+    expect(nextVersionId(['v1.0', 'v1.3', 'v1.1'])).toBe('v1.4');
+  });
+});
+
+describe('validation (EXP-005 outcome rule)', () => {
+  const D = 24 * H;
+  // One observation per day for 20 days; BTC alternates up/down each day. The baseline always says UP (score 60).
+  // The "proposed" side says DOWN on exactly the days BTC fell -> it fixes every day the baseline got wrong.
+  function scenario(flipGood, days = 20) {
+    const btc = [], pts = [];
+    let price = 100000;
+    for (let d = 0; d <= days; d++) { btc.push({ ts: d * D, btc_price: price }); price *= d % 2 ? 1.02 : 0.98; }
+    for (let d = 0; d < days; d++) {
+      const fell = d % 2 === 0;
+      const proposedDown = flipGood ? fell : !fell;
+      pts.push({ ts: d * D, stored: 60, reconstructed: 60, proposed: proposedDown ? 40 : 60 });
+    }
+    return { btc, recalc: { possible: true, all_points: pts } };
+  }
+  it('SUPPORTED when the adjustment fixes the days the baseline got wrong', () => {
+    const { btc, recalc } = scenario(true);
+    const v = validateRecalculation(recalc, btc);
+    expect(v.status).toBe('SUPPORTED');
+    expect(v.adjusted_v1.accuracy_pct).toBeGreaterThan(v.current_v1.accuracy_pct);
+    expect(v.independent.improved).toBe(10);
+  });
+  it('NOT_SUPPORTED when it breaks the days the baseline got right', () => {
+    const { btc, recalc } = scenario(false);
+    expect(validateRecalculation(recalc, btc).status).toBe('NOT_SUPPORTED');
+  });
+  it('VALIDATING with too few independent disagreements, INCONCLUSIVE when calls never change', () => {
+    const { btc, recalc } = scenario(true, 6);
+    expect(validateRecalculation(recalc, btc).status).toBe('VALIDATING');
+    const same = { possible: true, all_points: recalc.all_points.map((p) => ({ ...p, proposed: 61 })) };
+    expect(validateRecalculation(same, btc).status).toBe('INCONCLUSIVE');
+  });
+  it('never validates on the originating event window', () => {
+    const { btc, recalc } = scenario(true);
+    const all = validateRecalculation(recalc, btc).resolved;
+    expect(validateRecalculation(recalc, btc, { eventTs: 5 * D }).resolved).toBe(all - 3);
+  });
+});
+
+describe('Full journey: finding -> candidate -> adjustment -> recalculation -> validation -> approval -> version', () => {
+  async function confirmFinding(ctx) {
+    const finding = parseAiResearchResponse(GOOD_ANSWER).finding;
+    return call(ctx.env, '/api/learning/findings', { method: 'POST', body: { event_id: 15, provider: 'chatgpt', finding }, token: ctx.token });
+  }
+  it('runs end to end without touching V1 data', async () => {
+    const ctx = makeEnv();
+    const before = counts(ctx.db);
+    expect((await confirmFinding(ctx)).status).toBe(200);
+    // Slice 2: candidate from the confirmed finding (token required, idempotent)
+    expect((await call(ctx.env, '/api/learning/candidates', { method: 'POST', body: { event_id: 15 } })).status).toBe(401);
+    const created = await call(ctx.env, '/api/learning/candidates', { method: 'POST', body: { event_id: 15 }, token: ctx.token });
+    expect(created.json).toMatchObject({ ok: true, created: true });
+    const id = created.json.candidate_id;
+    expect((await call(ctx.env, '/api/learning/candidates', { method: 'POST', body: { event_id: 15 }, token: ctx.token })).json).toMatchObject({ candidate_id: id, created: false });
+    let view = (await call(ctx.env, `/api/learning/candidate?id=${id}`)).json;
+    expect(view.candidate).toMatchObject({ status: 'DRAFT', candidate_type: 'NEW_SOURCE', base_version_id: 'v1.0', title: 'Quarterly options expiry' });
+    expect(view.candidate.evidence.length).toBe(2);
+    // Slice 3 (case B): brand-new source, no history -> data collection required, nothing invented
+    expect(view.recalculation.possible).toBe(false);
+    expect(view.recalculation.availability.message).toMatch(/Historical source data is not yet available/);
+    expect(view.validation.status).toBe('NOT_ENOUGH_DATA');
+    let market = (await call(ctx.env, '/api/learning/market')).json;
+    expect(market.events.find((e) => e.event_id === 15).journey.find((s) => s.key === 'IMPACT')).toMatchObject({ state: 'WARN', text: 'Data collection required' });
+    // Slice 3 (case A): switch to an adjustment of existing sources -> deterministic recalculation
+    const upd = await call(ctx.env, '/api/learning/candidate/update', { method: 'POST', token: ctx.token, body: { candidate_id: id, submit: true, fields: { candidate_type: 'SOURCE_WEIGHT_ADJUSTMENT' }, adjustment: { type: 'CHANGE_WEIGHT', source_id: 'etfflows', weight: 0, confidence: 0.8 } } });
+    expect(upd.json).toMatchObject({ ok: true, candidate_status: 'PENDING_REVIEW' });
+    view = (await call(ctx.env, `/api/learning/candidate?id=${id}`)).json;
+    expect(view.recalculation.possible).toBe(true);
+    expect(view.recalculation.event).toMatchObject({ stored: 66, reconstructed: 70, proposed: 70, delta: 0 });
+    expect(view.recalculation.observations).toBeGreaterThan(90);
+    expect(view.recalculation.reconstruction.exact_matches).toBe(0);
+    expect(['VALIDATING', 'INCONCLUSIVE', 'NOT_ENOUGH_DATA']).toContain(view.validation.status);
+    // Slice 5: decision needs a name and, without supporting validation, an explicit acknowledgement
+    expect((await call(ctx.env, '/api/learning/candidate/decide', { method: 'POST', token: ctx.token, body: { candidate_id: id, decision: 'APPROVE' } })).status).toBe(400);
+    const noAck = await call(ctx.env, '/api/learning/candidate/decide', { method: 'POST', token: ctx.token, body: { candidate_id: id, decision: 'APPROVE', approver: 'Olivier' } });
+    expect(noAck.status).toBe(409);
+    const ok = await call(ctx.env, '/api/learning/candidate/decide', { method: 'POST', token: ctx.token, body: { candidate_id: id, decision: 'APPROVE', approver: 'Olivier', note: 'test', acknowledge_unsupported: true } });
+    expect(ok.json).toMatchObject({ ok: true, candidate_status: 'ACCEPTED', version_id: 'v1.1' });
+    // Slice 6: version v1.1 is APPROVED (ready), not active; baseline persisted once
+    const versions = ctx.db.prepare('SELECT * FROM v1_methodology_versions ORDER BY version_id').all();
+    expect(versions.map((v) => [v.version_id, v.status, v.effective_ts])).toEqual([['v1.0', 'BASELINE', null], ['v1.1', 'APPROVED', null]]);
+    const v11 = versions[1];
+    expect(v11).toMatchObject({ parent_version_id: 'v1.0', candidate_id: id, approved_by: 'Olivier', formula_id: 'v1-weighted-mean@1' });
+    expect(JSON.parse(v11.config_json).sources.find((s) => s.id === 'etfflows').weight).toBe(0);
+    expect(JSON.parse(v11.validation_json).approved_without_support).toBe(true);
+    expect((await call(ctx.env, '/api/learning/versions')).json.versions.map((v) => v.version_id)).toEqual(['v1.0', 'v1.1']);
+    view = (await call(ctx.env, `/api/learning/candidate?id=${id}`)).json;
+    expect(view.produced_version).toMatchObject({ version_id: 'v1.1', status: 'APPROVED' });
+    market = (await call(ctx.env, '/api/learning/market')).json;
+    expect(market.events.find((e) => e.event_id === 15).journey.find((s) => s.key === 'APPROVAL')).toMatchObject({ state: 'DONE', text: 'Approved: V1 v1.1 ready (not active)' });
+    // Terminal: no further edits or decisions
+    expect((await call(ctx.env, '/api/learning/candidate/decide', { method: 'POST', token: ctx.token, body: { candidate_id: id, decision: 'REJECT', approver: 'x' } })).status).toBe(409);
+    expect((await call(ctx.env, '/api/learning/candidate/update', { method: 'POST', token: ctx.token, body: { candidate_id: id, fields: { title: 'x' } } })).status).toBe(409);
+    // V1 data untouched
+    const after = counts(ctx.db);
+    for (const t of ['history', 'btc_data', 'research_events', 'research_event_evidence', 'research_sentiment_archive', 'stage7_event_sentiment']) expect(after[t]).toBe(before[t]);
+    expect(after.learning_candidates).toBe(1);
+    expect(after.v1_methodology_versions).toBe(2);
+  });
+
+  it('reject and investigate-more paths; a sent-back candidate can be edited and resubmitted', async () => {
+    const ctx = makeEnv();
+    await confirmFinding(ctx);
+    const id = (await call(ctx.env, '/api/learning/candidates', { method: 'POST', body: { event_id: 15 }, token: ctx.token })).json.candidate_id;
+    expect((await call(ctx.env, '/api/learning/candidate/decide', { method: 'POST', token: ctx.token, body: { candidate_id: id, decision: 'REJECT', approver: 'O' } })).status).toBe(409); // still DRAFT
+    await call(ctx.env, '/api/learning/candidate/update', { method: 'POST', token: ctx.token, body: { candidate_id: id, submit: true } });
+    expect((await call(ctx.env, '/api/learning/candidate/decide', { method: 'POST', token: ctx.token, body: { candidate_id: id, decision: 'NEEDS_MORE_RESEARCH', approver: 'O' } })).json.candidate_status).toBe('NEEDS_MORE_RESEARCH');
+    expect((await call(ctx.env, '/api/learning/candidate/update', { method: 'POST', token: ctx.token, body: { candidate_id: id, submit: true } })).json.candidate_status).toBe('PENDING_REVIEW');
+    expect((await call(ctx.env, '/api/learning/candidate/decide', { method: 'POST', token: ctx.token, body: { candidate_id: id, decision: 'REJECT', approver: 'O' } })).json.candidate_status).toBe('REJECTED');
+    expect(ctx.db.prepare('SELECT COUNT(*) AS n FROM v1_methodology_versions').get().n).toBe(0);
+  });
+
+  it('a candidate needs a human-confirmed finding; without migration 0021 learning writes are refused', async () => {
+    const ctx = makeEnv();
+    expect((await call(ctx.env, '/api/learning/candidates', { method: 'POST', body: { event_id: 15 }, token: ctx.token })).status).toBe(409);
+    const bare = makeEnv({ withLearning: false });
+    await confirmFinding(bare);
+    expect((await call(bare.env, '/api/learning/candidates', { method: 'POST', body: { event_id: 15 }, token: bare.token })).status).toBe(503);
+    expect((await call(bare.env, '/api/learning/market')).json.ok).toBe(true);
+    expect((await call(bare.env, '/api/learning/versions')).json.versions[0].version_id).toBe('v1.0');
   });
 });

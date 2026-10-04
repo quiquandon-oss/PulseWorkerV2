@@ -1,6 +1,7 @@
 // Research Lab primary UI: MARKET -> RESEARCH -> LEARNING. The previous 12-tab technical page is unchanged and lives
 // at /research-lab/advanced. Plain ES5 + fetch; every value from the API (including pasted AI text) is HTML-escaped,
-// and only http(s) URLs are ever rendered as links. The admin token lives only in this page's memory.
+// and only http(s) URLs are ever rendered as links. The page never handles the admin token: writes ride on the device's
+// signed HttpOnly session cookie (see learning-session.js).
 export const LEARNING_LAB_HTML = `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -42,25 +43,32 @@ export const LEARNING_LAB_HTML = `<!DOCTYPE html>
 </head>
 <body>
 <header><div><h1>CryptoPulse Research</h1><div class="sub">Understand the market &rarr; discover what V1 is missing &rarr; improve V1</div></div>
-<div class="lock"><span id="lockState">&#128274; Read-only</span><input type="password" id="tokenInput" placeholder="admin token" autocomplete="off"></div></header>
+<div class="lock" id="sessionBox"><span class="muted">Checking sign-in&hellip;</span></div></header>
 <nav id="nav"></nav>
 <main id="app"><div class="card muted">Loading&hellip;</div></main>
 <script>
 (function () {
   var TABS = ['Market', 'Research', 'Learning'];
-  var current = 'Market', market = null, focusId = null, caseCache = {}, draft = null, draftWarnings = [], candId = null, cand = null, versions = null, token = '';
+  var current = 'Market', market = null, focusId = null, caseCache = {}, draft = null, draftWarnings = [], candId = null, cand = null, versions = null, signedIn = false;
   var nav = document.getElementById('nav'), app = document.getElementById('app');
-  document.getElementById('tokenInput').oninput = function (e) { token = e.target.value; document.getElementById('lockState').innerHTML = token ? '&#128275; Editing unlocked' : '&#128274; Read-only'; };
+  function renderSession() {
+    document.getElementById('sessionBox').innerHTML = signedIn
+      ? '<span>&#128275; Signed in on this device</span> <a href="/research-lab/signout">Sign out</a>'
+      : '<span>&#128274; Read-only</span> <a href="/research-lab/signin">Sign in this device</a>';
+  }
+  fetch('/api/learning/session', { credentials: 'same-origin' }).then(function (r) { return r.json(); }).then(function (d) { signedIn = !!(d && d.signed_in); renderSession(); }, function () { renderSession(); });
 
   function esc(s) { return String(s === null || s === undefined ? '' : s).replace(/[&<>"']/g, function (c) { return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]; }); }
   function link(url, text) { return /^https?:\\/\\//i.test(url || '') ? '<a href="' + esc(url) + '" target="_blank" rel="noopener noreferrer">' + esc(text || url) + '</a>' : esc(text || ''); }
   function day(ts) { return ts ? new Date(ts).toISOString().slice(0, 16).replace('T', ' ') + ' UTC' : ''; }
   function getJson(path) { return fetch(path).then(function (r) { return r.json(); }); }
   function postJson(path, body) {
-    var h = { 'Content-Type': 'application/json' }; if (token) h.Authorization = 'Bearer ' + token;
-    return fetch(path, { method: 'POST', headers: h, body: JSON.stringify(body) }).then(function (r) { return r.json(); });
+    // Writes are authorized server-side by this device's signed, HttpOnly session cookie (sent automatically, same
+    // origin only) plus this header. No token is ever handled by the page.
+    return fetch(path, { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json', 'X-CryptoPulse-Research': '1' }, body: JSON.stringify(body) })
+      .then(function (r) { return r.json(); });
   }
-  function needToken(msgEl) { if (token) return false; msgEl.className = 'small err'; msgEl.textContent = 'Enter the admin token (top right) to save.'; return true; }
+  function needToken(msgEl) { if (signedIn) return false; msgEl.className = 'small err'; msgEl.innerHTML = 'This device is not signed in. <a href="/research-lab/signin">Sign in once</a>, then save.'; return true; }
   var VERDICT_CLASS = { EXPLAINED: 'c-good', PARTIALLY_EXPLAINED: 'c-warn', NOT_EXPLAINED: 'c-bad' };
   var ICON = { EXPLAINS: ['&#10003;', 'c-good'], PARTIAL: ['?', 'c-warn'], CONTRADICTS: ['&#10005;', 'c-bad'], SILENT: ['&ndash;', 'c-muted'], MISSING: ['&#8709;', 'c-muted'], NOT_APPLICABLE: ['&ndash;', 'c-muted'] };
   var STATUS_TEXT = { EXPLAINS: 'explains it', PARTIAL: 'partly', CONTRADICTS: 'pointed the other way', SILENT: 'silent', MISSING: 'no reading', NOT_APPLICABLE: 'n/a' };
@@ -107,7 +115,7 @@ export const LEARNING_LAB_HTML = `<!DOCTYPE html>
       '<li>Check every field and URL, tick the review box and press CONFIRM FINDING.</li>' +
       '<li>Create the learning candidate and set the V1 source adjustment.</li><li>Read current vs proposed V1 and the validation verdict.</li>' +
       '<li>Submit for review, then approve, reject or investigate more. Approval creates a READY V1 version; it never changes production V1.</li></ol>' +
-      '<p class="small muted">Writing needs the admin token (top right). It stays in this page only.</p></details>';
+      '<p class="small muted">Saving needs this device to be signed in once (top right). It then stays signed in for 180 days.</p></details>';
     if (!e) { app.innerHTML = html + '<div class="card muted">No market events recorded yet.</div>'; return; }
     html += journeyCard(e.journey);
     html += '<div class="card"><h2>What happened</h2><p class="headline">' + esc(e.headline) + '</p><p class="muted small">' + esc(e.btc_move_text) + '</p>' +

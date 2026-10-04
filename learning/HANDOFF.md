@@ -33,8 +33,9 @@ Research Lab never calls an AI by itself and never changes production V1.
 13. **Submit for review**, then **Approve V1 change**, **Reject** or **Investigate more**. Approving anything that is
     not SUPPORTED needs an explicit tick. Approval creates **v1.N = READY (not active)**. Production V1 does not change.
 
-Writing needs the staging admin token (the `STAGE7_STAGING_ADMIN_TOKEN` GitHub secret value). Type it into the box at
-the top right. It stays in that page only.
+Saving needs this browser to be signed in once: open `/research-lab/signin`, enter the admin token (the
+`STAGE7_STAGING_ADMIN_TOKEN` secret value), and the device stays signed in for 180 days with no token field in the Research
+Lab. Sign out from the top right. Rotating the admin token signs every device out.
 
 ## When Claude is needed
 

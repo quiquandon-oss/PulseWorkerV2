@@ -40,3 +40,103 @@ jobs:
         run: pip install pytest pyyaml --break-system-packages
       - name: Run Experiment 4 and research schema tests
         run: python3 -m pytest exp004-timesfm/ research/ experiment5-staging-runner/ staging-collector/ -v
+
+  # G1-A / G1-B: NON-WRITING live validation of the reviewed staging collector. Runs ONLY on a manual dispatch
+  # (never on push / pull_request). Uses the collector code exactly at the reviewed commit (second checkout, verified
+  # by SHA and per-file SHA-256), the pinned CryptoPulse page, and live PUBLIC data. It holds no secret, sends no
+  # Cloudflare request (api.cloudflare.com is sinkholed and the collector runs only in --dry-run, which uses an
+  # in-memory replica), writes neither staging nor production, and blocks every production Worker / Apps Script
+  # request twice: in /etc/hosts and in the browser harness's deny-by-default policy.
+  g1-live-validation:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    env:
+      REVIEWED_SHA: ddf48cad109f306fe76f2c701ce8736369247f92
+      CRYPTOPULSE_COMMIT: 0a1dfb8ce88883336ee2e712a84e49be857b1724
+      CRYPTOPULSE_INDEX_SHA256: 06e97b2dd8c0623ff7a87640720512a19914e3762f2aef13ff9514d803c9fe4a
+    steps:
+      - name: Checkout (report script)
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Checkout the reviewed collector commit
+        uses: actions/checkout@v4
+        with:
+          ref: ddf48cad109f306fe76f2c701ce8736369247f92
+          path: reviewed
+          persist-credentials: false
+      - name: Checkout the pinned CryptoPulse page (public, read-only)
+        uses: actions/checkout@v4
+        with:
+          repository: quiquandon-oss/CryptoPulse
+          ref: 0a1dfb8ce88883336ee2e712a84e49be857b1724
+          path: cryptopulse-pinned
+          persist-credentials: false
+      - name: Verify reviewed commit, collector file hashes and pinned page
+        run: |
+          [ "$(git -C reviewed rev-parse HEAD)" = "$REVIEWED_SHA" ] || { echo "::error::reviewed checkout is not $REVIEWED_SHA"; exit 1; }
+          [ "$(git -C cryptopulse-pinned rev-parse HEAD)" = "$CRYPTOPULSE_COMMIT" ] || { echo "::error::CryptoPulse is not $CRYPTOPULSE_COMMIT"; exit 1; }
+          echo "$CRYPTOPULSE_INDEX_SHA256  cryptopulse-pinned/index.html" | sha256sum -c -
+          cd reviewed/staging-collector && sha256sum -c - <<'SUMS'
+          387c8d1c877c1b1b49b9561c36fd1c9a68d2385d1d967fbd42cc55ff5ad33185  collector.py
+          b607f4579f908f0cd97993d6c0fc4ce8b74a849bb168c0e6fadfca8a3cdd04f4  history_harness.py
+          1336e4aa963fefcc50dbdba5729bce58e0b33d95c881fc3225c5cd7449cd9476  harness_policy.py
+          e73fad4a13c95f732ddf41823c4640721f39fcb27fe3cfa4c83581a2317e2278  relay_shims.py
+          SUMS
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install pytest and Playwright Chromium
+        run: |
+          pip install pytest pyyaml playwright==1.56.0 --break-system-packages
+          python3 -m playwright install --with-deps chromium
+      - name: Reviewed collector tests, including the offline run of the pinned page (never run live on red tests)
+        env:
+          CRYPTOPULSE_INDEX_FILE: ${{ github.workspace }}/cryptopulse-pinned/index.html
+        run: python3 -m pytest reviewed/staging-collector/ -q -p no:cacheprovider
+      - name: Lock out Cloudflare and production hosts, and assert no credential is present
+        run: |
+          printf '0.0.0.0 %s\n' api.cloudflare.com sentiment-ff75.quiquandon.workers.dev \
+            pulseworker-v2.quiquandon.workers.dev pulseworker-v2-staging.quiquandon.workers.dev \
+            script.google.com script.googleusercontent.com | sudo tee -a /etc/hosts
+          for h in api.cloudflare.com sentiment-ff75.quiquandon.workers.dev script.google.com; do
+            [ "$(getent hosts "$h" | awk '{print $1}')" = "0.0.0.0" ] || { echo "::error::$h not sinkholed"; exit 1; }
+          done
+          if env | grep -qiE '^(CLOUDFLARE_API_TOKEN|STAGING_COLLECTOR_CLOUDFLARE_API_TOKEN|EXP5_STAGING_CLOUDFLARE_API_TOKEN)='; then
+            echo "::error::a Cloudflare credential is present"; exit 1
+          fi
+      - name: G1-B - one live BTC observation (Hyperliquid + Coinbase), local in-memory replica only
+        run: |
+          set +e
+          python3 reviewed/staging-collector/collector.py btc-tick --dry-run | tee btc-dryrun.txt
+          echo "btc-tick exit: ${PIPESTATUS[0]}"
+      - name: G1-A - live composite capture from the pinned page (nothing sent)
+        run: |
+          set +e
+          python3 reviewed/staging-collector/history_harness.py --index-file cryptopulse-pinned/index.html \
+            --out capture-dryrun.json
+          echo "harness exit: $?"
+      - name: G1-A - validate the capture against the staging schema, local in-memory replica only
+        run: |
+          set +e
+          python3 reviewed/staging-collector/collector.py history-ingest capture-dryrun.json --dry-run | tee history-dryrun.txt
+          echo "history-ingest exit: ${PIPESTATUS[0]}"
+      - name: G1 report
+        run: |
+          python3 staging-collector/g1_report.py --btc-log btc-dryrun.txt --capture capture-dryrun.json \
+            --history-log history-dryrun.txt --summary-md "$GITHUB_STEP_SUMMARY"
+      - name: Keep capture-dryrun.json, its full request log and the dry-run logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: g1-capture-dryrun-${{ github.run_id }}
+          path: |
+            capture-dryrun.json
+            btc-dryrun.txt
+            history-dryrun.txt
+          if-no-files-found: warn
+          retention-days: 30

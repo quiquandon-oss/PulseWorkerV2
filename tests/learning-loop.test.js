@@ -539,7 +539,7 @@ describe('Full journey: finding -> candidate -> adjustment -> recalculation -> v
 
 describe('staging deploy job guard (.github/workflows/test.yml)', () => {
   const wf = readFileSync(join(__dirname, '..', '.github', 'workflows', 'test.yml'), 'utf8');
-  const job = wf.slice(wf.indexOf('  staging-deploy-learning:'));
+  const job = wf.slice(wf.indexOf('  staging-deploy-learning:'), wf.indexOf('  production-learning-setup:'));
   it('runs only on an explicit manual dispatch and targets only the staging Worker', () => {
     expect(job).toContain("if: github.event_name == 'workflow_dispatch' && inputs.job == 'staging-deploy-learning'");
     expect(job.match(/wrangler@4 (deploy|secret put STAGE7_ADMIN_TOKEN) -c wrangler\.staging\.toml/g)).toHaveLength(2);
@@ -562,5 +562,18 @@ describe('served pages', () => {
     const { Script } = await import('node:vm');
     const js = LEARNING_LAB_HTML.split('<script>')[1].split('</script>')[0];
     expect(() => new Script(js)).not.toThrow();
+  });
+});
+
+describe('production setup job guard (.github/workflows/test.yml)', () => {
+  const wf = readFileSync(join(__dirname, '..', '.github', 'workflows', 'test.yml'), 'utf8');
+  const job = wf.slice(wf.indexOf('  production-learning-setup:'));
+  it('is manual-only from main, sets only the admin secret, never deploys or touches D1', () => {
+    expect(job).toContain("if: github.event_name == 'workflow_dispatch' && inputs.job == 'production-learning-setup' && github.ref == 'refs/heads/main'");
+    expect(job.match(/wrangler@4 [^\n]+/g)).toEqual(['wrangler@4 secret put STAGE7_ADMIN_TOKEN --name pulseworker-v2']);
+    expect(job).not.toMatch(/wrangler@4 deploy|d1 (execute|migrations)|secret (delete|bulk)/);
+    expect([...job.matchAll(/secrets\.([A-Z0-9_]+)/g)].map((m) => m[1]).sort()).toEqual(['CLOUDFLARE_API_TOKEN', 'CLOUDFLARE_API_TOKEN', 'STAGE7_STAGING_ADMIN_TOKEN', 'STAGE7_STAGING_ADMIN_TOKEN', 'STAGE7_STAGING_ADMIN_TOKEN']);
+    expect(job.match(/-X POST/g)).toHaveLength(1);
+    expect(job).toContain('{"event_id":999999999}');
   });
 });

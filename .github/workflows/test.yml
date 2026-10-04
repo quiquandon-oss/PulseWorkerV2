@@ -11,7 +11,7 @@ on:
         required: false
         default: none
         type: choice
-        options: [none, staging-deploy-learning]
+        options: [none, staging-deploy-learning, production-learning-setup]
 
 jobs:
   test:
@@ -100,3 +100,62 @@ jobs:
           curl -fsS "$base/api/learning/market" | grep -q '"ok":true'
           curl -fsS "$base/api/learning/versions" | grep -q '"available":true'
           echo "staging Research Lab is live at $base/research-lab"
+
+  # PRODUCTION, manual only (job=production-learning-setup): sets ONLY the STAGE7_ADMIN_TOKEN secret on the production
+  # Worker pulseworker-v2 (value from STAGE7_STAGING_ADMIN_TOKEN, as authorized) and smoke-checks the live Research
+  # Lab with read-only GETs plus one no-write authorization probe. It never deploys code (deploy.yml does that on
+  # push to main), never runs D1 commands and never changes V1 weights. Guarded by tests/learning-loop.test.js.
+  production-learning-setup:
+    if: github.event_name == 'workflow_dispatch' && inputs.job == 'production-learning-setup' && github.ref == 'refs/heads/main'
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Require the secrets (values never printed)
+        env:
+          CF: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          ADMIN: ${{ secrets.STAGE7_STAGING_ADMIN_TOKEN }}
+        run: |
+          [ -n "$CF" ] || { echo "::error::CLOUDFLARE_API_TOKEN missing"; exit 1; }
+          [ -n "$ADMIN" ] || { echo "::error::STAGE7_STAGING_ADMIN_TOKEN missing"; exit 1; }
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Verify the production Worker name
+        run: grep -qx 'name = "pulseworker-v2"' wrangler.toml
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Set STAGE7_ADMIN_TOKEN on pulseworker-v2 (secret only, no code deploy)
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          ADMIN_VALUE: ${{ secrets.STAGE7_STAGING_ADMIN_TOKEN }}
+        run: printf '%s' "$ADMIN_VALUE" | npx --yes wrangler@4 secret put STAGE7_ADMIN_TOKEN --name pulseworker-v2
+      - name: Smoke-check the production Research Lab (read-only GETs + one no-write auth probe)
+        env:
+          ADMIN_VALUE: ${{ secrets.STAGE7_STAGING_ADMIN_TOKEN }}
+        run: |
+          set -e
+          base=https://pulseworker-v2.quiquandon.workers.dev
+          sleep 20
+          curl -fsS "$base/research-lab" | grep -q '<title>CryptoPulse Research</title>'
+          curl -fsS "$base/research-lab/advanced" | grep -q 'Research Lab'
+          curl -fsS "$base/api/learning/market" > market.json
+          python3 - <<'EOF'
+          import json
+          d = json.load(open('market.json'))
+          assert d['ok'] and d['stage7_available'], d.get('error')
+          print('events:', len(d['events']), '| latest BTC:', d['latest']['btc']['btc_price'], '| latest V1:', d['latest']['v1']['score'], '| focus event:', d['focus_event_id'])
+          for e in d['events']:
+              print(' ', e['event_id'], e['verdict'], e['explained_share'], '|', e['headline'][:80])
+          EOF
+          curl -fsS "$base/api/learning/versions" | grep -q '"available":true'
+          curl -fsS "$base/api/learning/case?event_id=15" | grep -q '"research_pack"'
+          # Authorization probe that cannot write: event 999999999 does not exist, so a valid token gets 409.
+          code=$(curl -s -o probe.json -w '%{http_code}' -X POST "$base/api/learning/candidates" -H 'Content-Type: application/json' -H "Authorization: Bearer $ADMIN_VALUE" -d '{"event_id":999999999}')
+          cat probe.json; echo
+          [ "$code" = "409" ] || { echo "::error::admin token probe returned $code (expected 409)"; exit 1; }
+          echo "production Research Lab is live at $base/research-lab"

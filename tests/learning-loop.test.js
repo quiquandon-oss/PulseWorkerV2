@@ -539,7 +539,7 @@ describe('Full journey: finding -> candidate -> adjustment -> recalculation -> v
 
 describe('staging deploy job guard (.github/workflows/test.yml)', () => {
   const wf = readFileSync(join(__dirname, '..', '.github', 'workflows', 'test.yml'), 'utf8');
-  const job = wf.slice(wf.indexOf('  staging-deploy-learning:'), wf.indexOf('  production-learning-setup:'));
+  const job = wf.slice(wf.indexOf('  staging-deploy-learning:'), wf.indexOf('  # STAGING ONLY, manual only (job=staging-session-walkthrough)'));
   it('runs only on an explicit manual dispatch and targets only the staging Worker', () => {
     expect(job).toContain("if: github.event_name == 'workflow_dispatch' && inputs.job == 'staging-deploy-learning'");
     expect(job.match(/wrangler@4 (deploy|secret put STAGE7_ADMIN_TOKEN) -c wrangler\.staging\.toml/g)).toHaveLength(2);
@@ -685,5 +685,18 @@ describe('Research Lab write authorization: signed device session', () => {
     expect(LEARNING_LAB_HTML).not.toMatch(/tokenInput|type="password"|Authorization|Bearer/);
     expect(LEARNING_LAB_HTML).toContain("'X-CryptoPulse-Research': '1'");
     expect(LEARNING_LAB_HTML).toContain('/research-lab/signin');
+  });
+});
+
+describe('staging walkthrough job guard (.github/workflows/test.yml)', () => {
+  const wf = readFileSync(join(__dirname, '..', '.github', 'workflows', 'test.yml'), 'utf8');
+  const job = wf.slice(wf.indexOf('  staging-session-walkthrough:'), wf.indexOf('  # PRODUCTION, manual only'));
+  const script = readFileSync(join(__dirname, 'e2e', 'staging-session-walkthrough.cjs'), 'utf8');
+  it('is manual-only, uses only the staging admin secret and targets only the staging Worker', () => {
+    expect(job).toContain("if: github.event_name == 'workflow_dispatch' && inputs.job == 'staging-session-walkthrough'");
+    expect([...job.matchAll(/secrets\.([A-Z0-9_]+)/g)].map((m) => m[1])).toEqual(['STAGE7_STAGING_ADMIN_TOKEN']);
+    expect(job).not.toMatch(/wrangler|CLOUDFLARE_API_TOKEN|d1 /);
+    expect(script).toContain("const BASE = 'https://pulseworker-v2-staging.quiquandon.workers.dev';");
+    expect(script).not.toMatch(/pulseworker-v2\.quiquandon|sentiment-ff75|console\.log\([^)]*TOKEN/);
   });
 });

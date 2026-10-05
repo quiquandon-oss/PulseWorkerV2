@@ -100,13 +100,17 @@ function analysisSummary(a) {
 }
 
 // The stored analysis summary is a snapshot. A snapshot that a refresh would change (new adjustment, or new data) moves
-// to `history` instead of being overwritten, so a result already shown (e.g. a proxy validation) stays auditable.
-function withHistory(summary, prevAnalysisJson, prevAdjustmentJson, now) {
+// to `history` instead of being overwritten, so a result already shown (e.g. a proxy validation) stays auditable. A
+// snapshot of a legacy proxy adjustment is archived with the proxy label, even if it was stored before the label existed.
+function withHistory(summary, prevAnalysisJson, prevAdjustmentJson, now, candidateType = null) {
   const prev = parseJson(prevAnalysisJson, null);
   const history = prev && Array.isArray(prev.history) ? prev.history.slice(-19) : [];
   if (prev) {
     const { history: _h, ...snapshot } = prev;
-    if (JSON.stringify(snapshot) !== JSON.stringify(summary || null)) history.push({ ...snapshot, adjustment: parseJson(prevAdjustmentJson, null), superseded_ts: now });
+    const prevAdjustment = parseJson(prevAdjustmentJson, null);
+    if (JSON.stringify(snapshot) !== JSON.stringify(summary || null)) {
+      history.push({ ...snapshot, ...(isProxySignalCandidate(candidateType, prevAdjustment) ? { signal_validity: PROXY_INVALID_FOR_SIGNAL_VALIDATION } : {}), adjustment: prevAdjustment, superseded_ts: now });
+    }
   }
   if (!summary && !history.length) return null;
   return { ...(summary || {}), ...(history.length ? { history } : {}) };
@@ -161,11 +165,11 @@ export async function createCandidate(env, { eventId, providedToken, now = Date.
   return { ok: true, status: 200, candidate_id: created.candidate_id, created: true, inserted: res && res.meta ? res.meta.changes : null };
 }
 
-async function refreshAnalysis(env, candidateId, { prevAnalysisJson = null, prevAdjustmentJson = null, now = Date.now() } = {}) {
+async function refreshAnalysis(env, candidateId, { prevAnalysisJson = null, prevAdjustmentJson = null, prevCandidateType = null, now = Date.now() } = {}) {
   const row = await env.DB.prepare('SELECT * FROM learning_candidates WHERE candidate_id = ?').bind(candidateId).first();
   const c = candidateView(row);
   const base = await getVersion(env, c.base_version_id);
-  const summary = withHistory(analysisSummary(await analyse(env, c, base)), prevAnalysisJson, prevAdjustmentJson, now);
+  const summary = withHistory(analysisSummary(await analyse(env, c, base)), prevAnalysisJson, prevAdjustmentJson, now, prevCandidateType);
   await env.DB.prepare('UPDATE learning_candidates SET analysis_json = ? WHERE candidate_id = ?').bind(summary ? JSON.stringify(summary) : null, candidateId).run();
   return summary;
 }
@@ -195,7 +199,7 @@ export async function updateCandidate(env, { candidateId, fields, adjustment, su
        adjustment_json = ?, status = ? WHERE candidate_id = ?`
   ).bind(now, type, clean(f.title, 140) || row.title, clean(f.reason, 2000) || row.reason, f.expected_effect !== undefined ? clean(f.expected_effect, 500) : row.expected_effect,
     ['LOW', 'MEDIUM', 'HIGH'].includes(f.confidence) ? f.confidence : row.confidence, adjJson, status, candidateId).run();
-  const summary = await refreshAnalysis(env, candidateId, { prevAnalysisJson: row.analysis_json, prevAdjustmentJson: row.adjustment_json, now });
+  const summary = await refreshAnalysis(env, candidateId, { prevAnalysisJson: row.analysis_json, prevAdjustmentJson: row.adjustment_json, prevCandidateType: row.candidate_type, now });
   return { ok: true, status: 200, candidate_status: status, analysis: summary };
 }
 
@@ -244,7 +248,7 @@ export async function decideCandidate(env, { candidateId, decision, approver, no
      VALUES (?, ?, ?, ?, ?, ?, ?, 'APPROVED', ?, ?, NULL, ?)`
   ).bind(versionId, base.version_id, FORMULA_ID, JSON.stringify(config), now, `${c.title}: ${a.recalculation.adjustment_text}`, candidateId, who, now, JSON.stringify(validation)).run();
   await env.DB.prepare('UPDATE learning_candidates SET status = ?, decision = ?, decided_ts = ?, decided_by = ?, decision_note = ?, produced_version_id = ?, updated_ts = ?, analysis_json = ? WHERE candidate_id = ?')
-    .bind('ACCEPTED', 'APPROVE', now, who, clean(note, 1000), versionId, now, JSON.stringify(withHistory(analysisSummary(a), row.analysis_json, row.adjustment_json, now)), candidateId).run();
+    .bind('ACCEPTED', 'APPROVE', now, who, clean(note, 1000), versionId, now, JSON.stringify(withHistory(analysisSummary(a), row.analysis_json, row.adjustment_json, now, row.candidate_type)), candidateId).run();
   return { ok: true, status: 200, candidate_status: 'ACCEPTED', version_id: versionId };
 }
 

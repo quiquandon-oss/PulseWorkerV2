@@ -888,7 +888,7 @@ describe('NEW_SIGNAL -> signal prototype, data collection first (Event #15 regre
     expect(view.signal_validity).toBeNull();
     expect(view.validation.status).toBe('DATA_REQUIRED');
     // the persisted proxy result (as stored in production) is kept verbatim; later recomputations are kept too
-    expect(view.analysis_history[0]).toMatchObject({ ...legacyAnalysis, adjustment: legacyAdj });
+    expect(view.analysis_history[0]).toMatchObject({ ...legacyAnalysis, adjustment: legacyAdj, signal_validity: 'PROXY_INVALID_FOR_SIGNAL_VALIDATION' });
     expect(view.analysis_history.every((h) => h.adjustment.type === 'ADD_SIGNAL' && h.superseded_ts)).toBe(true);
     journey = (await call(ctx.env, '/api/learning/market')).json.events.find((e) => e.event_id === 15).journey;
     expect(journey.find((s) => s.key === 'IMPACT').text).toBe('Not calculable yet: historical data required');

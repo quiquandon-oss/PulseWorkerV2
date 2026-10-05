@@ -158,11 +158,12 @@ const SIGNAL_SAMPLE = `SAMPLE ANSWER for the new-signal walkthrough (synthetic f
     await page.waitForTimeout(1500);
     const row1 = await candidateRow(PROXY_CANDIDATE_ID);
     check('PROXY: nothing stored before Save (adjustment, status, updated_ts, analysis unchanged)', JSON.stringify([row1.adjustment, row1.status, row1.updated_ts, row1.analysis]) === JSON.stringify([row0.adjustment, row0.status, row0.updated_ts, row0.analysis]));
-    await page.click('#save'); await page.waitForSelector('#impactNotCalc', { timeout: 20000 }); await countPrompts();
+    // #impactNotCalc already renders for the unsaved prototype; the save is done when the reloaded view drops the proxy warning.
+    await page.click('#save'); await page.waitForSelector('#proxyWarn', { state: 'detached', timeout: 20000 }); await page.waitForSelector('#impactNotCalc'); await countPrompts();
     const row2 = await candidateRow(PROXY_CANDIDATE_ID);
     check('PROXY: after Save it is a SIGNAL_PROTOTYPE, DATA_COLLECTION_REQUIRED, no proxy label', row2.adjustment.type === 'SIGNAL_PROTOTYPE' && row2.status === 'DATA_COLLECTION_REQUIRED' && row2.signal_validity === null && !('weight' in row2.adjustment) && !('confidence' in row2.adjustment), row2.status);
     const hist = (row2.analysis && row2.analysis.history) || [];
-    check('PROXY: the earlier proxy result is kept in history', hist.length >= 1 && hist[0].validation_status === row0.analysis.validation_status && hist[0].adjustment_text === row0.analysis.adjustment_text && hist[0].adjustment.derived_from === 'macrogeo');
+    check('PROXY: the earlier proxy result is kept in history', hist.length >= 1 && hist[0].validation_status === row0.analysis.validation_status && hist[0].adjustment_text === row0.analysis.adjustment_text && hist[0].adjustment.derived_from === 'macrogeo' && hist[0].signal_validity === 'PROXY_INVALID_FOR_SIGNAL_VALIDATION');
     check('PROXY: no V1 methodology version created', (await learningState()).versions === versionsBefore);
   }
 

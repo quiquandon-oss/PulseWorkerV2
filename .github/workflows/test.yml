@@ -12,6 +12,18 @@ on:
         default: none
         type: choice
         options: [none, staging-deploy-learning, staging-session-walkthrough, production-learning-setup, production-session-smoke]
+      event_id:
+        description: 'staging-session-walkthrough: fresh staging fixture event for the existing-source journey'
+        required: false
+        default: '999004'
+      signal_event_id:
+        description: 'staging-session-walkthrough: fresh staging fixture event for the NEW_SIGNAL journey (empty = skip)'
+        required: false
+        default: ''
+      proxy_candidate_id:
+        description: 'staging-session-walkthrough: staging copy of a legacy proxy candidate (empty = skip)'
+        required: false
+        default: ''
 
 jobs:
   test:
@@ -126,7 +138,9 @@ jobs:
       - name: Walk the staging Research Lab as a signed-in user
         env:
           STAGING_ADMIN_TOKEN: ${{ secrets.STAGE7_STAGING_ADMIN_TOKEN }}
-          EVENT_ID: '999004'
+          EVENT_ID: ${{ inputs.event_id || '999004' }}
+          SIGNAL_EVENT_ID: ${{ inputs.signal_event_id }}
+          PROXY_CANDIDATE_ID: ${{ inputs.proxy_candidate_id }}
         run: node tests/e2e/staging-session-walkthrough.cjs
 
   # PRODUCTION, manual only (job=production-learning-setup): sets ONLY the STAGE7_ADMIN_TOKEN secret on the production

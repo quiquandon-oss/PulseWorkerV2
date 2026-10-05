@@ -13,6 +13,8 @@ const BASE = LOCAL || STAGING;
 const TOKEN = process.env.STAGING_ADMIN_TOKEN;
 const EVENT_ID = Number(process.env.EVENT_ID || '999004');
 const SIGNAL_EVENT_ID = process.env.SIGNAL_EVENT_ID ? Number(process.env.SIGNAL_EVENT_ID) : null;
+// A staging copy of production Candidate #1 (legacy proxy shape, PENDING_REVIEW), prepared before the run.
+const PROXY_CANDIDATE_ID = process.env.PROXY_CANDIDATE_ID ? Number(process.env.PROXY_CANDIDATE_ID) : null;
 if (!TOKEN) { console.error('STAGING_ADMIN_TOKEN missing'); process.exit(1); }
 if (!LOCAL && !BASE.includes('-staging.')) { console.error('refusing: not the staging Worker'); process.exit(1); }
 
@@ -29,6 +31,11 @@ async function post(path, body, headers) {
   const r = await fetch(BASE + path, { method: 'POST', headers: { 'Content-Type': 'application/json', ...headers }, body: JSON.stringify(body) });
   return r.status;
 }
+async function postFull(path, body, headers) {
+  const r = await fetch(BASE + path, { method: 'POST', headers: { 'Content-Type': 'application/json', ...headers }, body: JSON.stringify(body) });
+  return { status: r.status, json: await json(r) };
+}
+const candidateRow = async (id) => { const v = await json(await fetch(`${BASE}/api/learning/candidate?id=${id}`)); return v && v.candidate; };
 const SAMPLE = `SAMPLE ANSWER for the staging session walkthrough (synthetic fixture event; not real research)
 \`\`\`json
 { "explanation": "SAMPLE: staging fixture explanation.", "primary_driver": "Sample driver (session walkthrough)", "driver_category": "FLOWS",
@@ -125,6 +132,38 @@ const SIGNAL_SAMPLE = `SAMPLE ANSWER for the new-signal walkthrough (synthetic f
     check('NEW_SIGNAL: submit for review was a human click -> PENDING REVIEW', /Learning candidate #\d+ PENDING REVIEW/i.test(t2));
     check('NEW_SIGNAL: decision offers only the data-collection plan', /Approve data-collection plan/.test(t2) && !/Approve V1 change/.test(t2) && (await page.locator('#ack').count()) === 0);
     check('NEW_SIGNAL: nothing approved, no V1 version created', (await learningState()).versions === versionsBefore);
+  }
+
+  // 3c. Legacy proxy candidate (copy of production Candidate #1): labelled, not approvable as a V1 change, and the
+  // switch to a prototype changes nothing until Save is clicked.
+  if (PROXY_CANDIDATE_ID !== null) {
+    const versionsBefore = (await learningState()).versions;
+    const row0 = await candidateRow(PROXY_CANDIDATE_ID);
+    check('PROXY: fixture is the legacy proxy shape', !!row0 && row0.adjustment.type === 'ADD_SIGNAL' && row0.adjustment.derived_from === 'macrogeo' && row0.status === 'PENDING_REVIEW', row0 ? row0.status : 'missing');
+    check('PROXY: API labels it PROXY_INVALID_FOR_SIGNAL_VALIDATION', row0 && row0.signal_validity === 'PROXY_INVALID_FOR_SIGNAL_VALIDATION');
+    await page.goto(`${BASE}/research-lab`); await page.waitForSelector('#act');
+    await page.click('nav button[data-tab="Learning"]'); await page.waitForSelector(`[data-cand="${PROXY_CANDIDATE_ID}"]`);
+    const listText = await page.innerText(`[data-cand="${PROXY_CANDIDATE_ID}"]`);
+    check('PROXY: learning list shows the proxy label', /PROXY: invalid for signal validation/i.test(listText));
+    await page.click(`[data-cand="${PROXY_CANDIDATE_ID}"]`); await page.waitForSelector('#proxyWarn', { timeout: 20000 }); await countPrompts();
+    const p1 = (await page.innerText('#app')).replace(/\s+/g, ' ');
+    check('PROXY: warning "PROXY: INVALID FOR SIGNAL VALIDATION" shown', /PROXY: INVALID FOR SIGNAL VALIDATION/i.test(p1) && /measure that proxy, not the new signal/i.test(p1));
+    check('PROXY: validation result marked as proxy, not signal validation', /PROXY RESULT Measured on the proxy adjustment/i.test(p1));
+    check('PROXY: no "Approve V1 change" button', (await page.locator('[data-d="APPROVE"]').count()) === 0);
+    const c = `cp_rl_session=${cookie.value}`;
+    const denied = await postFull('/api/learning/candidate/decide', { candidate_id: PROXY_CANDIDATE_ID, decision: 'APPROVE', approver: 'walkthrough', acknowledge_unsupported: true }, { Cookie: c, Origin: BASE, 'X-CryptoPulse-Research': '1' });
+    check('PROXY: approving it as a V1 change is refused (409)', denied.status === 409 && denied.json && denied.json.signal_validity === 'PROXY_INVALID_FOR_SIGNAL_VALIDATION', String(denied.status));
+    await page.click('#toProto'); await page.waitForSelector('#newSignal');
+    check('PROXY: switch fills the prototype editor (Risk Regime Shock, no weight/confidence)', (await page.inputValue('[data-a="signal_name"]')) === 'Risk Regime Shock' && (await page.locator('[data-a="weight"], [data-a="confidence"]').count()) === 0);
+    await page.waitForTimeout(1500);
+    const row1 = await candidateRow(PROXY_CANDIDATE_ID);
+    check('PROXY: nothing stored before Save (adjustment, status, updated_ts, analysis unchanged)', JSON.stringify([row1.adjustment, row1.status, row1.updated_ts, row1.analysis]) === JSON.stringify([row0.adjustment, row0.status, row0.updated_ts, row0.analysis]));
+    await page.click('#save'); await page.waitForSelector('#impactNotCalc', { timeout: 20000 }); await countPrompts();
+    const row2 = await candidateRow(PROXY_CANDIDATE_ID);
+    check('PROXY: after Save it is a SIGNAL_PROTOTYPE, DATA_COLLECTION_REQUIRED, no proxy label', row2.adjustment.type === 'SIGNAL_PROTOTYPE' && row2.status === 'DATA_COLLECTION_REQUIRED' && row2.signal_validity === null && !('weight' in row2.adjustment) && !('confidence' in row2.adjustment), row2.status);
+    const hist = (row2.analysis && row2.analysis.history) || [];
+    check('PROXY: the earlier proxy result is kept in history', hist.length >= 1 && hist[0].validation_status === row0.analysis.validation_status && hist[0].adjustment_text === row0.analysis.adjustment_text && hist[0].adjustment.derived_from === 'macrogeo');
+    check('PROXY: no V1 methodology version created', (await learningState()).versions === versionsBefore);
   }
 
   // 4. A real, valid session cookie is still refused cross-origin, without the header, expired or tampered.

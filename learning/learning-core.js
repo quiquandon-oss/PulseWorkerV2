@@ -263,6 +263,9 @@ export function buildResearchCase(described, assessment, evidence) {
   };
 }
 
+// The role a new signal would play in V1 (learning-method.js SIGNAL_ROLES).
+export const SIGNAL_ROLE_VALUES = ['REGIME_MODIFIER', 'DIRECTIONAL_SIGNAL', 'CONFIRMATION_FILTER', 'UNSPECIFIED'];
+
 const FINDING_JSON_TEMPLATE = `{
   "explanation": "2-4 sentences: what actually drove the move",
   "primary_driver": "the single most important driver, in a few words",
@@ -271,6 +274,9 @@ const FINDING_JSON_TEMPLATE = `{
   "covered_by_existing_v1_source": "one of the V1 source ids listed above, or \\"none\\"",
   "proposed_new_source": { "name": "", "url": "", "what_it_measures": "", "update_frequency": "", "free_or_paid": "" },
   "proposed_signal": "how that source would be turned into a 0-100 bullish/bearish reading",
+  "proposed_signal_name": "for NEW_SIGNAL / NEW_TREND: a short reusable name for the signal (not the name of this one event)",
+  "proposed_signal_role": "${SIGNAL_ROLE_VALUES.join(' | ')}",
+  "required_inputs": [ "each input the signal needs (data V1 may not collect yet)" ],
   "trend": "is this a one-off or an ongoing trend? since when?",
   "evidence": [ { "claim": "", "url": "", "publisher": "", "date": "YYYY-MM-DD" } ],
   "inference": [ "conclusions you draw from the evidence" ],
@@ -388,6 +394,9 @@ export function parseAiResearchResponse(rawText, v1SourceIds = V1_METHODOLOGY_V1
       update_frequency: str(src.update_frequency, 100), free_or_paid: str(src.free_or_paid, 100),
     },
     proposed_signal: str(obj.proposed_signal, 1000),
+    proposed_signal_name: str(obj.proposed_signal_name, 120),
+    proposed_signal_role: oneOf(obj.proposed_signal_role, SIGNAL_ROLE_VALUES, ''),
+    required_inputs: (Array.isArray(obj.required_inputs) ? obj.required_inputs : []).map((a) => str(a, 200)).filter(Boolean).slice(0, 12),
     trend: str(obj.trend, 1000),
     evidence: (Array.isArray(obj.evidence) ? obj.evidence : []).slice(0, 20).map((e) => ({
       claim: str(e && e.claim, 500), url: httpUrl(e && e.url), publisher: str(e && e.publisher, 120), date: str(e && e.date, 20),
@@ -411,7 +420,7 @@ export function emptyFinding(explanation = '') {
   return {
     explanation, primary_driver: '', driver_category: 'OTHER', finding_type: 'NEW_SOURCE', covered_by_existing_v1_source: 'none',
     proposed_new_source: { name: '', url: '', what_it_measures: '', update_frequency: '', free_or_paid: '' },
-    proposed_signal: '', trend: '', evidence: [], inference: [], speculation: [], alternative_explanations: [], limitations: '', confidence: 'LOW',
+    proposed_signal: '', proposed_signal_name: '', proposed_signal_role: '', required_inputs: [], trend: '', evidence: [], inference: [], speculation: [], alternative_explanations: [], limitations: '', confidence: 'LOW',
     sentiment_assessment: 'INDETERMINATE',
   };
 }
@@ -452,21 +461,28 @@ export function journeyProgress({ verdict, caseView, candidate }) {
   else if (verdict === 'NO_V1_DATA' || verdict === 'NO_PRICE_DATA' || verdict === 'NO_DIRECTIONAL_MOVE') steps.push(step('RESEARCH', 'Research', 'TODO', VERDICT_TEXT[verdict]));
   else if (caseView) steps.push(step('RESEARCH', 'Research', 'ACTIVE', 'Research case open: waiting for the AI answer'));
   else steps.push(step('RESEARCH', 'Research', 'WARN', 'Sources checked: missing explanation'));
-  if (candidate) steps.push(step('LEARNING', 'Learning', 'DONE', `Candidate #${candidate.candidate_id} created`));
+  const prototype = !!(candidate && candidate.adjustment && candidate.adjustment.type === 'SIGNAL_PROTOTYPE');
+  const proxy = !!(candidate && candidate.signal_validity);
+  if (candidate) steps.push(step('LEARNING', 'Learning', 'DONE', prototype ? `Candidate #${candidate.candidate_id} created: new signal identified` : `Candidate #${candidate.candidate_id} created`));
   else steps.push(step('LEARNING', 'Learning', confirmed ? 'ACTIVE' : 'TODO', confirmed ? 'Ready: create the learning candidate' : 'Candidate not yet created'));
   if (!candidate) steps.push(step('IMPACT', 'V1 impact', 'LOCKED', 'Not calculated'));
+  else if (prototype) steps.push(step('IMPACT', 'V1 impact', 'WARN', 'Not calculable yet: historical data required'));
   else if (!a) steps.push(step('IMPACT', 'V1 impact', 'ACTIVE', 'Define the V1 adjustment'));
+  else if (proxy) steps.push(step('IMPACT', 'V1 impact', 'WARN', 'Proxy only: measures an existing source, not the new signal'));
   else if (!a.recalculation_possible) steps.push(step('IMPACT', 'V1 impact', 'WARN', 'Data collection required'));
   else steps.push(step('IMPACT', 'V1 impact', 'DONE', a.event ? `Adjusted V1 calculated (${a.event.reconstructed} -> ${a.event.proposed})` : 'Adjusted V1 calculated'));
-  const vText = { NOT_ENOUGH_DATA: 'Not enough data', VALIDATING: 'Validating: more data needed', SUPPORTED: 'Supported', NOT_SUPPORTED: 'Not supported', INCONCLUSIVE: 'Inconclusive' };
-  if (!a) steps.push(step('VALIDATION', 'Validation', 'LOCKED', 'Waiting'));
+  const vText = { DATA_REQUIRED: 'Not supported yet: data required', NOT_ENOUGH_DATA: 'Not enough data', VALIDATING: 'Validating: more data needed', SUPPORTED: 'Supported', NOT_SUPPORTED: 'Not supported', INCONCLUSIVE: 'Inconclusive' };
+  if (prototype) steps.push(step('VALIDATION', 'Validation', 'WARN', vText.DATA_REQUIRED));
+  else if (!a) steps.push(step('VALIDATION', 'Validation', 'LOCKED', 'Waiting'));
+  else if (proxy) steps.push(step('VALIDATION', 'Validation', 'WARN', 'Proxy result: not a validation of the new signal'));
   else steps.push(step('VALIDATION', 'Validation', a.validation_status === 'SUPPORTED' ? 'DONE' : a.validation_status === 'VALIDATING' ? 'ACTIVE' : 'WARN', vText[a.validation_status] || a.validation_status));
   if (!candidate) steps.push(step('APPROVAL', 'Approval', 'LOCKED', 'Waiting'));
   else if (candidate.status === 'ACCEPTED') steps.push(step('APPROVAL', 'Approval', 'DONE', `Approved: V1 ${candidate.produced_version_id} ready (not active)`));
+  else if (candidate.status === 'DATA_COLLECTION_APPROVED') steps.push(step('APPROVAL', 'Approval', 'DONE', 'Data-collection plan approved (V1 unchanged)'));
   else if (candidate.status === 'REJECTED') steps.push(step('APPROVAL', 'Approval', 'WARN', 'Rejected'));
   else if (candidate.status === 'NEEDS_MORE_RESEARCH') steps.push(step('APPROVAL', 'Approval', 'WARN', 'Sent back for more research'));
   else if (candidate.status === 'PENDING_REVIEW') steps.push(step('APPROVAL', 'Approval', 'ACTIVE', 'Waiting for your decision'));
-  else steps.push(step('APPROVAL', 'Approval', 'LOCKED', 'Submit the candidate for review first'));
+  else steps.push(step('APPROVAL', 'Approval', 'LOCKED', prototype ? 'Submit the data-collection plan for review first' : 'Submit the candidate for review first'));
   return steps;
 }
 

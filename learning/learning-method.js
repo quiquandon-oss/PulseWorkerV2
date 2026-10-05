@@ -7,7 +7,7 @@
 // Impact and validation always compare PROPOSED with RECONSTRUCTED (same formula, same readings). STORED is shown
 // for reference only, together with how far it is from RECONSTRUCTED (V1's writer applied unpersisted browser-local
 // weight overrides and a temporary x1.5 Foufi driver boost, so STORED is not always reproducible).
-import { V1_METHODOLOGY_V1, SOURCE_GROUP_LABELS, nearestAtOrBefore } from './learning-core.js';
+import { V1_METHODOLOGY_V1, SOURCE_GROUP_LABELS, SIGNAL_ROLE_VALUES, nearestAtOrBefore } from './learning-core.js';
 
 export const FORMULA_ID = 'v1-weighted-mean@1';
 export const BASELINE_VERSION_ID = 'v1.0';
@@ -23,10 +23,17 @@ export function baselineConfig() {
 }
 
 export const CANDIDATE_TYPES = Object.freeze(['NEW_SOURCE', 'NEW_TREND', 'NEW_SIGNAL', 'SOURCE_RECLASSIFICATION', 'SOURCE_WEIGHT_ADJUSTMENT', 'REGIME_SPECIFIC_SIGNAL']);
-export const CANDIDATE_STATUSES = Object.freeze(['DRAFT', 'PENDING_REVIEW', 'ACCEPTED', 'REJECTED', 'NEEDS_MORE_RESEARCH']);
-export const ADJUSTMENT_TYPES = Object.freeze(['ADD_SOURCE', 'REMOVE_SOURCE', 'CHANGE_WEIGHT', 'CHANGE_CLASSIFICATION', 'ADD_SIGNAL', 'ADD_REGIME_CONDITION']);
+// DATA_COLLECTION_REQUIRED: a new-signal prototype whose inputs V1 does not record yet (editable, like DRAFT).
+// DATA_COLLECTION_APPROVED: a human approved its data-collection plan. Neither creates a methodology version.
+export const CANDIDATE_STATUSES = Object.freeze(['DRAFT', 'DATA_COLLECTION_REQUIRED', 'PENDING_REVIEW', 'ACCEPTED', 'DATA_COLLECTION_APPROVED', 'REJECTED', 'NEEDS_MORE_RESEARCH']);
+// SIGNAL_PROTOTYPE is the one adjustment that changes nothing in V1: it describes a new signal and the data it needs.
+// It has no weight and no confidence, and is never recalculated, validated or turned into a methodology version.
+export const ADJUSTMENT_TYPES = Object.freeze(['ADD_SOURCE', 'REMOVE_SOURCE', 'CHANGE_WEIGHT', 'CHANGE_CLASSIFICATION', 'ADD_SIGNAL', 'ADD_REGIME_CONDITION', 'SIGNAL_PROTOTYPE']);
+export const SIGNAL_ROLES = Object.freeze([...SIGNAL_ROLE_VALUES]);
+export const DATA_COLLECTION_REQUIRED = 'DATA_COLLECTION_REQUIRED';
+export const PROXY_INVALID_FOR_SIGNAL_VALIDATION = 'PROXY_INVALID_FOR_SIGNAL_VALIDATION';
 export const DEFAULT_ADJUSTMENT_FOR_TYPE = Object.freeze({
-  NEW_SOURCE: 'ADD_SOURCE', NEW_TREND: 'ADD_SIGNAL', NEW_SIGNAL: 'ADD_SIGNAL', SOURCE_RECLASSIFICATION: 'CHANGE_CLASSIFICATION',
+  NEW_SOURCE: 'ADD_SOURCE', NEW_TREND: 'SIGNAL_PROTOTYPE', NEW_SIGNAL: 'SIGNAL_PROTOTYPE', SOURCE_RECLASSIFICATION: 'CHANGE_CLASSIFICATION',
   SOURCE_WEIGHT_ADJUSTMENT: 'CHANGE_WEIGHT', REGIME_SPECIFIC_SIGNAL: 'ADD_REGIME_CONDITION',
 });
 export const SIGNAL_TRANSFORMS = Object.freeze({ MOMENTUM_24H: 'momentum_24h', LEVEL: 'level' });
@@ -45,6 +52,68 @@ export function slugId(text) {
 
 function num(v, lo, hi) { const n = Number(v); return Number.isFinite(n) && n >= lo && n <= hi ? n : null; }
 function clean(v, max = 200) { return typeof v === 'string' ? v.trim().slice(0, max) : ''; }
+function cleanList(v, maxItems = 12, max = 200) {
+  const arr = Array.isArray(v) ? v : typeof v === 'string' ? v.split('\n') : [];
+  return arr.map((x) => clean(x, max)).filter(Boolean).slice(0, maxItems);
+}
+
+// ---- New-signal prototype (NEW_SIGNAL / NEW_TREND findings) ----
+// The finding's own words are carried over; nothing is mapped onto an existing V1 source and no number is invented.
+// Explicit finding fields win; otherwise the reusable name / role / inputs are read from the proposed-signal text
+// (e.g. "Create a 0-100 Risk Regime Shock score from standardized changes in A, B and C ... as a regime modifier").
+// Everything stays editable by the human before review.
+function signalNameFrom(text) {
+  const m = /\b((?:[A-Z][A-Za-z0-9/&-]*\s+){1,4}[A-Z][A-Za-z0-9/&-]*)\s+(?:score|signal|index|indicator|modifier)\b/.exec(text || '');
+  return m ? m[1] : '';
+}
+function signalRoleFrom(text) {
+  if (/regime[- ]?(?:aware|modifier|condition|filter)/i.test(text || '')) return 'REGIME_MODIFIER';
+  if (/confirm(?:ation|ing)?[- ]?(?:filter|signal)/i.test(text || '')) return 'CONFIRMATION_FILTER';
+  return 'UNSPECIFIED';
+}
+function signalInputsFrom(text) {
+  const m = /\bfrom\s+(?:(?:standardi[sz]ed|normali[sz]ed)\s+)?(?:changes\s+in\s+)?([^.;]+)/i.exec(text || '');
+  return m ? m[1].split(/,\s*|\s+and\s+/).map((x) => x.trim()).filter((x) => x && x.length <= 80).slice(0, 12) : [];
+}
+export const PROTOTYPE_BACKFILL_TEXT = 'Point-in-time values for every input (no look-ahead), aligned to the timestamps of the stored V1 observations '
+  + 'and covering the same history window, so the signal can be computed at each observation. Values that cannot be collected or '
+  + 'reconstructed stay missing: none are estimated or invented.';
+export const PROTOTYPE_VALIDATION_TEXT = 'Once the inputs exist for the V1 history window: compute the signal at each stored V1 observation, apply it '
+  + 'in its stated role to V1 v1.0, and compare with reconstructed V1 using the EXP-005 outcome rule (24h realized BTC direction, '
+  + '>=50 = UP), excluding the 24h around the discovery event. Verdict needs at least 5 independent disagreement days and a one-sided '
+  + 'sign test at p <= 0.1. Only then can a weight or regime multiplier be proposed and reviewed.';
+
+export function prototypeFromFinding(finding, config = baselineConfig()) {
+  const f = finding || {};
+  const src = f.proposed_new_source || {};
+  const text = [f.proposed_signal, ...(Array.isArray(f.inference) ? f.inference : [])].join(' ');
+  const name = clean(f.proposed_signal_name, 120) || signalNameFrom(f.proposed_signal) || 'New signal (name it)';
+  const covered = config.sources.find((s) => s.id === f.covered_by_existing_v1_source);
+  return {
+    type: 'SIGNAL_PROTOTYPE',
+    signal_id: slugId(name),
+    signal_name: name,
+    role: SIGNAL_ROLES.includes(f.proposed_signal_role) ? f.proposed_signal_role : signalRoleFrom(text),
+    discovery_example: clean(f.primary_driver, 200),
+    why_it_matters: clean(f.trend, 600),
+    inputs: cleanList(f.required_inputs).length ? cleanList(f.required_inputs) : signalInputsFrom(f.proposed_signal),
+    prototype_definition: clean(f.proposed_signal, 1000),
+    data_sources: src.name || src.url ? [[clean(src.name, 120), /^https?:\/\//i.test(src.url || '') ? src.url : '', clean(src.free_or_paid, 120)].filter(Boolean).join(' | ')] : [],
+    collection_frequency: clean(src.update_frequency, 200),
+    backfill_requirement: PROTOTYPE_BACKFILL_TEXT,
+    validation_plan: PROTOTYPE_VALIDATION_TEXT,
+    // Informational only: the V1 sources the research said already touch this area. Never used as an input.
+    related_v1_sources: covered ? [covered.id] : [],
+  };
+}
+
+export function isSignalPrototype(adjustment) { return !!adjustment && adjustment.type === 'SIGNAL_PROTOTYPE'; }
+
+// Candidates created before SIGNAL_PROTOTYPE existed turned a NEW_SIGNAL / NEW_TREND finding into "the 24h change of an
+// existing V1 source" with a default weight. Their recalculation measures that proxy, not the researched signal.
+export function isProxySignalCandidate(candidateType, adjustment) {
+  return (candidateType === 'NEW_SIGNAL' || candidateType === 'NEW_TREND') && !!adjustment && adjustment.type === 'ADD_SIGNAL' && !!adjustment.derived_from;
+}
 
 // A finding -> the default candidate + adjustment, editable by the human before review.
 export function candidateFromFinding(finding, config = baselineConfig()) {
@@ -72,21 +141,19 @@ export function candidateFromFinding(finding, config = baselineConfig()) {
       weight: NEW_SOURCE_DEFAULTS.weight, confidence: NEW_SOURCE_DEFAULTS.confidence, url: src.url || '', what_it_measures: clean(src.what_it_measures, 300),
     };
   } else {
-    adjustment = {
-      type: 'ADD_SIGNAL', signal_id: slugId(f.proposed_signal || f.primary_driver), label: clean(f.primary_driver || f.proposed_signal, 120) || 'New signal',
-      derived_from: covered ? covered.id : '', transform: covered ? SIGNAL_TRANSFORMS.MOMENTUM_24H : '', group: covered ? covered.group : 'NEWS',
-      weight: NEW_SOURCE_DEFAULTS.weight, confidence: NEW_SOURCE_DEFAULTS.confidence, description: clean(f.proposed_signal, 300),
-    };
+    adjustment = prototypeFromFinding(f, config);
   }
   return {
     candidate_type: candidateType,
-    title: clean(f.primary_driver, 140) || 'Learning candidate',
+    // A new signal is named after the reusable signal; the event's driver stays as its discovery example.
+    title: (adjustment.type === 'SIGNAL_PROTOTYPE' && !/^New signal/.test(adjustment.signal_name) ? adjustment.signal_name : clean(f.primary_driver, 140)) || 'Learning candidate',
     reason: clean(f.explanation, 2000),
     expected_effect: candidateType === 'NEW_SOURCE'
       ? `Give V1 a reading on "${adjustment.label}", so moves driven by it are no longer missed.`
       : candidateType === 'SOURCE_WEIGHT_ADJUSTMENT' ? `Change how much "${covered.label}" counts in V1.`
         : candidateType === 'SOURCE_RECLASSIFICATION' ? `Reclassify how V1 reads "${covered.label}".`
-          : candidateType === 'REGIME_SPECIFIC_SIGNAL' ? `Make "${covered.label}" count more in a specific market regime.` : `Add "${adjustment.label}" as a V1 signal.`,
+          : candidateType === 'REGIME_SPECIFIC_SIGNAL' ? `Make "${covered.label}" count more in a specific market regime.`
+            : `Start collecting the inputs of "${adjustment.signal_name}" so it can be tested against V1. No V1 change until it is validated and approved.`,
     confidence: f.confidence || 'LOW',
     evidence: Array.isArray(f.evidence) ? f.evidence.slice(0, 20) : [],
     adjustment,
@@ -139,6 +206,21 @@ export function normalizeAdjustment(adj, config = baselineConfig()) {
     if (!has(out.source_id)) errors.push('Pick the V1 source the condition applies to.');
     if (out.value === null) errors.push('Give the BTC 24h move threshold (in %).');
     if (out.multiplier === null) errors.push('Give the weight multiplier (0-5).');
+  } else if (type === 'SIGNAL_PROTOTYPE') {
+    out.signal_name = clean(a.signal_name, 120);
+    out.signal_id = slugId(a.signal_id || out.signal_name);
+    out.role = SIGNAL_ROLES.includes(a.role) ? a.role : 'UNSPECIFIED';
+    out.discovery_example = clean(a.discovery_example, 200);
+    out.why_it_matters = clean(a.why_it_matters, 600);
+    out.inputs = cleanList(a.inputs);
+    out.prototype_definition = clean(a.prototype_definition, 1000);
+    out.data_sources = cleanList(a.data_sources, 12, 400);
+    out.collection_frequency = clean(a.collection_frequency, 200);
+    out.backfill_requirement = clean(a.backfill_requirement, 1000);
+    out.validation_plan = clean(a.validation_plan, 1500);
+    out.related_v1_sources = cleanList(a.related_v1_sources, 21, 40).filter(has);
+    if (!out.signal_name) errors.push('Name the new signal.');
+    if (!out.inputs.length) errors.push('List at least one input the signal needs.');
   }
   for (const k of ['weight', 'confidence']) if (k in out && out[k] === null) errors.push(`${k} is out of range.`);
   return { ok: errors.length === 0, errors, adjustment: out };
@@ -155,6 +237,7 @@ export function applyAdjustment(config, adjustment) {
     case 'CHANGE_CLASSIFICATION': Object.assign(src(a.source_id), { group: a.group, invert: a.invert }); break;
     case 'ADD_SIGNAL': c.signals.push({ id: a.signal_id, label: a.label, group: a.group, derived_from: a.derived_from, transform: a.transform, weight: a.weight, confidence: a.confidence }); break;
     case 'ADD_REGIME_CONDITION': src(a.source_id).regime = { metric: a.metric, op: a.op, value: a.value, multiplier: a.multiplier }; break;
+    case 'SIGNAL_PROTOTYPE': throw new Error('a signal prototype has no data yet and cannot change V1');
     default: throw new Error('unknown adjustment');
   }
   return c;
@@ -173,9 +256,14 @@ export function describeAdjustment(a, config = baselineConfig()) {
       ? `Add signal "${a.label}": the 24h change of "${(config.sources.find((x) => x.id === a.derived_from) || {}).label || a.derived_from}", weight ${a.weight}, confidence ${a.confidence}.`
       : `Add signal "${a.label}" (needs its own data feed), weight ${a.weight}, confidence ${a.confidence}.`;
     case 'ADD_REGIME_CONDITION': return `Multiply "${name}"'s weight by ${a.multiplier} whenever BTC's 24h move is ${a.op} ${a.value}%.`;
+    case 'SIGNAL_PROTOTYPE': return `New signal prototype "${a.signal_name}" (${SIGNAL_ROLE_TEXT[a.role] || 'role not set'}): data collection required. No weight, no V1 change.`;
     default: return '';
   }
 }
+
+export const SIGNAL_ROLE_TEXT = Object.freeze({
+  REGIME_MODIFIER: 'regime modifier', DIRECTIONAL_SIGNAL: 'directional signal', CONFIRMATION_FILTER: 'confirmation filter', UNSPECIFIED: 'role not set',
+});
 
 // ---- Scoring ----
 // ctx: { readings, prevReadings, btc24hPct }. Returns null when nothing resolved.
@@ -212,6 +300,10 @@ function signalValue(g, ctx) {
 // Which inputs the adjustment needs, and whether stored history has them.
 export function dataAvailability(adjustment, observations) {
   const a = adjustment;
+  if (a.type === 'SIGNAL_PROTOTYPE') {
+    return { status: DATA_COLLECTION_REQUIRED, input: a.signal_id, inputs: a.inputs || [], observations_with_data: 0, total_observations: observations.length,
+      message: 'Historical observations for the proposed signal do not exist.' };
+  }
   let need = null;
   if (a.type === 'ADD_SOURCE') need = a.source_id;
   else if (a.type === 'ADD_SIGNAL') need = a.derived_from || null;
@@ -241,6 +333,10 @@ export function buildContexts(observations, btcRows) {
 
 export function recalculate(baseConfig, adjustment, contexts, { eventTs = null } = {}) {
   const availability = dataAvailability(adjustment, contexts);
+  if (isSignalPrototype(adjustment)) { // nothing to recalculate: no proposed V1, no series, no fabricated readings
+    return { possible: false, availability, adjustment_text: describeAdjustment(adjustment, baseConfig), proposed_config: null, observations: 0,
+      from_ts: null, to_ts: null, reconstruction: null, event: null, summary: null, series: [] };
+  }
   const proposedConfig = applyAdjustment(baseConfig, adjustment);
   const points = [];
   for (const c of contexts) {
@@ -310,6 +406,10 @@ export function realizedDirection(btcRows, ts, rules = VALIDATION_RULES) {
 
 export function validateRecalculation(recalc, btcRows, { eventTs = null, rules = VALIDATION_RULES } = {}) {
   const head = { method: rules.method, rules: { horizon_hours: 24, min_independent_changed_calls: rules.minIndependentChanged, alpha: rules.alpha, excluded_window_hours: rules.excludeAroundEventMs / HOUR } };
+  if (recalc.availability && recalc.availability.status === DATA_COLLECTION_REQUIRED) {
+    return { ...head, status: 'DATA_REQUIRED', resolved: 0,
+      headline: 'CryptoPulse cannot validate this signal yet because V1 does not currently collect the required inputs.' };
+  }
   if (!recalc.possible) {
     return { ...head, status: 'NOT_ENOUGH_DATA', headline: 'Cannot be validated yet: no historical data for the new input.', resolved: 0 };
   }
@@ -351,7 +451,7 @@ export function validateRecalculation(recalc, btcRows, { eventTs = null, rules =
 }
 
 export const VALIDATION_TEXT = Object.freeze({
-  NOT_ENOUGH_DATA: 'Not enough data', VALIDATING: 'Validating', SUPPORTED: 'Supported', NOT_SUPPORTED: 'Not supported', INCONCLUSIVE: 'Inconclusive',
+  DATA_REQUIRED: 'Not supported yet: data required', NOT_ENOUGH_DATA: 'Not enough data', VALIDATING: 'Validating', SUPPORTED: 'Supported', NOT_SUPPORTED: 'Not supported', INCONCLUSIVE: 'Inconclusive',
 });
 
 export function nextVersionId(existingIds) {

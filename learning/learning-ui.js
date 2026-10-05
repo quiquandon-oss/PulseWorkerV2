@@ -73,8 +73,10 @@ export const LEARNING_LAB_HTML = `<!DOCTYPE html>
   var ICON = { EXPLAINS: ['&#10003;', 'c-good'], PARTIAL: ['?', 'c-warn'], CONTRADICTS: ['&#10005;', 'c-bad'], SILENT: ['&ndash;', 'c-muted'], MISSING: ['&#8709;', 'c-muted'], NOT_APPLICABLE: ['&ndash;', 'c-muted'] };
   var STATUS_TEXT = { EXPLAINS: 'explains it', PARTIAL: 'partly', CONTRADICTS: 'pointed the other way', SILENT: 'silent', MISSING: 'no reading', NOT_APPLICABLE: 'n/a' };
   var JICON = { DONE: ['&#10003;', 'c-good'], ACTIVE: ['&#9679;', 'c-acc'], WARN: ['&#9888;', 'c-warn'], TODO: ['&#9675;', 'c-muted'], LOCKED: ['&#128274;', 'c-muted'] };
-  var VCLASS = { SUPPORTED: 'c-good', NOT_SUPPORTED: 'c-bad', INCONCLUSIVE: 'c-warn', VALIDATING: 'c-acc', NOT_ENOUGH_DATA: 'c-muted' };
-  var CSTATUS_CLASS = { ACCEPTED: 'c-good', REJECTED: 'c-bad', PENDING_REVIEW: 'c-acc', NEEDS_MORE_RESEARCH: 'c-warn', DRAFT: 'c-muted' };
+  var VCLASS = { DATA_REQUIRED: 'c-warn', SUPPORTED: 'c-good', NOT_SUPPORTED: 'c-bad', INCONCLUSIVE: 'c-warn', VALIDATING: 'c-acc', NOT_ENOUGH_DATA: 'c-muted' };
+  var CSTATUS_CLASS = { DATA_COLLECTION_REQUIRED: 'c-warn', DATA_COLLECTION_APPROVED: 'c-good', ACCEPTED: 'c-good', REJECTED: 'c-bad', PENDING_REVIEW: 'c-acc', NEEDS_MORE_RESEARCH: 'c-warn', DRAFT: 'c-muted' };
+  var ROLES = ['REGIME_MODIFIER','DIRECTIONAL_SIGNAL','CONFIRMATION_FILTER','UNSPECIFIED'];
+  var ROLE_TEXT = { REGIME_MODIFIER: 'Regime modifier', DIRECTIONAL_SIGNAL: 'Directional signal', CONFIRMATION_FILTER: 'Confirmation filter', UNSPECIFIED: 'Role not set' };
   var GROUPS = { FLOWS: 'ETF flows', DERIVATIVES: 'Funding & positioning', MACRO: 'Macro', EQUITIES: 'Equities', NEWS: 'News & narrative', BREADTH: 'Market breadth', ONCHAIN: 'On-chain', TREASURY: 'Corporate treasuries' };
   function chip(text, cls) { return '<span class="chip ' + (cls || 'c-muted') + '">' + esc(text) + '</span>'; }
   function dirWord(d) { return d === 'UP' || d === 'DOWN' || d === 'NEUTRAL' || d === 'FLAT' ? d : 'unknown'; }
@@ -163,6 +165,8 @@ export const LEARNING_LAB_HTML = `<!DOCTYPE html>
       '<div><label>Potential new source</label><input data-s="name" value="' + esc(s.name) + '"></div><div><label>Source URL</label><input data-s="url" value="' + esc(s.url) + '"></div></div>' +
       '<label>What the source measures</label><input data-s="what_it_measures" value="' + esc(s.what_it_measures) + '">' +
       '<label>Potential signal (how it becomes a 0-100 reading)</label><textarea data-f="proposed_signal">' + esc(f.proposed_signal) + '</textarea>' +
+      '<div class="grid2"><div><label>New signal: reusable name</label><input data-f="proposed_signal_name" value="' + esc(f.proposed_signal_name) + '"></div><div><label>New signal: role in V1</label><select data-f="proposed_signal_role">' + opt([''].concat(ROLES), f.proposed_signal_role || '', ['(not set)'].concat(ROLES.map(function (r) { return ROLE_TEXT[r]; }))) + '</select></div></div>' +
+      '<label>New signal: required inputs &mdash; one per line</label><textarea data-list="required_inputs">' + esc((f.required_inputs || []).join('\\n')) + '</textarea>' +
       '<label>Trend</label><input data-f="trend" value="' + esc(f.trend) + '">' +
       '<label>Evidence &mdash; one per line: claim | url | publisher | date</label><textarea data-list="evidence">' + esc((f.evidence || []).map(function (e) { return [e.claim, e.url, e.publisher, e.date].join(' | '); }).join('\\n')) + '</textarea>' +
       '<label>Inference &mdash; one per line</label><textarea data-list="inference">' + esc((f.inference || []).join('\\n')) + '</textarea>' +
@@ -178,7 +182,7 @@ export const LEARNING_LAB_HTML = `<!DOCTYPE html>
     var els = app.querySelectorAll('[data-f]'); for (var i = 0; i < els.length; i++) f[els[i].dataset.f] = els[i].value;
     var ss = app.querySelectorAll('[data-s]'); f.proposed_new_source = f.proposed_new_source || {}; for (var j = 0; j < ss.length; j++) f.proposed_new_source[ss[j].dataset.s] = ss[j].value;
     f.evidence = app.querySelector('[data-list="evidence"]').value.split('\\n').filter(function (l) { return l.trim(); }).map(function (l) { var p = l.split('|').map(function (x) { return x.trim(); }); return { claim: p[0] || '', url: p[1] || '', publisher: p[2] || '', date: p[3] || '' }; });
-    ['inference', 'speculation', 'alternative_explanations'].forEach(function (k) { f[k] = app.querySelector('[data-list="' + k + '"]').value.split('\\n').map(function (x) { return x.trim(); }).filter(Boolean); });
+    ['inference', 'speculation', 'alternative_explanations', 'required_inputs'].forEach(function (k) { f[k] = app.querySelector('[data-list="' + k + '"]').value.split('\\n').map(function (x) { return x.trim(); }).filter(Boolean); });
     return f;
   }
   function renderResearch() {
@@ -262,8 +266,8 @@ export const LEARNING_LAB_HTML = `<!DOCTYPE html>
   }
 
   function adjustmentEditor(c, a, sources, editable) {
-    var types = ['ADD_SOURCE','REMOVE_SOURCE','CHANGE_WEIGHT','CHANGE_CLASSIFICATION','ADD_SIGNAL','ADD_REGIME_CONDITION'];
-    var tlabels = ['Add a new source','Remove a source','Change a source\\'s weight','Reclassify a source','Add a signal','Add a regime condition'];
+    var types = ['ADD_SOURCE','REMOVE_SOURCE','CHANGE_WEIGHT','CHANGE_CLASSIFICATION','ADD_SIGNAL','ADD_REGIME_CONDITION','SIGNAL_PROTOTYPE'];
+    var tlabels = ['Add a new source','Remove a source','Change a source\\'s weight','Reclassify a source','Add a signal derived from an existing source','Add a regime condition','New signal (prototype: collect data first)'];
     var ids = sources.map(function (s) { return s.id; }), lbls = sources.map(function (s) { return s.label + ' (w ' + s.weight + ', c ' + s.confidence + ')'; });
     var g = Object.keys(GROUPS), gl = g.map(function (k) { return GROUPS[k]; });
     a = a || { type: 'ADD_SOURCE' };
@@ -280,18 +284,37 @@ export const LEARNING_LAB_HTML = `<!DOCTYPE html>
       '<div><label>Weight</label><input data-a="weight" type="number" step="0.5" value="' + esc(a.weight) + '"' + dis + '></div><div><label>Confidence (0-1)</label><input data-a="confidence" type="number" step="0.05" value="' + esc(a.confidence) + '"' + dis + '></div></div><input type="hidden" data-a="transform" value="momentum_24h"><input type="hidden" data-a="signal_id" value="' + esc(a.signal_id) + '"><input type="hidden" data-a="group" value="' + esc(a.group || 'NEWS') + '">';
     if (t === 'ADD_REGIME_CONDITION') h += '<div class="grid2"><div><label>When BTC\\'s 24h move is</label><select data-a="op"' + dis + '>' + opt(['>=','<='], a.op || '<=', ['at least','at most']) + '</select></div><div><label>Threshold (%)</label><input data-a="value" type="number" step="0.5" value="' + esc(a.value === undefined ? -2 : a.value) + '"' + dis + '></div>' +
       '<div><label>Multiply its weight by</label><input data-a="multiplier" type="number" step="0.1" value="' + esc(a.multiplier === undefined ? 2 : a.multiplier) + '"' + dis + '></div><div></div></div>';
+    if (t === 'SIGNAL_PROTOTYPE') {
+      var lines = function (k) { return esc((a[k] || []).join('\\n')); };
+      h += '<div class="big" id="newSignal"><p class="headline" style="font-size:16px">New signal discovered &mdash; historical data required</p><p class="small">CryptoPulse cannot validate this signal yet because V1 does not currently collect the required inputs. It has no weight and no confidence: those can only be proposed after its data exists and it has been validated.</p></div>' +
+        '<div class="grid2"><div><label>Signal name (reusable)</label><input data-a="signal_name" value="' + esc(a.signal_name) + '"' + dis + '></div><div><label>Role in V1</label><select data-a="role"' + dis + '>' + opt(ROLES, a.role || 'UNSPECIFIED', ROLES.map(function (r) { return ROLE_TEXT[r]; })) + '</select></div></div>' +
+        '<label>Discovery example (the event that revealed it)</label><input data-a="discovery_example" value="' + esc(a.discovery_example) + '"' + dis + '>' +
+        '<label>Why it matters</label><textarea data-a="why_it_matters"' + dis + '>' + esc(a.why_it_matters) + '</textarea>' +
+        '<label>Required inputs &mdash; one per line</label><textarea data-al="inputs"' + dis + '>' + lines('inputs') + '</textarea>' +
+        '<label>Prototype definition</label><textarea data-a="prototype_definition"' + dis + '>' + esc(a.prototype_definition) + '</textarea>' +
+        '<label>Data sources to investigate &mdash; one per line</label><textarea data-al="data_sources"' + dis + '>' + lines('data_sources') + '</textarea>' +
+        '<label>Collection frequency</label><input data-a="collection_frequency" value="' + esc(a.collection_frequency) + '"' + dis + '>' +
+        '<label>Historical backfill requirement</label><textarea data-a="backfill_requirement"' + dis + '>' + esc(a.backfill_requirement) + '</textarea>' +
+        '<label>Validation plan (once data exists)</label><textarea data-a="validation_plan"' + dis + '>' + esc(a.validation_plan) + '</textarea>' +
+        ((a.related_v1_sources || []).length ? '<p class="small muted">Related V1 source(s), for context only and not used as an input: ' + esc(a.related_v1_sources.join(', ')) + '</p>' : '') +
+        '<input type="hidden" data-al="related_v1_sources" value="' + esc((a.related_v1_sources || []).join('\\n')) + '"><input type="hidden" data-a="signal_id" value="' + esc(a.signal_id) + '">' +
+        '<p class="small"><b>Status:</b> ' + chip('DATA COLLECTION REQUIRED', 'c-warn') + '</p>';
+    }
     return h;
   }
   function readAdjustment() {
     var a = { type: document.getElementById('adjType').value }, els = app.querySelectorAll('[data-a]');
     for (var i = 0; i < els.length; i++) { var k = els[i].dataset.a, v = els[i].value; a[k] = ['weight','confidence','value','multiplier'].indexOf(k) >= 0 ? Number(v) : k === 'invert' ? v === 'true' : v; }
+    var ls = app.querySelectorAll('[data-al]');
+    for (var j = 0; j < ls.length; j++) a[ls[j].dataset.al] = ls[j].value.split('\\n').map(function (x) { return x.trim(); }).filter(Boolean);
     return a;
   }
 
   function renderCandidate() {
     if (!cand) { app.innerHTML = '<div class="card muted">Loading candidate&hellip;</div>'; return; }
     if (!cand.ok) { app.innerHTML = '<div class="card err">' + esc(cand.error) + '</div>'; return; }
-    var c = cand.candidate, r = cand.recalculation, v = cand.validation, editable = ['DRAFT','PENDING_REVIEW','NEEDS_MORE_RESEARCH'].indexOf(c.status) >= 0;
+    var c = cand.candidate, r = cand.recalculation, v = cand.validation, editable = ['DRAFT','DATA_COLLECTION_REQUIRED','PENDING_REVIEW','NEEDS_MORE_RESEARCH'].indexOf(c.status) >= 0;
+    var proto = !!(c.adjustment && c.adjustment.type === 'SIGNAL_PROTOTYPE'), proxy = !!cand.signal_validity;
     var ev = null; if (market) for (var i = 0; i < market.events.length; i++) if (market.events[i].event_id === c.event_id) ev = market.events[i];
     var html = '<div class="btns" style="margin:0 0 12px"><button class="btn secondary" id="back">&larr; All learning</button></div>';
     if (ev) html += journeyCard(ev.journey);
@@ -302,12 +325,16 @@ export const LEARNING_LAB_HTML = `<!DOCTYPE html>
       '<label>Title</label><input id="cTitle" value="' + esc(c.title) + '"' + (editable ? '' : ' disabled') + '><label>Why (the finding)</label><textarea id="cReason"' + (editable ? '' : ' disabled') + '>' + esc(c.reason) + '</textarea>' +
       '<label>Expected effect</label><input id="cEffect" value="' + esc(c.expected_effect) + '"' + (editable ? '' : ' disabled') + '>' +
       (c.evidence.length ? '<label>Evidence</label><ul class="small">' + c.evidence.map(function (x) { return '<li>' + esc(x.claim) + ' ' + (x.url ? '(' + link(x.url, x.publisher || 'source') + ')' : '') + '</li>'; }).join('') + '</ul>' : '<p class="warn">No linked evidence.</p>') + '</div>';
-    html += '<div class="card"><h2>Source adjustment</h2>' + adjustmentEditor(c, c.adjustment, cand.base_version.sources, editable) +
+    if (proxy) html += '<div class="card" id="proxyWarn"><h2>' + chip('PROXY: INVALID FOR SIGNAL VALIDATION', 'c-bad') + '</h2><p>This candidate was generated automatically as the 24h change of an existing V1 source with a default weight and confidence. The V1 impact and validation shown below measure that <b>proxy</b>, not the new signal the research proposed, so they say nothing about whether the new signal works.</p><p class="small muted">The result is kept for audit. Switching to a signal prototype keeps it in the candidate\\'s history.</p>' +
+      (editable && cand.prototype_suggestion ? '<div class="btns"><button class="btn" id="toProto">Switch to signal prototype (data collection first)</button></div><p class="small muted">Fills the editor below from the confirmed finding. Nothing is saved until you press Save.</p>' : '') + '</div>';
+    html += '<div class="card"><h2>' + (proto ? 'New signal prototype' : 'Source adjustment') + '</h2>' + adjustmentEditor(c, c.adjustment, cand.base_version.sources, editable) +
       (r ? '<p style="margin-top:12px"><b>Proposed change:</b> ' + esc(r.adjustment_text) + '</p>' : '') +
-      (editable ? '<div class="btns"><button class="btn secondary" id="save">Save &amp; recalculate V1</button><button class="btn" id="submit">Submit for review</button></div><div id="saveMsg" class="small"></div>' : '') + '</div>';
+      (editable ? '<div class="btns"><button class="btn secondary" id="save">' + (proto ? 'Save' : 'Save &amp; recalculate V1') + '</button><button class="btn" id="submit">Submit for review</button></div><div id="saveMsg" class="small"></div>' : '') + '</div>';
     // V1 impact
     html += '<div class="card"><h2>What would V1 become?</h2>';
     if (!r) html += '<p class="muted">Define the adjustment above.</p>';
+    else if (proto) html += '<div class="big" id="impactNotCalc"><p><b>NOT CALCULABLE YET</b></p><p class="small">Reason: ' + esc(r.availability.message) + '</p><p class="small">No Proposed V1 is shown and no V1 numerical adjustment was applied. Current V1 is unchanged.</p></div>' +
+      '<label>Data required before V1 can be recalculated</label><ul class="small">' + (c.adjustment.inputs || []).map(function (x) { return '<li>' + esc(x) + '</li>'; }).join('') + '</ul>';
     else if (!r.possible) html += '<div class="big"><p class="headline" style="font-size:16px">' + esc(r.availability.message) + '</p><p><b>DATA COLLECTION REQUIRED</b></p><p class="small">To recalculate V1, CryptoPulse first has to start recording this input alongside V1\\'s other sources' + (c.adjustment && c.adjustment.url ? ' (' + link(c.adjustment.url, 'source') + ')' : '') + '. No historical values are invented. Once readings accumulate, this candidate can be recalculated and validated.</p></div>';
     else {
       var e = r.event;
@@ -319,18 +346,29 @@ export const LEARNING_LAB_HTML = `<!DOCTYPE html>
     }
     html += '</div>';
     // Validation
-    html += '<div class="card"><h2>Does it improve CryptoPulse?</h2>' + (v ? '<p>' + chip(v.status_text, VCLASS[v.status]) + ' ' + esc(v.headline) + '</p>' +
+    if (v && v.status === 'DATA_REQUIRED') html += '<div class="card" id="valData"><h2>Does it improve CryptoPulse?</h2><p>' + chip('NOT SUPPORTED YET / DATA REQUIRED', VCLASS.DATA_REQUIRED) + ' ' + esc(v.headline) + '</p><p class="small">No validation result exists for this signal, and none is claimed.</p>' +
+      '<label>Validation plan once data exists</label><p class="small">' + esc(c.adjustment.validation_plan) + '</p></div>';
+    else html += '<div class="card"><h2>Does it improve CryptoPulse?</h2>' + (v && proxy ? '<p class="small">' + chip('PROXY RESULT', 'c-bad') + ' Measured on the proxy adjustment, not on the proposed signal. Not a validation of the new signal.</p>' : '') + (v ? '<p>' + chip(v.status_text, VCLASS[v.status]) + ' ' + esc(v.headline) + '</p>' +
       (v.current_v1 ? '<div class="row"><div class="kv"><div class="k">Current V1 right</div><div class="v">' + esc(v.current_v1.accuracy_pct) + '%</div></div><div class="kv"><div class="k">Adjusted V1 right</div><div class="v" style="color:var(--accent)">' + esc(v.adjusted_v1.accuracy_pct) + '%</div></div><div class="kv"><div class="k">Outcomes checked</div><div class="v">' + esc(v.resolved) + '</div></div><div class="kv"><div class="k">Days they disagree</div><div class="v">' + esc(v.independent.days) + '</div></div></div>' : '') +
       '<details><summary>How this is checked</summary><p class="small">' + esc(v.method) + '. The ' + esc(v.rules.excluded_window_hours) + 'h around the originating event are excluded, so the candidate is not judged on the event that inspired it. Hourly observations overlap a 24h horizon, so the verdict uses at most one disagreement per day: it needs at least ' + esc(v.rules.min_independent_changed_calls) + ' such days and a one-sided sign test at p &le; ' + esc(v.rules.alpha) + '.</p></details>' : '<p class="muted">Waiting for the adjustment.</p>') + '</div>';
+    if (cand.analysis_history && cand.analysis_history.length) html += '<div class="card"><details><summary>Earlier analyses of this candidate (' + cand.analysis_history.length + ', kept for audit)</summary><ul class="small">' + cand.analysis_history.map(function (hh) {
+      return '<li>' + esc(hh.adjustment_text) + ' &mdash; validation ' + esc(hh.validation_status) + (hh.signal_validity ? ' ' + chip('PROXY: invalid for signal validation', 'c-bad') : '') + ' <span class="muted">(superseded ' + esc(day(hh.superseded_ts)) + ')</span></li>'; }).join('') + '</ul></details></div>';
     // Decision / outcome
-    if (c.status === 'PENDING_REVIEW') {
+    if (c.status === 'PENDING_REVIEW' && proto) {
+      html += '<div class="card"><h2>Learning result: your decision</h2><table>' +
+        '<tr><td class="muted small">New signal</td><td>' + esc(c.adjustment.signal_name) + ' (' + esc(ROLE_TEXT[c.adjustment.role] || '') + ')</td></tr><tr><td class="muted small">V1 impact</td><td>Not calculable yet: historical data required</td></tr>' +
+        '<tr><td class="muted small">Validation</td><td>' + chip('NOT SUPPORTED YET / DATA REQUIRED', 'c-warn') + '</td></tr></table>' +
+        '<label>Your name</label><input id="who" autocomplete="name"><label>Note</label><input id="note">' +
+        '<div class="btns"><button class="btn" data-d="APPROVE">Approve data-collection plan</button><button class="btn bad" data-d="REJECT">Reject</button><button class="btn secondary" data-d="NEEDS_MORE_RESEARCH">Investigate more</button></div><div id="decMsg" class="small"></div>' +
+        '<p class="small muted">Approving records the data-collection plan only. It creates no V1 methodology version, activates no source and changes nothing in V1.</p></div>';
+    } else if (c.status === 'PENDING_REVIEW') {
       html += '<div class="card"><h2>Learning result: your decision</h2><table>' +
         '<tr><td class="muted small">Finding</td><td>' + esc(c.title) + '</td></tr><tr><td class="muted small">Source / signal</td><td>' + esc(r ? r.adjustment_text : '') + '</td></tr>' +
         '<tr><td class="muted small">Evidence</td><td>' + esc(c.evidence.length) + ' linked item(s)</td></tr><tr><td class="muted small">V1 impact</td><td>' + esc(r && r.possible && r.event ? r.event.reconstructed + ' -> ' + r.event.proposed + ' at the event' : r && !r.possible ? 'Data collection required' : '') + '</td></tr>' +
         '<tr><td class="muted small">Validation</td><td>' + (v ? chip(v.status_text, VCLASS[v.status]) : '') + '</td></tr></table>' +
         '<label>Your name</label><input id="who" autocomplete="name"><label>Note</label><input id="note">' +
         (v && v.status !== 'SUPPORTED' ? '<label style="text-transform:none; font-size:14px; color:var(--text)"><input type="checkbox" id="ack" style="width:auto"> Approve without supporting validation (recorded on the version)</label>' : '') +
-        '<div class="btns"><button class="btn" data-d="APPROVE">Approve V1 change</button><button class="btn bad" data-d="REJECT">Reject</button><button class="btn secondary" data-d="NEEDS_MORE_RESEARCH">Investigate more</button></div><div id="decMsg" class="small"></div>' +
+        '<div class="btns">' + (proxy ? '' : '<button class="btn" data-d="APPROVE">Approve V1 change</button>') + '<button class="btn bad" data-d="REJECT">Reject</button><button class="btn secondary" data-d="NEEDS_MORE_RESEARCH">Investigate more</button></div><div id="decMsg" class="small"></div>' +
         '<p class="small muted">Approving creates a new V1 methodology version that is ready but NOT active. Production V1 does not change.</p></div>';
     } else if (c.status === 'ACCEPTED' && cand.produced_version) {
       var pv = cand.produced_version;
@@ -341,12 +379,14 @@ export const LEARNING_LAB_HTML = `<!DOCTYPE html>
         '<tr><td class="muted small">Sources</td><td>' + esc(pv.config.sources.length) + ' sources, ' + esc((pv.config.signals || []).length) + ' signal(s)</td></tr></table>' +
         '<p class="small muted">Activating a version in production is a separate, explicitly authorized step. It never happens from this page.</p></div>';
     } else if (c.decision) {
-      html += '<div class="card"><h2>Decision</h2><p>' + chip(c.status.replace(/_/g, ' '), CSTATUS_CLASS[c.status]) + ' by ' + esc(c.decided_by) + ' &middot; ' + esc(day(c.decided_ts)) + '</p>' + (c.decision_note ? '<p>' + esc(c.decision_note) + '</p>' : '') + (c.status === 'NEEDS_MORE_RESEARCH' ? '<p class="small">Edit the candidate and submit it for review again.</p>' : '') + '</div>';
+      html += '<div class="card"><h2>Decision</h2><p>' + chip(c.status.replace(/_/g, ' '), CSTATUS_CLASS[c.status]) + ' by ' + esc(c.decided_by) + ' &middot; ' + esc(day(c.decided_ts)) + '</p>' + (c.decision_note ? '<p>' + esc(c.decision_note) + '</p>' : '') + (c.status === 'NEEDS_MORE_RESEARCH' ? '<p class="small">Edit the candidate and submit it for review again.</p>' : '') + (c.status === 'DATA_COLLECTION_APPROVED' ? '<p class="small">Data-collection plan approved. No V1 methodology version was created and no source was activated; the signal becomes testable once its inputs are collected.</p>' : '') + '</div>';
     }
     app.innerHTML = html;
     document.getElementById('back').onclick = function () { candId = null; render(); };
     var at = document.getElementById('adjType');
-    if (at && editable) at.onchange = function () { c.adjustment = { type: at.value, source_id: '', weight: 5, confidence: 0.4, group: 'NEWS', label: c.title }; renderCandidate(); };
+    if (at && editable) at.onchange = function () { c.adjustment = at.value === 'SIGNAL_PROTOTYPE' ? (cand.prototype_suggestion || { type: 'SIGNAL_PROTOTYPE', signal_name: c.title, role: 'UNSPECIFIED', inputs: [] }) : { type: at.value, source_id: '', weight: 5, confidence: 0.4, group: 'NEWS', label: c.title }; renderCandidate(); };
+    var tp = document.getElementById('toProto');
+    if (tp) tp.onclick = function () { c.adjustment = cand.prototype_suggestion; renderCandidate(); };
     function save(submit) {
       var msg = document.getElementById('saveMsg'); if (needToken(msg)) return; msg.className = 'small'; msg.textContent = 'Recalculating...';
       postJson('/api/learning/candidate/update', { candidate_id: c.candidate_id, submit: submit, adjustment: readAdjustment(), fields: { candidate_type: document.getElementById('cType').value, confidence: document.getElementById('cConf').value, title: document.getElementById('cTitle').value, reason: document.getElementById('cReason').value, expected_effect: document.getElementById('cEffect').value } }).then(function (res) {
@@ -375,7 +415,8 @@ export const LEARNING_LAB_HTML = `<!DOCTYPE html>
     html += '<div class="card"><h2>Learning candidates (' + withCand.length + ')</h2>' + (withCand.length ? withCand.map(function (x) {
       var a = x.candidate.analysis;
       return '<div class="ev" data-cand="' + x.candidate.candidate_id + '"><div><b>#' + x.candidate.candidate_id + ' ' + esc(x.candidate.title) + '</b></div><div class="small muted">' + esc(x.headline) + '</div><div class="small" style="margin-top:3px">' + chip(x.candidate.status.replace(/_/g, ' '), CSTATUS_CLASS[x.candidate.status]) + ' ' +
-        (a ? (a.recalculation_possible ? chip('V1 ' + (a.event ? a.event.reconstructed + ' -> ' + a.event.proposed : 'recalculated'), 'c-acc') : chip('Data collection required', 'c-warn')) + ' ' + chip(a.validation_status.replace(/_/g, ' '), VCLASS[a.validation_status]) : '') + '</div></div>';
+        (x.candidate.signal_validity ? chip('PROXY: invalid for signal validation', 'c-bad') + ' ' : '') +
+        (a ? (a.recalculation_possible ? chip('V1 ' + (a.event ? a.event.reconstructed + ' -> ' + a.event.proposed : 'recalculated'), 'c-acc') : a.availability === 'DATA_COLLECTION_REQUIRED' ? chip('New signal: historical data required', 'c-warn') : chip('Data collection required', 'c-warn')) + ' ' + chip(a.validation_status.replace(/_/g, ' '), VCLASS[a.validation_status]) : '') + '</div></div>';
     }).join('') : '<p class="muted">None yet.</p>') + '</div>';
     if (ready.length) html += '<div class="card"><h2>Confirmed findings ready to learn from</h2>' + ready.map(function (x) {
       var f = x.case.finding.findings || {};

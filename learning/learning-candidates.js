@@ -6,9 +6,10 @@ import { checkToken, loadAllV1Observations, loadAllBtc } from './learning-api.js
 import {
   BASELINE_VERSION_ID, FORMULA_ID, baselineConfig, candidateFromFinding, normalizeAdjustment, applyAdjustment,
   buildContexts, recalculate, validateRecalculation, CANDIDATE_TYPES, CANDIDATE_STATUSES, VALIDATION_TEXT, nextVersionId,
+  isSignalPrototype, isProxySignalCandidate, prototypeFromFinding, DATA_COLLECTION_REQUIRED, PROXY_INVALID_FOR_SIGNAL_VALIDATION,
 } from './learning-method.js';
 
-const EDITABLE = ['DRAFT', 'PENDING_REVIEW', 'NEEDS_MORE_RESEARCH'];
+const EDITABLE = ['DRAFT', DATA_COLLECTION_REQUIRED, 'PENDING_REVIEW', 'NEEDS_MORE_RESEARCH'];
 function parseJson(raw, fallback) { if (typeof raw !== 'string') return fallback; try { return JSON.parse(raw); } catch (_e) { return fallback; } }
 function clean(v, max) { return typeof v === 'string' ? v.trim().slice(0, max) : ''; }
 
@@ -42,12 +43,15 @@ export async function listVersions(env) {
 }
 
 function candidateView(r) {
+  const adjustment = parseJson(r.adjustment_json, null);
   return {
     candidate_id: r.candidate_id, created_ts: r.created_ts, updated_ts: r.updated_ts, event_id: r.event_id, request_id: r.request_id,
     response_id: r.response_id, candidate_type: r.candidate_type, title: r.title, reason: r.reason, expected_effect: r.expected_effect,
     confidence: r.confidence, evidence: parseJson(r.evidence_json, []), status: r.status, base_version_id: r.base_version_id,
-    adjustment: parseJson(r.adjustment_json, null), analysis: parseJson(r.analysis_json, null), decision: r.decision,
+    adjustment, analysis: parseJson(r.analysis_json, null), decision: r.decision,
     decided_ts: r.decided_ts, decided_by: r.decided_by, decision_note: r.decision_note, produced_version_id: r.produced_version_id,
+    // Read-time label only: stored rows are never rewritten to carry it.
+    signal_validity: isProxySignalCandidate(r.candidate_type, adjustment) ? PROXY_INVALID_FOR_SIGNAL_VALIDATION : null,
   };
 }
 
@@ -77,7 +81,11 @@ async function analyse(env, candidate, baseVersion) {
   const recalc = recalculate(baseVersion.config, candidate.adjustment, contexts, { eventTs });
   const validation = validateRecalculation(recalc, btc, { eventTs });
   const { all_points, proposed_config, ...recalcView } = recalc;
-  return { event_ts: eventTs, recalculation: recalcView, validation: { ...validation, status_text: VALIDATION_TEXT[validation.status] }, proposed_config };
+  const proxy = isProxySignalCandidate(candidate.candidate_type, candidate.adjustment);
+  return {
+    event_ts: eventTs, recalculation: recalcView, proposed_config,
+    validation: { ...validation, status_text: VALIDATION_TEXT[validation.status], ...(proxy ? { signal_validity: PROXY_INVALID_FOR_SIGNAL_VALIDATION } : {}) },
+  };
 }
 
 function analysisSummary(a) {
@@ -87,7 +95,21 @@ function analysisSummary(a) {
     recalculation_possible: r.possible, availability: r.availability.status, adjustment_text: r.adjustment_text,
     event: r.event, mean_abs_delta: r.summary ? r.summary.mean_abs_delta : null, observations: r.observations,
     validation_status: a.validation.status, validation_headline: a.validation.headline,
+    ...(a.validation.signal_validity ? { signal_validity: a.validation.signal_validity } : {}),
   };
+}
+
+// The stored analysis summary is a snapshot. A snapshot that a refresh would change (new adjustment, or new data) moves
+// to `history` instead of being overwritten, so a result already shown (e.g. a proxy validation) stays auditable.
+function withHistory(summary, prevAnalysisJson, prevAdjustmentJson, now) {
+  const prev = parseJson(prevAnalysisJson, null);
+  const history = prev && Array.isArray(prev.history) ? prev.history.slice(-19) : [];
+  if (prev) {
+    const { history: _h, ...snapshot } = prev;
+    if (JSON.stringify(snapshot) !== JSON.stringify(summary || null)) history.push({ ...snapshot, adjustment: parseJson(prevAdjustmentJson, null), superseded_ts: now });
+  }
+  if (!summary && !history.length) return null;
+  return { ...(summary || {}), ...(history.length ? { history } : {}) };
 }
 
 export async function getCandidate(env, candidateId) {
@@ -104,6 +126,10 @@ export async function getCandidate(env, candidateId) {
     finding: finding ? { provider: finding.provider, registered_ts: finding.registered_ts, ...parseJson(finding.findings_json, {}) } : null,
     recalculation: a.recalculation, validation: a.validation, produced_version: produced,
     proposed_sources: a.proposed_config ? a.proposed_config.sources : null, proposed_signals: a.proposed_config ? a.proposed_config.signals : null,
+    signal_validity: c.signal_validity,
+    // What the finding becomes as a new-signal prototype; the human may switch a proxy candidate to it (an explicit edit).
+    prototype_suggestion: c.signal_validity && finding ? prototypeFromFinding(parseJson(finding.findings_json, {}), base.config) : null,
+    analysis_history: c.analysis && Array.isArray(c.analysis.history) ? c.analysis.history : [],
   };
 }
 
@@ -126,19 +152,20 @@ export async function createCandidate(env, { eventId, providedToken, now = Date.
   const res = await env.DB.prepare(
     `INSERT INTO learning_candidates (created_ts, updated_ts, event_id, request_id, response_id, candidate_type, title, reason,
        expected_effect, confidence, evidence_json, status, base_version_id, adjustment_json)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'DRAFT', ?, ?)`
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
   ).bind(now, now, eventId, resp.request_id, resp.response_id, d.candidate_type, d.title, d.reason || '(no explanation)', d.expected_effect,
-    d.confidence, JSON.stringify(d.evidence), BASELINE_VERSION_ID, norm.ok ? JSON.stringify(norm.adjustment) : null).run();
+    d.confidence, JSON.stringify(d.evidence), isSignalPrototype(d.adjustment) ? DATA_COLLECTION_REQUIRED : 'DRAFT', BASELINE_VERSION_ID,
+    norm.ok ? JSON.stringify(norm.adjustment) : null).run();
   const created = await env.DB.prepare('SELECT candidate_id FROM learning_candidates WHERE response_id = ?').bind(resp.response_id).first();
   await refreshAnalysis(env, created.candidate_id);
   return { ok: true, status: 200, candidate_id: created.candidate_id, created: true, inserted: res && res.meta ? res.meta.changes : null };
 }
 
-async function refreshAnalysis(env, candidateId) {
+async function refreshAnalysis(env, candidateId, { prevAnalysisJson = null, prevAdjustmentJson = null, now = Date.now() } = {}) {
   const row = await env.DB.prepare('SELECT * FROM learning_candidates WHERE candidate_id = ?').bind(candidateId).first();
   const c = candidateView(row);
   const base = await getVersion(env, c.base_version_id);
-  const summary = analysisSummary(await analyse(env, c, base));
+  const summary = withHistory(analysisSummary(await analyse(env, c, base)), prevAnalysisJson, prevAdjustmentJson, now);
   await env.DB.prepare('UPDATE learning_candidates SET analysis_json = ? WHERE candidate_id = ?').bind(summary ? JSON.stringify(summary) : null, candidateId).run();
   return summary;
 }
@@ -161,13 +188,14 @@ export async function updateCandidate(env, { candidateId, fields, adjustment, su
     adjJson = JSON.stringify(norm.adjustment);
   }
   if (submit && !adjJson) return { ok: false, status: 400, error: 'Define the V1 adjustment before submitting for review.' };
-  const status = submit ? 'PENDING_REVIEW' : (row.status === 'NEEDS_MORE_RESEARCH' ? 'NEEDS_MORE_RESEARCH' : 'DRAFT');
+  const status = submit ? 'PENDING_REVIEW' : row.status === 'NEEDS_MORE_RESEARCH' ? 'NEEDS_MORE_RESEARCH'
+    : isSignalPrototype(parseJson(adjJson, null)) ? DATA_COLLECTION_REQUIRED : 'DRAFT';
   await env.DB.prepare(
     `UPDATE learning_candidates SET updated_ts = ?, candidate_type = ?, title = ?, reason = ?, expected_effect = ?, confidence = ?,
        adjustment_json = ?, status = ? WHERE candidate_id = ?`
   ).bind(now, type, clean(f.title, 140) || row.title, clean(f.reason, 2000) || row.reason, f.expected_effect !== undefined ? clean(f.expected_effect, 500) : row.expected_effect,
     ['LOW', 'MEDIUM', 'HIGH'].includes(f.confidence) ? f.confidence : row.confidence, adjJson, status, candidateId).run();
-  const summary = await refreshAnalysis(env, candidateId);
+  const summary = await refreshAnalysis(env, candidateId, { prevAnalysisJson: row.analysis_json, prevAdjustmentJson: row.adjustment_json, now });
   return { ok: true, status: 200, candidate_status: status, analysis: summary };
 }
 
@@ -183,6 +211,15 @@ export async function decideCandidate(env, { candidateId, decision, approver, no
   if (!row) return { ok: false, status: 404, error: 'candidate_not_found' };
   if (row.status !== 'PENDING_REVIEW') return { ok: false, status: 409, error: `Only a candidate submitted for review can be decided (this one is ${row.status}).` };
   const c = candidateView(row);
+  if (decision === 'APPROVE' && c.signal_validity) {
+    return { ok: false, status: 409, error: 'This candidate tests a proxy (an existing V1 source), not the researched new signal. Switch it to a signal prototype, or reject it.', signal_validity: c.signal_validity };
+  }
+  if (decision === 'APPROVE' && isSignalPrototype(c.adjustment)) {
+    // Approves the data-collection plan only: no methodology version, no source activated, V1 unchanged.
+    await env.DB.prepare('UPDATE learning_candidates SET status = ?, decision = ?, decided_ts = ?, decided_by = ?, decision_note = ?, updated_ts = ? WHERE candidate_id = ?')
+      .bind('DATA_COLLECTION_APPROVED', 'APPROVE_DATA_COLLECTION', now, who, clean(note, 1000), now, candidateId).run();
+    return { ok: true, status: 200, candidate_status: 'DATA_COLLECTION_APPROVED', version_id: null };
+  }
   if (decision !== 'APPROVE') {
     await env.DB.prepare('UPDATE learning_candidates SET status = ?, decision = ?, decided_ts = ?, decided_by = ?, decision_note = ?, updated_ts = ? WHERE candidate_id = ?')
       .bind(decision === 'REJECT' ? 'REJECTED' : 'NEEDS_MORE_RESEARCH', decision, now, who, clean(note, 1000), now, candidateId).run();
@@ -207,7 +244,7 @@ export async function decideCandidate(env, { candidateId, decision, approver, no
      VALUES (?, ?, ?, ?, ?, ?, ?, 'APPROVED', ?, ?, NULL, ?)`
   ).bind(versionId, base.version_id, FORMULA_ID, JSON.stringify(config), now, `${c.title}: ${a.recalculation.adjustment_text}`, candidateId, who, now, JSON.stringify(validation)).run();
   await env.DB.prepare('UPDATE learning_candidates SET status = ?, decision = ?, decided_ts = ?, decided_by = ?, decision_note = ?, produced_version_id = ?, updated_ts = ?, analysis_json = ? WHERE candidate_id = ?')
-    .bind('ACCEPTED', 'APPROVE', now, who, clean(note, 1000), versionId, now, JSON.stringify(analysisSummary(a)), candidateId).run();
+    .bind('ACCEPTED', 'APPROVE', now, who, clean(note, 1000), versionId, now, JSON.stringify(withHistory(analysisSummary(a), row.analysis_json, row.adjustment_json, now)), candidateId).run();
   return { ok: true, status: 200, candidate_status: 'ACCEPTED', version_id: versionId };
 }
 

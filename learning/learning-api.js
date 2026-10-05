@@ -164,7 +164,7 @@ export async function getLearningMarket(env, { limit = 15 } = {}) {
     };
   });
   // Focus: an event already in the loop (newest open candidate or confirmed finding), else the newest unexplained one.
-  const inLoop = (e) => (e.candidate && !['ACCEPTED', 'REJECTED'].includes(e.candidate.status)) || (e.case && e.case.finding && !e.candidate);
+  const inLoop = (e) => (e.candidate && !['ACCEPTED', 'DATA_COLLECTION_APPROVED', 'REJECTED'].includes(e.candidate.status)) || (e.case && e.case.finding && !e.candidate);
   const needsResearch = (e) => (e.verdict === 'NOT_EXPLAINED' || e.verdict === 'PARTIALLY_EXPLAINED') && !(e.case && e.case.finding);
   const focus = out.find(inLoop) || out.find(needsResearch) || out[0];
   return {

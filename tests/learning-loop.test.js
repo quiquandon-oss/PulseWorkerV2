@@ -348,7 +348,7 @@ describe('Learning API + routes (real worker.js fetch, real SQLite)', () => {
 // ---------------- Slices 2-6: candidate -> adjustment -> recalculation -> validation -> decision -> version ----------------
 import {
   baselineConfig, applyAdjustment, normalizeAdjustment, scoreWithConfig, dataAvailability, recalculate, buildContexts,
-  validateRecalculation, candidateFromFinding, nextVersionId,
+  validateRecalculation, candidateFromFinding, nextVersionId, describeAdjustment,
 } from '../learning/learning-method.js';
 
 describe('methodology: adjustments and scoring', () => {
@@ -406,7 +406,10 @@ describe('methodology: adjustments and scoring', () => {
   it('maps findings to candidate types and adjustments', () => {
     expect(candidateFromFinding(parseAiResearchResponse(GOOD_ANSWER).finding)).toMatchObject({ candidate_type: 'NEW_SOURCE', adjustment: { type: 'ADD_SOURCE', group: 'DERIVATIVES', weight: 5, confidence: 0.4 } });
     expect(candidateFromFinding({ finding_type: 'EXISTING_SOURCE_MISREAD', covered_by_existing_v1_source: 'etfflows' })).toMatchObject({ candidate_type: 'SOURCE_WEIGHT_ADJUSTMENT', adjustment: { type: 'CHANGE_WEIGHT', source_id: 'etfflows' } });
-    expect(candidateFromFinding({ finding_type: 'NEW_SIGNAL', covered_by_existing_v1_source: 'funding', proposed_signal: 'funding momentum' }).adjustment).toMatchObject({ type: 'ADD_SIGNAL', derived_from: 'funding' });
+    // A new signal is never mapped onto the existing source the research mentioned (see the Event #15 regression below).
+    const sig = candidateFromFinding({ finding_type: 'NEW_SIGNAL', covered_by_existing_v1_source: 'funding', proposed_signal: 'funding momentum' }).adjustment;
+    expect(sig).toMatchObject({ type: 'SIGNAL_PROTOTYPE', related_v1_sources: ['funding'] });
+    expect(sig).not.toHaveProperty('derived_from');
   });
   it('versions increment from the highest existing v1.N', () => {
     expect(nextVersionId(['v1.0'])).toBe('v1.1');
@@ -696,7 +699,10 @@ describe('staging walkthrough job guard (.github/workflows/test.yml)', () => {
     expect(job).toContain("if: github.event_name == 'workflow_dispatch' && inputs.job == 'staging-session-walkthrough'");
     expect([...job.matchAll(/secrets\.([A-Z0-9_]+)/g)].map((m) => m[1])).toEqual(['STAGE7_STAGING_ADMIN_TOKEN']);
     expect(job).not.toMatch(/wrangler|CLOUDFLARE_API_TOKEN|d1 /);
-    expect(script).toContain("const BASE = 'https://pulseworker-v2-staging.quiquandon.workers.dev';");
+    expect(script).toContain("const STAGING = 'https://pulseworker-v2-staging.quiquandon.workers.dev';");
+    // the only other target is a loopback worker.fetch server, for running the same walk locally
+    expect(script).toContain("const LOCAL = /^http:\\/\\/(localhost|127\\.0\\.0\\.1):\\d+$/.test(process.env.LOCAL_BASE || '') ? process.env.LOCAL_BASE : null;");
+    expect(script).toContain('const BASE = LOCAL || STAGING;');
     expect(script).not.toMatch(/pulseworker-v2\.quiquandon|sentiment-ff75|console\.log\([^)]*TOKEN/);
   });
 });
@@ -723,5 +729,174 @@ describe('production session smoke job guard', () => {
     const k = await worker.fetch(new Request('https://w.test/api/learning/candidates', { method: 'POST', headers: h, body: JSON.stringify({ event_id: 999999999 }) }), ctx.env, { waitUntil() {} });
     expect([f.status, k.status]).toEqual([404, 409]);
     expect(counts(ctx.db)).toEqual(before);
+  });
+});
+
+// ---------------- Regression: NEW_SIGNAL -> signal prototype, data collection first (production Event #15) ----------------
+// Event #15's confirmed finding (production D1, read-only) proposed a reusable "Risk Regime Shock" regime modifier. The
+// first candidate built from it was "the 24h change of Macro economy news, weight 5, confidence 0.4" -- a proxy whose
+// validation (45.2% vs 46.5%, Not supported) said nothing about the researched signal.
+const EVENT15_ANSWER = '```json\n' + JSON.stringify({
+  explanation: 'The BTC decline was most likely driven by a cross-asset risk-off shock surrounding the U.S.-Iran conflict and uncertainty over reopening the Strait of Hormuz, which pushed oil and Treasury yields higher and reduced risk appetite.',
+  primary_driver: 'U.S.-Iran/Hormuz risk-off shock', driver_category: 'MACRO', finding_type: 'NEW_SIGNAL', covered_by_existing_v1_source: 'macrogeo',
+  proposed_new_source: { name: 'CoinGlass + cross-asset macro/event feed', url: 'https://open-api-v4.coinglass.com/api/futures/liquidation/history', what_it_measures: 'A regime-aware shock signal combining geopolitical event intensity with oil, Treasury-yield, equity and crypto-leverage/liquidation changes.', update_frequency: 'Intraday; CoinGlass liquidation data supports high-frequency updates.', free_or_paid: 'Mixed' },
+  proposed_signal: 'Create a 0-100 Risk Regime Shock score from standardized changes in geopolitical event severity, Brent/WTI, Treasury yields, equity futures, USD/rate expectations and crypto liquidation intensity. Scores near 0 represent risk-on conditions and scores near 100 represent acute risk-off conditions. Apply the signal as a regime modifier rather than simply adding another independent headline-sentiment weight.',
+  trend: 'The underlying Iran/Hormuz geopolitical and oil-supply regime was ongoing. The appropriate learned pattern is an ongoing regime condition rather than an Iran-specific one-off rule.',
+  evidence: [{ claim: 'Bitcoin was falling as Treasury yields surged and there was little progress toward a U.S.-Iran peace deal.', url: 'https://ca.investing.com/news/cryptocurrency-news/bitcoin-falls-to-83k-amid-pressure-from-high-yields-iran-tensions-4855135', publisher: 'Investing.com', date: '2026-09-28' }],
+  inference: ['A regime-aware shock signal should therefore be tested before changing individual V1 source weights.'],
+  confidence: 'HIGH', sentiment_assessment: 'NEGATIVE',
+}) + '\n```';
+
+describe('NEW_SIGNAL -> signal prototype, data collection first (Event #15 regression)', () => {
+  const finding = parseAiResearchResponse(EVENT15_ANSWER).finding;
+  const v1Tables = ['history', 'btc_data', 'research_events', 'research_event_evidence', 'research_sentiment_archive', 'stage7_event_sentiment'];
+  async function setup() {
+    const ctx = makeEnv();
+    const before = counts(ctx.db);
+    expect((await call(ctx.env, '/api/learning/findings', { method: 'POST', body: { event_id: 15, provider: 'chatgpt', finding }, token: ctx.token })).status).toBe(200);
+    const created = await call(ctx.env, '/api/learning/candidates', { method: 'POST', body: { event_id: 15 }, token: ctx.token });
+    expect(created.json).toMatchObject({ ok: true, created: true });
+    return { ctx, before, id: created.json.candidate_id };
+  }
+
+  it('1-3: maps to a prototype of the reusable signal, not to Macro economy news, with no invented weight or confidence', () => {
+    const d = candidateFromFinding(finding);
+    expect(d.candidate_type).toBe('NEW_SIGNAL');
+    expect(d.title).toBe('Risk Regime Shock');
+    const a = normalizeAdjustment(d.adjustment).adjustment;
+    expect(a).toMatchObject({ type: 'SIGNAL_PROTOTYPE', signal_name: 'Risk Regime Shock', signal_id: 'risk_regime_shock', role: 'REGIME_MODIFIER', discovery_example: 'U.S.-Iran/Hormuz risk-off shock' });
+    expect(a.inputs).toEqual(['geopolitical event severity', 'Brent/WTI', 'Treasury yields', 'equity futures', 'USD/rate expectations', 'crypto liquidation intensity']);
+    // the event is the discovery example, not the signal's definition
+    expect(a.signal_name).not.toMatch(/Iran|Hormuz/);
+    // 1: no mapping onto an existing V1 source
+    expect(a).not.toHaveProperty('derived_from');
+    expect(a).not.toHaveProperty('source_id');
+    expect(a.related_v1_sources).toEqual(['macrogeo']); // informational only
+    // 2-3: no weight, no confidence -- not 5, not 0.4, not anything
+    expect(a).not.toHaveProperty('weight');
+    expect(a).not.toHaveProperty('confidence');
+    expect(JSON.stringify(a)).not.toMatch(/"weight"|"confidence"/);
+    expect(describeAdjustment(a)).not.toMatch(/Macro economy news|weight 5|confidence 0\.4/);
+    expect(a.prototype_definition).toMatch(/regime modifier/);
+    expect(a.data_sources[0]).toMatch(/^CoinGlass/);
+    expect(a.collection_frequency).toMatch(/Intraday/);
+    expect(a.backfill_requirement).toMatch(/none are estimated or invented/);
+    expect(a.validation_plan).toMatch(/EXP-005 outcome rule/);
+    // explicit fields from the AI win over the text heuristics
+    const explicit = candidateFromFinding({ ...finding, proposed_signal_name: 'Cross-asset stress', proposed_signal_role: 'CONFIRMATION_FILTER', required_inputs: ['VIX'] }).adjustment;
+    expect(explicit).toMatchObject({ signal_name: 'Cross-asset stress', role: 'CONFIRMATION_FILTER', inputs: ['VIX'] });
+  });
+
+  it('5-6: produces no Proposed V1 and a DATA_REQUIRED validation; never applied to the V1 configuration', () => {
+    const a = normalizeAdjustment(candidateFromFinding(finding).adjustment).adjustment;
+    const obs = [{ ts: 0, stored: 56, readings: { ...ALL_NEUTRAL, macrogeo: 20 } }, { ts: 24 * H, stored: 57, readings: { ...ALL_NEUTRAL, macrogeo: 40 } }];
+    const r = recalculate(baselineConfig(), a, buildContexts(obs, []), { eventTs: 24 * H });
+    expect(r).toMatchObject({ possible: false, event: null, summary: null, series: [], proposed_config: null, observations: 0 });
+    expect(r.availability).toMatchObject({ status: 'DATA_COLLECTION_REQUIRED', observations_with_data: 0, message: 'Historical observations for the proposed signal do not exist.' });
+    expect(r).not.toHaveProperty('all_points');
+    const v = validateRecalculation(r, [{ ts: 0, btc_price: 1 }, { ts: 24 * H, btc_price: 2 }]);
+    expect(v.status).toBe('DATA_REQUIRED');
+    expect(v.headline).toMatch(/cannot validate this signal yet because V1 does not currently collect the required inputs/);
+    expect(v).not.toHaveProperty('current_v1');
+    expect(v).not.toHaveProperty('adjusted_v1');
+    expect(() => applyAdjustment(baselineConfig(), a)).toThrow(/cannot change V1/);
+    expect(normalizeAdjustment({ type: 'SIGNAL_PROTOTYPE', signal_name: '', inputs: [] }).errors).toEqual(['Name the new signal.', 'List at least one input the signal needs.']);
+  });
+
+  it('4, 8-10: Research -> Learning creates a DATA_COLLECTION_REQUIRED candidate; approval stays human and creates no V1 version', async () => {
+    const { ctx, before, id } = await setup();
+    let view = (await call(ctx.env, `/api/learning/candidate?id=${id}`)).json;
+    expect(view.candidate).toMatchObject({ status: 'DATA_COLLECTION_REQUIRED', candidate_type: 'NEW_SIGNAL', title: 'Risk Regime Shock', confidence: 'HIGH', signal_validity: null });
+    expect(view.candidate.adjustment.type).toBe('SIGNAL_PROTOTYPE');
+    expect(view.recalculation).toMatchObject({ possible: false, event: null, summary: null });
+    expect(view.validation.status).toBe('DATA_REQUIRED');
+    expect(view.proposed_sources).toBeNull();
+    expect(view.proposed_signals).toBeNull();
+    const row = ctx.db.prepare('SELECT * FROM learning_candidates WHERE candidate_id = ?').get(id);
+    expect(row.adjustment_json).not.toMatch(/"weight"|"confidence"|macrogeo"?,"transform/);
+    expect(JSON.parse(row.analysis_json)).toMatchObject({ recalculation_possible: false, availability: 'DATA_COLLECTION_REQUIRED', event: null, validation_status: 'DATA_REQUIRED' });
+    let journey = (await call(ctx.env, '/api/learning/market')).json.events.find((e) => e.event_id === 15).journey;
+    expect(journey.map((s) => [s.key, s.state, s.text])).toEqual([
+      ['MARKET', 'DONE', 'Event understood'], ['RESEARCH', 'DONE', 'Finding confirmed'],
+      ['LEARNING', 'DONE', `Candidate #${id} created: new signal identified`], ['IMPACT', 'WARN', 'Not calculable yet: historical data required'],
+      ['VALIDATION', 'WARN', 'Not supported yet: data required'], ['APPROVAL', 'LOCKED', 'Submit the data-collection plan for review first'],
+    ]);
+    // Editing keeps the status; deciding before a human submits is refused.
+    const edited = await call(ctx.env, '/api/learning/candidate/update', { method: 'POST', token: ctx.token, body: { candidate_id: id, adjustment: { ...view.candidate.adjustment, inputs: ['VIX', 'Brent/WTI'] } } });
+    expect(edited.json).toMatchObject({ ok: true, candidate_status: 'DATA_COLLECTION_REQUIRED' });
+    expect((await call(ctx.env, '/api/learning/candidate/decide', { method: 'POST', token: ctx.token, body: { candidate_id: id, decision: 'APPROVE', approver: 'O' } })).status).toBe(409);
+    // 9: writes need the human's authorization
+    expect((await call(ctx.env, '/api/learning/candidate/update', { method: 'POST', body: { candidate_id: id, submit: true } })).status).toBe(401);
+    expect((await call(ctx.env, '/api/learning/candidate/update', { method: 'POST', token: ctx.token, body: { candidate_id: id, submit: true } })).json.candidate_status).toBe('PENDING_REVIEW');
+    expect((await call(ctx.env, '/api/learning/candidate/decide', { method: 'POST', body: { candidate_id: id, decision: 'APPROVE', approver: 'O' } })).status).toBe(401);
+    expect((await call(ctx.env, '/api/learning/candidate/decide', { method: 'POST', token: ctx.token, body: { candidate_id: id, decision: 'APPROVE' } })).status).toBe(400);
+    const ok = await call(ctx.env, '/api/learning/candidate/decide', { method: 'POST', token: ctx.token, body: { candidate_id: id, decision: 'APPROVE', approver: 'Olivier', note: 'collect inputs' } });
+    expect(ok.json).toMatchObject({ ok: true, candidate_status: 'DATA_COLLECTION_APPROVED', version_id: null });
+    view = (await call(ctx.env, `/api/learning/candidate?id=${id}`)).json;
+    expect(view.candidate).toMatchObject({ status: 'DATA_COLLECTION_APPROVED', decision: 'APPROVE_DATA_COLLECTION', decided_by: 'Olivier', produced_version_id: null });
+    journey = (await call(ctx.env, '/api/learning/market')).json.events.find((e) => e.event_id === 15).journey;
+    expect(journey.find((s) => s.key === 'APPROVAL')).toMatchObject({ state: 'DONE', text: 'Data-collection plan approved (V1 unchanged)' });
+    expect((await call(ctx.env, '/api/learning/candidate/update', { method: 'POST', token: ctx.token, body: { candidate_id: id, fields: { title: 'x' } } })).status).toBe(409);
+    // 10: no methodology version, V1 data and the active baseline untouched
+    const after = counts(ctx.db);
+    expect(after.v1_methodology_versions).toBe(0);
+    for (const t of v1Tables) expect(after[t]).toBe(before[t]);
+    expect(baselineConfig()).toEqual(baselineConfig());
+    expect(baselineConfig().signals).toEqual([]);
+    expect((await call(ctx.env, '/api/learning/versions')).json.versions.map((v) => [v.version_id, v.status])).toEqual([['v1.0', 'BASELINE']]);
+  });
+
+  it('7: existing-source adjustments on the same candidate still recalculate and validate', async () => {
+    const { ctx, id } = await setup();
+    const upd = await call(ctx.env, '/api/learning/candidate/update', { method: 'POST', token: ctx.token, body: { candidate_id: id, fields: { candidate_type: 'SOURCE_WEIGHT_ADJUSTMENT' }, adjustment: { type: 'CHANGE_WEIGHT', source_id: 'etfflows', weight: 0, confidence: 0.8 } } });
+    expect(upd.json).toMatchObject({ ok: true, candidate_status: 'DRAFT' });
+    const view = (await call(ctx.env, `/api/learning/candidate?id=${id}`)).json;
+    expect(view.recalculation.possible).toBe(true);
+    expect(view.recalculation.event).toMatchObject({ stored: 66, reconstructed: 70, proposed: 70, delta: 0 });
+    expect(['VALIDATING', 'INCONCLUSIVE', 'NOT_ENOUGH_DATA', 'SUPPORTED', 'NOT_SUPPORTED']).toContain(view.validation.status);
+    // the prototype's earlier analysis is kept, not overwritten
+    expect(view.analysis_history).toHaveLength(1);
+    expect(view.analysis_history[0]).toMatchObject({ availability: 'DATA_COLLECTION_REQUIRED', adjustment: { type: 'SIGNAL_PROTOTYPE' } });
+  });
+
+  it('legacy proxy candidate (the stored Candidate #1 shape): labelled invalid for signal validation, cannot be approved, switchable with its result kept', async () => {
+    const ctx = makeEnv();
+    await call(ctx.env, '/api/learning/findings', { method: 'POST', body: { event_id: 15, provider: 'chatgpt', finding }, token: ctx.token });
+    const resp = ctx.db.prepare('SELECT request_id, response_id FROM stage7_research_responses').get();
+    const legacyAdj = { type: 'ADD_SIGNAL', signal_id: 'create_a_0_100_risk_regime_shock_score_f', label: 'U.S.-Iran/Hormuz risk-off shock', derived_from: 'macrogeo', transform: 'momentum_24h', group: 'MACRO', weight: 5, confidence: 0.4, description: 'Create a 0-100 Risk Regime Shock score' };
+    const legacyAnalysis = { recalculation_possible: true, availability: 'HISTORY_AVAILABLE', adjustment_text: 'Add signal "U.S.-Iran/Hormuz risk-off shock": the 24h change of "Macro economy news", weight 5, confidence 0.4.', event: { stored: 56, reconstructed: 57, proposed: 56, delta: -1 }, validation_status: 'NOT_SUPPORTED' };
+    ctx.db.prepare(`INSERT INTO learning_candidates (created_ts, updated_ts, event_id, request_id, response_id, candidate_type, title, reason, expected_effect, confidence, evidence_json, status, base_version_id, adjustment_json, analysis_json)
+      VALUES (1, 1, 15, ?, ?, 'NEW_SIGNAL', 'U.S.-Iran/Hormuz risk-off shock', 'r', 'e', 'HIGH', '[]', 'DRAFT', 'v1.0', ?, ?)`).run(resp.request_id, resp.response_id, JSON.stringify(legacyAdj), JSON.stringify(legacyAnalysis));
+    const id = ctx.db.prepare('SELECT candidate_id FROM learning_candidates').get().candidate_id;
+    let view = (await call(ctx.env, `/api/learning/candidate?id=${id}`)).json;
+    expect(view.signal_validity).toBe('PROXY_INVALID_FOR_SIGNAL_VALIDATION');
+    expect(view.validation.signal_validity).toBe('PROXY_INVALID_FOR_SIGNAL_VALIDATION');
+    expect(view.prototype_suggestion).toMatchObject({ type: 'SIGNAL_PROTOTYPE', signal_name: 'Risk Regime Shock' });
+    let journey = (await call(ctx.env, '/api/learning/market')).json.events.find((e) => e.event_id === 15).journey;
+    expect(journey.find((s) => s.key === 'VALIDATION')).toMatchObject({ state: 'WARN', text: 'Proxy result: not a validation of the new signal' });
+    // reading never rewrites the stored row
+    expect(ctx.db.prepare('SELECT adjustment_json, analysis_json, status FROM learning_candidates').get()).toEqual({ adjustment_json: JSON.stringify(legacyAdj), analysis_json: JSON.stringify(legacyAnalysis), status: 'DRAFT' });
+    await call(ctx.env, '/api/learning/candidate/update', { method: 'POST', token: ctx.token, body: { candidate_id: id, submit: true } });
+    const denied = await call(ctx.env, '/api/learning/candidate/decide', { method: 'POST', token: ctx.token, body: { candidate_id: id, decision: 'APPROVE', approver: 'O', acknowledge_unsupported: true } });
+    expect(denied.status).toBe(409);
+    expect(denied.json.signal_validity).toBe('PROXY_INVALID_FOR_SIGNAL_VALIDATION');
+    expect(ctx.db.prepare('SELECT COUNT(*) AS n FROM v1_methodology_versions').get().n).toBe(0);
+    // the human switches it to the prototype; the proxy result moves to history
+    const sw = await call(ctx.env, '/api/learning/candidate/update', { method: 'POST', token: ctx.token, body: { candidate_id: id, adjustment: view.prototype_suggestion, fields: { title: 'Risk Regime Shock' } } });
+    expect(sw.json).toMatchObject({ ok: true, candidate_status: 'DATA_COLLECTION_REQUIRED' });
+    view = (await call(ctx.env, `/api/learning/candidate?id=${id}`)).json;
+    expect(view.signal_validity).toBeNull();
+    expect(view.validation.status).toBe('DATA_REQUIRED');
+    // the persisted proxy result (as stored in production) is kept verbatim; later recomputations are kept too
+    expect(view.analysis_history[0]).toMatchObject({ ...legacyAnalysis, adjustment: legacyAdj });
+    expect(view.analysis_history.every((h) => h.adjustment.type === 'ADD_SIGNAL' && h.superseded_ts)).toBe(true);
+    journey = (await call(ctx.env, '/api/learning/market')).json.events.find((e) => e.event_id === 15).journey;
+    expect(journey.find((s) => s.key === 'IMPACT').text).toBe('Not calculable yet: historical data required');
+  });
+
+  it('the parser keeps the new optional signal fields and the research pack asks for them', () => {
+    const p = parseAiResearchResponse('```json\n{"explanation":"x","finding_type":"NEW_SIGNAL","proposed_signal_name":"Risk Regime Shock","proposed_signal_role":"regime modifier","required_inputs":["Brent/WTI",""]}\n```').finding;
+    expect(p).toMatchObject({ proposed_signal_name: 'Risk Regime Shock', proposed_signal_role: 'REGIME_MODIFIER', required_inputs: ['Brent/WTI'] });
+    expect(parseAiResearchResponse('```json\n{"explanation":"x","proposed_signal_role":"weight 5"}\n```').finding.proposed_signal_role).toBe('');
   });
 });

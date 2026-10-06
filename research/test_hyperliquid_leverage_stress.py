@@ -213,3 +213,26 @@ def test_runner_ok_path_end_to_end_with_fixture_api(tmp_path, monkeypatch):
     assert run.main(args) == 0 and len(calls) == n
     b = json.loads(out.read_text())
     assert {k: v for k, v in b.items() if k not in ("previous_runs", "data")} == {k: v for k, v in a.items() if k not in ("previous_runs", "data")}
+
+
+def test_event_timing_ignores_episode_that_cleared_before_boundary(monkeypatch):
+    """FIXTURE flags: an early 3h episode that clears before the pre-event boundary, then one starting after it.
+    The early episode could not have warned the first failed prediction, so the flag is not PRE-EVENT."""
+    e = run.EVENT15["event_ts_ms"]
+    early = range(e - 31 * run.HOUR, e - 28 * run.HOUR, run.HOUR)
+
+    def fake_features(candles, funding, t):
+        on = any(abs(t - x) < run.HOUR / 2 for x in early) or t >= e - run.HOUR
+        return {"status": "OK", "t": str(t), "flag": on}
+
+    monkeypatch.setattr(run.h, "features_at", fake_features)
+    monkeypatch.setattr(run.h, "abnormal_flags", lambda f: {"F_premium_low": f["flag"]})
+    t = run.analyse_event([], [])["flag_timing"]["F_premium_low"]
+    assert t["active_at_pre_boundary"] is False
+    assert t["classification"] == "CONTEMPORANEOUS"
+    assert [ep["class"] for ep in t["episodes"]] == ["PRE-EVENT", "CONTEMPORANEOUS"]
+    assert t["episodes"][0]["hours"] == 3
+
+    monkeypatch.setattr(run.h, "abnormal_flags", lambda f: {"F_premium_low": True})   # on throughout
+    t = run.analyse_event([], [])["flag_timing"]["F_premium_low"]
+    assert t["active_at_pre_boundary"] is True and t["classification"] == "PRE-EVENT"

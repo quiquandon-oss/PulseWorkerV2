@@ -1,7 +1,22 @@
 {
   "artifact": "hyperliquid-leverage-stress-research",
   "data": {
-    "requests": {}
+    "candle_range": [
+      1787043600000,
+      1791273599999
+    ],
+    "candles_1h": 1175,
+    "funding_range": [
+      1787047200049,
+      1791270000032
+    ],
+    "funding_records": 1174,
+    "requests": {
+      "candleSnapshot_CACHED": 2,
+      "fundingHistory_CACHED": 4,
+      "fundingHistory_page_max_rows": 500,
+      "metaAndAssetCtxs_CACHED": 1
+    }
   },
   "dimensions_expected": {
     "A_oi_level": {
@@ -60,19 +75,1079 @@
       "history": "No aggregate liquidation request is known in the Info API; per-user fill data is not a market measure."
     }
   },
-  "error": "POST https://api.hyperliquid.xyz/info metaAndAssetCtxs failed after 3 attempts: <urlopen error Tunnel connection failed: 403 Forbidden>",
   "event": {
     "event_id": 15,
     "event_ts_ms": 1790564484213,
     "label": "BTC 84,429 -> 83,480 (-1.1%) in the 24 h to 2026-09-28 03:01 UTC; V1 predicted UP"
   },
+  "event15": {
+    "at_event": {
+      "D2_premium": -0.0005522643,
+      "D_funding": -6.533e-06,
+      "E_funding_change_8h": -1.9033e-05,
+      "E_premium_change_8h": -0.00021752369999999998,
+      "F_funding_pctile_7d": 0.6,
+      "F_premium_pctile_7d": 0.6,
+      "G_ret_1h": -0.33950580387562823,
+      "G_ret_24h": -1.2566920926706748,
+      "G_ret_6h": -1.3443309704980866,
+      "G_ret_6h_pctile_7d": 5.39,
+      "H_volume_6h_vs_7d_median": 1.1319,
+      "flags": {
+        "F_funding_high": false,
+        "F_funding_low": true,
+        "F_premium_high": false,
+        "F_premium_low": true,
+        "G_ret_6h_high": false,
+        "G_ret_6h_low": false,
+        "H_volume_high": false
+      },
+      "funding_at_floor": false,
+      "funding_at_floor_share_7d": 0.6886,
+      "last_candle_close": 1790564399999,
+      "last_funding_t": 1790564400036,
+      "price": 83367.0,
+      "status": "OK",
+      "t": "2026-09-28T03:01:24.213000+00:00"
+    },
+    "at_pre_boundary": {
+      "D2_premium": -0.0002066517,
+      "D_funding": 1.25e-05,
+      "E_funding_change_8h": 0.0,
+      "E_premium_change_8h": 0.00010613370000000003,
+      "F_funding_pctile_7d": 52.69,
+      "F_premium_pctile_7d": 43.71,
+      "G_ret_1h": 0.03535609480147528,
+      "G_ret_24h": 0.8782771980699211,
+      "G_ret_6h": 0.5103611604499791,
+      "G_ret_6h_pctile_7d": 71.86,
+      "H_volume_6h_vs_7d_median": 0.6175,
+      "flags": {
+        "F_funding_high": false,
+        "F_funding_low": false,
+        "F_premium_high": false,
+        "F_premium_low": false,
+        "G_ret_6h_high": false,
+        "G_ret_6h_low": false,
+        "H_volume_high": false
+      },
+      "funding_at_floor": true,
+      "funding_at_floor_share_7d": 0.7186,
+      "last_candle_close": 1790510399999,
+      "last_funding_t": 1790510400075,
+      "price": 84881.0,
+      "status": "OK",
+      "t": "2026-09-27T12:01:24.213000+00:00"
+    },
+    "flag_timing": {
+      "F_funding_high": {
+        "active_at_pre_boundary": false,
+        "classification": "UNUSABLE",
+        "episodes": [],
+        "first_seen": null,
+        "longest_run_hours": 0,
+        "points": 0
+      },
+      "F_funding_low": {
+        "active_at_pre_boundary": false,
+        "classification": "CONTEMPORANEOUS",
+        "episodes": [
+          {
+            "class": "PRE-EVENT",
+            "end": "2026-09-26T22:01:24.213000+00:00",
+            "hours": 3,
+            "start": "2026-09-26T20:01:24.213000+00:00"
+          },
+          {
+            "class": "CONTEMPORANEOUS",
+            "end": "2026-09-28T06:01:24.213000+00:00",
+            "hours": 5,
+            "start": "2026-09-28T02:01:24.213000+00:00"
+          },
+          {
+            "class": "POST-EVENT",
+            "end": "2026-09-28T23:01:24.213000+00:00",
+            "hours": 2,
+            "start": "2026-09-28T22:01:24.213000+00:00"
+          }
+        ],
+        "first_seen": "2026-09-26T20:01:24.213000+00:00",
+        "longest_run_hours": 5,
+        "points": 10
+      },
+      "F_premium_high": {
+        "active_at_pre_boundary": false,
+        "classification": "UNUSABLE",
+        "episodes": [],
+        "first_seen": null,
+        "longest_run_hours": 0,
+        "points": 0
+      },
+      "F_premium_low": {
+        "active_at_pre_boundary": false,
+        "classification": "CONTEMPORANEOUS",
+        "episodes": [
+          {
+            "class": "PRE-EVENT",
+            "end": "2026-09-26T22:01:24.213000+00:00",
+            "hours": 3,
+            "start": "2026-09-26T20:01:24.213000+00:00"
+          },
+          {
+            "class": "CONTEMPORANEOUS",
+            "end": "2026-09-28T06:01:24.213000+00:00",
+            "hours": 5,
+            "start": "2026-09-28T02:01:24.213000+00:00"
+          },
+          {
+            "class": "POST-EVENT",
+            "end": "2026-09-28T23:01:24.213000+00:00",
+            "hours": 2,
+            "start": "2026-09-28T22:01:24.213000+00:00"
+          }
+        ],
+        "first_seen": "2026-09-26T20:01:24.213000+00:00",
+        "longest_run_hours": 5,
+        "points": 10
+      },
+      "G_ret_6h_high": {
+        "active_at_pre_boundary": false,
+        "classification": "POST-EVENT",
+        "episodes": [
+          {
+            "class": "POST-EVENT",
+            "end": "2026-09-28T18:01:24.213000+00:00",
+            "hours": 2,
+            "start": "2026-09-28T17:01:24.213000+00:00"
+          }
+        ],
+        "first_seen": "2026-09-28T17:01:24.213000+00:00",
+        "longest_run_hours": 2,
+        "points": 2
+      },
+      "G_ret_6h_low": {
+        "active_at_pre_boundary": false,
+        "classification": "POST-EVENT",
+        "episodes": [
+          {
+            "class": "POST-EVENT",
+            "end": "2026-09-28T04:01:24.213000+00:00",
+            "hours": 1,
+            "start": "2026-09-28T04:01:24.213000+00:00"
+          },
+          {
+            "class": "POST-EVENT",
+            "end": "2026-09-28T06:01:24.213000+00:00",
+            "hours": 1,
+            "start": "2026-09-28T06:01:24.213000+00:00"
+          }
+        ],
+        "first_seen": "2026-09-28T04:01:24.213000+00:00",
+        "longest_run_hours": 1,
+        "points": 2
+      },
+      "H_volume_high": {
+        "active_at_pre_boundary": false,
+        "classification": "UNUSABLE",
+        "episodes": [],
+        "first_seen": null,
+        "longest_run_hours": 0,
+        "points": 0
+      }
+    },
+    "grid": "hourly, Event #15 -48h..+24h",
+    "pre_event_boundary": "2026-09-27T12:01:27.481000+00:00",
+    "series": [
+      {
+        "flags": [],
+        "funding": 7.1759e-06,
+        "premium": -0.0004425925,
+        "premium_pctile": 5.39,
+        "price": 83981.0,
+        "ret_6h": 0.1454822976663106,
+        "status": "OK",
+        "t": "2026-09-26T03:01:24.213000+00:00",
+        "vol_ratio": 0.4193
+      },
+      {
+        "flags": [],
+        "funding": 1.15215e-05,
+        "premium": -0.0004078281,
+        "premium_pctile": 7.19,
+        "price": 83905.0,
+        "ret_6h": 0.16713424461289872,
+        "status": "OK",
+        "t": "2026-09-26T04:01:24.213000+00:00",
+        "vol_ratio": 0.3169
+      },
+      {
+        "flags": [],
+        "funding": 9.1074e-06,
+        "premium": -0.0004271407,
+        "premium_pctile": 7.19,
+        "price": 83949.0,
+        "ret_6h": -0.10471577995406767,
+        "status": "OK",
+        "t": "2026-09-26T05:01:24.213000+00:00",
+        "vol_ratio": 0.3029
+      },
+      {
+        "flags": [],
+        "funding": 9.395e-06,
+        "premium": -0.0004248399,
+        "premium_pctile": 7.74,
+        "price": 83891.0,
+        "ret_6h": -0.20816977137011472,
+        "status": "OK",
+        "t": "2026-09-26T06:01:24.213000+00:00",
+        "vol_ratio": 0.2932
+      },
+      {
+        "flags": [],
+        "funding": 1.04235e-05,
+        "premium": -0.0004166119,
+        "premium_pctile": 8.38,
+        "price": 83865.0,
+        "ret_6h": -0.007153843402363247,
+        "status": "OK",
+        "t": "2026-09-26T07:01:24.213000+00:00",
+        "vol_ratio": 0.2126
+      },
+      {
+        "flags": [],
+        "funding": 9.4943e-06,
+        "premium": -0.0004240459,
+        "premium_pctile": 8.33,
+        "price": 84076.0,
+        "ret_6h": 0.04283674440741514,
+        "status": "OK",
+        "t": "2026-09-26T08:01:24.213000+00:00",
+        "vol_ratio": 0.2309
+      },
+      {
+        "flags": [],
+        "funding": 8.2963e-06,
+        "premium": -0.0004336294,
+        "premium_pctile": 7.14,
+        "price": 84191.0,
+        "ret_6h": 0.2500565604124816,
+        "status": "OK",
+        "t": "2026-09-26T09:01:24.213000+00:00",
+        "vol_ratio": 0.3051
+      },
+      {
+        "flags": [],
+        "funding": 1.25e-05,
+        "premium": -0.0003603971,
+        "premium_pctile": 13.17,
+        "price": 83976.0,
+        "ret_6h": 0.08461951016029978,
+        "status": "OK",
+        "t": "2026-09-26T10:01:24.213000+00:00",
+        "vol_ratio": 0.3212
+      },
+      {
+        "flags": [],
+        "funding": 1.25e-05,
+        "premium": -0.0003832381,
+        "premium_pctile": 13.1,
+        "price": 84148.0,
+        "ret_6h": 0.23704868432024018,
+        "status": "OK",
+        "t": "2026-09-26T11:01:24.213000+00:00",
+        "vol_ratio": 0.4027
+      },
+      {
+        "flags": [],
+        "funding": 1.25e-05,
+        "premium": -0.0003521855,
+        "premium_pctile": 14.29,
+        "price": 84142.0,
+        "ret_6h": 0.2991977685329772,
+        "status": "OK",
+        "t": "2026-09-26T12:01:24.213000+00:00",
+        "vol_ratio": 0.4156
+      },
+      {
+        "flags": [],
+        "funding": 1.11208e-05,
+        "premium": -0.0004110336,
+        "premium_pctile": 10.18,
+        "price": 84026.0,
+        "ret_6h": 0.19197519823526132,
+        "status": "OK",
+        "t": "2026-09-26T13:01:24.213000+00:00",
+        "vol_ratio": 0.4555
+      },
+      {
+        "flags": [],
+        "funding": 1.06422e-05,
+        "premium": -0.0004148625,
+        "premium_pctile": 10.12,
+        "price": 83915.0,
+        "ret_6h": -0.19149341072363102,
+        "status": "OK",
+        "t": "2026-09-26T14:01:24.213000+00:00",
+        "vol_ratio": 0.5035
+      },
+      {
+        "flags": [],
+        "funding": 1.25e-05,
+        "premium": -0.0003907484,
+        "premium_pctile": 14.37,
+        "price": 83989.0,
+        "ret_6h": -0.23993063391574143,
+        "status": "OK",
+        "t": "2026-09-26T15:01:24.213000+00:00",
+        "vol_ratio": 0.3353
+      },
+      {
+        "flags": [],
+        "funding": 1.25e-05,
+        "premium": -0.000385256,
+        "premium_pctile": 14.88,
+        "price": 84133.0,
+        "ret_6h": 0.18695817852720786,
+        "status": "OK",
+        "t": "2026-09-26T16:01:24.213000+00:00",
+        "vol_ratio": 0.3209
+      },
+      {
+        "flags": [],
+        "funding": 1.25e-05,
+        "premium": -0.0003921098,
+        "premium_pctile": 14.37,
+        "price": 84078.0,
+        "ret_6h": -0.08318676617388165,
+        "status": "OK",
+        "t": "2026-09-26T17:01:24.213000+00:00",
+        "vol_ratio": 0.2951
+      },
+      {
+        "flags": [],
+        "funding": 8.2686e-06,
+        "premium": -0.0004338515,
+        "premium_pctile": 7.19,
+        "price": 84110.0,
+        "ret_6h": -0.038030947683675986,
+        "status": "OK",
+        "t": "2026-09-26T18:01:24.213000+00:00",
+        "vol_ratio": 0.2739
+      },
+      {
+        "flags": [],
+        "funding": 6.9574e-06,
+        "premium": -0.0004443409,
+        "premium_pctile": 5.39,
+        "price": 83968.0,
+        "ret_6h": -0.0690262537785924,
+        "status": "OK",
+        "t": "2026-09-26T19:01:24.213000+00:00",
+        "vol_ratio": 0.3212
+      },
+      {
+        "flags": [
+          "F_premium_low",
+          "F_funding_low"
+        ],
+        "funding": 4.6593e-06,
+        "premium": -0.0004627255,
+        "premium_pctile": 4.17,
+        "price": 83981.0,
+        "ret_6h": 0.07865101590895929,
+        "status": "OK",
+        "t": "2026-09-26T20:01:24.213000+00:00",
+        "vol_ratio": 0.2852
+      },
+      {
+        "flags": [
+          "F_premium_low",
+          "F_funding_low"
+        ],
+        "funding": 4.3499e-06,
+        "premium": -0.000465201,
+        "premium_pctile": 4.19,
+        "price": 83995.0,
+        "ret_6h": 0.007143792639507929,
+        "status": "OK",
+        "t": "2026-09-26T21:01:24.213000+00:00",
+        "vol_ratio": 0.3351
+      },
+      {
+        "flags": [
+          "F_premium_low",
+          "F_funding_low"
+        ],
+        "funding": 2.7785e-06,
+        "premium": -0.0004777718,
+        "premium_pctile": 3.57,
+        "price": 84125.0,
+        "ret_6h": -0.009508753996645414,
+        "status": "OK",
+        "t": "2026-09-26T22:01:24.213000+00:00",
+        "vol_ratio": 0.3967
+      },
+      {
+        "flags": [],
+        "funding": 8.5709e-06,
+        "premium": -0.0004314329,
+        "premium_pctile": 10.71,
+        "price": 84251.0,
+        "ret_6h": 0.2057613168724215,
+        "status": "OK",
+        "t": "2026-09-26T23:01:24.213000+00:00",
+        "vol_ratio": 0.5065
+      },
+      {
+        "flags": [],
+        "funding": 1.25e-05,
+        "premium": -0.0003676761,
+        "premium_pctile": 20.36,
+        "price": 84413.0,
+        "ret_6h": 0.3602425395315745,
+        "status": "OK",
+        "t": "2026-09-27T00:01:24.213000+00:00",
+        "vol_ratio": 0.5705
+      },
+      {
+        "flags": [],
+        "funding": 1.25e-05,
+        "premium": -0.0003453865,
+        "premium_pctile": 22.75,
+        "price": 84284.0,
+        "ret_6h": 0.3763338414634054,
+        "status": "OK",
+        "t": "2026-09-27T01:01:24.213000+00:00",
+        "vol_ratio": 0.5029
+      },
+      {
+        "flags": [],
+        "funding": 1.25e-05,
+        "premium": -0.0003037097,
+        "premium_pctile": 29.94,
+        "price": 84471.0,
+        "ret_6h": 0.5834653076291163,
+        "status": "OK",
+        "t": "2026-09-27T02:01:24.213000+00:00",
+        "vol_ratio": 0.5164
+      },
+      {
+        "flags": [],
+        "funding": 1.25e-05,
+        "premium": -0.0003107365,
+        "premium_pctile": 27.38,
+        "price": 84428.0,
+        "ret_6h": 0.515506875409244,
+        "status": "OK",
+        "t": "2026-09-27T03:01:24.213000+00:00",
+        "vol_ratio": 0.4006
+      },
+      {
+        "flags": [],
+        "funding": 1.25e-05,
+        "premium": -0.0003127854,
+        "premium_pctile": 27.54,
+        "price": 84382.0,
+        "ret_6h": 0.3054977711738571,
+        "status": "OK",
+        "t": "2026-09-27T04:01:24.213000+00:00",
+        "vol_ratio": 0.3313
+      },
+      {
+        "flags": [],
+        "funding": 1.25e-05,
+        "premium": -0.000283483,
+        "premium_pctile": 35.33,
+        "price": 84310.0,
+        "ret_6h": 0.07002884238762608,
+        "status": "OK",
+        "t": "2026-09-27T05:01:24.213000+00:00",
+        "vol_ratio": 0.2902
+      },
+      {
+        "flags": [],
+        "funding": 1.25e-05,
+        "premium": -0.0002936274,
+        "premium_pctile": 34.52,
+        "price": 84450.0,
+        "ret_6h": 0.04383211116771868,
+        "status": "OK",
+        "t": "2026-09-27T06:01:24.213000+00:00",
+        "vol_ratio": 0.2206
+      },
+      {
+        "flags": [],
+        "funding": 1.25e-05,
+        "premium": -0.0003019522,
+        "premium_pctile": 31.74,
+        "price": 84496.0,
+        "ret_6h": 0.25153053960420557,
+        "status": "OK",
+        "t": "2026-09-27T07:01:24.213000+00:00",
+        "vol_ratio": 0.2128
+      },
+      {
+        "flags": [],
+        "funding": 1.25e-05,
+        "premium": -0.0002843727,
+        "premium_pctile": 35.71,
+        "price": 84770.0,
+        "ret_6h": 0.3539676338625064,
+        "status": "OK",
+        "t": "2026-09-27T08:01:24.213000+00:00",
+        "vol_ratio": 0.2429
+      },
+      {
+        "flags": [],
+        "funding": 1.25e-05,
+        "premium": -0.0002180922,
+        "premium_pctile": 41.32,
+        "price": 84777.0,
+        "ret_6h": 0.41336997204719506,
+        "status": "OK",
+        "t": "2026-09-27T09:01:24.213000+00:00",
+        "vol_ratio": 0.3592
+      },
+      {
+        "flags": [],
+        "funding": 1.25e-05,
+        "premium": -0.0002078208,
+        "premium_pctile": 42.26,
+        "price": 84926.0,
+        "ret_6h": 0.6446872555758265,
+        "status": "OK",
+        "t": "2026-09-27T10:01:24.213000+00:00",
+        "vol_ratio": 0.4481
+      },
+      {
+        "flags": [],
+        "funding": 1.25e-05,
+        "premium": -0.0002472194,
+        "premium_pctile": 39.29,
+        "price": 84851.0,
+        "ret_6h": 0.641679516071636,
+        "status": "OK",
+        "t": "2026-09-27T11:01:24.213000+00:00",
+        "vol_ratio": 0.6143
+      },
+      {
+        "flags": [],
+        "funding": 1.25e-05,
+        "premium": -0.0002066517,
+        "premium_pctile": 43.71,
+        "price": 84881.0,
+        "ret_6h": 0.5103611604499791,
+        "status": "OK",
+        "t": "2026-09-27T12:01:24.213000+00:00",
+        "vol_ratio": 0.6175
+      },
+      {
+        "flags": [],
+        "funding": 1.25e-05,
+        "premium": -0.0001761819,
+        "premium_pctile": 47.02,
+        "price": 84769.0,
+        "ret_6h": 0.3230922173830697,
+        "status": "OK",
+        "t": "2026-09-27T13:01:24.213000+00:00",
+        "vol_ratio": 0.6422
+      },
+      {
+        "flags": [],
+        "funding": 1.25e-05,
+        "premium": -0.0002316999,
+        "premium_pctile": 40.12,
+        "price": 85006.0,
+        "ret_6h": 0.2784003774920274,
+        "status": "OK",
+        "t": "2026-09-27T14:01:24.213000+00:00",
+        "vol_ratio": 0.7529
+      },
+      {
+        "flags": [],
+        "funding": 1.25e-05,
+        "premium": -0.0002634243,
+        "premium_pctile": 38.69,
+        "price": 84501.0,
+        "ret_6h": -0.32555999858452367,
+        "status": "OK",
+        "t": "2026-09-27T15:01:24.213000+00:00",
+        "vol_ratio": 0.6102
+      },
+      {
+        "flags": [],
+        "funding": 1.25e-05,
+        "premium": -0.0003476905,
+        "premium_pctile": 22.75,
+        "price": 84434.0,
+        "ret_6h": -0.579327885453218,
+        "status": "OK",
+        "t": "2026-09-27T16:01:24.213000+00:00",
+        "vol_ratio": 0.6182
+      },
+      {
+        "flags": [],
+        "funding": 1.25e-05,
+        "premium": -0.0003314567,
+        "premium_pctile": 26.35,
+        "price": 84401.0,
+        "ret_6h": -0.5303414220221292,
+        "status": "OK",
+        "t": "2026-09-27T17:01:24.213000+00:00",
+        "vol_ratio": 0.5727
+      },
+      {
+        "flags": [],
+        "funding": 1.25e-05,
+        "premium": -0.0003347406,
+        "premium_pctile": 26.19,
+        "price": 84555.0,
+        "ret_6h": -0.3840671057127043,
+        "status": "OK",
+        "t": "2026-09-27T18:01:24.213000+00:00",
+        "vol_ratio": 0.5385
+      },
+      {
+        "flags": [],
+        "funding": 1.25e-05,
+        "premium": -0.000293107,
+        "premium_pctile": 37.72,
+        "price": 84798.0,
+        "ret_6h": 0.034210619448149515,
+        "status": "OK",
+        "t": "2026-09-27T19:01:24.213000+00:00",
+        "vol_ratio": 0.5016
+      },
+      {
+        "flags": [],
+        "funding": 1.25e-05,
+        "premium": -0.000294323,
+        "premium_pctile": 36.9,
+        "price": 84703.0,
+        "ret_6h": -0.356445427381602,
+        "status": "OK",
+        "t": "2026-09-27T20:01:24.213000+00:00",
+        "vol_ratio": 0.4684
+      },
+      {
+        "flags": [],
+        "funding": 7.2729e-06,
+        "premium": -0.0004418166,
+        "premium_pctile": 8.38,
+        "price": 84503.0,
+        "ret_6h": 0.0023668358954287427,
+        "status": "OK",
+        "t": "2026-09-27T21:01:24.213000+00:00",
+        "vol_ratio": 0.4216
+      },
+      {
+        "flags": [],
+        "funding": 1.25e-05,
+        "premium": -0.0003982522,
+        "premium_pctile": 17.26,
+        "price": 84644.0,
+        "ret_6h": 0.24871497264136178,
+        "status": "OK",
+        "t": "2026-09-27T22:01:24.213000+00:00",
+        "vol_ratio": 0.3772
+      },
+      {
+        "flags": [],
+        "funding": 7.7054e-06,
+        "premium": -0.0004383568,
+        "premium_pctile": 10.18,
+        "price": 84160.0,
+        "ret_6h": -0.28554164050188513,
+        "status": "OK",
+        "t": "2026-09-27T23:01:24.213000+00:00",
+        "vol_ratio": 0.6245
+      },
+      {
+        "flags": [],
+        "funding": 7.9535e-06,
+        "premium": -0.0004363723,
+        "premium_pctile": 10.71,
+        "price": 84437.0,
+        "ret_6h": -0.13955413636095315,
+        "status": "OK",
+        "t": "2026-09-28T00:01:24.213000+00:00",
+        "vol_ratio": 0.7454
+      },
+      {
+        "flags": [],
+        "funding": 1.21536e-05,
+        "premium": -0.0004027714,
+        "premium_pctile": 18.45,
+        "price": 84085.0,
+        "ret_6h": -0.8408217174933341,
+        "status": "OK",
+        "t": "2026-09-28T01:01:24.213000+00:00",
+        "vol_ratio": 0.8419
+      },
+      {
+        "flags": [
+          "F_premium_low",
+          "F_funding_low"
+        ],
+        "funding": 1.0614e-06,
+        "premium": -0.0004915088,
+        "premium_pctile": 2.99,
+        "price": 83651.0,
+        "ret_6h": -1.241986706492093,
+        "status": "OK",
+        "t": "2026-09-28T02:01:24.213000+00:00",
+        "vol_ratio": 1.1309
+      },
+      {
+        "flags": [
+          "F_premium_low",
+          "F_funding_low"
+        ],
+        "funding": -6.533e-06,
+        "premium": -0.0005522643,
+        "premium_pctile": 0.6,
+        "price": 83367.0,
+        "ret_6h": -1.3443309704980866,
+        "status": "OK",
+        "t": "2026-09-28T03:01:24.213000+00:00",
+        "vol_ratio": 1.1319
+      },
+      {
+        "flags": [
+          "F_premium_low",
+          "F_funding_low",
+          "G_ret_6h_low"
+        ],
+        "funding": -1.02659e-05,
+        "premium": -0.0005821275,
+        "premium_pctile": 0.0,
+        "price": 83295.0,
+        "ret_6h": -1.5937337554935982,
+        "status": "OK",
+        "t": "2026-09-28T04:01:24.213000+00:00",
+        "vol_ratio": 1.2422
+      },
+      {
+        "flags": [
+          "F_premium_low",
+          "F_funding_low"
+        ],
+        "funding": -5.0762e-06,
+        "premium": -0.0005406099,
+        "premium_pctile": 2.4,
+        "price": 83451.0,
+        "ret_6h": -0.8424429657794663,
+        "status": "OK",
+        "t": "2026-09-28T05:01:24.213000+00:00",
+        "vol_ratio": 1.1822
+      },
+      {
+        "flags": [
+          "F_premium_low",
+          "F_funding_low",
+          "G_ret_6h_low"
+        ],
+        "funding": -5.6554e-06,
+        "premium": -0.0005452429,
+        "premium_pctile": 2.4,
+        "price": 83143.0,
+        "ret_6h": -1.5325035233369255,
+        "status": "OK",
+        "t": "2026-09-28T06:01:24.213000+00:00",
+        "vol_ratio": 1.2949
+      },
+      {
+        "flags": [],
+        "funding": 1.6044e-06,
+        "premium": -0.000487165,
+        "premium_pctile": 6.59,
+        "price": 83125.0,
+        "ret_6h": -1.1417018493191433,
+        "status": "OK",
+        "t": "2026-09-28T07:01:24.213000+00:00",
+        "vol_ratio": 1.2127
+      },
+      {
+        "flags": [],
+        "funding": 2.2113e-06,
+        "premium": -0.0004823093,
+        "premium_pctile": 7.14,
+        "price": 82922.0,
+        "ret_6h": -0.8714779261455363,
+        "status": "OK",
+        "t": "2026-09-28T08:01:24.213000+00:00",
+        "vol_ratio": 1.1573
+      },
+      {
+        "flags": [],
+        "funding": 1.07418e-05,
+        "premium": -0.0004140655,
+        "premium_pctile": 20.24,
+        "price": 82934.0,
+        "ret_6h": -0.5193901663727907,
+        "status": "OK",
+        "t": "2026-09-28T09:01:24.213000+00:00",
+        "vol_ratio": 0.8761
+      },
+      {
+        "flags": [],
+        "funding": 1.25e-05,
+        "premium": -0.0003792153,
+        "premium_pctile": 27.98,
+        "price": 82630.0,
+        "ret_6h": -0.7983672489345062,
+        "status": "OK",
+        "t": "2026-09-28T10:01:24.213000+00:00",
+        "vol_ratio": 0.925
+      },
+      {
+        "flags": [],
+        "funding": 1.25e-05,
+        "premium": -0.0003814613,
+        "premium_pctile": 27.98,
+        "price": 82939.0,
+        "ret_6h": -0.6135336904291133,
+        "status": "OK",
+        "t": "2026-09-28T11:01:24.213000+00:00",
+        "vol_ratio": 1.0094
+      },
+      {
+        "flags": [],
+        "funding": 1.25e-05,
+        "premium": -0.0002543215,
+        "premium_pctile": 51.5,
+        "price": 83068.0,
+        "ret_6h": -0.09020603057383614,
+        "status": "OK",
+        "t": "2026-09-28T12:01:24.213000+00:00",
+        "vol_ratio": 0.7958
+      },
+      {
+        "flags": [],
+        "funding": 1.25e-05,
+        "premium": -0.0002594805,
+        "premium_pctile": 51.5,
+        "price": 83556.0,
+        "ret_6h": 0.5184962406014959,
+        "status": "OK",
+        "t": "2026-09-28T13:01:24.213000+00:00",
+        "vol_ratio": 0.9105
+      },
+      {
+        "flags": [],
+        "funding": 1.25e-05,
+        "premium": -0.0002292649,
+        "premium_pctile": 54.49,
+        "price": 83620.0,
+        "ret_6h": 0.8417549021972448,
+        "status": "OK",
+        "t": "2026-09-28T14:01:24.213000+00:00",
+        "vol_ratio": 0.9392
+      },
+      {
+        "flags": [],
+        "funding": 1.25e-05,
+        "premium": -0.0002967829,
+        "premium_pctile": 45.51,
+        "price": 83003.0,
+        "ret_6h": 0.08319868811343945,
+        "status": "OK",
+        "t": "2026-09-28T15:01:24.213000+00:00",
+        "vol_ratio": 1.1703
+      },
+      {
+        "flags": [],
+        "funding": 1.25e-05,
+        "premium": -0.0002886854,
+        "premium_pctile": 48.21,
+        "price": 83364.0,
+        "ret_6h": 0.8882972286094581,
+        "status": "OK",
+        "t": "2026-09-28T16:01:24.213000+00:00",
+        "vol_ratio": 1.2574
+      },
+      {
+        "flags": [
+          "G_ret_6h_high"
+        ],
+        "funding": 1.25e-05,
+        "premium": -0.000172513,
+        "premium_pctile": 63.69,
+        "price": 83702.0,
+        "ret_6h": 0.9199532186305648,
+        "status": "OK",
+        "t": "2026-09-28T17:01:24.213000+00:00",
+        "vol_ratio": 1.7935
+      },
+      {
+        "flags": [
+          "G_ret_6h_high"
+        ],
+        "funding": 1.25e-05,
+        "premium": -0.0001392784,
+        "premium_pctile": 67.07,
+        "price": 83862.0,
+        "ret_6h": 0.9558434054028009,
+        "status": "OK",
+        "t": "2026-09-28T18:01:24.213000+00:00",
+        "vol_ratio": 1.9484
+      },
+      {
+        "flags": [],
+        "funding": 1.25e-05,
+        "premium": -0.0001290254,
+        "premium_pctile": 67.86,
+        "price": 84037.0,
+        "ret_6h": 0.575661831585994,
+        "status": "OK",
+        "t": "2026-09-28T19:01:24.213000+00:00",
+        "vol_ratio": 1.6292
+      },
+      {
+        "flags": [],
+        "funding": 1.25e-05,
+        "premium": -0.0003719264,
+        "premium_pctile": 29.17,
+        "price": 83354.0,
+        "ret_6h": -0.31810571633580365,
+        "status": "OK",
+        "t": "2026-09-28T20:01:24.213000+00:00",
+        "vol_ratio": 1.7917
+      },
+      {
+        "flags": [],
+        "funding": 4.4877e-06,
+        "premium": -0.0004640982,
+        "premium_pctile": 9.52,
+        "price": 83502.0,
+        "ret_6h": 0.6011830897678427,
+        "status": "OK",
+        "t": "2026-09-28T21:01:24.213000+00:00",
+        "vol_ratio": 1.3567
+      },
+      {
+        "flags": [
+          "F_premium_low",
+          "F_funding_low"
+        ],
+        "funding": -1.2815e-06,
+        "premium": -0.0005102522,
+        "premium_pctile": 4.79,
+        "price": 83179.0,
+        "ret_6h": -0.22191833405307282,
+        "status": "OK",
+        "t": "2026-09-28T22:01:24.213000+00:00",
+        "vol_ratio": 1.3333
+      },
+      {
+        "flags": [
+          "F_premium_low",
+          "F_funding_low"
+        ],
+        "funding": -8.1007e-06,
+        "premium": -0.0005648056,
+        "premium_pctile": 0.6,
+        "price": 83507.0,
+        "ret_6h": -0.23296934362381228,
+        "status": "OK",
+        "t": "2026-09-28T23:01:24.213000+00:00",
+        "vol_ratio": 1.0701
+      },
+      {
+        "flags": [],
+        "funding": -9.017e-07,
+        "premium": -0.0005072134,
+        "premium_pctile": 5.99,
+        "price": 83457.0,
+        "ret_6h": -0.4829362524146785,
+        "status": "OK",
+        "t": "2026-09-29T00:01:24.213000+00:00",
+        "vol_ratio": 0.9999
+      },
+      {
+        "flags": [],
+        "funding": 8.985e-07,
+        "premium": -0.0004928121,
+        "premium_pctile": 7.14,
+        "price": 83140.0,
+        "ret_6h": -1.0673869843045303,
+        "status": "OK",
+        "t": "2026-09-29T01:01:24.213000+00:00",
+        "vol_ratio": 0.9553
+      },
+      {
+        "flags": [],
+        "funding": -5.916e-07,
+        "premium": -0.0005047329,
+        "premium_pctile": 6.59,
+        "price": 83031.0,
+        "ret_6h": -0.38750389903303706,
+        "status": "OK",
+        "t": "2026-09-29T02:01:24.213000+00:00",
+        "vol_ratio": 0.6886
+      },
+      {
+        "flags": [],
+        "funding": -8.734e-07,
+        "premium": -0.0005069876,
+        "premium_pctile": 6.59,
+        "price": 82923.0,
+        "ret_6h": -0.6933965653517227,
+        "status": "OK",
+        "t": "2026-09-29T03:01:24.213000+00:00",
+        "vol_ratio": 0.6206
+      }
+    ]
+  },
   "history": {
-    "measured": false,
-    "reason": "Hyperliquid could not be read",
-    "v1_observations": 575
+    "abnormal_flag_rates": {
+      "F_funding_high": 0.0278,
+      "F_funding_low": 0.073,
+      "F_premium_high": 0.0783,
+      "F_premium_low": 0.0765,
+      "G_ret_6h_high": 0.0991,
+      "G_ret_6h_low": 0.0504,
+      "H_volume_high": 0.1861
+    },
+    "btc_funding_at_floor_share": 0.7217,
+    "coverage_pct": 100.0,
+    "excluded": {},
+    "spearman_premium_vs_v1_funding": 0.681,
+    "usable": 575,
+    "usable_with_7d_baseline": 575,
+    "v1_funding_50_agrees_with_hl_floor": 0.8479,
+    "v1_observations": 575,
+    "weekend_usable": 188
+  },
+  "live_snapshot": {
+    "day_ntl_volume": 1828932009.021649,
+    "fields_present": [
+      "dayBaseVlm",
+      "dayNtlVlm",
+      "funding",
+      "impactPxs",
+      "markPx",
+      "midPx",
+      "openInterest",
+      "oraclePx",
+      "premium",
+      "prevDayPx"
+    ],
+    "funding": 1.25e-05,
+    "mark_px": 85585.0,
+    "mid_px": 85585.5,
+    "open_interest": 40758.9122800001,
+    "oracle_px": 85612.0,
+    "premium": -0.0003036957,
+    "prev_day_px": 85286.0
   },
   "lookahead": "A 1h candle is used only after its close time T; a funding record only after its time.",
-  "previous_runs": [],
+  "previous_runs": [
+    {
+      "error": "POST https://api.hyperliquid.xyz/info metaAndAssetCtxs failed after 3 attempts: <urlopen error Tunnel connection failed: 403 Forbidden>",
+      "status": "LIVE_FETCH_FAILED"
+    }
+  ],
   "requests": {
     "candleSnapshot": {
       "body": {
@@ -115,7 +1190,7 @@
     "name": "Hyperliquid Info API",
     "venue_scope": "Hyperliquid perpetuals only; not the whole crypto market"
   },
-  "status": "LIVE_FETCH_FAILED",
+  "status": "OK",
   "v1_impact": "NONE: research only; no weight, no methodology version, V1 unchanged.",
   "v1_observations_input": 575,
   "v1_only_findings": {

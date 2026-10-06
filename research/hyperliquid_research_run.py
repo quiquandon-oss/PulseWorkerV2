@@ -130,16 +130,32 @@ def analyse_event(candles, funding) -> Dict:
         f["flags"] = h.abnormal_flags(f) if f["status"] == "OK" else {}
         pts.append(f)
     keys = sorted({k for p in pts for k in p["flags"]})
+    iso = lambda ms: datetime.fromtimestamp(ms / 1000, UTC).isoformat() if ms else None
+    boundary_t = max(t for t in grid if t <= PRE_BOUNDARY_MS)
     timing = {}
     for k in keys:
         first = first_true(pts, k)
-        run = best = 0
+        episodes, cur = [], None
         for p in pts:
-            run = run + 1 if p["flags"].get(k) else 0
-            best = max(best, run)
-        timing[k] = {"first_seen": datetime.fromtimestamp(first / 1000, UTC).isoformat() if first else None,
-                     "classification": h.classify_timing(first, PRE_BOUNDARY_MS, e), "longest_run_hours": best,
-                     "points": sum(1 for p in pts if p["flags"].get(k))}
+            if p["flags"].get(k):
+                cur = cur or {"start": p["t_ms"], "hours": 0}
+                cur["end"] = p["t_ms"]
+                cur["hours"] += 1
+            elif cur:
+                episodes.append(cur)
+                cur = None
+        if cur:
+            episodes.append(cur)
+        # A flag is PRE-EVENT only if it is on at the point the first failed prediction was issued; an earlier
+        # episode that cleared before then could not have warned that prediction.
+        active = any(ep["start"] <= boundary_t <= ep["end"] for ep in episodes)
+        later = [ep["start"] for ep in episodes if ep["start"] > boundary_t]
+        timing[k] = {"first_seen": iso(first), "active_at_pre_boundary": active,
+                     "classification": "PRE-EVENT" if active else h.classify_timing(later[0] if later else None, PRE_BOUNDARY_MS, e),
+                     "longest_run_hours": max((ep["hours"] for ep in episodes), default=0),
+                     "points": sum(1 for p in pts if p["flags"].get(k)),
+                     "episodes": [{"start": iso(ep["start"]), "end": iso(ep["end"]), "hours": ep["hours"],
+                                   "class": h.classify_timing(ep["start"], PRE_BOUNDARY_MS, e)} for ep in episodes]}
     at = next((p for p in pts if p["t_ms"] == e), None)
     pre = next((p for p in pts if p["t_ms"] == max(t for t in grid if t <= PRE_BOUNDARY_MS)), None)
     slim = lambda p: {k: v for k, v in p.items() if k not in ("t_ms",)} if p else None

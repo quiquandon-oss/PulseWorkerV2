@@ -351,3 +351,52 @@ def test_history_scope_respects_the_file_cap(tmp_path, monkeypatch):
     assert run.main(["--v1", str(tmp_path / "v1.json"), "--cache", str(tmp_path / "c"), "--out", str(out), "--scope", "history"]) == 2
     a = json.loads(out.read_text())
     assert a["status"] == "REFUSED_TOO_MANY_FILES" and a["required_batches"] > 700 and "fetch" not in a
+
+
+# ---- detection rule (regression: real data showed isolated top-decile points in ~2% of readings) ----
+def _fake_scores(monkeypatch, elevated_at):
+    def fake(series, t):
+        k = round((t - (E - timedelta(hours=24))).total_seconds() / 900)
+        hit = k in elevated_at
+        return {"t": t.isoformat(), "status": "OK", "batch_used": None, "geo_shock_score": 95.0 if hit else 40.0, "elevated": hit}
+    monkeypatch.setattr(run.g, "score_at", fake)
+
+
+def test_isolated_elevated_points_are_not_a_detection(monkeypatch):
+    _fake_scores(monkeypatch, {10, 50, 51, 120, 180})                 # one, two (0.5 h), one, one point
+    res = run.analyse({}, [], [], E)
+    assert res["any_elevated_point"] and res["elevated_before_event"]
+    assert res["detected"] is False and res["first_persistent_elevated"] is None
+    assert [p["points"] for p in res["elevated_periods"]] == [1, 2, 1, 1]
+
+
+def test_a_persistent_elevated_period_is_a_detection(monkeypatch):
+    _fake_scores(monkeypatch, {10} | set(range(90, 94)))               # isolated point, then a 1-hour run
+    res = run.analyse({}, [], [], E)
+    assert res["detected"] is True
+    assert res["first_elevated"] < res["first_persistent_elevated"] == (E - timedelta(hours=24) + timedelta(minutes=15 * 90)).isoformat()
+
+
+def test_corridor_breadth_separates_one_story_from_broad_activity():
+    one = [{"url": "https://a.com/x", "mentions": 5, "category": "armed_conflict", "action_country": "IS"}] * 9 + \
+          [{"url": "https://b.com/y", "mentions": 1, "category": "threat", "action_country": "IR"}]
+    b = run.breadth(one)
+    assert b["top_article_share"] == 0.9 and b["distinct_articles"] == 2 and b["distinct_domains"] == 2
+    assert b["by_action_country"] == {"IS": 9, "IR": 1} and b["mentions"] == 46
+    assert run.breadth([]) == {"events": 0}
+
+
+def test_long_lists_go_to_sidecars_with_a_hash(tmp_path):
+    import hashlib
+    out = tmp_path / "gdelt.json"
+    a = {"fetch": {"fetch_status_counts": {"FETCHED": 1}, "files": [{"batch": "20260928000000", "md5": "x", "status": "FETCHED"}]},
+         "v1_historical_scores": {"scored": 1, "rows": [{"ts": 1, "geo_shock_score": 50.0}]}}
+    run.split_sidecars(a, out)
+    assert "files" not in a["fetch"] and "rows" not in a["v1_historical_scores"]
+    for holder, name in ((a["fetch"]["files_sidecar"], "gdelt_files.json"), (a["v1_historical_scores"]["rows_sidecar"], "gdelt_v1_scores.json")):
+        assert holder["path"] == name
+        assert hashlib.sha256((tmp_path / name).read_bytes()).hexdigest() == holder["sha256"]
+    assert json.loads((tmp_path / "gdelt_files.json").read_text())[0]["batch"] == "20260928000000"
+    b = {"status": "LIVE_FETCH_FAILED"}
+    run.split_sidecars(b, out)
+    assert b == {"status": "LIVE_FETCH_FAILED"}

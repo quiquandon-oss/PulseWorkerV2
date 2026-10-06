@@ -113,6 +113,24 @@ def spearman(xs: List[float], ys: List[float]) -> Optional[float]:
     return round(num / den, 3) if den else None
 
 
+def breadth(events: List[Dict]) -> Dict:
+    """Where the corridor escalation events came from, and whether one story dominates them."""
+    if not events:
+        return {"events": 0}
+    by_url = Counter(r["url"] for r in events)
+    n = len(events)
+    return {
+        "events": n,
+        "mentions": sum(r["mentions"] for r in events),
+        "distinct_articles": len(by_url),
+        "distinct_domains": len({g.source_domain(u) for u in by_url if u}),
+        "top_article_share": round(by_url.most_common(1)[0][1] / n, 4),
+        "top10_articles_share": round(sum(c for _, c in by_url.most_common(10)) / n, 4),
+        "by_action_country": dict(sorted(Counter(r.get("action_country") or "??" for r in events).most_common(10), key=lambda kv: (-kv[1], kv[0]))),
+        "by_category": dict(sorted(Counter(r["category"] for r in events).items(), key=lambda kv: (-kv[1], kv[0]))),
+    }
+
+
 def analyse(series: Dict[datetime, Dict], top_events: List[Dict], v1: List[Dict], event_ts: datetime) -> Dict:
     """Event #15 analysis on an already point-in-time-safe batch series."""
     grid = [event_ts - timedelta(hours=24) + timedelta(minutes=15 * i) for i in range(4 * 48 + 1)]
@@ -147,11 +165,19 @@ def analyse(series: Dict[datetime, Dict], top_events: List[Dict], v1: List[Dict]
     pairs = [(r["geo_shock_score"], r["geopolitics"]) for r in v1_rows if r["geo_shock_score"] is not None and r["geopolitics"] is not None]
     pairs_m = [(r["geo_shock_score"], r["macrogeo"]) for r in v1_rows if r["geo_shock_score"] is not None and r["macrogeo"] is not None]
     first = elevated[0]["t"] if elevated else None
+    # Detection needs a persistent elevated period (>= 1 h). On real data single 15-minute top-decile points occur
+    # in about 2% of readings, so "any elevated point in a 48 h window" is true almost by construction.
+    periods = g.elevated_periods(scores)
+    persistent = [p for p in periods if p["persistent"]]
     return {
         "event": {**EVENT15, "event_ts": event_ts.isoformat()},
         "grid_points": len(grid), "scored_points": len(ok),
         "status_counts": dict(Counter(s["status"] for s in scores)),
-        "detected": bool(elevated),
+        "detected": bool(persistent),
+        "detection_rule": "detected = at least one persistent elevated period (>= 1 h of consecutive readings >= 90) in Event #15 -24h..+24h",
+        "any_elevated_point": bool(elevated),
+        "elevated_periods": periods,
+        "first_persistent_elevated": persistent[0]["start"] if persistent else None,
         "first_elevated": first,
         "elevated_before_event": any(s["elevated"] for s in before),
         "elevated_during_decline_24h": any(s["elevated"] for s in decline),
@@ -161,7 +187,8 @@ def analyse(series: Dict[datetime, Dict], top_events: List[Dict], v1: List[Dict]
         "acceleration_at_event": acc,
         "counts_6h_before_event": window_counts(event_ts - timedelta(hours=6), event_ts),
         "counts_24h_before_event": window_counts(event_ts - timedelta(hours=24), event_ts),
-        "top_corridor_escalation_events_24h_before": top_events[:15],
+        "top_corridor_escalation_events_24h_before": [{k: v for k, v in r.items() if k != "action_country"} for r in top_events[:15]],
+        "corridor_escalation_24h_before": breadth(top_events),
         "score_series": [{"t": s["t"], "status": s["status"], "geo_shock_score": s.get("geo_shock_score")} for s in scores],
         "v1_comparison": v1_rows,
         "spearman_vs_v1_geopolitics": spearman(*map(list, zip(*pairs))) if pairs else None,
@@ -191,6 +218,7 @@ def build_series(batches: List[datetime], idx, cache: Path, event_ts: datetime) 
                 if c.relevant and c.corridor and c.escalation:
                     top.append({"event_id": e.event_id, "date_added": e.date_added, "cameo": e.code, "category": c.category,
                                 "actor1": e.actor1_country, "actor2": e.actor2_country, "location": e.action_name,
+                                "action_country": e.action_country,
                                 "mentions": e.mentions, "sources": e.sources, "articles": e.articles, "url": e.url})
     top.sort(key=lambda r: (-r["mentions"], -r["sources"], r["event_id"]))
     return series, top, {"fetch_status_counts": dict(fetch_log), "row_rejects": dict(rejects), "files": files}
@@ -254,6 +282,7 @@ def main(argv=None) -> int:
                             v1_coverage={"v1_observations": len(v1_ts), "measured": False,
                                          "reason": "GDELT file availability could not be read"})
     Path(args.out).parent.mkdir(parents=True, exist_ok=True)
+    split_sidecars(artifact, Path(args.out))
     Path(args.out).write_text(g.dumps_deterministic(artifact))
     print(artifact["status"])
     return 0 if artifact["status"] == "OK" else 2
@@ -262,6 +291,22 @@ def main(argv=None) -> int:
 def _grid(lo: datetime, hi: datetime) -> List[datetime]:
     start = lo.replace(minute=(lo.minute // 15) * 15, second=0, microsecond=0)
     return [start + timedelta(minutes=15 * i) for i in range(int((hi - start).total_seconds() // 900) + 1)]
+
+
+def split_sidecars(artifact: Dict, out: Path) -> None:
+    """The main artifact is bundled into the Worker, so the long per-file manifest and the per-observation V1
+    scores go to sidecar files next to it; the artifact keeps their path and SHA-256."""
+    import hashlib
+    parts = []
+    if isinstance(artifact.get("fetch"), dict) and "files" in artifact["fetch"]:
+        parts.append(("files", artifact["fetch"], "files", "_files.json"))
+    if isinstance(artifact.get("v1_historical_scores"), dict) and "rows" in artifact["v1_historical_scores"]:
+        parts.append(("v1_scores", artifact["v1_historical_scores"], "rows", "_v1_scores.json"))
+    for _, holder, key, suffix in parts:
+        path = out.with_name(out.stem + suffix)
+        text = g.dumps_deterministic(holder.pop(key))
+        path.write_text(text)
+        holder[key + "_sidecar"] = {"path": path.name, "sha256": hashlib.sha256(text.encode()).hexdigest()}
 
 
 def _previous_runs(path: Path) -> List[Dict]:

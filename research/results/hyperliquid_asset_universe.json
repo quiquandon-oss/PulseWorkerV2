@@ -1,0 +1,5489 @@
+{
+  "api": {
+    "auth": "none (public POST, no key)",
+    "candle_limit": "most recent 5,000 candles per interval",
+    "cost_eur": 0,
+    "documented_requests": [
+      "perpDexs",
+      "meta",
+      "metaAndAssetCtxs",
+      "spotMetaAndAssetCtxs",
+      "candleSnapshot",
+      "fundingHistory"
+    ],
+    "intervals": [
+      "1m",
+      "3m",
+      "5m",
+      "15m",
+      "30m",
+      "1h",
+      "2h",
+      "4h",
+      "8h",
+      "12h",
+      "1d",
+      "3d",
+      "1w",
+      "1M"
+    ],
+    "open_interest_history": "none documented (current value only, via metaAndAssetCtxs)",
+    "page_rows": 500,
+    "rate_limit": "1,200 weight/min per IP; info requests weight 20 (candleSnapshot +1 per 60 rows, fundingHistory +1 per 20 rows)",
+    "undocumented_requests_used": [
+      "perpConciseAnnotations",
+      "perpAnnotation"
+    ],
+    "url": "https://api.hyperliquid.xyz/info"
+  },
+  "artifact": "hyperliquid-asset-universe-audit",
+  "btc_event15": {
+    "change_boundary_to_event_pct": -1.7837,
+    "flag_timing": {
+      "ret_6h_high": {
+        "active_at_boundary": false,
+        "classification": "POST-EVENT",
+        "episodes": [
+          {
+            "class": "POST-EVENT",
+            "end": "2026-09-28T18:01:24.213000+00:00",
+            "hours": 2,
+            "start": "2026-09-28T17:01:24.213000+00:00"
+          }
+        ],
+        "persisted_hours_max": 2
+      },
+      "ret_6h_low": {
+        "active_at_boundary": false,
+        "classification": "POST-EVENT",
+        "episodes": [
+          {
+            "class": "POST-EVENT",
+            "end": "2026-09-28T04:01:24.213000+00:00",
+            "hours": 1,
+            "start": "2026-09-28T04:01:24.213000+00:00"
+          },
+          {
+            "class": "POST-EVENT",
+            "end": "2026-09-28T06:01:24.213000+00:00",
+            "hours": 1,
+            "start": "2026-09-28T06:01:24.213000+00:00"
+          }
+        ],
+        "persisted_hours_max": 1
+      }
+    },
+    "overall": "POST-EVENT",
+    "price_at_boundary": 84881.0,
+    "ret_24h_before_boundary_pct": 0.8783,
+    "ret_6h_pctile_at_boundary": 71.86,
+    "ret_6h_pctile_at_event": 5.39,
+    "status_at_boundary": "OK",
+    "status_at_event": "OK",
+    "usable": true
+  },
+  "candidates": [
+    {
+      "annotation_category": null,
+      "category": "CRYPTO",
+      "coverage_575": {
+        "coverage_pct": 100.0,
+        "missing": 0,
+        "moved_in_prior_6h_share": 1.0,
+        "status": {
+          "OK": 575
+        },
+        "usable": 575,
+        "usable_with_7d_baseline": 575,
+        "v1_observations": 575,
+        "weekend_usable": 188
+      },
+      "dex": "(native)",
+      "display_name": null,
+      "event15": {
+        "change_boundary_to_event_pct": -5.3787,
+        "flag_timing": {
+          "ret_6h_high": {
+            "active_at_boundary": false,
+            "classification": "UNUSABLE",
+            "episodes": [],
+            "persisted_hours_max": 0
+          },
+          "ret_6h_low": {
+            "active_at_boundary": false,
+            "classification": "POST-EVENT",
+            "episodes": [
+              {
+                "class": "POST-EVENT",
+                "end": "2026-09-28T04:01:24.213000+00:00",
+                "hours": 1,
+                "start": "2026-09-28T04:01:24.213000+00:00"
+              }
+            ],
+            "persisted_hours_max": 1
+          }
+        },
+        "overall": "POST-EVENT",
+        "price_at_boundary": 0.45513,
+        "ret_24h_before_boundary_pct": -3.3653,
+        "ret_6h_pctile_at_boundary": 68.26,
+        "ret_6h_pctile_at_event": 9.58,
+        "status_at_boundary": "OK",
+        "status_at_event": "OK",
+        "usable": true
+      },
+      "history": {
+        "daily_candles": 644,
+        "first_daily_candle": "2025-01-01T00:00:00+00:00",
+        "funding_history_available": true,
+        "hourly_candles_in_window": 1175,
+        "hourly_first": "2026-08-18T09:00:00+00:00",
+        "open_interest_history": false
+      },
+      "instrument_type": "PERPETUAL/DERIVATIVE REPRESENTATION (native perp, validator oracle from crypto-exchange spot)",
+      "live": {
+        "day_ntl_volume": 3582097.8848840017,
+        "funding": 1.25e-05,
+        "mark_px": 0.41401,
+        "max_leverage": 5,
+        "mid_px": 0.41418,
+        "open_interest": 19052259.8,
+        "oracle_px": 0.41342
+      },
+      "market_hours": {
+        "gaps_over_1h": 0,
+        "weekday": {
+          "flat_share": 0.0,
+          "hours": 839,
+          "median_abs_1h_move_pct": 0.747,
+          "zero_volume_share": 0.0
+        },
+        "weekend": {
+          "flat_share": 0.0,
+          "hours": 336,
+          "median_abs_1h_move_pct": 0.5873,
+          "zero_volume_share": 0.0
+        }
+      },
+      "native_or_hip3": "native",
+      "symbol": "SPX",
+      "underlying_per_deployer": null,
+      "v1_overlap": {
+        "note": "No V1 counterpart",
+        "v1_source": null
+      }
+    },
+    {
+      "annotation_category": null,
+      "category": "GOLD",
+      "coverage_575": {
+        "coverage_pct": 100.0,
+        "missing": 0,
+        "moved_in_prior_6h_share": 1.0,
+        "status": {
+          "OK": 575
+        },
+        "usable": 575,
+        "usable_with_7d_baseline": 575,
+        "v1_observations": 575,
+        "weekend_usable": 188
+      },
+      "cross_asset": {
+        "btc_down_and_asset_down": {
+          "both": 8,
+          "both_distinct_days": 4,
+          "both_if_independent": 1.16,
+          "btc_abnormal": 29,
+          "observations_both_measurable": 575,
+          "other_abnormal": 23
+        },
+        "btc_down_and_asset_up": {
+          "both": 0,
+          "both_distinct_days": 0,
+          "both_if_independent": 1.61,
+          "btc_abnormal": 29,
+          "observations_both_measurable": 575,
+          "other_abnormal": 32
+        },
+        "n": 575,
+        "spearman_24h_ret_vs_btc": 0.418
+      },
+      "dex": "(native)",
+      "display_name": null,
+      "event15": {
+        "change_boundary_to_event_pct": -1.8619,
+        "flag_timing": {
+          "ret_6h_high": {
+            "active_at_boundary": false,
+            "classification": "POST-EVENT",
+            "episodes": [
+              {
+                "class": "POST-EVENT",
+                "end": "2026-09-29T03:01:24.213000+00:00",
+                "hours": 1,
+                "start": "2026-09-29T03:01:24.213000+00:00"
+              }
+            ],
+            "persisted_hours_max": 1
+          },
+          "ret_6h_low": {
+            "active_at_boundary": false,
+            "classification": "CONTEMPORANEOUS",
+            "episodes": [
+              {
+                "class": "CONTEMPORANEOUS",
+                "end": "2026-09-28T09:01:24.213000+00:00",
+                "hours": 9,
+                "start": "2026-09-28T01:01:24.213000+00:00"
+              }
+            ],
+            "persisted_hours_max": 9
+          }
+        },
+        "overall": "CONTEMPORANEOUS",
+        "price_at_boundary": 4280.5,
+        "ret_24h_before_boundary_pct": -0.0117,
+        "ret_6h_pctile_at_boundary": 58.68,
+        "ret_6h_pctile_at_event": 0.0,
+        "status_at_boundary": "OK",
+        "status_at_event": "OK",
+        "usable": true
+      },
+      "history": {
+        "daily_candles": 559,
+        "first_daily_candle": "2025-03-27T00:00:00+00:00",
+        "funding_history_available": true,
+        "hourly_candles_in_window": 1175,
+        "hourly_first": "2026-08-18T09:00:00+00:00",
+        "open_interest_history": false
+      },
+      "instrument_type": "PERPETUAL/DERIVATIVE REPRESENTATION (native perp, validator oracle from crypto-exchange spot)",
+      "live": {
+        "day_ntl_volume": 1895050.8843000005,
+        "funding": 1.25e-05,
+        "mark_px": 4166.4,
+        "max_leverage": 10,
+        "mid_px": 4166.45,
+        "open_interest": 5567.198,
+        "oracle_px": 4165.8
+      },
+      "market_hours": {
+        "gaps_over_1h": 0,
+        "weekday": {
+          "flat_share": 0.0,
+          "hours": 839,
+          "median_abs_1h_move_pct": 0.145,
+          "zero_volume_share": 0.0
+        },
+        "weekend": {
+          "flat_share": 0.0,
+          "hours": 336,
+          "median_abs_1h_move_pct": 0.0202,
+          "zero_volume_share": 0.0
+        }
+      },
+      "native_or_hip3": "native",
+      "symbol": "PAXG",
+      "underlying_per_deployer": null,
+      "v1_overlap": {
+        "note": "Same exposure (gold) via a perp on the PAXG token; V1 gold covers the direction",
+        "v1_source": "gold"
+      }
+    },
+    {
+      "annotation_category": "indices",
+      "category": "EQUITY INDEX",
+      "coverage_575": {
+        "coverage_pct": 100.0,
+        "missing": 0,
+        "moved_in_prior_6h_share": 1.0,
+        "status": {
+          "OK": 575
+        },
+        "usable": 575,
+        "usable_with_7d_baseline": 575,
+        "v1_observations": 575,
+        "weekend_usable": 188
+      },
+      "cross_asset": {
+        "btc_down_and_asset_down": {
+          "both": 11,
+          "both_distinct_days": 4,
+          "both_if_independent": 1.97,
+          "btc_abnormal": 29,
+          "observations_both_measurable": 575,
+          "other_abnormal": 39
+        },
+        "btc_down_and_asset_up": {
+          "both": 0,
+          "both_distinct_days": 0,
+          "both_if_independent": 2.47,
+          "btc_abnormal": 29,
+          "observations_both_measurable": 575,
+          "other_abnormal": 49
+        },
+        "n": 575,
+        "spearman_24h_ret_vs_btc": 0.627
+      },
+      "dex": "xyz",
+      "display_name": "XYZ100",
+      "event15": {
+        "change_boundary_to_event_pct": -0.7866,
+        "flag_timing": {
+          "ret_6h_high": {
+            "active_at_boundary": false,
+            "classification": "UNUSABLE",
+            "episodes": [],
+            "persisted_hours_max": 0
+          },
+          "ret_6h_low": {
+            "active_at_boundary": false,
+            "classification": "CONTEMPORANEOUS",
+            "episodes": [
+              {
+                "class": "CONTEMPORANEOUS",
+                "end": "2026-09-28T04:01:24.213000+00:00",
+                "hours": 3,
+                "start": "2026-09-28T02:01:24.213000+00:00"
+              }
+            ],
+            "persisted_hours_max": 3
+          }
+        },
+        "overall": "CONTEMPORANEOUS",
+        "price_at_boundary": 30638.0,
+        "ret_24h_before_boundary_pct": 0.1733,
+        "ret_6h_pctile_at_boundary": 45.51,
+        "ret_6h_pctile_at_event": 2.4,
+        "status_at_boundary": "OK",
+        "status_at_event": "OK",
+        "usable": true
+      },
+      "history": {
+        "daily_candles": 359,
+        "first_daily_candle": "2025-10-13T00:00:00+00:00",
+        "funding_history_available": true,
+        "hourly_candles_in_window": 1175,
+        "hourly_first": "2026-08-18T09:00:00+00:00",
+        "open_interest_history": false
+      },
+      "instrument_type": "BUILDER/ORACLE-BASED SYNTHETIC EXPOSURE (HIP-3 perp, deployer-set oracle)",
+      "live": {
+        "day_ntl_volume": 253747585.3864999,
+        "funding": 6.25e-06,
+        "mark_px": 31266.0,
+        "max_leverage": 30,
+        "mid_px": 31264.0,
+        "open_interest": 6550.8368,
+        "oracle_px": 31270.0
+      },
+      "market_hours": {
+        "gaps_over_1h": 0,
+        "weekday": {
+          "flat_share": 0.0,
+          "hours": 839,
+          "median_abs_1h_move_pct": 0.0948,
+          "zero_volume_share": 0.0
+        },
+        "weekend": {
+          "flat_share": 0.0,
+          "hours": 336,
+          "median_abs_1h_move_pct": 0.0304,
+          "zero_volume_share": 0.0
+        }
+      },
+      "native_or_hip3": "HIP-3",
+      "symbol": "xyz:XYZ100",
+      "underlying_per_deployer": "XYZ100 tracks a modified market-capitalization-weighted index of 100 of the largest, most actively-traded, non-financial companies that are listed on a U.S. stock exchange, serving as a benchmark for large-cap U.S. technology and growth equities.",
+      "v1_overlap": {
+        "note": "Nasdaq-100-like vs V1's Nasdaq Composite daily close",
+        "v1_source": "nasdaq"
+      }
+    },
+    {
+      "annotation_category": "commodities",
+      "category": "GOLD",
+      "coverage_575": {
+        "coverage_pct": 100.0,
+        "missing": 0,
+        "moved_in_prior_6h_share": 1.0,
+        "status": {
+          "OK": 575
+        },
+        "usable": 575,
+        "usable_with_7d_baseline": 575,
+        "v1_observations": 575,
+        "weekend_usable": 188
+      },
+      "cross_asset": {
+        "btc_down_and_asset_down": {
+          "both": 8,
+          "both_distinct_days": 4,
+          "both_if_independent": 1.21,
+          "btc_abnormal": 29,
+          "observations_both_measurable": 575,
+          "other_abnormal": 24
+        },
+        "btc_down_and_asset_up": {
+          "both": 0,
+          "both_distinct_days": 0,
+          "both_if_independent": 1.46,
+          "btc_abnormal": 29,
+          "observations_both_measurable": 575,
+          "other_abnormal": 29
+        },
+        "n": 575,
+        "spearman_24h_ret_vs_btc": 0.413
+      },
+      "dex": "xyz",
+      "display_name": "GOLD",
+      "event15": {
+        "change_boundary_to_event_pct": -2.0064,
+        "flag_timing": {
+          "ret_6h_high": {
+            "active_at_boundary": false,
+            "classification": "UNUSABLE",
+            "episodes": [],
+            "persisted_hours_max": 0
+          },
+          "ret_6h_low": {
+            "active_at_boundary": false,
+            "classification": "CONTEMPORANEOUS",
+            "episodes": [
+              {
+                "class": "CONTEMPORANEOUS",
+                "end": "2026-09-28T09:01:24.213000+00:00",
+                "hours": 9,
+                "start": "2026-09-28T01:01:24.213000+00:00"
+              }
+            ],
+            "persisted_hours_max": 9
+          }
+        },
+        "overall": "CONTEMPORANEOUS",
+        "price_at_boundary": 4281.2,
+        "ret_24h_before_boundary_pct": -0.021,
+        "ret_6h_pctile_at_boundary": 63.47,
+        "ret_6h_pctile_at_event": 0.0,
+        "status_at_boundary": "OK",
+        "status_at_event": "OK",
+        "usable": true
+      },
+      "history": {
+        "daily_candles": 289,
+        "first_daily_candle": "2025-12-22T00:00:00+00:00",
+        "funding_history_available": true,
+        "hourly_candles_in_window": 1175,
+        "hourly_first": "2026-08-18T09:00:00+00:00",
+        "open_interest_history": false
+      },
+      "instrument_type": "BUILDER/ORACLE-BASED SYNTHETIC EXPOSURE (HIP-3 perp, deployer-set oracle)",
+      "live": {
+        "day_ntl_volume": 51075165.019940004,
+        "funding": 6.25e-06,
+        "mark_px": 4159.8,
+        "max_leverage": 25,
+        "mid_px": 4159.55,
+        "open_interest": 66403.8402,
+        "oracle_px": 4161.0
+      },
+      "market_hours": {
+        "gaps_over_1h": 0,
+        "weekday": {
+          "flat_share": 0.0,
+          "hours": 839,
+          "median_abs_1h_move_pct": 0.1497,
+          "zero_volume_share": 0.0
+        },
+        "weekend": {
+          "flat_share": 0.0,
+          "hours": 336,
+          "median_abs_1h_move_pct": 0.0145,
+          "zero_volume_share": 0.0
+        }
+      },
+      "native_or_hip3": "HIP-3",
+      "symbol": "xyz:GOLD",
+      "underlying_per_deployer": "GOLD references the USD spot price of 1 troy ounce of gold (XAU/USD).",
+      "v1_overlap": {
+        "note": "SAME INSTRUMENT: V1 already scores xyz:GOLD's 24h change",
+        "v1_source": "gold"
+      }
+    },
+    {
+      "annotation_category": "fx",
+      "category": "FX / USD",
+      "coverage_575": {
+        "coverage_pct": 100.0,
+        "missing": 0,
+        "moved_in_prior_6h_share": 1.0,
+        "status": {
+          "OK": 575
+        },
+        "usable": 575,
+        "usable_with_7d_baseline": 575,
+        "v1_observations": 575,
+        "weekend_usable": 188
+      },
+      "cross_asset": {
+        "btc_down_and_asset_down": {
+          "both": 0,
+          "both_distinct_days": 0,
+          "both_if_independent": 2.22,
+          "btc_abnormal": 29,
+          "observations_both_measurable": 575,
+          "other_abnormal": 44
+        },
+        "btc_down_and_asset_up": {
+          "both": 6,
+          "both_distinct_days": 3,
+          "both_if_independent": 1.31,
+          "btc_abnormal": 29,
+          "observations_both_measurable": 575,
+          "other_abnormal": 26
+        },
+        "n": 575,
+        "spearman_24h_ret_vs_btc": 0.025
+      },
+      "dex": "xyz",
+      "display_name": "USDJPY",
+      "event15": {
+        "change_boundary_to_event_pct": 0.2225,
+        "flag_timing": {
+          "ret_6h_high": {
+            "active_at_boundary": false,
+            "classification": "POST-EVENT",
+            "episodes": [
+              {
+                "class": "POST-EVENT",
+                "end": "2026-09-28T04:01:24.213000+00:00",
+                "hours": 1,
+                "start": "2026-09-28T04:01:24.213000+00:00"
+              },
+              {
+                "class": "POST-EVENT",
+                "end": "2026-09-28T16:01:24.213000+00:00",
+                "hours": 2,
+                "start": "2026-09-28T15:01:24.213000+00:00"
+              }
+            ],
+            "persisted_hours_max": 2
+          },
+          "ret_6h_low": {
+            "active_at_boundary": false,
+            "classification": "POST-EVENT",
+            "episodes": [
+              {
+                "class": "POST-EVENT",
+                "end": "2026-09-28T12:01:24.213000+00:00",
+                "hours": 4,
+                "start": "2026-09-28T09:01:24.213000+00:00"
+              }
+            ],
+            "persisted_hours_max": 4
+          }
+        },
+        "overall": "POST-EVENT",
+        "price_at_boundary": 157.27,
+        "ret_24h_before_boundary_pct": -0.0445,
+        "ret_6h_pctile_at_boundary": 26.95,
+        "ret_6h_pctile_at_event": 87.43,
+        "status_at_boundary": "OK",
+        "status_at_event": "OK",
+        "usable": true
+      },
+      "history": {
+        "daily_candles": 288,
+        "first_daily_candle": "2025-12-23T00:00:00+00:00",
+        "funding_history_available": true,
+        "hourly_candles_in_window": 1175,
+        "hourly_first": "2026-08-18T09:00:00+00:00",
+        "open_interest_history": false
+      },
+      "instrument_type": "BUILDER/ORACLE-BASED SYNTHETIC EXPOSURE (HIP-3 perp, deployer-set oracle)",
+      "live": {
+        "day_ntl_volume": 1415372.1326000004,
+        "funding": -2.373e-06,
+        "mark_px": 158.12,
+        "max_leverage": 50,
+        "mid_px": 158.12,
+        "open_interest": 183507.58,
+        "oracle_px": 158.18
+      },
+      "market_hours": {
+        "gaps_over_1h": 0,
+        "weekday": {
+          "flat_share": 0.0,
+          "hours": 839,
+          "median_abs_1h_move_pct": 0.0439,
+          "zero_volume_share": 0.0
+        },
+        "weekend": {
+          "flat_share": 0.0357,
+          "hours": 336,
+          "median_abs_1h_move_pct": 0.013,
+          "zero_volume_share": 0.006
+        }
+      },
+      "native_or_hip3": "HIP-3",
+      "symbol": "xyz:JPY",
+      "underlying_per_deployer": "USDJPY references the USD/JPY spot exchange rate: Japanese yen per 1 U.S. dollar. The Japanese yen is the official currency of Japan.",
+      "v1_overlap": {
+        "note": "USD/JPY: USD factor plus yen safe-haven/carry; partial overlap",
+        "v1_source": "usd"
+      }
+    },
+    {
+      "annotation_category": "fx",
+      "category": "FX / USD",
+      "coverage_575": {
+        "coverage_pct": 100.0,
+        "missing": 0,
+        "moved_in_prior_6h_share": 1.0,
+        "status": {
+          "OK": 575
+        },
+        "usable": 575,
+        "usable_with_7d_baseline": 575,
+        "v1_observations": 575,
+        "weekend_usable": 188
+      },
+      "cross_asset": {
+        "btc_down_and_asset_down": {
+          "both": 7,
+          "both_distinct_days": 5,
+          "both_if_independent": 1.56,
+          "btc_abnormal": 29,
+          "observations_both_measurable": 575,
+          "other_abnormal": 31
+        },
+        "btc_down_and_asset_up": {
+          "both": 0,
+          "both_distinct_days": 0,
+          "both_if_independent": 1.77,
+          "btc_abnormal": 29,
+          "observations_both_measurable": 575,
+          "other_abnormal": 35
+        },
+        "n": 575,
+        "spearman_24h_ret_vs_btc": 0.053
+      },
+      "dex": "xyz",
+      "display_name": "EURUSD",
+      "event15": {
+        "change_boundary_to_event_pct": -0.0351,
+        "flag_timing": {
+          "ret_6h_high": {
+            "active_at_boundary": false,
+            "classification": "CONTEMPORANEOUS",
+            "episodes": [
+              {
+                "class": "CONTEMPORANEOUS",
+                "end": "2026-09-27T17:01:24.213000+00:00",
+                "hours": 1,
+                "start": "2026-09-27T17:01:24.213000+00:00"
+              }
+            ],
+            "persisted_hours_max": 1
+          },
+          "ret_6h_low": {
+            "active_at_boundary": false,
+            "classification": "CONTEMPORANEOUS",
+            "episodes": [
+              {
+                "class": "CONTEMPORANEOUS",
+                "end": "2026-09-28T00:01:24.213000+00:00",
+                "hours": 2,
+                "start": "2026-09-27T23:01:24.213000+00:00"
+              }
+            ],
+            "persisted_hours_max": 2
+          }
+        },
+        "overall": "CONTEMPORANEOUS",
+        "price_at_boundary": 1.1399,
+        "ret_24h_before_boundary_pct": -0.0526,
+        "ret_6h_pctile_at_boundary": 32.93,
+        "ret_6h_pctile_at_event": 77.84,
+        "status_at_boundary": "OK",
+        "status_at_event": "OK",
+        "usable": true
+      },
+      "history": {
+        "daily_candles": 288,
+        "first_daily_candle": "2025-12-23T00:00:00+00:00",
+        "funding_history_available": true,
+        "hourly_candles_in_window": 1175,
+        "hourly_first": "2026-08-18T09:00:00+00:00",
+        "open_interest_history": false
+      },
+      "instrument_type": "BUILDER/ORACLE-BASED SYNTHETIC EXPOSURE (HIP-3 perp, deployer-set oracle)",
+      "live": {
+        "day_ntl_volume": 2538903.9910599994,
+        "funding": 5.6156e-06,
+        "mark_px": 1.1261,
+        "max_leverage": 50,
+        "mid_px": 1.1262,
+        "open_interest": 22192060.0,
+        "oracle_px": 1.1258
+      },
+      "market_hours": {
+        "gaps_over_1h": 0,
+        "weekday": {
+          "flat_share": 0.0012,
+          "hours": 839,
+          "median_abs_1h_move_pct": 0.0262,
+          "zero_volume_share": 0.0
+        },
+        "weekend": {
+          "flat_share": 0.0863,
+          "hours": 336,
+          "median_abs_1h_move_pct": 0.0172,
+          "zero_volume_share": 0.0208
+        }
+      },
+      "native_or_hip3": "HIP-3",
+      "symbol": "xyz:EUR",
+      "underlying_per_deployer": "EURUSD references the EUR/USD spot exchange rate: U.S. dollars per 1 euro. The euro is the official currency of the euro area.",
+      "v1_overlap": {
+        "note": "SAME INSTRUMENT: V1 usd is xyz:EUR's 24h change",
+        "v1_source": "usd"
+      }
+    },
+    {
+      "annotation_category": "commodities",
+      "category": "COMMODITY",
+      "coverage_575": {
+        "coverage_pct": 100.0,
+        "missing": 0,
+        "moved_in_prior_6h_share": 1.0,
+        "status": {
+          "OK": 575
+        },
+        "usable": 575,
+        "usable_with_7d_baseline": 575,
+        "v1_observations": 575,
+        "weekend_usable": 188
+      },
+      "cross_asset": {
+        "btc_down_and_asset_down": {
+          "both": 7,
+          "both_distinct_days": 3,
+          "both_if_independent": 0.96,
+          "btc_abnormal": 29,
+          "observations_both_measurable": 575,
+          "other_abnormal": 19
+        },
+        "btc_down_and_asset_up": {
+          "both": 0,
+          "both_distinct_days": 0,
+          "both_if_independent": 1.71,
+          "btc_abnormal": 29,
+          "observations_both_measurable": 575,
+          "other_abnormal": 34
+        },
+        "n": 575,
+        "spearman_24h_ret_vs_btc": 0.411
+      },
+      "dex": "xyz",
+      "display_name": "SILVER",
+      "event15": {
+        "change_boundary_to_event_pct": -3.3706,
+        "flag_timing": {
+          "ret_6h_high": {
+            "active_at_boundary": false,
+            "classification": "UNUSABLE",
+            "episodes": [],
+            "persisted_hours_max": 0
+          },
+          "ret_6h_low": {
+            "active_at_boundary": false,
+            "classification": "CONTEMPORANEOUS",
+            "episodes": [
+              {
+                "class": "CONTEMPORANEOUS",
+                "end": "2026-09-28T08:01:24.213000+00:00",
+                "hours": 8,
+                "start": "2026-09-28T01:01:24.213000+00:00"
+              }
+            ],
+            "persisted_hours_max": 8
+          }
+        },
+        "overall": "CONTEMPORANEOUS",
+        "price_at_boundary": 64.142,
+        "ret_24h_before_boundary_pct": -0.1059,
+        "ret_6h_pctile_at_boundary": 70.06,
+        "ret_6h_pctile_at_event": 0.0,
+        "status_at_boundary": "OK",
+        "status_at_event": "OK",
+        "usable": true
+      },
+      "history": {
+        "daily_candles": 285,
+        "first_daily_candle": "2025-12-26T00:00:00+00:00",
+        "funding_history_available": true,
+        "hourly_candles_in_window": 1175,
+        "hourly_first": "2026-08-18T09:00:00+00:00",
+        "open_interest_history": false
+      },
+      "instrument_type": "BUILDER/ORACLE-BASED SYNTHETIC EXPOSURE (HIP-3 perp, deployer-set oracle)",
+      "live": {
+        "day_ntl_volume": 152037381.31480002,
+        "funding": 6.25e-06,
+        "mark_px": 61.298,
+        "max_leverage": 25,
+        "mid_px": 61.2985,
+        "open_interest": 2572552.2199999997,
+        "oracle_px": 61.282
+      },
+      "market_hours": {
+        "gaps_over_1h": 0,
+        "weekday": {
+          "flat_share": 0.0,
+          "hours": 839,
+          "median_abs_1h_move_pct": 0.2263,
+          "zero_volume_share": 0.0
+        },
+        "weekend": {
+          "flat_share": 0.0,
+          "hours": 336,
+          "median_abs_1h_move_pct": 0.0388,
+          "zero_volume_share": 0.0
+        }
+      },
+      "native_or_hip3": "HIP-3",
+      "symbol": "xyz:SILVER",
+      "underlying_per_deployer": "SILVER references the USD spot price of 1 troy ounce of silver (XAG/USD).",
+      "v1_overlap": {
+        "note": "No V1 counterpart (correlated with gold)",
+        "v1_source": null
+      }
+    },
+    {
+      "annotation_category": "commodities",
+      "category": "OIL / ENERGY",
+      "coverage_575": {
+        "coverage_pct": 100.0,
+        "missing": 0,
+        "moved_in_prior_6h_share": 1.0,
+        "status": {
+          "OK": 575
+        },
+        "usable": 575,
+        "usable_with_7d_baseline": 575,
+        "v1_observations": 575,
+        "weekend_usable": 188
+      },
+      "cross_asset": {
+        "btc_down_and_asset_down": {
+          "both": 2,
+          "both_distinct_days": 1,
+          "both_if_independent": 2.27,
+          "btc_abnormal": 29,
+          "observations_both_measurable": 575,
+          "other_abnormal": 45
+        },
+        "btc_down_and_asset_up": {
+          "both": 4,
+          "both_distinct_days": 1,
+          "both_if_independent": 2.07,
+          "btc_abnormal": 29,
+          "observations_both_measurable": 575,
+          "other_abnormal": 41
+        },
+        "n": 575,
+        "spearman_24h_ret_vs_btc": -0.265
+      },
+      "dex": "xyz",
+      "display_name": "WTIOIL",
+      "event15": {
+        "change_boundary_to_event_pct": -1.0568,
+        "flag_timing": {
+          "ret_6h_high": {
+            "active_at_boundary": false,
+            "classification": "POST-EVENT",
+            "episodes": [
+              {
+                "class": "POST-EVENT",
+                "end": "2026-09-28T09:01:24.213000+00:00",
+                "hours": 1,
+                "start": "2026-09-28T09:01:24.213000+00:00"
+              },
+              {
+                "class": "POST-EVENT",
+                "end": "2026-09-28T11:01:24.213000+00:00",
+                "hours": 1,
+                "start": "2026-09-28T11:01:24.213000+00:00"
+              }
+            ],
+            "persisted_hours_max": 1
+          },
+          "ret_6h_low": {
+            "active_at_boundary": false,
+            "classification": "POST-EVENT",
+            "episodes": [
+              {
+                "class": "POST-EVENT",
+                "end": "2026-09-28T18:01:24.213000+00:00",
+                "hours": 2,
+                "start": "2026-09-28T17:01:24.213000+00:00"
+              },
+              {
+                "class": "POST-EVENT",
+                "end": "2026-09-28T21:01:24.213000+00:00",
+                "hours": 1,
+                "start": "2026-09-28T21:01:24.213000+00:00"
+              }
+            ],
+            "persisted_hours_max": 2
+          }
+        },
+        "overall": "POST-EVENT",
+        "price_at_boundary": 94.435,
+        "ret_24h_before_boundary_pct": 0.1018,
+        "ret_6h_pctile_at_boundary": 55.69,
+        "ret_6h_pctile_at_event": 50.9,
+        "status_at_boundary": "OK",
+        "status_at_event": "OK",
+        "usable": true
+      },
+      "history": {
+        "daily_candles": 274,
+        "first_daily_candle": "2026-01-06T00:00:00+00:00",
+        "funding_history_available": true,
+        "hourly_candles_in_window": 1175,
+        "hourly_first": "2026-08-18T09:00:00+00:00",
+        "open_interest_history": false
+      },
+      "instrument_type": "BUILDER/ORACLE-BASED SYNTHETIC EXPOSURE (HIP-3 perp, deployer-set oracle)",
+      "live": {
+        "day_ntl_volume": 207976057.94731304,
+        "funding": -4.61293e-05,
+        "mark_px": 89.519,
+        "max_leverage": 20,
+        "mid_px": 89.531,
+        "open_interest": 1619919.484,
+        "oracle_px": 89.6
+      },
+      "market_hours": {
+        "gaps_over_1h": 0,
+        "weekday": {
+          "flat_share": 0.0,
+          "hours": 839,
+          "median_abs_1h_move_pct": 0.2792,
+          "zero_volume_share": 0.0
+        },
+        "weekend": {
+          "flat_share": 0.0,
+          "hours": 336,
+          "median_abs_1h_move_pct": 0.0812,
+          "zero_volume_share": 0.0
+        }
+      },
+      "native_or_hip3": "HIP-3",
+      "symbol": "xyz:CL",
+      "underlying_per_deployer": "WTIOIL references the USD price of 1 barrel of WTI Light Sweet Crude Oil. WTI serves as a primary global benchmark for oil prices due to its high quality (low density, low sulfur).",
+      "v1_overlap": {
+        "note": "WTI vs Brent: same oil factor, different benchmark",
+        "v1_source": "oil"
+      }
+    },
+    {
+      "annotation_category": "commodities",
+      "category": "COMMODITY",
+      "coverage_575": {
+        "coverage_pct": 100.0,
+        "missing": 0,
+        "moved_in_prior_6h_share": 1.0,
+        "status": {
+          "OK": 575
+        },
+        "usable": 575,
+        "usable_with_7d_baseline": 575,
+        "v1_observations": 575,
+        "weekend_usable": 188
+      },
+      "cross_asset": {
+        "btc_down_and_asset_down": {
+          "both": 9,
+          "both_distinct_days": 4,
+          "both_if_independent": 1.61,
+          "btc_abnormal": 29,
+          "observations_both_measurable": 575,
+          "other_abnormal": 32
+        },
+        "btc_down_and_asset_up": {
+          "both": 0,
+          "both_distinct_days": 0,
+          "both_if_independent": 1.36,
+          "btc_abnormal": 29,
+          "observations_both_measurable": 575,
+          "other_abnormal": 27
+        },
+        "n": 575,
+        "spearman_24h_ret_vs_btc": 0.312
+      },
+      "dex": "xyz",
+      "display_name": "COPPER",
+      "event15": {
+        "change_boundary_to_event_pct": -1.8487,
+        "flag_timing": {
+          "ret_6h_high": {
+            "active_at_boundary": false,
+            "classification": "UNUSABLE",
+            "episodes": [],
+            "persisted_hours_max": 0
+          },
+          "ret_6h_low": {
+            "active_at_boundary": false,
+            "classification": "CONTEMPORANEOUS",
+            "episodes": [
+              {
+                "class": "CONTEMPORANEOUS",
+                "end": "2026-09-28T04:01:24.213000+00:00",
+                "hours": 4,
+                "start": "2026-09-28T01:01:24.213000+00:00"
+              },
+              {
+                "class": "POST-EVENT",
+                "end": "2026-09-28T06:01:24.213000+00:00",
+                "hours": 1,
+                "start": "2026-09-28T06:01:24.213000+00:00"
+              }
+            ],
+            "persisted_hours_max": 4
+          }
+        },
+        "overall": "CONTEMPORANEOUS",
+        "price_at_boundary": 6.7887,
+        "ret_24h_before_boundary_pct": -0.0029,
+        "ret_6h_pctile_at_boundary": 45.51,
+        "ret_6h_pctile_at_event": 0.0,
+        "status_at_boundary": "OK",
+        "status_at_event": "OK",
+        "usable": true
+      },
+      "history": {
+        "daily_candles": 266,
+        "first_daily_candle": "2026-01-14T00:00:00+00:00",
+        "funding_history_available": true,
+        "hourly_candles_in_window": 1175,
+        "hourly_first": "2026-08-18T09:00:00+00:00",
+        "open_interest_history": false
+      },
+      "instrument_type": "BUILDER/ORACLE-BASED SYNTHETIC EXPOSURE (HIP-3 perp, deployer-set oracle)",
+      "live": {
+        "day_ntl_volume": 3548210.1404680004,
+        "funding": 6.25e-06,
+        "mark_px": 6.6493,
+        "max_leverage": 20,
+        "mid_px": 6.6493,
+        "open_interest": 1712077.54,
+        "oracle_px": 6.65
+      },
+      "market_hours": {
+        "gaps_over_1h": 0,
+        "weekday": {
+          "flat_share": 0.0,
+          "hours": 839,
+          "median_abs_1h_move_pct": 0.1334,
+          "zero_volume_share": 0.0
+        },
+        "weekend": {
+          "flat_share": 0.003,
+          "hours": 336,
+          "median_abs_1h_move_pct": 0.0463,
+          "zero_volume_share": 0.003
+        }
+      },
+      "native_or_hip3": "HIP-3",
+      "symbol": "xyz:COPPER",
+      "underlying_per_deployer": "COPPER references the USD price of 1 pound of high-grade copper. Copper is a core industrial metal and a widely followed barometer of global manufacturing and infrastructure demand.",
+      "v1_overlap": {
+        "note": "No V1 counterpart (industrial-demand barometer)",
+        "v1_source": null
+      }
+    },
+    {
+      "annotation_category": "commodities",
+      "category": "OIL / ENERGY",
+      "coverage_575": {
+        "coverage_pct": 100.0,
+        "missing": 0,
+        "moved_in_prior_6h_share": 1.0,
+        "status": {
+          "OK": 575
+        },
+        "usable": 575,
+        "usable_with_7d_baseline": 575,
+        "v1_observations": 575,
+        "weekend_usable": 188
+      },
+      "cross_asset": {
+        "btc_down_and_asset_down": {
+          "both": 5,
+          "both_distinct_days": 3,
+          "both_if_independent": 1.71,
+          "btc_abnormal": 29,
+          "observations_both_measurable": 575,
+          "other_abnormal": 34
+        },
+        "btc_down_and_asset_up": {
+          "both": 4,
+          "both_distinct_days": 1,
+          "both_if_independent": 1.51,
+          "btc_abnormal": 29,
+          "observations_both_measurable": 575,
+          "other_abnormal": 30
+        },
+        "n": 575,
+        "spearman_24h_ret_vs_btc": -0.033
+      },
+      "dex": "xyz",
+      "display_name": "NATGAS",
+      "event15": {
+        "change_boundary_to_event_pct": -3.6018,
+        "flag_timing": {
+          "ret_6h_high": {
+            "active_at_boundary": false,
+            "classification": "UNUSABLE",
+            "episodes": [],
+            "persisted_hours_max": 0
+          },
+          "ret_6h_low": {
+            "active_at_boundary": false,
+            "classification": "CONTEMPORANEOUS",
+            "episodes": [
+              {
+                "class": "CONTEMPORANEOUS",
+                "end": "2026-09-28T03:01:24.213000+00:00",
+                "hours": 5,
+                "start": "2026-09-27T23:01:24.213000+00:00"
+              }
+            ],
+            "persisted_hours_max": 5
+          }
+        },
+        "overall": "CONTEMPORANEOUS",
+        "price_at_boundary": 3.2289,
+        "ret_24h_before_boundary_pct": 0.373,
+        "ret_6h_pctile_at_boundary": 50.9,
+        "ret_6h_pctile_at_event": 0.0,
+        "status_at_boundary": "OK",
+        "status_at_event": "OK",
+        "usable": true
+      },
+      "history": {
+        "daily_candles": 259,
+        "first_daily_candle": "2026-01-21T00:00:00+00:00",
+        "funding_history_available": true,
+        "hourly_candles_in_window": 1175,
+        "hourly_first": "2026-08-18T09:00:00+00:00",
+        "open_interest_history": false
+      },
+      "instrument_type": "BUILDER/ORACLE-BASED SYNTHETIC EXPOSURE (HIP-3 perp, deployer-set oracle)",
+      "live": {
+        "day_ntl_volume": 19003191.241369996,
+        "funding": 0.0002315538,
+        "mark_px": 3.124,
+        "max_leverage": 10,
+        "mid_px": 3.1238,
+        "open_interest": 8181344.8,
+        "oracle_px": 3.1115
+      },
+      "market_hours": {
+        "gaps_over_1h": 0,
+        "weekday": {
+          "flat_share": 0.0,
+          "hours": 839,
+          "median_abs_1h_move_pct": 0.1964,
+          "zero_volume_share": 0.0
+        },
+        "weekend": {
+          "flat_share": 0.0,
+          "hours": 336,
+          "median_abs_1h_move_pct": 0.0747,
+          "zero_volume_share": 0.0
+        }
+      },
+      "native_or_hip3": "HIP-3",
+      "symbol": "xyz:NATGAS",
+      "underlying_per_deployer": "NATGAS references the USD price of 1 MMBtu of Henry Hub natural gas. Henry Hub serves as the primary U.S. benchmark for natural gas pricing and is widely referenced in global energy markets.",
+      "v1_overlap": {
+        "note": "No V1 counterpart",
+        "v1_source": null
+      }
+    },
+    {
+      "annotation_category": "commodities",
+      "category": "COMMODITY",
+      "coverage_575": {
+        "coverage_pct": 100.0,
+        "missing": 0,
+        "moved_in_prior_6h_share": 1.0,
+        "status": {
+          "OK": 575
+        },
+        "usable": 575,
+        "usable_with_7d_baseline": 575,
+        "v1_observations": 575,
+        "weekend_usable": 188
+      },
+      "cross_asset": {
+        "btc_down_and_asset_down": {
+          "both": 13,
+          "both_distinct_days": 4,
+          "both_if_independent": 1.31,
+          "btc_abnormal": 29,
+          "observations_both_measurable": 575,
+          "other_abnormal": 26
+        },
+        "btc_down_and_asset_up": {
+          "both": 0,
+          "both_distinct_days": 0,
+          "both_if_independent": 1.66,
+          "btc_abnormal": 29,
+          "observations_both_measurable": 575,
+          "other_abnormal": 33
+        },
+        "n": 575,
+        "spearman_24h_ret_vs_btc": 0.349
+      },
+      "dex": "xyz",
+      "display_name": "PLATINUM",
+      "event15": {
+        "change_boundary_to_event_pct": -2.3422,
+        "flag_timing": {
+          "ret_6h_high": {
+            "active_at_boundary": false,
+            "classification": "UNUSABLE",
+            "episodes": [],
+            "persisted_hours_max": 0
+          },
+          "ret_6h_low": {
+            "active_at_boundary": false,
+            "classification": "CONTEMPORANEOUS",
+            "episodes": [
+              {
+                "class": "CONTEMPORANEOUS",
+                "end": "2026-09-28T04:01:24.213000+00:00",
+                "hours": 3,
+                "start": "2026-09-28T02:01:24.213000+00:00"
+              },
+              {
+                "class": "POST-EVENT",
+                "end": "2026-09-28T06:01:24.213000+00:00",
+                "hours": 1,
+                "start": "2026-09-28T06:01:24.213000+00:00"
+              }
+            ],
+            "persisted_hours_max": 3
+          }
+        },
+        "overall": "CONTEMPORANEOUS",
+        "price_at_boundary": 1780.4,
+        "ret_24h_before_boundary_pct": 0.0787,
+        "ret_6h_pctile_at_boundary": 55.69,
+        "ret_6h_pctile_at_event": 1.2,
+        "status_at_boundary": "OK",
+        "status_at_event": "OK",
+        "usable": true
+      },
+      "history": {
+        "daily_candles": 253,
+        "first_daily_candle": "2026-01-27T00:00:00+00:00",
+        "funding_history_available": true,
+        "hourly_candles_in_window": 1175,
+        "hourly_first": "2026-08-18T09:00:00+00:00",
+        "open_interest_history": false
+      },
+      "instrument_type": "BUILDER/ORACLE-BASED SYNTHETIC EXPOSURE (HIP-3 perp, deployer-set oracle)",
+      "live": {
+        "day_ntl_volume": 2745835.4871300003,
+        "funding": 6.25e-06,
+        "mark_px": 1701.6,
+        "max_leverage": 20,
+        "mid_px": 1701.75,
+        "open_interest": 1706.2626,
+        "oracle_px": 1700.6
+      },
+      "market_hours": {
+        "gaps_over_1h": 0,
+        "weekday": {
+          "flat_share": 0.0,
+          "hours": 839,
+          "median_abs_1h_move_pct": 0.2267,
+          "zero_volume_share": 0.0
+        },
+        "weekend": {
+          "flat_share": 0.1369,
+          "hours": 336,
+          "median_abs_1h_move_pct": 0.0444,
+          "zero_volume_share": 0.0565
+        }
+      },
+      "native_or_hip3": "HIP-3",
+      "symbol": "xyz:PLATINUM",
+      "underlying_per_deployer": "PLATINUM references the USD spot price of 1 troy ounce of platinum (XPT/USD).",
+      "v1_overlap": {
+        "note": "No V1 counterpart",
+        "v1_source": null
+      }
+    },
+    {
+      "annotation_category": "stocks",
+      "category": "COMMODITY",
+      "coverage_575": {
+        "coverage_pct": 100.0,
+        "missing": 0,
+        "moved_in_prior_6h_share": 1.0,
+        "status": {
+          "OK": 575
+        },
+        "usable": 575,
+        "usable_with_7d_baseline": 575,
+        "v1_observations": 575,
+        "weekend_usable": 188
+      },
+      "cross_asset": {
+        "btc_down_and_asset_down": {
+          "both": 8,
+          "both_distinct_days": 3,
+          "both_if_independent": 1.87,
+          "btc_abnormal": 29,
+          "observations_both_measurable": 575,
+          "other_abnormal": 37
+        },
+        "btc_down_and_asset_up": {
+          "both": 0,
+          "both_distinct_days": 0,
+          "both_if_independent": 1.21,
+          "btc_abnormal": 29,
+          "observations_both_measurable": 575,
+          "other_abnormal": 24
+        },
+        "n": 575,
+        "spearman_24h_ret_vs_btc": 0.381
+      },
+      "dex": "xyz",
+      "display_name": "URNM",
+      "event15": {
+        "change_boundary_to_event_pct": -0.5306,
+        "flag_timing": {
+          "ret_6h_high": {
+            "active_at_boundary": false,
+            "classification": "UNUSABLE",
+            "episodes": [],
+            "persisted_hours_max": 0
+          },
+          "ret_6h_low": {
+            "active_at_boundary": false,
+            "classification": "UNUSABLE",
+            "episodes": [],
+            "persisted_hours_max": 0
+          }
+        },
+        "overall": "NO ABNORMAL MOVE",
+        "price_at_boundary": 49.57,
+        "ret_24h_before_boundary_pct": 0.1536,
+        "ret_6h_pctile_at_boundary": 56.89,
+        "ret_6h_pctile_at_event": 17.37,
+        "status_at_boundary": "OK",
+        "status_at_event": "OK",
+        "usable": true
+      },
+      "history": {
+        "daily_candles": 251,
+        "first_daily_candle": "2026-01-29T00:00:00+00:00",
+        "funding_history_available": true,
+        "hourly_candles_in_window": 1175,
+        "hourly_first": "2026-08-18T09:00:00+00:00",
+        "open_interest_history": false
+      },
+      "instrument_type": "BUILDER/ORACLE-BASED SYNTHETIC EXPOSURE (HIP-3 perp, deployer-set oracle)",
+      "live": {
+        "day_ntl_volume": 284995.14206,
+        "funding": 4.66118e-05,
+        "mark_px": 50.98,
+        "max_leverage": 10,
+        "mid_px": 51.0035,
+        "open_interest": 40651.0,
+        "oracle_px": 50.945
+      },
+      "market_hours": {
+        "gaps_over_1h": 0,
+        "weekday": {
+          "flat_share": 0.0489,
+          "hours": 839,
+          "median_abs_1h_move_pct": 0.1654,
+          "zero_volume_share": 0.0191
+        },
+        "weekend": {
+          "flat_share": 0.2292,
+          "hours": 336,
+          "median_abs_1h_move_pct": 0.082,
+          "zero_volume_share": 0.0804
+        }
+      },
+      "native_or_hip3": "HIP-3",
+      "symbol": "xyz:URNM",
+      "underlying_per_deployer": "URNM references 1 share of the Sprott Uranium Miners ETF (NYSE Arca: URNM), quoted in USD. The fund holds uranium-mining equities and physical uranium exposure.",
+      "v1_overlap": {
+        "note": "No V1 counterpart",
+        "v1_source": null
+      }
+    },
+    {
+      "annotation_category": "commodities",
+      "category": "COMMODITY",
+      "coverage_575": {
+        "coverage_pct": 100.0,
+        "missing": 0,
+        "moved_in_prior_6h_share": 1.0,
+        "status": {
+          "OK": 575
+        },
+        "usable": 575,
+        "usable_with_7d_baseline": 575,
+        "v1_observations": 575,
+        "weekend_usable": 188
+      },
+      "cross_asset": {
+        "btc_down_and_asset_down": {
+          "both": 10,
+          "both_distinct_days": 4,
+          "both_if_independent": 1.71,
+          "btc_abnormal": 29,
+          "observations_both_measurable": 575,
+          "other_abnormal": 34
+        },
+        "btc_down_and_asset_up": {
+          "both": 0,
+          "both_distinct_days": 0,
+          "both_if_independent": 1.51,
+          "btc_abnormal": 29,
+          "observations_both_measurable": 575,
+          "other_abnormal": 30
+        },
+        "n": 575,
+        "spearman_24h_ret_vs_btc": 0.117
+      },
+      "dex": "xyz",
+      "display_name": "PALLADIUM",
+      "event15": {
+        "change_boundary_to_event_pct": -2.8733,
+        "flag_timing": {
+          "ret_6h_high": {
+            "active_at_boundary": false,
+            "classification": "UNUSABLE",
+            "episodes": [],
+            "persisted_hours_max": 0
+          },
+          "ret_6h_low": {
+            "active_at_boundary": false,
+            "classification": "CONTEMPORANEOUS",
+            "episodes": [
+              {
+                "class": "CONTEMPORANEOUS",
+                "end": "2026-09-28T06:01:24.213000+00:00",
+                "hours": 6,
+                "start": "2026-09-28T01:01:24.213000+00:00"
+              }
+            ],
+            "persisted_hours_max": 6
+          }
+        },
+        "overall": "CONTEMPORANEOUS",
+        "price_at_boundary": 1270.3,
+        "ret_24h_before_boundary_pct": -0.0551,
+        "ret_6h_pctile_at_boundary": 56.29,
+        "ret_6h_pctile_at_event": 0.0,
+        "status_at_boundary": "OK",
+        "status_at_event": "OK",
+        "usable": true
+      },
+      "history": {
+        "daily_candles": 217,
+        "first_daily_candle": "2026-03-04T00:00:00+00:00",
+        "funding_history_available": true,
+        "hourly_candles_in_window": 1175,
+        "hourly_first": "2026-08-18T09:00:00+00:00",
+        "open_interest_history": false
+      },
+      "instrument_type": "BUILDER/ORACLE-BASED SYNTHETIC EXPOSURE (HIP-3 perp, deployer-set oracle)",
+      "live": {
+        "day_ntl_volume": 352255.1272599999,
+        "funding": 6.25e-06,
+        "mark_px": 1173.1,
+        "max_leverage": 20,
+        "mid_px": 1173.05,
+        "open_interest": 2650.8474,
+        "oracle_px": 1173.0
+      },
+      "market_hours": {
+        "gaps_over_1h": 0,
+        "weekday": {
+          "flat_share": 0.0143,
+          "hours": 839,
+          "median_abs_1h_move_pct": 0.2151,
+          "zero_volume_share": 0.0036
+        },
+        "weekend": {
+          "flat_share": 0.2232,
+          "hours": 336,
+          "median_abs_1h_move_pct": 0.0383,
+          "zero_volume_share": 0.1161
+        }
+      },
+      "native_or_hip3": "HIP-3",
+      "symbol": "xyz:PALLADIUM",
+      "underlying_per_deployer": "PALLADIUM references the USD spot price of 1 troy ounce of palladium (XPD/USD).",
+      "v1_overlap": {
+        "note": "No V1 counterpart",
+        "v1_source": null
+      }
+    },
+    {
+      "annotation_category": "indices",
+      "category": "EQUITY INDEX",
+      "coverage_575": {
+        "coverage_pct": 100.0,
+        "missing": 0,
+        "moved_in_prior_6h_share": 1.0,
+        "status": {
+          "OK": 575
+        },
+        "usable": 575,
+        "usable_with_7d_baseline": 575,
+        "v1_observations": 575,
+        "weekend_usable": 188
+      },
+      "cross_asset": {
+        "btc_down_and_asset_down": {
+          "both": 6,
+          "both_distinct_days": 4,
+          "both_if_independent": 1.71,
+          "btc_abnormal": 29,
+          "observations_both_measurable": 575,
+          "other_abnormal": 34
+        },
+        "btc_down_and_asset_up": {
+          "both": 4,
+          "both_distinct_days": 2,
+          "both_if_independent": 1.61,
+          "btc_abnormal": 29,
+          "observations_both_measurable": 575,
+          "other_abnormal": 32
+        },
+        "n": 575,
+        "spearman_24h_ret_vs_btc": 0.315
+      },
+      "dex": "xyz",
+      "display_name": "KR200",
+      "event15": {
+        "change_boundary_to_event_pct": -1.8117,
+        "flag_timing": {
+          "ret_6h_high": {
+            "active_at_boundary": false,
+            "classification": "POST-EVENT",
+            "episodes": [
+              {
+                "class": "POST-EVENT",
+                "end": "2026-09-28T21:01:24.213000+00:00",
+                "hours": 1,
+                "start": "2026-09-28T21:01:24.213000+00:00"
+              }
+            ],
+            "persisted_hours_max": 1
+          },
+          "ret_6h_low": {
+            "active_at_boundary": false,
+            "classification": "CONTEMPORANEOUS",
+            "episodes": [
+              {
+                "class": "CONTEMPORANEOUS",
+                "end": "2026-09-28T04:01:24.213000+00:00",
+                "hours": 3,
+                "start": "2026-09-28T02:01:24.213000+00:00"
+              },
+              {
+                "class": "POST-EVENT",
+                "end": "2026-09-28T06:01:24.213000+00:00",
+                "hours": 1,
+                "start": "2026-09-28T06:01:24.213000+00:00"
+              }
+            ],
+            "persisted_hours_max": 3
+          }
+        },
+        "overall": "CONTEMPORANEOUS",
+        "price_at_boundary": 1115.0,
+        "ret_24h_before_boundary_pct": 0.2788,
+        "ret_6h_pctile_at_boundary": 41.32,
+        "ret_6h_pctile_at_event": 3.59,
+        "status_at_boundary": "OK",
+        "status_at_event": "OK",
+        "usable": true
+      },
+      "history": {
+        "daily_candles": 181,
+        "first_daily_candle": "2026-04-09T00:00:00+00:00",
+        "funding_history_available": true,
+        "hourly_candles_in_window": 1175,
+        "hourly_first": "2026-08-18T09:00:00+00:00",
+        "open_interest_history": false
+      },
+      "instrument_type": "BUILDER/ORACLE-BASED SYNTHETIC EXPOSURE (HIP-3 perp, deployer-set oracle)",
+      "live": {
+        "day_ntl_volume": 248485.92004,
+        "funding": 1.80825e-05,
+        "mark_px": 1093.0,
+        "max_leverage": 20,
+        "mid_px": 1093.65,
+        "open_interest": 697.0476,
+        "oracle_px": 1093.1
+      },
+      "market_hours": {
+        "gaps_over_1h": 0,
+        "weekday": {
+          "flat_share": 0.0215,
+          "hours": 839,
+          "median_abs_1h_move_pct": 0.2437,
+          "zero_volume_share": 0.0119
+        },
+        "weekend": {
+          "flat_share": 0.2202,
+          "hours": 336,
+          "median_abs_1h_move_pct": 0.084,
+          "zero_volume_share": 0.128
+        }
+      },
+      "native_or_hip3": "HIP-3",
+      "symbol": "xyz:KR200",
+      "underlying_per_deployer": "KR200 references the native KRW level of the Korea 200, a capitalization-weighted index of 200 leading South Korean equities. No FX conversion is applied; index-point P&L is cash-settled in USDC.",
+      "v1_overlap": {
+        "note": "No V1 counterpart",
+        "v1_source": null
+      }
+    },
+    {
+      "annotation_category": "indices",
+      "category": "EQUITY INDEX",
+      "coverage_575": {
+        "coverage_pct": 100.0,
+        "missing": 0,
+        "moved_in_prior_6h_share": 1.0,
+        "status": {
+          "OK": 575
+        },
+        "usable": 575,
+        "usable_with_7d_baseline": 575,
+        "v1_observations": 575,
+        "weekend_usable": 188
+      },
+      "cross_asset": {
+        "btc_down_and_asset_down": {
+          "both": 11,
+          "both_distinct_days": 4,
+          "both_if_independent": 1.66,
+          "btc_abnormal": 29,
+          "observations_both_measurable": 575,
+          "other_abnormal": 33
+        },
+        "btc_down_and_asset_up": {
+          "both": 0,
+          "both_distinct_days": 0,
+          "both_if_independent": 1.87,
+          "btc_abnormal": 29,
+          "observations_both_measurable": 575,
+          "other_abnormal": 37
+        },
+        "n": 575,
+        "spearman_24h_ret_vs_btc": 0.331
+      },
+      "dex": "xyz",
+      "display_name": "JP225",
+      "event15": {
+        "change_boundary_to_event_pct": -0.3164,
+        "flag_timing": {
+          "ret_6h_high": {
+            "active_at_boundary": false,
+            "classification": "UNUSABLE",
+            "episodes": [],
+            "persisted_hours_max": 0
+          },
+          "ret_6h_low": {
+            "active_at_boundary": false,
+            "classification": "POST-EVENT",
+            "episodes": [
+              {
+                "class": "POST-EVENT",
+                "end": "2026-09-28T09:01:24.213000+00:00",
+                "hours": 3,
+                "start": "2026-09-28T07:01:24.213000+00:00"
+              }
+            ],
+            "persisted_hours_max": 3
+          }
+        },
+        "overall": "POST-EVENT",
+        "price_at_boundary": 66377.0,
+        "ret_24h_before_boundary_pct": -0.0482,
+        "ret_6h_pctile_at_boundary": 46.11,
+        "ret_6h_pctile_at_event": 19.16,
+        "status_at_boundary": "OK",
+        "status_at_event": "OK",
+        "usable": true
+      },
+      "history": {
+        "daily_candles": 181,
+        "first_daily_candle": "2026-04-09T00:00:00+00:00",
+        "funding_history_available": true,
+        "hourly_candles_in_window": 1175,
+        "hourly_first": "2026-08-18T09:00:00+00:00",
+        "open_interest_history": false
+      },
+      "instrument_type": "BUILDER/ORACLE-BASED SYNTHETIC EXPOSURE (HIP-3 perp, deployer-set oracle)",
+      "live": {
+        "day_ntl_volume": 1482231.4069299994,
+        "funding": 6.25e-06,
+        "mark_px": 70922.0,
+        "max_leverage": 20,
+        "mid_px": 70920.5,
+        "open_interest": 56.788,
+        "oracle_px": 70896.0
+      },
+      "market_hours": {
+        "gaps_over_1h": 0,
+        "weekday": {
+          "flat_share": 0.006,
+          "hours": 839,
+          "median_abs_1h_move_pct": 0.1525,
+          "zero_volume_share": 0.0024
+        },
+        "weekend": {
+          "flat_share": 0.1131,
+          "hours": 336,
+          "median_abs_1h_move_pct": 0.0714,
+          "zero_volume_share": 0.0685
+        }
+      },
+      "native_or_hip3": "HIP-3",
+      "symbol": "xyz:JP225",
+      "underlying_per_deployer": "JP225 references the native JPY level of the Japan 225, a price-weighted index of 225 leading Japanese equities. No FX conversion is applied; index-point P&L is cash-settled in USDC.",
+      "v1_overlap": {
+        "note": "No V1 counterpart",
+        "v1_source": null
+      }
+    },
+    {
+      "annotation_category": "stocks",
+      "category": "EQUITY INDEX",
+      "coverage_575": {
+        "coverage_pct": 100.0,
+        "missing": 0,
+        "moved_in_prior_6h_share": 1.0,
+        "status": {
+          "OK": 575
+        },
+        "usable": 575,
+        "usable_with_7d_baseline": 575,
+        "v1_observations": 575,
+        "weekend_usable": 188
+      },
+      "cross_asset": {
+        "btc_down_and_asset_down": {
+          "both": 5,
+          "both_distinct_days": 4,
+          "both_if_independent": 1.66,
+          "btc_abnormal": 29,
+          "observations_both_measurable": 575,
+          "other_abnormal": 33
+        },
+        "btc_down_and_asset_up": {
+          "both": 3,
+          "both_distinct_days": 1,
+          "both_if_independent": 1.66,
+          "btc_abnormal": 29,
+          "observations_both_measurable": 575,
+          "other_abnormal": 33
+        },
+        "n": 575,
+        "spearman_24h_ret_vs_btc": 0.355
+      },
+      "dex": "xyz",
+      "display_name": "EWY",
+      "event15": {
+        "change_boundary_to_event_pct": -1.5138,
+        "flag_timing": {
+          "ret_6h_high": {
+            "active_at_boundary": false,
+            "classification": "POST-EVENT",
+            "episodes": [
+              {
+                "class": "POST-EVENT",
+                "end": "2026-09-28T21:01:24.213000+00:00",
+                "hours": 1,
+                "start": "2026-09-28T21:01:24.213000+00:00"
+              }
+            ],
+            "persisted_hours_max": 1
+          },
+          "ret_6h_low": {
+            "active_at_boundary": false,
+            "classification": "CONTEMPORANEOUS",
+            "episodes": [
+              {
+                "class": "CONTEMPORANEOUS",
+                "end": "2026-09-28T03:01:24.213000+00:00",
+                "hours": 1,
+                "start": "2026-09-28T03:01:24.213000+00:00"
+              },
+              {
+                "class": "POST-EVENT",
+                "end": "2026-09-28T06:01:24.213000+00:00",
+                "hours": 1,
+                "start": "2026-09-28T06:01:24.213000+00:00"
+              }
+            ],
+            "persisted_hours_max": 1
+          }
+        },
+        "overall": "CONTEMPORANEOUS",
+        "price_at_boundary": 187.61,
+        "ret_24h_before_boundary_pct": 0.3101,
+        "ret_6h_pctile_at_boundary": 38.32,
+        "ret_6h_pctile_at_event": 4.79,
+        "status_at_boundary": "OK",
+        "status_at_event": "OK",
+        "usable": true
+      },
+      "history": {
+        "daily_candles": 219,
+        "first_daily_candle": "2026-03-02T00:00:00+00:00",
+        "funding_history_available": true,
+        "hourly_candles_in_window": 1175,
+        "hourly_first": "2026-08-18T09:00:00+00:00",
+        "open_interest_history": false
+      },
+      "instrument_type": "BUILDER/ORACLE-BASED SYNTHETIC EXPOSURE (HIP-3 perp, deployer-set oracle)",
+      "live": {
+        "day_ntl_volume": 14030430.527219994,
+        "funding": 6.25e-06,
+        "mark_px": 188.56,
+        "max_leverage": 20,
+        "mid_px": 188.55,
+        "open_interest": 36510.146,
+        "oracle_px": 188.54
+      },
+      "market_hours": {
+        "gaps_over_1h": 0,
+        "weekday": {
+          "flat_share": 0.0,
+          "hours": 839,
+          "median_abs_1h_move_pct": 0.2179,
+          "zero_volume_share": 0.0
+        },
+        "weekend": {
+          "flat_share": 0.0,
+          "hours": 336,
+          "median_abs_1h_move_pct": 0.0605,
+          "zero_volume_share": 0.0
+        }
+      },
+      "native_or_hip3": "HIP-3",
+      "symbol": "xyz:EWY",
+      "underlying_per_deployer": "EWY references 1 share of the iShares MSCI South Korea ETF (NYSE Arca: EWY), quoted in USD. The fund provides exposure to large- and mid-cap South Korean equities; local-currency exposure is embedded in the ETF.",
+      "v1_overlap": {
+        "note": "No V1 counterpart",
+        "v1_source": null
+      }
+    },
+    {
+      "annotation_category": "stocks",
+      "category": "EQUITY INDEX",
+      "coverage_575": {
+        "coverage_pct": 100.0,
+        "missing": 0,
+        "moved_in_prior_6h_share": 1.0,
+        "status": {
+          "OK": 575
+        },
+        "usable": 575,
+        "usable_with_7d_baseline": 575,
+        "v1_observations": 575,
+        "weekend_usable": 188
+      },
+      "cross_asset": {
+        "btc_down_and_asset_down": {
+          "both": 9,
+          "both_distinct_days": 5,
+          "both_if_independent": 1.36,
+          "btc_abnormal": 29,
+          "observations_both_measurable": 575,
+          "other_abnormal": 27
+        },
+        "btc_down_and_asset_up": {
+          "both": 0,
+          "both_distinct_days": 0,
+          "both_if_independent": 2.37,
+          "btc_abnormal": 29,
+          "observations_both_measurable": 575,
+          "other_abnormal": 47
+        },
+        "n": 575,
+        "spearman_24h_ret_vs_btc": 0.376
+      },
+      "dex": "xyz",
+      "display_name": "EWJ",
+      "event15": {
+        "change_boundary_to_event_pct": -0.6672,
+        "flag_timing": {
+          "ret_6h_high": {
+            "active_at_boundary": false,
+            "classification": "UNUSABLE",
+            "episodes": [],
+            "persisted_hours_max": 0
+          },
+          "ret_6h_low": {
+            "active_at_boundary": false,
+            "classification": "CONTEMPORANEOUS",
+            "episodes": [
+              {
+                "class": "CONTEMPORANEOUS",
+                "end": "2026-09-28T06:01:24.213000+00:00",
+                "hours": 5,
+                "start": "2026-09-28T02:01:24.213000+00:00"
+              }
+            ],
+            "persisted_hours_max": 5
+          }
+        },
+        "overall": "CONTEMPORANEOUS",
+        "price_at_boundary": 98.021,
+        "ret_24h_before_boundary_pct": 0.1164,
+        "ret_6h_pctile_at_boundary": 32.93,
+        "ret_6h_pctile_at_event": 4.19,
+        "status_at_boundary": "OK",
+        "status_at_event": "OK",
+        "usable": true
+      },
+      "history": {
+        "daily_candles": 219,
+        "first_daily_candle": "2026-03-02T00:00:00+00:00",
+        "funding_history_available": true,
+        "hourly_candles_in_window": 1175,
+        "hourly_first": "2026-08-18T09:00:00+00:00",
+        "open_interest_history": false
+      },
+      "instrument_type": "BUILDER/ORACLE-BASED SYNTHETIC EXPOSURE (HIP-3 perp, deployer-set oracle)",
+      "live": {
+        "day_ntl_volume": 244279.55241,
+        "funding": 6.25e-06,
+        "mark_px": 99.618,
+        "max_leverage": 20,
+        "mid_px": 99.616,
+        "open_interest": 10445.488,
+        "oracle_px": 99.59
+      },
+      "market_hours": {
+        "gaps_over_1h": 0,
+        "weekday": {
+          "flat_share": 0.0489,
+          "hours": 839,
+          "median_abs_1h_move_pct": 0.1057,
+          "zero_volume_share": 0.0226
+        },
+        "weekend": {
+          "flat_share": 0.2262,
+          "hours": 336,
+          "median_abs_1h_move_pct": 0.0284,
+          "zero_volume_share": 0.122
+        }
+      },
+      "native_or_hip3": "HIP-3",
+      "symbol": "xyz:EWJ",
+      "underlying_per_deployer": "EWJ references 1 share of the iShares MSCI Japan ETF (NYSE Arca: EWJ), quoted in USD. The fund provides exposure to large- and mid-cap Japanese equities; local-currency exposure is embedded in the ETF.",
+      "v1_overlap": {
+        "note": "No V1 counterpart",
+        "v1_source": null
+      }
+    },
+    {
+      "annotation_category": "commodities",
+      "category": "OIL / ENERGY",
+      "coverage_575": {
+        "coverage_pct": 100.0,
+        "missing": 0,
+        "moved_in_prior_6h_share": 1.0,
+        "status": {
+          "OK": 575
+        },
+        "usable": 575,
+        "usable_with_7d_baseline": 575,
+        "v1_observations": 575,
+        "weekend_usable": 188
+      },
+      "cross_asset": {
+        "btc_down_and_asset_down": {
+          "both": 2,
+          "both_distinct_days": 1,
+          "both_if_independent": 1.77,
+          "btc_abnormal": 29,
+          "observations_both_measurable": 575,
+          "other_abnormal": 35
+        },
+        "btc_down_and_asset_up": {
+          "both": 9,
+          "both_distinct_days": 3,
+          "both_if_independent": 2.27,
+          "btc_abnormal": 29,
+          "observations_both_measurable": 575,
+          "other_abnormal": 45
+        },
+        "n": 575,
+        "spearman_24h_ret_vs_btc": -0.227
+      },
+      "dex": "xyz",
+      "display_name": "BRENTOIL",
+      "event15": {
+        "change_boundary_to_event_pct": -1.1493,
+        "flag_timing": {
+          "ret_6h_high": {
+            "active_at_boundary": false,
+            "classification": "POST-EVENT",
+            "episodes": [
+              {
+                "class": "POST-EVENT",
+                "end": "2026-09-28T09:01:24.213000+00:00",
+                "hours": 1,
+                "start": "2026-09-28T09:01:24.213000+00:00"
+              }
+            ],
+            "persisted_hours_max": 1
+          },
+          "ret_6h_low": {
+            "active_at_boundary": false,
+            "classification": "POST-EVENT",
+            "episodes": [
+              {
+                "class": "POST-EVENT",
+                "end": "2026-09-28T18:01:24.213000+00:00",
+                "hours": 2,
+                "start": "2026-09-28T17:01:24.213000+00:00"
+              }
+            ],
+            "persisted_hours_max": 2
+          }
+        },
+        "overall": "POST-EVENT",
+        "price_at_boundary": 99.627,
+        "ret_24h_before_boundary_pct": 0.473,
+        "ret_6h_pctile_at_boundary": 46.71,
+        "ret_6h_pctile_at_event": 39.52,
+        "status_at_boundary": "OK",
+        "status_at_event": "OK",
+        "usable": true
+      },
+      "history": {
+        "daily_candles": 217,
+        "first_daily_candle": "2026-03-04T00:00:00+00:00",
+        "funding_history_available": true,
+        "hourly_candles_in_window": 1175,
+        "hourly_first": "2026-08-18T09:00:00+00:00",
+        "open_interest_history": false
+      },
+      "instrument_type": "BUILDER/ORACLE-BASED SYNTHETIC EXPOSURE (HIP-3 perp, deployer-set oracle)",
+      "live": {
+        "day_ntl_volume": 174221783.14362,
+        "funding": -7.58302e-05,
+        "mark_px": 100.42,
+        "max_leverage": 20,
+        "mid_px": 100.415,
+        "open_interest": 1578733.1199999999,
+        "oracle_px": 100.56
+      },
+      "market_hours": {
+        "gaps_over_1h": 0,
+        "weekday": {
+          "flat_share": 0.0,
+          "hours": 839,
+          "median_abs_1h_move_pct": 0.2505,
+          "zero_volume_share": 0.0
+        },
+        "weekend": {
+          "flat_share": 0.0,
+          "hours": 336,
+          "median_abs_1h_move_pct": 0.0716,
+          "zero_volume_share": 0.0
+        }
+      },
+      "native_or_hip3": "HIP-3",
+      "symbol": "xyz:BRENTOIL",
+      "underlying_per_deployer": "BRENTOIL references the USD price of 1 barrel of Brent crude oil. Brent is the world's primary oil benchmark, used to price the majority of globally traded crude.",
+      "v1_overlap": {
+        "note": "SAME INSTRUMENT: V1 already scores xyz:BRENTOIL's 24h change",
+        "v1_source": "oil"
+      }
+    },
+    {
+      "annotation_category": "indices",
+      "category": "EQUITY INDEX",
+      "coverage_575": {
+        "coverage_pct": 100.0,
+        "missing": 0,
+        "moved_in_prior_6h_share": 1.0,
+        "status": {
+          "OK": 575
+        },
+        "usable": 575,
+        "usable_with_7d_baseline": 575,
+        "v1_observations": 575,
+        "weekend_usable": 188
+      },
+      "cross_asset": {
+        "btc_down_and_asset_down": {
+          "both": 14,
+          "both_distinct_days": 5,
+          "both_if_independent": 2.12,
+          "btc_abnormal": 29,
+          "observations_both_measurable": 575,
+          "other_abnormal": 42
+        },
+        "btc_down_and_asset_up": {
+          "both": 0,
+          "both_distinct_days": 0,
+          "both_if_independent": 2.12,
+          "btc_abnormal": 29,
+          "observations_both_measurable": 575,
+          "other_abnormal": 42
+        },
+        "n": 575,
+        "spearman_24h_ret_vs_btc": 0.564
+      },
+      "dex": "xyz",
+      "display_name": "S&P500",
+      "event15": {
+        "change_boundary_to_event_pct": -0.2986,
+        "flag_timing": {
+          "ret_6h_high": {
+            "active_at_boundary": false,
+            "classification": "UNUSABLE",
+            "episodes": [],
+            "persisted_hours_max": 0
+          },
+          "ret_6h_low": {
+            "active_at_boundary": false,
+            "classification": "POST-EVENT",
+            "episodes": [
+              {
+                "class": "POST-EVENT",
+                "end": "2026-09-28T15:01:24.213000+00:00",
+                "hours": 1,
+                "start": "2026-09-28T15:01:24.213000+00:00"
+              }
+            ],
+            "persisted_hours_max": 1
+          }
+        },
+        "overall": "POST-EVENT",
+        "price_at_boundary": 7735.5,
+        "ret_24h_before_boundary_pct": 0.0893,
+        "ret_6h_pctile_at_boundary": 61.68,
+        "ret_6h_pctile_at_event": 8.38,
+        "status_at_boundary": "OK",
+        "status_at_event": "OK",
+        "usable": true
+      },
+      "history": {
+        "daily_candles": 203,
+        "first_daily_candle": "2026-03-18T00:00:00+00:00",
+        "funding_history_available": true,
+        "hourly_candles_in_window": 1175,
+        "hourly_first": "2026-08-18T09:00:00+00:00",
+        "open_interest_history": false
+      },
+      "instrument_type": "BUILDER/ORACLE-BASED SYNTHETIC EXPOSURE (HIP-3 perp, deployer-set oracle)",
+      "live": {
+        "day_ntl_volume": 234942021.43740007,
+        "funding": -4.9621e-06,
+        "mark_px": 7822.3,
+        "max_leverage": 50,
+        "mid_px": 7821.95,
+        "open_interest": 50397.074,
+        "oracle_px": 7825.3
+      },
+      "market_hours": {
+        "gaps_over_1h": 0,
+        "weekday": {
+          "flat_share": 0.0,
+          "hours": 839,
+          "median_abs_1h_move_pct": 0.0586,
+          "zero_volume_share": 0.0
+        },
+        "weekend": {
+          "flat_share": 0.0,
+          "hours": 336,
+          "median_abs_1h_move_pct": 0.022,
+          "zero_volume_share": 0.0
+        }
+      },
+      "native_or_hip3": "HIP-3",
+      "symbol": "xyz:SP500",
+      "underlying_per_deployer": "S&P500 references the S&P 500 Index, a free-float-capitalization-weighted benchmark of 500 leading publicly-traded U.S. companies, widely regarded as the best single gauge of large-cap U.S. equities. The S&P 500 Index is a product of S&P Dow Jones Indices LLC and has been licensed for use by trade[XYZ]; see https://docs.trade.xyz/legal-and-disclaimers/s-and-p-500-disclaimers.",
+      "v1_overlap": {
+        "note": "Same index; V1 reads FRED daily closes, Hyperliquid trades hourly incl. weekends",
+        "v1_source": "sp500"
+      }
+    },
+    {
+      "annotation_category": "stocks",
+      "category": "OIL / ENERGY",
+      "coverage_575": {
+        "coverage_pct": 100.0,
+        "missing": 0,
+        "moved_in_prior_6h_share": 1.0,
+        "status": {
+          "OK": 575
+        },
+        "usable": 575,
+        "usable_with_7d_baseline": 575,
+        "v1_observations": 575,
+        "weekend_usable": 188
+      },
+      "cross_asset": {
+        "btc_down_and_asset_down": {
+          "both": 1,
+          "both_distinct_days": 1,
+          "both_if_independent": 1.41,
+          "btc_abnormal": 29,
+          "observations_both_measurable": 575,
+          "other_abnormal": 28
+        },
+        "btc_down_and_asset_up": {
+          "both": 7,
+          "both_distinct_days": 2,
+          "both_if_independent": 1.82,
+          "btc_abnormal": 29,
+          "observations_both_measurable": 575,
+          "other_abnormal": 36
+        },
+        "n": 575,
+        "spearman_24h_ret_vs_btc": -0.22
+      },
+      "dex": "xyz",
+      "display_name": "XLE",
+      "event15": {
+        "change_boundary_to_event_pct": 0.7822,
+        "flag_timing": {
+          "ret_6h_high": {
+            "active_at_boundary": false,
+            "classification": "CONTEMPORANEOUS",
+            "episodes": [
+              {
+                "class": "CONTEMPORANEOUS",
+                "end": "2026-09-28T03:01:24.213000+00:00",
+                "hours": 1,
+                "start": "2026-09-28T03:01:24.213000+00:00"
+              },
+              {
+                "class": "POST-EVENT",
+                "end": "2026-09-28T11:01:24.213000+00:00",
+                "hours": 1,
+                "start": "2026-09-28T11:01:24.213000+00:00"
+              }
+            ],
+            "persisted_hours_max": 1
+          },
+          "ret_6h_low": {
+            "active_at_boundary": false,
+            "classification": "POST-EVENT",
+            "episodes": [
+              {
+                "class": "POST-EVENT",
+                "end": "2026-09-28T19:01:24.213000+00:00",
+                "hours": 3,
+                "start": "2026-09-28T17:01:24.213000+00:00"
+              }
+            ],
+            "persisted_hours_max": 3
+          }
+        },
+        "overall": "CONTEMPORANEOUS",
+        "price_at_boundary": 61.879,
+        "ret_24h_before_boundary_pct": -0.3398,
+        "ret_6h_pctile_at_boundary": 35.93,
+        "ret_6h_pctile_at_event": 97.01,
+        "status_at_boundary": "OK",
+        "status_at_event": "OK",
+        "usable": true
+      },
+      "history": {
+        "daily_candles": 156,
+        "first_daily_candle": "2026-05-04T00:00:00+00:00",
+        "funding_history_available": true,
+        "hourly_candles_in_window": 1175,
+        "hourly_first": "2026-08-18T09:00:00+00:00",
+        "open_interest_history": false
+      },
+      "instrument_type": "BUILDER/ORACLE-BASED SYNTHETIC EXPOSURE (HIP-3 perp, deployer-set oracle)",
+      "live": {
+        "day_ntl_volume": 179605.92343,
+        "funding": 1.58403e-05,
+        "mark_px": 64.061,
+        "max_leverage": 20,
+        "mid_px": 64.052,
+        "open_interest": 25717.84,
+        "oracle_px": 64.035
+      },
+      "market_hours": {
+        "gaps_over_1h": 0,
+        "weekday": {
+          "flat_share": 0.0679,
+          "hours": 839,
+          "median_abs_1h_move_pct": 0.1008,
+          "zero_volume_share": 0.0358
+        },
+        "weekend": {
+          "flat_share": 0.2589,
+          "hours": 336,
+          "median_abs_1h_move_pct": 0.0463,
+          "zero_volume_share": 0.1399
+        }
+      },
+      "native_or_hip3": "HIP-3",
+      "symbol": "xyz:XLE",
+      "underlying_per_deployer": "XLE references 1 share of the State Street Energy Select Sector SPDR ETF (NYSE Arca: XLE), quoted in USD. The fund tracks large U.S. energy companies in the Energy Select Sector Index.",
+      "v1_overlap": {
+        "note": "Energy equities; partly the oil factor",
+        "v1_source": "oil"
+      }
+    },
+    {
+      "annotation_category": "stocks",
+      "category": "EQUITY INDEX",
+      "coverage_575": {
+        "coverage_pct": 100.0,
+        "missing": 0,
+        "moved_in_prior_6h_share": 1.0,
+        "status": {
+          "OK": 575
+        },
+        "usable": 575,
+        "usable_with_7d_baseline": 575,
+        "v1_observations": 575,
+        "weekend_usable": 188
+      },
+      "cross_asset": {
+        "btc_down_and_asset_down": {
+          "both": 7,
+          "both_distinct_days": 3,
+          "both_if_independent": 1.46,
+          "btc_abnormal": 29,
+          "observations_both_measurable": 575,
+          "other_abnormal": 29
+        },
+        "btc_down_and_asset_up": {
+          "both": 3,
+          "both_distinct_days": 1,
+          "both_if_independent": 1.31,
+          "btc_abnormal": 29,
+          "observations_both_measurable": 575,
+          "other_abnormal": 26
+        },
+        "n": 575,
+        "spearman_24h_ret_vs_btc": 0.122
+      },
+      "dex": "xyz",
+      "display_name": "EWZ",
+      "event15": {
+        "change_boundary_to_event_pct": 0.1669,
+        "flag_timing": {
+          "ret_6h_high": {
+            "active_at_boundary": false,
+            "classification": "UNUSABLE",
+            "episodes": [],
+            "persisted_hours_max": 0
+          },
+          "ret_6h_low": {
+            "active_at_boundary": false,
+            "classification": "POST-EVENT",
+            "episodes": [
+              {
+                "class": "POST-EVENT",
+                "end": "2026-09-28T13:01:24.213000+00:00",
+                "hours": 1,
+                "start": "2026-09-28T13:01:24.213000+00:00"
+              }
+            ],
+            "persisted_hours_max": 1
+          }
+        },
+        "overall": "POST-EVENT",
+        "price_at_boundary": 36.555,
+        "ret_24h_before_boundary_pct": -0.1966,
+        "ret_6h_pctile_at_boundary": 48.5,
+        "ret_6h_pctile_at_event": 79.04,
+        "status_at_boundary": "OK",
+        "status_at_event": "OK",
+        "usable": true
+      },
+      "history": {
+        "daily_candles": 156,
+        "first_daily_candle": "2026-05-04T00:00:00+00:00",
+        "funding_history_available": true,
+        "hourly_candles_in_window": 1175,
+        "hourly_first": "2026-08-18T09:00:00+00:00",
+        "open_interest_history": false
+      },
+      "instrument_type": "BUILDER/ORACLE-BASED SYNTHETIC EXPOSURE (HIP-3 perp, deployer-set oracle)",
+      "live": {
+        "day_ntl_volume": 2653650.94738,
+        "funding": 6.25e-06,
+        "mark_px": 42.937,
+        "max_leverage": 20,
+        "mid_px": 42.9375,
+        "open_interest": 50351.0,
+        "oracle_px": 42.94
+      },
+      "market_hours": {
+        "gaps_over_1h": 0,
+        "weekday": {
+          "flat_share": 0.118,
+          "hours": 839,
+          "median_abs_1h_move_pct": 0.1322,
+          "zero_volume_share": 0.0536
+        },
+        "weekend": {
+          "flat_share": 0.3542,
+          "hours": 336,
+          "median_abs_1h_move_pct": 0.028,
+          "zero_volume_share": 0.1607
+        }
+      },
+      "native_or_hip3": "HIP-3",
+      "symbol": "xyz:EWZ",
+      "underlying_per_deployer": "EWZ references 1 share of the iShares MSCI Brazil ETF (NYSE Arca: EWZ), quoted in USD. The fund provides exposure to large- and mid-cap Brazilian equities; local-currency exposure is embedded in the ETF.",
+      "v1_overlap": {
+        "note": "No V1 counterpart",
+        "v1_source": null
+      }
+    },
+    {
+      "annotation_category": "stocks",
+      "category": "EQUITY INDEX",
+      "coverage_575": {
+        "coverage_pct": 100.0,
+        "missing": 0,
+        "moved_in_prior_6h_share": 0.9948,
+        "status": {
+          "OK": 575
+        },
+        "usable": 575,
+        "usable_with_7d_baseline": 575,
+        "v1_observations": 575,
+        "weekend_usable": 188
+      },
+      "cross_asset": {
+        "btc_down_and_asset_down": {
+          "both": 9,
+          "both_distinct_days": 5,
+          "both_if_independent": 1.51,
+          "btc_abnormal": 29,
+          "observations_both_measurable": 575,
+          "other_abnormal": 30
+        },
+        "btc_down_and_asset_up": {
+          "both": 0,
+          "both_distinct_days": 0,
+          "both_if_independent": 2.12,
+          "btc_abnormal": 29,
+          "observations_both_measurable": 575,
+          "other_abnormal": 42
+        },
+        "n": 575,
+        "spearman_24h_ret_vs_btc": 0.403
+      },
+      "dex": "xyz",
+      "display_name": "EWT",
+      "event15": {
+        "change_boundary_to_event_pct": -0.8846,
+        "flag_timing": {
+          "ret_6h_high": {
+            "active_at_boundary": false,
+            "classification": "POST-EVENT",
+            "episodes": [
+              {
+                "class": "POST-EVENT",
+                "end": "2026-09-28T22:01:24.213000+00:00",
+                "hours": 2,
+                "start": "2026-09-28T21:01:24.213000+00:00"
+              }
+            ],
+            "persisted_hours_max": 2
+          },
+          "ret_6h_low": {
+            "active_at_boundary": false,
+            "classification": "UNUSABLE",
+            "episodes": [],
+            "persisted_hours_max": 0
+          }
+        },
+        "overall": "POST-EVENT",
+        "price_at_boundary": 115.3,
+        "ret_24h_before_boundary_pct": -0.1472,
+        "ret_6h_pctile_at_boundary": 25.15,
+        "ret_6h_pctile_at_event": 8.98,
+        "status_at_boundary": "OK",
+        "status_at_event": "OK",
+        "usable": true
+      },
+      "history": {
+        "daily_candles": 139,
+        "first_daily_candle": "2026-05-21T00:00:00+00:00",
+        "funding_history_available": true,
+        "hourly_candles_in_window": 1175,
+        "hourly_first": "2026-08-18T09:00:00+00:00",
+        "open_interest_history": false
+      },
+      "instrument_type": "BUILDER/ORACLE-BASED SYNTHETIC EXPOSURE (HIP-3 perp, deployer-set oracle)",
+      "live": {
+        "day_ntl_volume": 26700.1045,
+        "funding": 6.25e-06,
+        "mark_px": 117.96,
+        "max_leverage": 20,
+        "mid_px": 117.955,
+        "open_interest": 4866.6,
+        "oracle_px": 117.99
+      },
+      "market_hours": {
+        "gaps_over_1h": 0,
+        "weekday": {
+          "flat_share": 0.1228,
+          "hours": 839,
+          "median_abs_1h_move_pct": 0.1216,
+          "zero_volume_share": 0.0632
+        },
+        "weekend": {
+          "flat_share": 0.3393,
+          "hours": 336,
+          "median_abs_1h_move_pct": 0.0268,
+          "zero_volume_share": 0.1637
+        }
+      },
+      "native_or_hip3": "HIP-3",
+      "symbol": "xyz:EWT",
+      "underlying_per_deployer": "EWT references 1 share of the iShares MSCI Taiwan ETF (NYSE Arca: EWT), quoted in USD. The fund provides exposure to large- and mid-cap Taiwanese equities; local-currency exposure is embedded in the ETF.",
+      "v1_overlap": {
+        "note": "No V1 counterpart",
+        "v1_source": null
+      }
+    },
+    {
+      "annotation_category": "fx",
+      "category": "FX / USD",
+      "coverage_575": {
+        "coverage_pct": 100.0,
+        "missing": 0,
+        "moved_in_prior_6h_share": 0.9826,
+        "status": {
+          "OK": 575
+        },
+        "usable": 575,
+        "usable_with_7d_baseline": 575,
+        "v1_observations": 575,
+        "weekend_usable": 188
+      },
+      "cross_asset": {
+        "btc_down_and_asset_down": {
+          "both": 4,
+          "both_distinct_days": 2,
+          "both_if_independent": 1.51,
+          "btc_abnormal": 29,
+          "observations_both_measurable": 575,
+          "other_abnormal": 30
+        },
+        "btc_down_and_asset_up": {
+          "both": 0,
+          "both_distinct_days": 0,
+          "both_if_independent": 2.07,
+          "btc_abnormal": 29,
+          "observations_both_measurable": 575,
+          "other_abnormal": 41
+        },
+        "n": 575,
+        "spearman_24h_ret_vs_btc": 0.096
+      },
+      "dex": "xyz",
+      "display_name": "GBPUSD",
+      "event15": {
+        "change_boundary_to_event_pct": 0.0681,
+        "flag_timing": {
+          "ret_6h_high": {
+            "active_at_boundary": false,
+            "classification": "POST-EVENT",
+            "episodes": [
+              {
+                "class": "PRE-EVENT",
+                "end": "2026-09-26T12:01:24.213000+00:00",
+                "hours": 1,
+                "start": "2026-09-26T12:01:24.213000+00:00"
+              },
+              {
+                "class": "PRE-EVENT",
+                "end": "2026-09-26T17:01:24.213000+00:00",
+                "hours": 3,
+                "start": "2026-09-26T15:01:24.213000+00:00"
+              },
+              {
+                "class": "POST-EVENT",
+                "end": "2026-09-28T09:01:24.213000+00:00",
+                "hours": 1,
+                "start": "2026-09-28T09:01:24.213000+00:00"
+              }
+            ],
+            "persisted_hours_max": 3
+          },
+          "ret_6h_low": {
+            "active_at_boundary": false,
+            "classification": "UNUSABLE",
+            "episodes": [
+              {
+                "class": "PRE-EVENT",
+                "end": "2026-09-26T22:01:24.213000+00:00",
+                "hours": 1,
+                "start": "2026-09-26T22:01:24.213000+00:00"
+              }
+            ],
+            "persisted_hours_max": 1
+          }
+        },
+        "overall": "POST-EVENT",
+        "price_at_boundary": 1.3225,
+        "ret_24h_before_boundary_pct": -0.3466,
+        "ret_6h_pctile_at_boundary": 19.16,
+        "ret_6h_pctile_at_event": 76.65,
+        "status_at_boundary": "OK",
+        "status_at_event": "OK",
+        "usable": true
+      },
+      "history": {
+        "daily_candles": 142,
+        "first_daily_candle": "2026-05-18T00:00:00+00:00",
+        "funding_history_available": true,
+        "hourly_candles_in_window": 1175,
+        "hourly_first": "2026-08-18T09:00:00+00:00",
+        "open_interest_history": false
+      },
+      "instrument_type": "BUILDER/ORACLE-BASED SYNTHETIC EXPOSURE (HIP-3 perp, deployer-set oracle)",
+      "live": {
+        "day_ntl_volume": 74556.2871,
+        "funding": 0.0,
+        "mark_px": 1.3273,
+        "max_leverage": 50,
+        "mid_px": 1.3273,
+        "open_interest": 590092.0,
+        "oracle_px": 1.3272
+      },
+      "market_hours": {
+        "gaps_over_1h": 0,
+        "weekday": {
+          "flat_share": 0.3361,
+          "hours": 839,
+          "median_abs_1h_move_pct": 0.0148,
+          "zero_volume_share": 0.1824
+        },
+        "weekend": {
+          "flat_share": 0.5089,
+          "hours": 336,
+          "median_abs_1h_move_pct": 0.0,
+          "zero_volume_share": 0.3869
+        }
+      },
+      "native_or_hip3": "HIP-3",
+      "symbol": "xyz:GBP",
+      "underlying_per_deployer": "GBPUSD references the GBP/USD spot exchange rate: U.S. dollars per 1 pound sterling. The pound sterling is the official currency of the United Kingdom.",
+      "v1_overlap": {
+        "note": "Another USD cross; overlaps the USD factor V1 reads from EUR",
+        "v1_source": "usd"
+      }
+    },
+    {
+      "annotation_category": "stocks",
+      "category": "EQUITY INDEX",
+      "coverage_575": {
+        "coverage_pct": 100.0,
+        "missing": 0,
+        "moved_in_prior_6h_share": 1.0,
+        "status": {
+          "OK": 575
+        },
+        "usable": 575,
+        "usable_with_7d_baseline": 575,
+        "v1_observations": 575,
+        "weekend_usable": 188
+      },
+      "cross_asset": {
+        "btc_down_and_asset_down": {
+          "both": 7,
+          "both_distinct_days": 3,
+          "both_if_independent": 1.56,
+          "btc_abnormal": 29,
+          "observations_both_measurable": 575,
+          "other_abnormal": 31
+        },
+        "btc_down_and_asset_up": {
+          "both": 1,
+          "both_distinct_days": 1,
+          "both_if_independent": 1.61,
+          "btc_abnormal": 29,
+          "observations_both_measurable": 575,
+          "other_abnormal": 32
+        },
+        "n": 575,
+        "spearman_24h_ret_vs_btc": 0.504
+      },
+      "dex": "xyz",
+      "display_name": "SMH",
+      "event15": {
+        "change_boundary_to_event_pct": -2.026,
+        "flag_timing": {
+          "ret_6h_high": {
+            "active_at_boundary": false,
+            "classification": "UNUSABLE",
+            "episodes": [],
+            "persisted_hours_max": 0
+          },
+          "ret_6h_low": {
+            "active_at_boundary": false,
+            "classification": "CONTEMPORANEOUS",
+            "episodes": [
+              {
+                "class": "CONTEMPORANEOUS",
+                "end": "2026-09-28T06:01:24.213000+00:00",
+                "hours": 6,
+                "start": "2026-09-28T01:01:24.213000+00:00"
+              }
+            ],
+            "persisted_hours_max": 6
+          }
+        },
+        "overall": "CONTEMPORANEOUS",
+        "price_at_boundary": 611.54,
+        "ret_24h_before_boundary_pct": 0.2673,
+        "ret_6h_pctile_at_boundary": 59.28,
+        "ret_6h_pctile_at_event": 0.0,
+        "status_at_boundary": "OK",
+        "status_at_event": "OK",
+        "usable": true
+      },
+      "history": {
+        "daily_candles": 114,
+        "first_daily_candle": "2026-06-15T00:00:00+00:00",
+        "funding_history_available": true,
+        "hourly_candles_in_window": 1175,
+        "hourly_first": "2026-08-18T09:00:00+00:00",
+        "open_interest_history": false
+      },
+      "instrument_type": "BUILDER/ORACLE-BASED SYNTHETIC EXPOSURE (HIP-3 perp, deployer-set oracle)",
+      "live": {
+        "day_ntl_volume": 297581.15871,
+        "funding": 2.45286e-05,
+        "mark_px": 635.68,
+        "max_leverage": 20,
+        "mid_px": 635.91,
+        "open_interest": 3531.292,
+        "oracle_px": 635.52
+      },
+      "market_hours": {
+        "gaps_over_1h": 0,
+        "weekday": {
+          "flat_share": 0.0048,
+          "hours": 839,
+          "median_abs_1h_move_pct": 0.1622,
+          "zero_volume_share": 0.0024
+        },
+        "weekend": {
+          "flat_share": 0.2262,
+          "hours": 336,
+          "median_abs_1h_move_pct": 0.0458,
+          "zero_volume_share": 0.0923
+        }
+      },
+      "native_or_hip3": "HIP-3",
+      "symbol": "xyz:SMH",
+      "underlying_per_deployer": "SMH references 1 share of the VanEck Semiconductor ETF (Nasdaq: SMH), quoted in USD. The fund tracks U.S.-listed companies involved in semiconductor production and equipment.",
+      "v1_overlap": {
+        "note": "No V1 counterpart",
+        "v1_source": null
+      }
+    },
+    {
+      "annotation_category": "stocks",
+      "category": "UNKNOWN",
+      "coverage_575": {
+        "coverage_pct": 100.0,
+        "missing": 0,
+        "moved_in_prior_6h_share": 1.0,
+        "status": {
+          "OK": 575
+        },
+        "usable": 575,
+        "usable_with_7d_baseline": 575,
+        "v1_observations": 575,
+        "weekend_usable": 188
+      },
+      "dex": "xyz",
+      "display_name": "STRC",
+      "event15": {
+        "change_boundary_to_event_pct": 0.1906,
+        "flag_timing": {
+          "ret_6h_high": {
+            "active_at_boundary": false,
+            "classification": "POST-EVENT",
+            "episodes": [
+              {
+                "class": "PRE-EVENT",
+                "end": "2026-09-26T07:01:24.213000+00:00",
+                "hours": 1,
+                "start": "2026-09-26T07:01:24.213000+00:00"
+              },
+              {
+                "class": "POST-EVENT",
+                "end": "2026-09-28T21:01:24.213000+00:00",
+                "hours": 7,
+                "start": "2026-09-28T15:01:24.213000+00:00"
+              }
+            ],
+            "persisted_hours_max": 7
+          },
+          "ret_6h_low": {
+            "active_at_boundary": false,
+            "classification": "POST-EVENT",
+            "episodes": [
+              {
+                "class": "POST-EVENT",
+                "end": "2026-09-28T11:01:24.213000+00:00",
+                "hours": 3,
+                "start": "2026-09-28T09:01:24.213000+00:00"
+              },
+              {
+                "class": "POST-EVENT",
+                "end": "2026-09-28T13:01:24.213000+00:00",
+                "hours": 1,
+                "start": "2026-09-28T13:01:24.213000+00:00"
+              }
+            ],
+            "persisted_hours_max": 3
+          }
+        },
+        "overall": "POST-EVENT",
+        "price_at_boundary": 98.612,
+        "ret_24h_before_boundary_pct": -0.165,
+        "ret_6h_pctile_at_boundary": 10.78,
+        "ret_6h_pctile_at_event": 80.24,
+        "status_at_boundary": "OK",
+        "status_at_event": "OK",
+        "usable": true
+      },
+      "history": {
+        "daily_candles": 107,
+        "first_daily_candle": "2026-06-22T00:00:00+00:00",
+        "funding_history_available": true,
+        "hourly_candles_in_window": 1175,
+        "hourly_first": "2026-08-18T09:00:00+00:00",
+        "open_interest_history": false
+      },
+      "instrument_type": "BUILDER/ORACLE-BASED SYNTHETIC EXPOSURE (HIP-3 perp, deployer-set oracle)",
+      "live": {
+        "day_ntl_volume": 509515.1971999999,
+        "funding": 1.4217e-06,
+        "mark_px": 99.523,
+        "max_leverage": 10,
+        "mid_px": 99.512,
+        "open_interest": 116768.6,
+        "oracle_px": 99.535
+      },
+      "market_hours": {
+        "gaps_over_1h": 0,
+        "weekday": {
+          "flat_share": 0.0882,
+          "hours": 839,
+          "median_abs_1h_move_pct": 0.0391,
+          "zero_volume_share": 0.0322
+        },
+        "weekend": {
+          "flat_share": 0.2202,
+          "hours": 336,
+          "median_abs_1h_move_pct": 0.0264,
+          "zero_volume_share": 0.0952
+        }
+      },
+      "native_or_hip3": "HIP-3",
+      "symbol": "xyz:STRC",
+      "underlying_per_deployer": "STRC references 1 share of Strategy Inc's Variable Rate Series A Perpetual Stretch Preferred Stock (Nasdaq: STRC), quoted in USD. Stretch, the underlying security, pays cumulative monthly cash dividends at a variable rate on a $100 stated amount. Strategy, formerly MicroStrategy, holds bitcoin as its primary treasury asset.",
+      "v1_overlap": {
+        "note": "SAME UNDERLYING: V1 strc reads STRC via Yahoo; Hyperliquid adds 24/7 trading of the perp",
+        "v1_source": "strc"
+      }
+    },
+    {
+      "annotation_category": "stocks",
+      "category": "EQUITY INDEX",
+      "coverage_575": {
+        "coverage_pct": 100.0,
+        "missing": 0,
+        "moved_in_prior_6h_share": 1.0,
+        "status": {
+          "OK": 575
+        },
+        "usable": 575,
+        "usable_with_7d_baseline": 575,
+        "v1_observations": 575,
+        "weekend_usable": 188
+      },
+      "cross_asset": {
+        "btc_down_and_asset_down": {
+          "both": 4,
+          "both_distinct_days": 3,
+          "both_if_independent": 1.66,
+          "btc_abnormal": 29,
+          "observations_both_measurable": 575,
+          "other_abnormal": 33
+        },
+        "btc_down_and_asset_up": {
+          "both": 2,
+          "both_distinct_days": 1,
+          "both_if_independent": 1.56,
+          "btc_abnormal": 29,
+          "observations_both_measurable": 575,
+          "other_abnormal": 31
+        },
+        "n": 575,
+        "spearman_24h_ret_vs_btc": 0.36
+      },
+      "dex": "xyz",
+      "display_name": "KORU",
+      "event15": {
+        "change_boundary_to_event_pct": -3.9103,
+        "flag_timing": {
+          "ret_6h_high": {
+            "active_at_boundary": false,
+            "classification": "POST-EVENT",
+            "episodes": [
+              {
+                "class": "POST-EVENT",
+                "end": "2026-09-28T21:01:24.213000+00:00",
+                "hours": 1,
+                "start": "2026-09-28T21:01:24.213000+00:00"
+              }
+            ],
+            "persisted_hours_max": 1
+          },
+          "ret_6h_low": {
+            "active_at_boundary": false,
+            "classification": "UNUSABLE",
+            "episodes": [],
+            "persisted_hours_max": 0
+          }
+        },
+        "overall": "POST-EVENT",
+        "price_at_boundary": 21.661,
+        "ret_24h_before_boundary_pct": 0.7816,
+        "ret_6h_pctile_at_boundary": 39.52,
+        "ret_6h_pctile_at_event": 5.39,
+        "status_at_boundary": "OK",
+        "status_at_event": "OK",
+        "usable": true
+      },
+      "history": {
+        "daily_candles": 63,
+        "first_daily_candle": "2026-08-05T00:00:00+00:00",
+        "funding_history_available": true,
+        "hourly_candles_in_window": 1175,
+        "hourly_first": "2026-08-18T09:00:00+00:00",
+        "open_interest_history": false
+      },
+      "instrument_type": "BUILDER/ORACLE-BASED SYNTHETIC EXPOSURE (HIP-3 perp, deployer-set oracle)",
+      "live": {
+        "day_ntl_volume": 11283635.653500004,
+        "funding": 6.25e-06,
+        "mark_px": 21.754,
+        "max_leverage": 10,
+        "mid_px": 21.7455,
+        "open_interest": 123380.4,
+        "oracle_px": 21.755
+      },
+      "market_hours": {
+        "gaps_over_1h": 0,
+        "weekday": {
+          "flat_share": 0.0024,
+          "hours": 839,
+          "median_abs_1h_move_pct": 0.6614,
+          "zero_volume_share": 0.0
+        },
+        "weekend": {
+          "flat_share": 0.0,
+          "hours": 336,
+          "median_abs_1h_move_pct": 0.155,
+          "zero_volume_share": 0.0
+        }
+      },
+      "native_or_hip3": "HIP-3",
+      "symbol": "xyz:KORU",
+      "underlying_per_deployer": "KORU references 1 share of the Direxion Daily MSCI South Korea Bull 3X ETF (NYSE Arca: KORU), quoted in USD. The fund seeks daily investment results, before fees and expenses, of 300% of the performance of the MSCI Korea 25/50 Index; local-currency exposure is embedded in the ETF.",
+      "v1_overlap": {
+        "note": "No V1 counterpart",
+        "v1_source": null
+      }
+    },
+    {
+      "annotation_category": "stocks",
+      "category": "EQUITY INDEX",
+      "coverage_575": {
+        "coverage_pct": 100.0,
+        "missing": 0,
+        "moved_in_prior_6h_share": 1.0,
+        "status": {
+          "OK": 575
+        },
+        "usable": 575,
+        "usable_with_7d_baseline": 575,
+        "v1_observations": 575,
+        "weekend_usable": 188
+      },
+      "cross_asset": {
+        "btc_down_and_asset_down": {
+          "both": 8,
+          "both_distinct_days": 4,
+          "both_if_independent": 1.66,
+          "btc_abnormal": 29,
+          "observations_both_measurable": 575,
+          "other_abnormal": 33
+        },
+        "btc_down_and_asset_up": {
+          "both": 3,
+          "both_distinct_days": 1,
+          "both_if_independent": 2.12,
+          "btc_abnormal": 29,
+          "observations_both_measurable": 575,
+          "other_abnormal": 42
+        },
+        "n": 575,
+        "spearman_24h_ret_vs_btc": 0.471
+      },
+      "dex": "xyz",
+      "display_name": "SOXL",
+      "event15": {
+        "change_boundary_to_event_pct": -6.6848,
+        "flag_timing": {
+          "ret_6h_high": {
+            "active_at_boundary": false,
+            "classification": "UNUSABLE",
+            "episodes": [],
+            "persisted_hours_max": 0
+          },
+          "ret_6h_low": {
+            "active_at_boundary": false,
+            "classification": "CONTEMPORANEOUS",
+            "episodes": [
+              {
+                "class": "CONTEMPORANEOUS",
+                "end": "2026-09-28T04:01:24.213000+00:00",
+                "hours": 3,
+                "start": "2026-09-28T02:01:24.213000+00:00"
+              },
+              {
+                "class": "POST-EVENT",
+                "end": "2026-09-28T06:01:24.213000+00:00",
+                "hours": 1,
+                "start": "2026-09-28T06:01:24.213000+00:00"
+              }
+            ],
+            "persisted_hours_max": 3
+          }
+        },
+        "overall": "CONTEMPORANEOUS",
+        "price_at_boundary": 154.23,
+        "ret_24h_before_boundary_pct": 2.5534,
+        "ret_6h_pctile_at_boundary": 58.68,
+        "ret_6h_pctile_at_event": 0.0,
+        "status_at_boundary": "OK",
+        "status_at_event": "OK",
+        "usable": true
+      },
+      "history": {
+        "daily_candles": 62,
+        "first_daily_candle": "2026-08-06T00:00:00+00:00",
+        "funding_history_available": true,
+        "hourly_candles_in_window": 1175,
+        "hourly_first": "2026-08-18T09:00:00+00:00",
+        "open_interest_history": false
+      },
+      "instrument_type": "BUILDER/ORACLE-BASED SYNTHETIC EXPOSURE (HIP-3 perp, deployer-set oracle)",
+      "live": {
+        "day_ntl_volume": 25959785.662500005,
+        "funding": 6.25e-06,
+        "mark_px": 166.82,
+        "max_leverage": 10,
+        "mid_px": 166.815,
+        "open_interest": 237490.04,
+        "oracle_px": 166.78
+      },
+      "market_hours": {
+        "gaps_over_1h": 0,
+        "weekday": {
+          "flat_share": 0.0,
+          "hours": 839,
+          "median_abs_1h_move_pct": 0.5534,
+          "zero_volume_share": 0.0
+        },
+        "weekend": {
+          "flat_share": 0.0,
+          "hours": 336,
+          "median_abs_1h_move_pct": 0.1586,
+          "zero_volume_share": 0.0
+        }
+      },
+      "native_or_hip3": "HIP-3",
+      "symbol": "xyz:SOXL",
+      "underlying_per_deployer": "SOXL references 1 share of the Direxion Daily Semiconductor Bull 3X Shares (NYSE Arca: SOXL), quoted in USD. The fund seeks daily investment results of 300% of the daily performance of the ICE Semiconductor Index, an index of the 30 largest U.S.-listed semiconductor companies; leverage resets daily.",
+      "v1_overlap": {
+        "note": "No V1 counterpart",
+        "v1_source": null
+      }
+    },
+    {
+      "annotation_category": "stocks",
+      "category": "EQUITY INDEX",
+      "coverage_575": {
+        "coverage_pct": 100.0,
+        "missing": 0,
+        "moved_in_prior_6h_share": 0.9843,
+        "status": {
+          "OK": 575
+        },
+        "usable": 575,
+        "usable_with_7d_baseline": 575,
+        "v1_observations": 575,
+        "weekend_usable": 188
+      },
+      "cross_asset": {
+        "btc_down_and_asset_down": {
+          "both": 8,
+          "both_distinct_days": 3,
+          "both_if_independent": 1.87,
+          "btc_abnormal": 29,
+          "observations_both_measurable": 575,
+          "other_abnormal": 37
+        },
+        "btc_down_and_asset_up": {
+          "both": 2,
+          "both_distinct_days": 1,
+          "both_if_independent": 2.47,
+          "btc_abnormal": 29,
+          "observations_both_measurable": 575,
+          "other_abnormal": 49
+        },
+        "n": 575,
+        "spearman_24h_ret_vs_btc": 0.355
+      },
+      "dex": "xyz",
+      "display_name": "MAGS",
+      "event15": {
+        "change_boundary_to_event_pct": -0.5945,
+        "flag_timing": {
+          "ret_6h_high": {
+            "active_at_boundary": false,
+            "classification": "UNUSABLE",
+            "episodes": [],
+            "persisted_hours_max": 0
+          },
+          "ret_6h_low": {
+            "active_at_boundary": false,
+            "classification": "POST-EVENT",
+            "episodes": [
+              {
+                "class": "POST-EVENT",
+                "end": "2026-09-28T10:01:24.213000+00:00",
+                "hours": 2,
+                "start": "2026-09-28T09:01:24.213000+00:00"
+              },
+              {
+                "class": "POST-EVENT",
+                "end": "2026-09-28T19:01:24.213000+00:00",
+                "hours": 1,
+                "start": "2026-09-28T19:01:24.213000+00:00"
+              }
+            ],
+            "persisted_hours_max": 2
+          }
+        },
+        "overall": "POST-EVENT",
+        "price_at_boundary": 72.999,
+        "ret_24h_before_boundary_pct": 0.4334,
+        "ret_6h_pctile_at_boundary": 77.84,
+        "ret_6h_pctile_at_event": 10.18,
+        "status_at_boundary": "OK",
+        "status_at_event": "OK",
+        "usable": true
+      },
+      "history": {
+        "daily_candles": 50,
+        "first_daily_candle": "2026-08-18T00:00:00+00:00",
+        "funding_history_available": true,
+        "hourly_candles_in_window": 1166,
+        "hourly_first": "2026-08-18T18:00:00+00:00",
+        "open_interest_history": false
+      },
+      "instrument_type": "BUILDER/ORACLE-BASED SYNTHETIC EXPOSURE (HIP-3 perp, deployer-set oracle)",
+      "live": {
+        "day_ntl_volume": 266682.5101600001,
+        "funding": 6.43949e-05,
+        "mark_px": 73.918,
+        "max_leverage": 10,
+        "mid_px": 73.926,
+        "open_interest": 14846.44,
+        "oracle_px": 73.84
+      },
+      "market_hours": {
+        "gaps_over_1h": 0,
+        "weekday": {
+          "flat_share": 0.2048,
+          "hours": 830,
+          "median_abs_1h_move_pct": 0.1014,
+          "zero_volume_share": 0.1398
+        },
+        "weekend": {
+          "flat_share": 0.375,
+          "hours": 336,
+          "median_abs_1h_move_pct": 0.0156,
+          "zero_volume_share": 0.247
+        }
+      },
+      "native_or_hip3": "HIP-3",
+      "symbol": "xyz:MAGS",
+      "underlying_per_deployer": "MAGS references 1 share of the Roundhill Magnificent Seven ETF (Cboe BZX: MAGS), quoted in USD. The fund offers approximately equal-weight exposure to Alphabet, Amazon, Apple, Meta, Microsoft, NVIDIA, and Tesla.",
+      "v1_overlap": {
+        "note": "No V1 counterpart",
+        "v1_source": null
+      }
+    },
+    {
+      "annotation_category": "stocks",
+      "category": "UNKNOWN",
+      "coverage_575": {
+        "coverage_pct": 98.09,
+        "missing": 11,
+        "moved_in_prior_6h_share": 0.9982,
+        "status": {
+          "NO_DATA": 11,
+          "OK": 564
+        },
+        "usable": 564,
+        "usable_with_7d_baseline": 473,
+        "v1_observations": 575,
+        "weekend_usable": 188
+      },
+      "dex": "xyz",
+      "display_name": "XBI",
+      "event15": {
+        "change_boundary_to_event_pct": -0.8643,
+        "flag_timing": {
+          "ret_6h_high": {
+            "active_at_boundary": false,
+            "classification": "POST-EVENT",
+            "episodes": [
+              {
+                "class": "POST-EVENT",
+                "end": "2026-09-28T19:01:24.213000+00:00",
+                "hours": 3,
+                "start": "2026-09-28T17:01:24.213000+00:00"
+              }
+            ],
+            "persisted_hours_max": 3
+          },
+          "ret_6h_low": {
+            "active_at_boundary": false,
+            "classification": "UNUSABLE",
+            "episodes": [],
+            "persisted_hours_max": 0
+          }
+        },
+        "overall": "POST-EVENT",
+        "price_at_boundary": 156.2,
+        "ret_24h_before_boundary_pct": 0.6703,
+        "ret_6h_pctile_at_boundary": 80.24,
+        "ret_6h_pctile_at_event": 8.98,
+        "status_at_boundary": "OK",
+        "status_at_event": "OK",
+        "usable": true
+      },
+      "history": {
+        "daily_candles": 41,
+        "first_daily_candle": "2026-08-27T00:00:00+00:00",
+        "funding_history_available": true,
+        "hourly_candles_in_window": 954,
+        "hourly_first": "2026-08-27T14:00:00+00:00",
+        "open_interest_history": false
+      },
+      "instrument_type": "BUILDER/ORACLE-BASED SYNTHETIC EXPOSURE (HIP-3 perp, deployer-set oracle)",
+      "live": {
+        "day_ntl_volume": 105732.0959,
+        "funding": 6.25e-06,
+        "mark_px": 150.45,
+        "max_leverage": 10,
+        "mid_px": 150.445,
+        "open_interest": 1076.56,
+        "oracle_px": 150.29
+      },
+      "market_hours": {
+        "gaps_over_1h": 0,
+        "weekday": {
+          "flat_share": 0.2838,
+          "hours": 666,
+          "median_abs_1h_move_pct": 0.0862,
+          "zero_volume_share": 0.1832
+        },
+        "weekend": {
+          "flat_share": 0.3854,
+          "hours": 288,
+          "median_abs_1h_move_pct": 0.0324,
+          "zero_volume_share": 0.2326
+        }
+      },
+      "native_or_hip3": "HIP-3",
+      "symbol": "xyz:XBI",
+      "underlying_per_deployer": "XBI references 1 share of the State Street SPDR S&P Biotech ETF (NYSE Arca: XBI), quoted in USD. The fund tracks the S&P Biotechnology Select Industry Index, a modified equal-weighted index of U.S.-listed biotechnology companies.",
+      "v1_overlap": {
+        "note": "No V1 counterpart",
+        "v1_source": null
+      }
+    },
+    {
+      "annotation_category": "stocks",
+      "category": "INTEREST RATE / BOND",
+      "coverage_575": {
+        "coverage_pct": 49.74,
+        "missing": 289,
+        "moved_in_prior_6h_share": 1.0,
+        "status": {
+          "NO_DATA": 289,
+          "OK": 286
+        },
+        "usable": 286,
+        "usable_with_7d_baseline": 205,
+        "v1_observations": 575,
+        "weekend_usable": 92
+      },
+      "cross_asset": {
+        "btc_down_and_asset_down": {
+          "both": 5,
+          "both_distinct_days": 1,
+          "both_if_independent": 1.14,
+          "btc_abnormal": 13,
+          "observations_both_measurable": 205,
+          "other_abnormal": 18
+        },
+        "btc_down_and_asset_up": {
+          "both": 0,
+          "both_distinct_days": 0,
+          "both_if_independent": 0.38,
+          "btc_abnormal": 13,
+          "observations_both_measurable": 205,
+          "other_abnormal": 6
+        },
+        "n": 272,
+        "spearman_24h_ret_vs_btc": 0.485
+      },
+      "dex": "xyz",
+      "display_name": "TLT",
+      "event15": {
+        "change_boundary_to_event_pct": -0.4712,
+        "flag_timing": {
+          "ret_6h_high": {
+            "active_at_boundary": false,
+            "classification": "POST-EVENT",
+            "episodes": [
+              {
+                "class": "POST-EVENT",
+                "end": "2026-09-28T21:01:24.213000+00:00",
+                "hours": 1,
+                "start": "2026-09-28T21:01:24.213000+00:00"
+              },
+              {
+                "class": "POST-EVENT",
+                "end": "2026-09-28T23:01:24.213000+00:00",
+                "hours": 1,
+                "start": "2026-09-28T23:01:24.213000+00:00"
+              }
+            ],
+            "persisted_hours_max": 1
+          },
+          "ret_6h_low": {
+            "active_at_boundary": false,
+            "classification": "UNUSABLE",
+            "episodes": [],
+            "persisted_hours_max": 0
+          }
+        },
+        "overall": "POST-EVENT",
+        "price_at_boundary": 79.373,
+        "ret_24h_before_boundary_pct": 0.0693,
+        "ret_6h_pctile_at_boundary": 34.73,
+        "ret_6h_pctile_at_event": 21.56,
+        "status_at_boundary": "OK",
+        "status_at_event": "OK",
+        "usable": true
+      },
+      "history": {
+        "daily_candles": 20,
+        "first_daily_candle": "2026-09-17T00:00:00+00:00",
+        "funding_history_available": true,
+        "hourly_candles_in_window": 445,
+        "hourly_first": "2026-09-17T19:00:00+00:00",
+        "open_interest_history": false
+      },
+      "instrument_type": "BUILDER/ORACLE-BASED SYNTHETIC EXPOSURE (HIP-3 perp, deployer-set oracle)",
+      "live": {
+        "day_ntl_volume": 712233.6998800001,
+        "funding": -3.52283e-05,
+        "mark_px": 77.275,
+        "max_leverage": 20,
+        "mid_px": 77.281,
+        "open_interest": 18165.7,
+        "oracle_px": 77.335
+      },
+      "market_hours": {
+        "gaps_over_1h": 0,
+        "weekday": {
+          "flat_share": 0.1495,
+          "hours": 301,
+          "median_abs_1h_move_pct": 0.0958,
+          "zero_volume_share": 0.0831
+        },
+        "weekend": {
+          "flat_share": 0.5,
+          "hours": 144,
+          "median_abs_1h_move_pct": 0.0,
+          "zero_volume_share": 0.3056
+        }
+      },
+      "native_or_hip3": "HIP-3",
+      "symbol": "xyz:TLT",
+      "underlying_per_deployer": "TLT references 1 share of the iShares 20+ Year Treasury Bond ETF (Nasdaq: TLT), quoted in USD. The fund tracks the ICE U.S. Treasury 20+ Year Bond Index, an index of U.S. Treasury bonds with remaining maturities greater than 20 years.",
+      "v1_overlap": {
+        "note": "Long-bond price; inverse of long yields, overlaps yield10y direction",
+        "v1_source": "yield10y"
+      }
+    },
+    {
+      "annotation_category": "commodities",
+      "category": "OIL / ENERGY",
+      "coverage_575": {
+        "coverage_pct": 13.91,
+        "missing": 495,
+        "moved_in_prior_6h_share": 1.0,
+        "status": {
+          "NO_DATA": 495,
+          "OK": 80
+        },
+        "usable": 80,
+        "usable_with_7d_baseline": 0,
+        "v1_observations": 575,
+        "weekend_usable": 23
+      },
+      "cross_asset": {
+        "btc_down_and_asset_down": {
+          "both": 0,
+          "both_distinct_days": 0,
+          "both_if_independent": null,
+          "btc_abnormal": 0,
+          "observations_both_measurable": 0,
+          "other_abnormal": 0
+        },
+        "btc_down_and_asset_up": {
+          "both": 0,
+          "both_distinct_days": 0,
+          "both_if_independent": null,
+          "btc_abnormal": 0,
+          "observations_both_measurable": 0,
+          "other_abnormal": 0
+        },
+        "n": 65,
+        "spearman_24h_ret_vs_btc": -0.306
+      },
+      "dex": "xyz",
+      "display_name": "DIESEL",
+      "event15": {
+        "change_boundary_to_event_pct": null,
+        "flag_timing": {
+          "ret_6h_high": {
+            "active_at_boundary": false,
+            "classification": "UNUSABLE",
+            "episodes": [],
+            "persisted_hours_max": 0
+          },
+          "ret_6h_low": {
+            "active_at_boundary": false,
+            "classification": "UNUSABLE",
+            "episodes": [],
+            "persisted_hours_max": 0
+          }
+        },
+        "overall": "UNUSABLE",
+        "price_at_boundary": null,
+        "ret_24h_before_boundary_pct": null,
+        "ret_6h_pctile_at_boundary": null,
+        "ret_6h_pctile_at_event": null,
+        "status_at_boundary": "NO_DATA",
+        "status_at_event": "NO_DATA",
+        "usable": false
+      },
+      "history": {
+        "daily_candles": 6,
+        "first_daily_candle": "2026-10-01T00:00:00+00:00",
+        "funding_history_available": true,
+        "hourly_candles_in_window": 127,
+        "hourly_first": "2026-10-01T01:00:00+00:00",
+        "open_interest_history": false
+      },
+      "instrument_type": "BUILDER/ORACLE-BASED SYNTHETIC EXPOSURE (HIP-3 perp, deployer-set oracle)",
+      "live": {
+        "day_ntl_volume": 804166.3436999999,
+        "funding": -0.0011070378,
+        "mark_px": 4.4347,
+        "max_leverage": 10,
+        "mid_px": 4.44865,
+        "open_interest": 477266.0,
+        "oracle_px": 4.5543
+      },
+      "market_hours": {
+        "gaps_over_1h": 0,
+        "weekday": {
+          "flat_share": 0.2025,
+          "hours": 79,
+          "median_abs_1h_move_pct": 0.3346,
+          "zero_volume_share": 0.1139
+        },
+        "weekend": {
+          "flat_share": 0.1875,
+          "hours": 48,
+          "median_abs_1h_move_pct": 0.3481,
+          "zero_volume_share": 0.1042
+        }
+      },
+      "native_or_hip3": "HIP-3",
+      "symbol": "xyz:HO",
+      "underlying_per_deployer": "DIESEL references the USD price of 1 U.S. gallon of New York Harbor ultra-low sulfur diesel (ULSD).",
+      "v1_overlap": {
+        "note": "No V1 counterpart (diesel; correlated with oil)",
+        "v1_source": null
+      }
+    },
+    {
+      "annotation_category": "crypto",
+      "category": "CRYPTO",
+      "coverage_575": {
+        "coverage_pct": 100.0,
+        "missing": 0,
+        "moved_in_prior_6h_share": 0.9809,
+        "status": {
+          "OK": 575
+        },
+        "usable": 575,
+        "usable_with_7d_baseline": 575,
+        "v1_observations": 575,
+        "weekend_usable": 188
+      },
+      "dex": "para",
+      "display_name": "TOTAL2",
+      "event15": {
+        "change_boundary_to_event_pct": -1.3061,
+        "flag_timing": {
+          "ret_6h_high": {
+            "active_at_boundary": false,
+            "classification": "UNUSABLE",
+            "episodes": [],
+            "persisted_hours_max": 0
+          },
+          "ret_6h_low": {
+            "active_at_boundary": false,
+            "classification": "UNUSABLE",
+            "episodes": [],
+            "persisted_hours_max": 0
+          }
+        },
+        "overall": "NO ABNORMAL MOVE",
+        "price_at_boundary": 1179.1,
+        "ret_24h_before_boundary_pct": 1.0802,
+        "ret_6h_pctile_at_boundary": 83.23,
+        "ret_6h_pctile_at_event": 10.78,
+        "status_at_boundary": "OK",
+        "status_at_event": "OK",
+        "usable": true
+      },
+      "history": {
+        "daily_candles": 189,
+        "first_daily_candle": "2026-04-01T00:00:00+00:00",
+        "funding_history_available": true,
+        "hourly_candles_in_window": 1175,
+        "hourly_first": "2026-08-18T09:00:00+00:00",
+        "open_interest_history": false
+      },
+      "instrument_type": "BUILDER/ORACLE-BASED SYNTHETIC EXPOSURE (HIP-3 perp, deployer-set oracle)",
+      "live": {
+        "day_ntl_volume": 6315.6278,
+        "funding": 7.5e-06,
+        "mark_px": 1167.252,
+        "max_leverage": 20,
+        "mid_px": 1167.45,
+        "open_interest": 704.856,
+        "oracle_px": 1167.252
+      },
+      "market_hours": {
+        "gaps_over_1h": 0,
+        "weekday": {
+          "flat_share": 0.5805,
+          "hours": 839,
+          "median_abs_1h_move_pct": 0.0,
+          "zero_volume_share": 0.3397
+        },
+        "weekend": {
+          "flat_share": 0.6726,
+          "hours": 336,
+          "median_abs_1h_move_pct": 0.0,
+          "zero_volume_share": 0.4583
+        }
+      },
+      "native_or_hip3": "HIP-3",
+      "symbol": "para:TOTAL2",
+      "underlying_per_deployer": "TOTAL2 tracks the aggregate market capitalization of the top 125 crypto assets excluding Bitcoin. It serves as the primary benchmark for overall altcoin market health and direction.",
+      "v1_overlap": {
+        "note": "No V1 counterpart",
+        "v1_source": null
+      }
+    },
+    {
+      "annotation_category": "crypto",
+      "category": "CRYPTO",
+      "coverage_575": {
+        "coverage_pct": 100.0,
+        "missing": 0,
+        "moved_in_prior_6h_share": 0.9583,
+        "status": {
+          "OK": 575
+        },
+        "usable": 575,
+        "usable_with_7d_baseline": 575,
+        "v1_observations": 575,
+        "weekend_usable": 188
+      },
+      "dex": "para",
+      "display_name": "OTHERS",
+      "event15": {
+        "change_boundary_to_event_pct": -0.2668,
+        "flag_timing": {
+          "ret_6h_high": {
+            "active_at_boundary": false,
+            "classification": "UNUSABLE",
+            "episodes": [],
+            "persisted_hours_max": 0
+          },
+          "ret_6h_low": {
+            "active_at_boundary": false,
+            "classification": "POST-EVENT",
+            "episodes": [
+              {
+                "class": "POST-EVENT",
+                "end": "2026-09-28T06:01:24.213000+00:00",
+                "hours": 1,
+                "start": "2026-09-28T06:01:24.213000+00:00"
+              },
+              {
+                "class": "POST-EVENT",
+                "end": "2026-09-28T11:01:24.213000+00:00",
+                "hours": 4,
+                "start": "2026-09-28T08:01:24.213000+00:00"
+              }
+            ],
+            "persisted_hours_max": 4
+          }
+        },
+        "overall": "POST-EVENT",
+        "price_at_boundary": 232.36,
+        "ret_24h_before_boundary_pct": 1.8631,
+        "ret_6h_pctile_at_boundary": 81.44,
+        "ret_6h_pctile_at_event": 29.34,
+        "status_at_boundary": "OK",
+        "status_at_event": "OK",
+        "usable": true
+      },
+      "history": {
+        "daily_candles": 189,
+        "first_daily_candle": "2026-04-01T00:00:00+00:00",
+        "funding_history_available": true,
+        "hourly_candles_in_window": 1175,
+        "hourly_first": "2026-08-18T09:00:00+00:00",
+        "open_interest_history": false
+      },
+      "instrument_type": "BUILDER/ORACLE-BASED SYNTHETIC EXPOSURE (HIP-3 perp, deployer-set oracle)",
+      "live": {
+        "day_ntl_volume": 482388.9426,
+        "funding": -4.76136e-05,
+        "mark_px": 232.63,
+        "max_leverage": 10,
+        "mid_px": 232.55,
+        "open_interest": 1961.06,
+        "oracle_px": 232.6907
+      },
+      "market_hours": {
+        "gaps_over_1h": 0,
+        "weekday": {
+          "flat_share": 0.6734,
+          "hours": 839,
+          "median_abs_1h_move_pct": 0.0,
+          "zero_volume_share": 0.4708
+        },
+        "weekend": {
+          "flat_share": 0.6667,
+          "hours": 336,
+          "median_abs_1h_move_pct": 0.0,
+          "zero_volume_share": 0.4464
+        }
+      },
+      "native_or_hip3": "HIP-3",
+      "symbol": "para:OTHERS",
+      "underlying_per_deployer": "OTHERS tracks the aggregate market capitalization of the top 125 crypto assets excluding the top 10. It isolates mid-cap and small-cap crypto activity, serving as a benchmark for risk appetite beyond large-cap assets.",
+      "v1_overlap": {
+        "note": "No V1 counterpart",
+        "v1_source": null
+      }
+    },
+    {
+      "annotation_category": "crypto",
+      "category": "CRYPTO",
+      "coverage_575": {
+        "coverage_pct": 100.0,
+        "missing": 0,
+        "moved_in_prior_6h_share": 0.8626,
+        "status": {
+          "OK": 575
+        },
+        "usable": 575,
+        "usable_with_7d_baseline": 575,
+        "v1_observations": 575,
+        "weekend_usable": 188
+      },
+      "dex": "para",
+      "display_name": "BTC.D",
+      "event15": {
+        "change_boundary_to_event_pct": -0.2318,
+        "flag_timing": {
+          "ret_6h_high": {
+            "active_at_boundary": false,
+            "classification": "UNUSABLE",
+            "episodes": [
+              {
+                "class": "PRE-EVENT",
+                "end": "2026-09-26T14:01:24.213000+00:00",
+                "hours": 1,
+                "start": "2026-09-26T14:01:24.213000+00:00"
+              }
+            ],
+            "persisted_hours_max": 1
+          },
+          "ret_6h_low": {
+            "active_at_boundary": false,
+            "classification": "POST-EVENT",
+            "episodes": [
+              {
+                "class": "PRE-EVENT",
+                "end": "2026-09-26T20:01:24.213000+00:00",
+                "hours": 1,
+                "start": "2026-09-26T20:01:24.213000+00:00"
+              },
+              {
+                "class": "POST-EVENT",
+                "end": "2026-09-28T08:01:24.213000+00:00",
+                "hours": 1,
+                "start": "2026-09-28T08:01:24.213000+00:00"
+              }
+            ],
+            "persisted_hours_max": 1
+          }
+        },
+        "overall": "POST-EVENT",
+        "price_at_boundary": 59.096,
+        "ret_24h_before_boundary_pct": 0.2494,
+        "ret_6h_pctile_at_boundary": 18.86,
+        "ret_6h_pctile_at_event": 12.57,
+        "status_at_boundary": "OK",
+        "status_at_event": "OK",
+        "usable": true
+      },
+      "history": {
+        "daily_candles": 189,
+        "first_daily_candle": "2026-04-01T00:00:00+00:00",
+        "funding_history_available": true,
+        "hourly_candles_in_window": 1175,
+        "hourly_first": "2026-08-18T09:00:00+00:00",
+        "open_interest_history": false
+      },
+      "instrument_type": "BUILDER/ORACLE-BASED SYNTHETIC EXPOSURE (HIP-3 perp, deployer-set oracle)",
+      "live": {
+        "day_ntl_volume": 21618.1489,
+        "funding": -2.60078e-05,
+        "mark_px": 59.52969,
+        "max_leverage": 20,
+        "mid_px": 59.523,
+        "open_interest": 15980.8,
+        "oracle_px": 59.57485
+      },
+      "market_hours": {
+        "gaps_over_1h": 0,
+        "weekday": {
+          "flat_share": 0.8057,
+          "hours": 839,
+          "median_abs_1h_move_pct": 0.0,
+          "zero_volume_share": 0.6436
+        },
+        "weekend": {
+          "flat_share": 0.8244,
+          "hours": 336,
+          "median_abs_1h_move_pct": 0.0,
+          "zero_volume_share": 0.6577
+        }
+      },
+      "native_or_hip3": "HIP-3",
+      "symbol": "para:BTCD",
+      "underlying_per_deployer": "BTC.D tracks Bitcoin's percentage share of total crypto market capitalization across the top 125 assets. Bitcoin dominance is the most widely referenced measure of capital rotation between Bitcoin and altcoins.",
+      "v1_overlap": {
+        "note": "No V1 counterpart",
+        "v1_source": null
+      }
+    },
+    {
+      "annotation_category": "rates",
+      "category": "INTEREST RATE / BOND",
+      "coverage_575": {
+        "coverage_pct": 100.0,
+        "missing": 0,
+        "moved_in_prior_6h_share": 0.9913,
+        "status": {
+          "OK": 575
+        },
+        "usable": 575,
+        "usable_with_7d_baseline": 575,
+        "v1_observations": 575,
+        "weekend_usable": 188
+      },
+      "cross_asset": {
+        "btc_down_and_asset_down": {
+          "both": 0,
+          "both_distinct_days": 0,
+          "both_if_independent": 2.02,
+          "btc_abnormal": 29,
+          "observations_both_measurable": 575,
+          "other_abnormal": 40
+        },
+        "btc_down_and_asset_up": {
+          "both": 14,
+          "both_distinct_days": 5,
+          "both_if_independent": 2.37,
+          "btc_abnormal": 29,
+          "observations_both_measurable": 575,
+          "other_abnormal": 47
+        },
+        "n": 575,
+        "spearman_24h_ret_vs_btc": -0.454
+      },
+      "dex": "para",
+      "display_name": null,
+      "event15": {
+        "change_boundary_to_event_pct": 0.6583,
+        "flag_timing": {
+          "ret_6h_high": {
+            "active_at_boundary": false,
+            "classification": "UNUSABLE",
+            "episodes": [],
+            "persisted_hours_max": 0
+          },
+          "ret_6h_low": {
+            "active_at_boundary": false,
+            "classification": "POST-EVENT",
+            "episodes": [
+              {
+                "class": "POST-EVENT",
+                "end": "2026-09-28T21:01:24.213000+00:00",
+                "hours": 1,
+                "start": "2026-09-28T21:01:24.213000+00:00"
+              }
+            ],
+            "persisted_hours_max": 1
+          }
+        },
+        "overall": "POST-EVENT",
+        "price_at_boundary": 5.1648,
+        "ret_24h_before_boundary_pct": -0.1006,
+        "ret_6h_pctile_at_boundary": 43.71,
+        "ret_6h_pctile_at_event": 85.63,
+        "status_at_boundary": "OK",
+        "status_at_event": "OK",
+        "usable": true
+      },
+      "history": {
+        "daily_candles": 56,
+        "first_daily_candle": "2026-08-12T00:00:00+00:00",
+        "funding_history_available": true,
+        "hourly_candles_in_window": 1175,
+        "hourly_first": "2026-08-18T09:00:00+00:00",
+        "open_interest_history": false
+      },
+      "instrument_type": "BUILDER/ORACLE-BASED SYNTHETIC EXPOSURE (HIP-3 perp, deployer-set oracle)",
+      "live": {
+        "day_ntl_volume": 235227.9358799999,
+        "funding": 1.25e-06,
+        "mark_px": 5.287,
+        "max_leverage": 20,
+        "mid_px": 5.2868,
+        "open_interest": 343161.0,
+        "oracle_px": 5.278
+      },
+      "market_hours": {
+        "gaps_over_1h": 0,
+        "weekday": {
+          "flat_share": 0.3874,
+          "hours": 839,
+          "median_abs_1h_move_pct": 0.0189,
+          "zero_volume_share": 0.2706
+        },
+        "weekend": {
+          "flat_share": 0.631,
+          "hours": 336,
+          "median_abs_1h_move_pct": 0.0,
+          "zero_volume_share": 0.4524
+        }
+      },
+      "native_or_hip3": "HIP-3",
+      "symbol": "para:10Y",
+      "underlying_per_deployer": "10Y tracks the yield on the most recently issued (on-the-run) 10-year US Treasury note, expressed in percent. The standard reference for long-term US dollar borrowing costs.",
+      "v1_overlap": {
+        "note": "Same yield; V1 reads FRED DGS10 daily, Hyperliquid trades hourly incl. weekends",
+        "v1_source": "yield10y"
+      }
+    },
+    {
+      "annotation_category": "crypto",
+      "category": "CRYPTO",
+      "coverage_575": {
+        "coverage_pct": 100.0,
+        "missing": 0,
+        "moved_in_prior_6h_share": 1.0,
+        "status": {
+          "OK": 575
+        },
+        "usable": 575,
+        "usable_with_7d_baseline": 511,
+        "v1_observations": 575,
+        "weekend_usable": 188
+      },
+      "dex": "para",
+      "display_name": null,
+      "event15": {
+        "change_boundary_to_event_pct": -3.0912,
+        "flag_timing": {
+          "ret_6h_high": {
+            "active_at_boundary": false,
+            "classification": "UNUSABLE",
+            "episodes": [],
+            "persisted_hours_max": 0
+          },
+          "ret_6h_low": {
+            "active_at_boundary": false,
+            "classification": "POST-EVENT",
+            "episodes": [
+              {
+                "class": "PRE-EVENT",
+                "end": "2026-09-26T05:01:24.213000+00:00",
+                "hours": 1,
+                "start": "2026-09-26T05:01:24.213000+00:00"
+              },
+              {
+                "class": "POST-EVENT",
+                "end": "2026-09-29T02:01:24.213000+00:00",
+                "hours": 3,
+                "start": "2026-09-29T00:01:24.213000+00:00"
+              }
+            ],
+            "persisted_hours_max": 3
+          }
+        },
+        "overall": "POST-EVENT",
+        "price_at_boundary": 0.17404,
+        "ret_24h_before_boundary_pct": -2.3728,
+        "ret_6h_pctile_at_boundary": 39.52,
+        "ret_6h_pctile_at_event": 52.69,
+        "status_at_boundary": "OK",
+        "status_at_event": "OK",
+        "usable": true
+      },
+      "history": {
+        "daily_candles": 43,
+        "first_daily_candle": "2026-08-25T00:00:00+00:00",
+        "funding_history_available": true,
+        "hourly_candles_in_window": 1001,
+        "hourly_first": "2026-08-25T15:00:00+00:00",
+        "open_interest_history": false
+      },
+      "instrument_type": "BUILDER/ORACLE-BASED SYNTHETIC EXPOSURE (HIP-3 perp, deployer-set oracle)",
+      "live": {
+        "day_ntl_volume": 287415.6241400001,
+        "funding": 0.0002179497,
+        "mark_px": 0.144197,
+        "max_leverage": 3,
+        "mid_px": 0.14426,
+        "open_interest": 9844584.0,
+        "oracle_px": 0.145648
+      },
+      "market_hours": {
+        "gaps_over_1h": 0,
+        "weekday": {
+          "flat_share": 0.0098,
+          "hours": 713,
+          "median_abs_1h_move_pct": 1.6419,
+          "zero_volume_share": 0.007
+        },
+        "weekend": {
+          "flat_share": 0.0104,
+          "hours": 288,
+          "median_abs_1h_move_pct": 1.3489,
+          "zero_volume_share": 0.0
+        }
+      },
+      "native_or_hip3": "HIP-3",
+      "symbol": "para:ANSEM",
+      "underlying_per_deployer": "ANSEM tracks the value of one ANSEM token. ANSEM is a community-driven memecoin on Solana associated with crypto trader and commentator Ansem, with its activity centered around its online community and broader crypto culture.",
+      "v1_overlap": {
+        "note": "No V1 counterpart",
+        "v1_source": null
+      }
+    },
+    {
+      "annotation_category": "rates",
+      "category": "INTEREST RATE / BOND",
+      "coverage_575": {
+        "coverage_pct": 31.65,
+        "missing": 393,
+        "moved_in_prior_6h_share": 0.6154,
+        "status": {
+          "NO_DATA": 393,
+          "OK": 182
+        },
+        "usable": 182,
+        "usable_with_7d_baseline": 93,
+        "v1_observations": 575,
+        "weekend_usable": 58
+      },
+      "cross_asset": {
+        "btc_down_and_asset_down": {
+          "both": 0,
+          "both_distinct_days": 0,
+          "both_if_independent": 0.59,
+          "btc_abnormal": 5,
+          "observations_both_measurable": 93,
+          "other_abnormal": 11
+        },
+        "btc_down_and_asset_up": {
+          "both": 3,
+          "both_distinct_days": 1,
+          "both_if_independent": 0.48,
+          "btc_abnormal": 5,
+          "observations_both_measurable": 93,
+          "other_abnormal": 9
+        },
+        "n": 164,
+        "spearman_24h_ret_vs_btc": -0.53
+      },
+      "dex": "para",
+      "display_name": null,
+      "event15": {
+        "change_boundary_to_event_pct": 0.2202,
+        "flag_timing": {
+          "ret_6h_high": {
+            "active_at_boundary": false,
+            "classification": "UNUSABLE",
+            "episodes": [],
+            "persisted_hours_max": 0
+          },
+          "ret_6h_low": {
+            "active_at_boundary": false,
+            "classification": "UNUSABLE",
+            "episodes": [],
+            "persisted_hours_max": 0
+          }
+        },
+        "overall": "NO ABNORMAL MOVE",
+        "price_at_boundary": 5.4943,
+        "ret_24h_before_boundary_pct": 0.0,
+        "ret_6h_pctile_at_boundary": null,
+        "ret_6h_pctile_at_event": null,
+        "status_at_boundary": "OK",
+        "status_at_event": "OK",
+        "usable": true
+      },
+      "history": {
+        "daily_candles": 13,
+        "first_daily_candle": "2026-09-24T00:00:00+00:00",
+        "funding_history_available": true,
+        "hourly_candles_in_window": 283,
+        "hourly_first": "2026-09-24T13:00:00+00:00",
+        "open_interest_history": false
+      },
+      "instrument_type": "BUILDER/ORACLE-BASED SYNTHETIC EXPOSURE (HIP-3 perp, deployer-set oracle)",
+      "live": {
+        "day_ntl_volume": 80061.3156,
+        "funding": 1.25e-06,
+        "mark_px": 5.6482,
+        "max_leverage": 20,
+        "mid_px": 5.65095,
+        "open_interest": 31822.6,
+        "oracle_px": 5.648
+      },
+      "market_hours": {
+        "gaps_over_1h": 0,
+        "weekday": {
+          "flat_share": 0.7701,
+          "hours": 187,
+          "median_abs_1h_move_pct": 0.0,
+          "zero_volume_share": 0.6417
+        },
+        "weekend": {
+          "flat_share": 0.9583,
+          "hours": 96,
+          "median_abs_1h_move_pct": 0.0,
+          "zero_volume_share": 0.9375
+        }
+      },
+      "native_or_hip3": "HIP-3",
+      "symbol": "para:30Y",
+      "underlying_per_deployer": "30Y tracks the yield on the most recently issued (on-the-run) 30-year US Treasury bond, expressed in percent. A key reference for long-dated US borrowing costs, term premium, and demand from pensions and insurers.",
+      "v1_overlap": {
+        "note": "Long-end yield: no V1 counterpart (partly correlated with yield10y)",
+        "v1_source": null
+      }
+    },
+    {
+      "annotation_category": "rates",
+      "category": "INTEREST RATE / BOND",
+      "coverage_575": {
+        "coverage_pct": 31.65,
+        "missing": 393,
+        "moved_in_prior_6h_share": 0.8462,
+        "status": {
+          "NO_DATA": 393,
+          "OK": 182
+        },
+        "usable": 182,
+        "usable_with_7d_baseline": 93,
+        "v1_observations": 575,
+        "weekend_usable": 58
+      },
+      "cross_asset": {
+        "btc_down_and_asset_down": {
+          "both": 0,
+          "both_distinct_days": 0,
+          "both_if_independent": 0.0,
+          "btc_abnormal": 5,
+          "observations_both_measurable": 93,
+          "other_abnormal": 0
+        },
+        "btc_down_and_asset_up": {
+          "both": 4,
+          "both_distinct_days": 1,
+          "both_if_independent": 0.38,
+          "btc_abnormal": 5,
+          "observations_both_measurable": 93,
+          "other_abnormal": 7
+        },
+        "n": 164,
+        "spearman_24h_ret_vs_btc": -0.365
+      },
+      "dex": "para",
+      "display_name": null,
+      "event15": {
+        "change_boundary_to_event_pct": -3.5258,
+        "flag_timing": {
+          "ret_6h_high": {
+            "active_at_boundary": false,
+            "classification": "UNUSABLE",
+            "episodes": [],
+            "persisted_hours_max": 0
+          },
+          "ret_6h_low": {
+            "active_at_boundary": false,
+            "classification": "UNUSABLE",
+            "episodes": [],
+            "persisted_hours_max": 0
+          }
+        },
+        "overall": "NO ABNORMAL MOVE",
+        "price_at_boundary": 4.9237,
+        "ret_24h_before_boundary_pct": 1.1504,
+        "ret_6h_pctile_at_boundary": null,
+        "ret_6h_pctile_at_event": null,
+        "status_at_boundary": "OK",
+        "status_at_event": "OK",
+        "usable": true
+      },
+      "history": {
+        "daily_candles": 13,
+        "first_daily_candle": "2026-09-24T00:00:00+00:00",
+        "funding_history_available": true,
+        "hourly_candles_in_window": 283,
+        "hourly_first": "2026-09-24T13:00:00+00:00",
+        "open_interest_history": false
+      },
+      "instrument_type": "BUILDER/ORACLE-BASED SYNTHETIC EXPOSURE (HIP-3 perp, deployer-set oracle)",
+      "live": {
+        "day_ntl_volume": 114357.22055,
+        "funding": 1.9468e-05,
+        "mark_px": 4.8278,
+        "max_leverage": 20,
+        "mid_px": 4.8302,
+        "open_interest": 349753.6,
+        "oracle_px": 4.8
+      },
+      "market_hours": {
+        "gaps_over_1h": 0,
+        "weekday": {
+          "flat_share": 0.4545,
+          "hours": 187,
+          "median_abs_1h_move_pct": 0.0124,
+          "zero_volume_share": 0.3476
+        },
+        "weekend": {
+          "flat_share": 0.8646,
+          "hours": 96,
+          "median_abs_1h_move_pct": 0.0,
+          "zero_volume_share": 0.7917
+        }
+      },
+      "native_or_hip3": "HIP-3",
+      "symbol": "para:2Y",
+      "underlying_per_deployer": "2Y tracks the yield on the most recently issued (on-the-run) 2-year US Treasury note, expressed in percent. A key reference for near-term US interest rates and expectations for Federal Reserve policy.",
+      "v1_overlap": {
+        "note": "Front-end rates: no V1 counterpart",
+        "v1_source": null
+      }
+    },
+    {
+      "annotation_category": "crypto",
+      "category": "CRYPTO",
+      "coverage_575": {
+        "coverage_pct": 52.0,
+        "missing": 276,
+        "moved_in_prior_6h_share": 1.0,
+        "status": {
+          "NO_DATA": 276,
+          "OK": 299
+        },
+        "usable": 299,
+        "usable_with_7d_baseline": 216,
+        "v1_observations": 575,
+        "weekend_usable": 92
+      },
+      "dex": "para",
+      "display_name": null,
+      "event15": {
+        "change_boundary_to_event_pct": 4.6946,
+        "flag_timing": {
+          "ret_6h_high": {
+            "active_at_boundary": true,
+            "classification": "PRE-EVENT",
+            "episodes": [
+              {
+                "class": "PRE-EVENT",
+                "end": "2026-09-26T03:01:24.213000+00:00",
+                "hours": 1,
+                "start": "2026-09-26T03:01:24.213000+00:00"
+              },
+              {
+                "class": "PRE-EVENT",
+                "end": "2026-09-27T15:01:24.213000+00:00",
+                "hours": 6,
+                "start": "2026-09-27T10:01:24.213000+00:00"
+              },
+              {
+                "class": "CONTEMPORANEOUS",
+                "end": "2026-09-28T06:01:24.213000+00:00",
+                "hours": 4,
+                "start": "2026-09-28T03:01:24.213000+00:00"
+              }
+            ],
+            "persisted_hours_max": 6
+          },
+          "ret_6h_low": {
+            "active_at_boundary": false,
+            "classification": "CONTEMPORANEOUS",
+            "episodes": [
+              {
+                "class": "CONTEMPORANEOUS",
+                "end": "2026-09-27T17:01:24.213000+00:00",
+                "hours": 1,
+                "start": "2026-09-27T17:01:24.213000+00:00"
+              },
+              {
+                "class": "CONTEMPORANEOUS",
+                "end": "2026-09-28T00:01:24.213000+00:00",
+                "hours": 5,
+                "start": "2026-09-27T20:01:24.213000+00:00"
+              },
+              {
+                "class": "POST-EVENT",
+                "end": "2026-09-29T03:01:24.213000+00:00",
+                "hours": 1,
+                "start": "2026-09-29T03:01:24.213000+00:00"
+              }
+            ],
+            "persisted_hours_max": 5
+          }
+        },
+        "overall": "PRE-EVENT",
+        "price_at_boundary": 1.2461,
+        "ret_24h_before_boundary_pct": 50.7592,
+        "ret_6h_pctile_at_boundary": 100.0,
+        "ret_6h_pctile_at_event": 98.2,
+        "status_at_boundary": "OK",
+        "status_at_event": "OK",
+        "usable": true
+      },
+      "history": {
+        "daily_candles": 21,
+        "first_daily_candle": "2026-09-16T00:00:00+00:00",
+        "funding_history_available": true,
+        "hourly_candles_in_window": 474,
+        "hourly_first": "2026-09-16T14:00:00+00:00",
+        "open_interest_history": false
+      },
+      "instrument_type": "BUILDER/ORACLE-BASED SYNTHETIC EXPOSURE (HIP-3 perp, deployer-set oracle)",
+      "live": {
+        "day_ntl_volume": 207224.8835999999,
+        "funding": 0.0002774452,
+        "mark_px": 1.1804,
+        "max_leverage": 5,
+        "mid_px": 1.1829,
+        "open_interest": 654410.0,
+        "oracle_px": 1.1731
+      },
+      "market_hours": {
+        "gaps_over_1h": 0,
+        "weekday": {
+          "flat_share": 0.003,
+          "hours": 330,
+          "median_abs_1h_move_pct": 1.9804,
+          "zero_volume_share": 0.0
+        },
+        "weekend": {
+          "flat_share": 0.0,
+          "hours": 144,
+          "median_abs_1h_move_pct": 1.2664,
+          "zero_volume_share": 0.0
+        }
+      },
+      "native_or_hip3": "HIP-3",
+      "symbol": "para:TREAD",
+      "underlying_per_deployer": "TREAD tracks the value of one TREAD token. TREAD is the utility token of Tread.fi, an algorithmic trading platform that provides institutional-grade execution, AI trading agents, automated strategies, and connectivity across centralized and decentralized crypto venues. The token is used for fee discounts, agent marketplace access, and participation in Tread.fi’s liquidity and venue ecosystem.",
+      "v1_overlap": {
+        "note": "No V1 counterpart",
+        "v1_source": null
+      }
+    },
+    {
+      "annotation_category": "indices",
+      "category": "EQUITY INDEX",
+      "coverage_575": {
+        "coverage_pct": 100.0,
+        "missing": 0,
+        "moved_in_prior_6h_share": 1.0,
+        "status": {
+          "OK": 575
+        },
+        "usable": 575,
+        "usable_with_7d_baseline": 575,
+        "v1_observations": 575,
+        "weekend_usable": 188
+      },
+      "cross_asset": {
+        "btc_down_and_asset_down": {
+          "both": 13,
+          "both_distinct_days": 5,
+          "both_if_independent": 2.17,
+          "btc_abnormal": 29,
+          "observations_both_measurable": 575,
+          "other_abnormal": 43
+        },
+        "btc_down_and_asset_up": {
+          "both": 0,
+          "both_distinct_days": 0,
+          "both_if_independent": 2.17,
+          "btc_abnormal": 29,
+          "observations_both_measurable": 575,
+          "other_abnormal": 43
+        },
+        "n": 575,
+        "spearman_24h_ret_vs_btc": 0.545
+      },
+      "dex": "mkts",
+      "display_name": null,
+      "event15": {
+        "change_boundary_to_event_pct": -0.3061,
+        "flag_timing": {
+          "ret_6h_high": {
+            "active_at_boundary": false,
+            "classification": "UNUSABLE",
+            "episodes": [],
+            "persisted_hours_max": 0
+          },
+          "ret_6h_low": {
+            "active_at_boundary": false,
+            "classification": "POST-EVENT",
+            "episodes": [
+              {
+                "class": "POST-EVENT",
+                "end": "2026-09-28T15:01:24.213000+00:00",
+                "hours": 1,
+                "start": "2026-09-28T15:01:24.213000+00:00"
+              }
+            ],
+            "persisted_hours_max": 1
+          }
+        },
+        "overall": "POST-EVENT",
+        "price_at_boundary": 771.11,
+        "ret_24h_before_boundary_pct": 0.1247,
+        "ret_6h_pctile_at_boundary": 68.26,
+        "ret_6h_pctile_at_event": 10.18,
+        "status_at_boundary": "OK",
+        "status_at_event": "OK",
+        "usable": true
+      },
+      "history": {
+        "daily_candles": 98,
+        "first_daily_candle": "2026-07-01T00:00:00+00:00",
+        "funding_history_available": true,
+        "hourly_candles_in_window": 1175,
+        "hourly_first": "2026-08-18T09:00:00+00:00",
+        "open_interest_history": false
+      },
+      "instrument_type": "BUILDER/ORACLE-BASED SYNTHETIC EXPOSURE (HIP-3 perp, deployer-set oracle)",
+      "live": {
+        "day_ntl_volume": 1127648.1435200002,
+        "funding": 5.7078e-06,
+        "mark_px": 779.48,
+        "max_leverage": 25,
+        "mid_px": 779.42,
+        "open_interest": 2367.198,
+        "oracle_px": 779.65
+      },
+      "market_hours": {
+        "gaps_over_1h": 0,
+        "weekday": {
+          "flat_share": 0.0,
+          "hours": 839,
+          "median_abs_1h_move_pct": 0.0483,
+          "zero_volume_share": 0.0
+        },
+        "weekend": {
+          "flat_share": 0.0179,
+          "hours": 336,
+          "median_abs_1h_move_pct": 0.0182,
+          "zero_volume_share": 0.0089
+        }
+      },
+      "native_or_hip3": "HIP-3",
+      "symbol": "mkts:US500",
+      "underlying_per_deployer": "Provides broad exposure to 500 of the largest U.S. companies by market capitalisation, spanning all major sectors of the US equity market. Please refer to mkts docs for further info on oracle reference pricing sources and design.",
+      "v1_overlap": {
+        "note": "Same index family (price level differs from the index; deployer docs not in the API)",
+        "v1_source": "sp500"
+      }
+    },
+    {
+      "annotation_category": "stocks",
+      "category": "INTEREST RATE / BOND",
+      "coverage_575": {
+        "coverage_pct": 100.0,
+        "missing": 0,
+        "moved_in_prior_6h_share": 0.9878,
+        "status": {
+          "OK": 575
+        },
+        "usable": 575,
+        "usable_with_7d_baseline": 492,
+        "v1_observations": 575,
+        "weekend_usable": 188
+      },
+      "cross_asset": {
+        "btc_down_and_asset_down": {
+          "both": 9,
+          "both_distinct_days": 4,
+          "both_if_independent": 1.85,
+          "btc_abnormal": 24,
+          "observations_both_measurable": 492,
+          "other_abnormal": 38
+        },
+        "btc_down_and_asset_up": {
+          "both": 0,
+          "both_distinct_days": 0,
+          "both_if_independent": 1.46,
+          "btc_abnormal": 24,
+          "observations_both_measurable": 492,
+          "other_abnormal": 30
+        },
+        "n": 564,
+        "spearman_24h_ret_vs_btc": 0.391
+      },
+      "dex": "mkts",
+      "display_name": "TLT",
+      "event15": {
+        "change_boundary_to_event_pct": -0.309,
+        "flag_timing": {
+          "ret_6h_high": {
+            "active_at_boundary": false,
+            "classification": "POST-EVENT",
+            "episodes": [
+              {
+                "class": "POST-EVENT",
+                "end": "2026-09-28T23:01:24.213000+00:00",
+                "hours": 3,
+                "start": "2026-09-28T21:01:24.213000+00:00"
+              }
+            ],
+            "persisted_hours_max": 3
+          },
+          "ret_6h_low": {
+            "active_at_boundary": false,
+            "classification": "UNUSABLE",
+            "episodes": [],
+            "persisted_hours_max": 0
+          }
+        },
+        "overall": "POST-EVENT",
+        "price_at_boundary": 79.288,
+        "ret_24h_before_boundary_pct": -0.0618,
+        "ret_6h_pctile_at_boundary": 58.38,
+        "ret_6h_pctile_at_event": 19.76,
+        "status_at_boundary": "OK",
+        "status_at_event": "OK",
+        "usable": true
+      },
+      "history": {
+        "daily_candles": 42,
+        "first_daily_candle": "2026-08-26T00:00:00+00:00",
+        "funding_history_available": true,
+        "hourly_candles_in_window": 978,
+        "hourly_first": "2026-08-26T14:00:00+00:00",
+        "open_interest_history": false
+      },
+      "instrument_type": "BUILDER/ORACLE-BASED SYNTHETIC EXPOSURE (HIP-3 perp, deployer-set oracle)",
+      "live": {
+        "day_ntl_volume": 399692.944488,
+        "funding": -8.8539e-06,
+        "mark_px": 77.303,
+        "max_leverage": 10,
+        "mid_px": 77.307,
+        "open_interest": 28339.872,
+        "oracle_px": 77.333
+      },
+      "market_hours": {
+        "gaps_over_1h": 0,
+        "weekday": {
+          "flat_share": 0.313,
+          "hours": 690,
+          "median_abs_1h_move_pct": 0.0308,
+          "zero_volume_share": 0.1971
+        },
+        "weekend": {
+          "flat_share": 0.5556,
+          "hours": 288,
+          "median_abs_1h_move_pct": 0.0,
+          "zero_volume_share": 0.3785
+        }
+      },
+      "native_or_hip3": "HIP-3",
+      "symbol": "mkts:USBOND",
+      "underlying_per_deployer": "Provides exposure to long-duration U.S. Treasury bonds with remaining maturities of 20 years or more, offering sensitivity to long-term U.S. interest rates. Please refer to mkts docs for further info on oracle reference pricing sources and design.",
+      "v1_overlap": {
+        "note": "Long-bond price; inverse of long yields, overlaps yield10y direction",
+        "v1_source": "yield10y"
+      }
+    },
+    {
+      "annotation_category": "indices",
+      "category": "EQUITY INDEX",
+      "coverage_575": {
+        "coverage_pct": 100.0,
+        "missing": 0,
+        "moved_in_prior_6h_share": 0.9826,
+        "status": {
+          "OK": 575
+        },
+        "usable": 575,
+        "usable_with_7d_baseline": 492,
+        "v1_observations": 575,
+        "weekend_usable": 188
+      },
+      "cross_asset": {
+        "btc_down_and_asset_down": {
+          "both": 9,
+          "both_distinct_days": 3,
+          "both_if_independent": 1.41,
+          "btc_abnormal": 24,
+          "observations_both_measurable": 492,
+          "other_abnormal": 29
+        },
+        "btc_down_and_asset_up": {
+          "both": 0,
+          "both_distinct_days": 0,
+          "both_if_independent": 1.17,
+          "btc_abnormal": 24,
+          "observations_both_measurable": 492,
+          "other_abnormal": 24
+        },
+        "n": 564,
+        "spearman_24h_ret_vs_btc": 0.5
+      },
+      "dex": "mkts",
+      "display_name": "IWM",
+      "event15": {
+        "change_boundary_to_event_pct": -0.4677,
+        "flag_timing": {
+          "ret_6h_high": {
+            "active_at_boundary": false,
+            "classification": "POST-EVENT",
+            "episodes": [
+              {
+                "class": "POST-EVENT",
+                "end": "2026-09-28T22:01:24.213000+00:00",
+                "hours": 1,
+                "start": "2026-09-28T22:01:24.213000+00:00"
+              }
+            ],
+            "persisted_hours_max": 1
+          },
+          "ret_6h_low": {
+            "active_at_boundary": false,
+            "classification": "CONTEMPORANEOUS",
+            "episodes": [
+              {
+                "class": "CONTEMPORANEOUS",
+                "end": "2026-09-27T23:01:24.213000+00:00",
+                "hours": 1,
+                "start": "2026-09-27T23:01:24.213000+00:00"
+              }
+            ],
+            "persisted_hours_max": 1
+          }
+        },
+        "overall": "CONTEMPORANEOUS",
+        "price_at_boundary": 282.25,
+        "ret_24h_before_boundary_pct": -0.0035,
+        "ret_6h_pctile_at_boundary": 68.26,
+        "ret_6h_pctile_at_event": 6.59,
+        "status_at_boundary": "OK",
+        "status_at_event": "OK",
+        "usable": true
+      },
+      "history": {
+        "daily_candles": 42,
+        "first_daily_candle": "2026-08-26T00:00:00+00:00",
+        "funding_history_available": true,
+        "hourly_candles_in_window": 978,
+        "hourly_first": "2026-08-26T14:00:00+00:00",
+        "open_interest_history": false
+      },
+      "instrument_type": "BUILDER/ORACLE-BASED SYNTHETIC EXPOSURE (HIP-3 perp, deployer-set oracle)",
+      "live": {
+        "day_ntl_volume": 104956.63617,
+        "funding": 5.7078e-06,
+        "mark_px": 281.54,
+        "max_leverage": 20,
+        "mid_px": 281.6,
+        "open_interest": 1301.802,
+        "oracle_px": 281.5
+      },
+      "market_hours": {
+        "gaps_over_1h": 0,
+        "weekday": {
+          "flat_share": 0.3087,
+          "hours": 690,
+          "median_abs_1h_move_pct": 0.0393,
+          "zero_volume_share": 0.1841
+        },
+        "weekend": {
+          "flat_share": 0.5312,
+          "hours": 288,
+          "median_abs_1h_move_pct": 0.0,
+          "zero_volume_share": 0.3403
+        }
+      },
+      "native_or_hip3": "HIP-3",
+      "symbol": "mkts:SMALL2000",
+      "underlying_per_deployer": "Provides exposure to approximately 2,000 smaller U.S. publicly traded companies, representing the small-capitalisation segment of the US equity market. Please refer to mkts docs for further info on oracle reference pricing sources and design.",
+      "v1_overlap": {
+        "note": "Small caps: no V1 counterpart",
+        "v1_source": null
+      }
+    },
+    {
+      "annotation_category": "indices",
+      "category": "EQUITY INDEX",
+      "coverage_575": {
+        "coverage_pct": 100.0,
+        "missing": 0,
+        "moved_in_prior_6h_share": 1.0,
+        "status": {
+          "OK": 575
+        },
+        "usable": 575,
+        "usable_with_7d_baseline": 575,
+        "v1_observations": 575,
+        "weekend_usable": 188
+      },
+      "cross_asset": {
+        "btc_down_and_asset_down": {
+          "both": 12,
+          "both_distinct_days": 4,
+          "both_if_independent": 2.07,
+          "btc_abnormal": 29,
+          "observations_both_measurable": 575,
+          "other_abnormal": 41
+        },
+        "btc_down_and_asset_up": {
+          "both": 0,
+          "both_distinct_days": 0,
+          "both_if_independent": 2.32,
+          "btc_abnormal": 29,
+          "observations_both_measurable": 575,
+          "other_abnormal": 46
+        },
+        "n": 575,
+        "spearman_24h_ret_vs_btc": 0.629
+      },
+      "dex": "mkts",
+      "display_name": "QQQ",
+      "event15": {
+        "change_boundary_to_event_pct": -0.6543,
+        "flag_timing": {
+          "ret_6h_high": {
+            "active_at_boundary": false,
+            "classification": "UNUSABLE",
+            "episodes": [],
+            "persisted_hours_max": 0
+          },
+          "ret_6h_low": {
+            "active_at_boundary": false,
+            "classification": "CONTEMPORANEOUS",
+            "episodes": [
+              {
+                "class": "CONTEMPORANEOUS",
+                "end": "2026-09-28T04:01:24.213000+00:00",
+                "hours": 2,
+                "start": "2026-09-28T03:01:24.213000+00:00"
+              },
+              {
+                "class": "POST-EVENT",
+                "end": "2026-09-28T06:01:24.213000+00:00",
+                "hours": 1,
+                "start": "2026-09-28T06:01:24.213000+00:00"
+              }
+            ],
+            "persisted_hours_max": 2
+          }
+        },
+        "overall": "CONTEMPORANEOUS",
+        "price_at_boundary": 744.3,
+        "ret_24h_before_boundary_pct": 0.1009,
+        "ret_6h_pctile_at_boundary": 43.11,
+        "ret_6h_pctile_at_event": 2.4,
+        "status_at_boundary": "OK",
+        "status_at_event": "OK",
+        "usable": true
+      },
+      "history": {
+        "daily_candles": 98,
+        "first_daily_candle": "2026-07-01T00:00:00+00:00",
+        "funding_history_available": true,
+        "hourly_candles_in_window": 1175,
+        "hourly_first": "2026-08-18T09:00:00+00:00",
+        "open_interest_history": false
+      },
+      "instrument_type": "BUILDER/ORACLE-BASED SYNTHETIC EXPOSURE (HIP-3 perp, deployer-set oracle)",
+      "live": {
+        "day_ntl_volume": 1891466.1175699995,
+        "funding": -5.3471e-06,
+        "mark_px": 760.28,
+        "max_leverage": 25,
+        "mid_px": 760.18,
+        "open_interest": 6240.698,
+        "oracle_px": 760.56
+      },
+      "market_hours": {
+        "gaps_over_1h": 0,
+        "weekday": {
+          "flat_share": 0.0,
+          "hours": 839,
+          "median_abs_1h_move_pct": 0.089,
+          "zero_volume_share": 0.0
+        },
+        "weekend": {
+          "flat_share": 0.0089,
+          "hours": 336,
+          "median_abs_1h_move_pct": 0.0266,
+          "zero_volume_share": 0.006
+        }
+      },
+      "native_or_hip3": "HIP-3",
+      "symbol": "mkts:USTECH",
+      "underlying_per_deployer": "Provides exposure to 100 of the largest non-financial companies listed on U.S. exchanges, with a concentration in technology, communications, and high-growth sectors. Please refer to mkts docs for further info on oracle reference pricing sources and design.",
+      "v1_overlap": {
+        "note": "Nasdaq-100-like vs V1's Nasdaq Composite daily close",
+        "v1_source": "nasdaq"
+      }
+    },
+    {
+      "annotation_category": null,
+      "category": "UNKNOWN",
+      "coverage_575": {
+        "coverage_pct": 38.96,
+        "missing": 351,
+        "moved_in_prior_6h_share": 0.4821,
+        "status": {
+          "NO_DATA": 351,
+          "OK": 224
+        },
+        "usable": 224,
+        "usable_with_7d_baseline": 141,
+        "v1_observations": 575,
+        "weekend_usable": 58
+      },
+      "dex": "mkts",
+      "display_name": null,
+      "event15": {
+        "change_boundary_to_event_pct": 0.0,
+        "flag_timing": {
+          "ret_6h_high": {
+            "active_at_boundary": false,
+            "classification": "UNUSABLE",
+            "episodes": [],
+            "persisted_hours_max": 0
+          },
+          "ret_6h_low": {
+            "active_at_boundary": false,
+            "classification": "UNUSABLE",
+            "episodes": [],
+            "persisted_hours_max": 0
+          }
+        },
+        "overall": "NO ABNORMAL MOVE",
+        "price_at_boundary": 40.519,
+        "ret_24h_before_boundary_pct": 0.0,
+        "ret_6h_pctile_at_boundary": 50.0,
+        "ret_6h_pctile_at_event": 50.0,
+        "status_at_boundary": "OK",
+        "status_at_event": "OK",
+        "usable": true
+      },
+      "history": {
+        "daily_candles": 16,
+        "first_daily_candle": "2026-09-21T00:00:00+00:00",
+        "funding_history_available": true,
+        "hourly_candles_in_window": 354,
+        "hourly_first": "2026-09-21T14:00:00+00:00",
+        "open_interest_history": false
+      },
+      "instrument_type": "BUILDER/ORACLE-BASED SYNTHETIC EXPOSURE (HIP-3 perp, deployer-set oracle)",
+      "live": {
+        "day_ntl_volume": 242791.389,
+        "funding": -1.5454e-06,
+        "mark_px": 38.257,
+        "max_leverage": 5,
+        "mid_px": 38.26,
+        "open_interest": 12926.08,
+        "oracle_px": 38.244
+      },
+      "market_hours": {
+        "gaps_over_1h": 0,
+        "weekday": {
+          "flat_share": 0.6163,
+          "hours": 258,
+          "median_abs_1h_move_pct": 0.0,
+          "zero_volume_share": 0.5814
+        },
+        "weekend": {
+          "flat_share": 0.6354,
+          "hours": 96,
+          "median_abs_1h_move_pct": 0.0,
+          "zero_volume_share": 0.5625
+        }
+      },
+      "native_or_hip3": "HIP-3",
+      "symbol": "mkts:BVIV",
+      "underlying_per_deployer": null,
+      "v1_overlap": {
+        "note": "No V1 counterpart",
+        "v1_source": null
+      }
+    },
+    {
+      "annotation_category": null,
+      "category": "UNKNOWN",
+      "coverage_575": {
+        "coverage_pct": 47.83,
+        "missing": 300,
+        "moved_in_prior_6h_share": 1.0,
+        "status": {
+          "NO_DATA": 300,
+          "OK": 275
+        },
+        "usable": 275,
+        "usable_with_7d_baseline": 189,
+        "v1_observations": 575,
+        "weekend_usable": 92
+      },
+      "dex": "io",
+      "display_name": null,
+      "event15": {
+        "change_boundary_to_event_pct": -1.2818,
+        "flag_timing": {
+          "ret_6h_high": {
+            "active_at_boundary": false,
+            "classification": "POST-EVENT",
+            "episodes": [
+              {
+                "class": "POST-EVENT",
+                "end": "2026-09-28T21:01:24.213000+00:00",
+                "hours": 1,
+                "start": "2026-09-28T21:01:24.213000+00:00"
+              }
+            ],
+            "persisted_hours_max": 1
+          },
+          "ret_6h_low": {
+            "active_at_boundary": false,
+            "classification": "CONTEMPORANEOUS",
+            "episodes": [
+              {
+                "class": "CONTEMPORANEOUS",
+                "end": "2026-09-28T04:01:24.213000+00:00",
+                "hours": 3,
+                "start": "2026-09-28T02:01:24.213000+00:00"
+              },
+              {
+                "class": "POST-EVENT",
+                "end": "2026-09-28T06:01:24.213000+00:00",
+                "hours": 1,
+                "start": "2026-09-28T06:01:24.213000+00:00"
+              }
+            ],
+            "persisted_hours_max": 3
+          }
+        },
+        "overall": "CONTEMPORANEOUS",
+        "price_at_boundary": 187.24,
+        "ret_24h_before_boundary_pct": 0.2516,
+        "ret_6h_pctile_at_boundary": 37.13,
+        "ret_6h_pctile_at_event": 2.4,
+        "status_at_boundary": "OK",
+        "status_at_event": "OK",
+        "usable": true
+      },
+      "history": {
+        "daily_candles": 19,
+        "first_daily_candle": "2026-09-18T00:00:00+00:00",
+        "funding_history_available": true,
+        "hourly_candles_in_window": 425,
+        "hourly_first": "2026-09-18T15:00:00+00:00",
+        "open_interest_history": false
+      },
+      "instrument_type": "BUILDER/ORACLE-BASED SYNTHETIC EXPOSURE (HIP-3 perp, deployer-set oracle)",
+      "live": {
+        "day_ntl_volume": 321521.5298999999,
+        "funding": 1.04452e-05,
+        "mark_px": 188.57,
+        "max_leverage": 25,
+        "mid_px": 188.51,
+        "open_interest": 1781.12,
+        "oracle_px": 188.53
+      },
+      "market_hours": {
+        "gaps_over_1h": 0,
+        "weekday": {
+          "flat_share": 0.0961,
+          "hours": 281,
+          "median_abs_1h_move_pct": 0.1537,
+          "zero_volume_share": 0.0463
+        },
+        "weekend": {
+          "flat_share": 0.2014,
+          "hours": 144,
+          "median_abs_1h_move_pct": 0.0389,
+          "zero_volume_share": 0.1319
+        }
+      },
+      "native_or_hip3": "HIP-3",
+      "symbol": "io:EWY",
+      "underlying_per_deployer": null,
+      "v1_overlap": {
+        "note": "No V1 counterpart",
+        "v1_source": null
+      }
+    }
+  ],
+  "event": {
+    "event_id": 15,
+    "event_ts_ms": 1790564484213,
+    "label": "BTC 84,429 -> 83,480 (-1.1%) in the 24 h to 2026-09-28 03:01 UTC; V1 predicted UP"
+  },
+  "inventory": {
+    "delisted_macro_symbols": [
+      "flx:COPPER",
+      "flx:GAS",
+      "flx:GOLD",
+      "flx:OIL",
+      "flx:PALLADIUM",
+      "flx:PLATINUM",
+      "flx:SILVER",
+      "flx:USA500",
+      "km:GLDMINE",
+      "km:GOLD",
+      "km:SEMI",
+      "km:SILVER",
+      "km:SMALL2000",
+      "km:US500",
+      "km:USENERGY",
+      "km:USOIL",
+      "km:USTECH",
+      "vntl:BIOTECH",
+      "vntl:DEFENSE",
+      "vntl:ENERGY",
+      "vntl:GOLDJM",
+      "vntl:INFOTECH",
+      "vntl:MAG7",
+      "vntl:NUCLEAR",
+      "vntl:ROBOT",
+      "vntl:SEMIS",
+      "vntl:SILVERJM",
+      "vntl:SOY",
+      "vntl:WHEAT",
+      "xyz:ALUMINIUM",
+      "xyz:CORN",
+      "xyz:DXY",
+      "xyz:KRW",
+      "xyz:VIX",
+      "xyz:VOL",
+      "xyz:WHEAT"
+    ],
+    "delisted_perps": 202,
+    "dexs": [
+      {
+        "assets": 234,
+        "deployer": null,
+        "dex": "(native)",
+        "full_name": null,
+        "live": 178,
+        "oracle_updater": null
+      },
+      {
+        "assets": 131,
+        "deployer": "0x88806a71d74ad0a510b350545c9ae490912f0888",
+        "dex": "xyz",
+        "full_name": "XYZ",
+        "live": 112,
+        "oracle_updater": null
+      },
+      {
+        "assets": 16,
+        "deployer": "0x2fab552502a6d45920d5741a2f3ebf4c35536352",
+        "dex": "flx",
+        "full_name": "Felix Exchange",
+        "live": 0,
+        "oracle_updater": "0x94757f8dcb4bf73b850195660e959d1105cfedd5"
+      },
+      {
+        "assets": 15,
+        "deployer": "0x8888888192a4a0593c13532ba48449fc24c3beda",
+        "dex": "vntl",
+        "full_name": "Ventuals",
+        "live": 0,
+        "oracle_updater": null
+      },
+      {
+        "assets": 25,
+        "deployer": "0x53e655101ea361537124ef814ad4e654b54d0637",
+        "dex": "hyna",
+        "full_name": "HyENA",
+        "live": 0,
+        "oracle_updater": "0xaab93501e78f5105e265a1eafda10ce6530de17e"
+      },
+      {
+        "assets": 23,
+        "deployer": "0x71f0019cc7fa79e4f42587fb7b9a817d8d2429ec",
+        "dex": "km",
+        "full_name": "Markets by Kinetiq",
+        "live": 0,
+        "oracle_updater": null
+      },
+      {
+        "assets": 1,
+        "deployer": "0x372c7f69d0ecc14f73f89bd8a7dfb41bdf29857c",
+        "dex": "abcd",
+        "full_name": "ABCDEx",
+        "live": 0,
+        "oracle_updater": null
+      },
+      {
+        "assets": 17,
+        "deployer": "0xffa8198c62adb1e811629bd54c9b646d726deef7",
+        "dex": "cash",
+        "full_name": "dreamcash",
+        "live": 0,
+        "oracle_updater": null
+      },
+      {
+        "assets": 38,
+        "deployer": "0x8888888c43cbb7e1c4132542e46831bffd866ed3",
+        "dex": "para",
+        "full_name": "Paragon",
+        "live": 29,
+        "oracle_updater": "0x8888888c43cbb7e1c4132542e46831bffd866ed3"
+      },
+      {
+        "assets": 24,
+        "deployer": "0x71f0019cc7fa79e4f42587fb7b9a817d8d2429ec",
+        "dex": "mkts",
+        "full_name": "Markets By Kinetiq",
+        "live": 5,
+        "oracle_updater": null
+      },
+      {
+        "assets": 11,
+        "deployer": "0x320c8988e3d1b5198f335802d7bfd2728a8fcac6",
+        "dex": "io",
+        "full_name": "EntropyIO",
+        "live": 9,
+        "oracle_updater": "0x94757f8dcb4bf73b850195660e959d1105cfedd5"
+      }
+    ],
+    "live_by_concise_category": {
+      "(none)": 2,
+      "commodities": 9,
+      "crypto": 5,
+      "fx": 3,
+      "indices": 7,
+      "preipo": 3,
+      "rates": 3,
+      "stock": 1,
+      "stocks": 122
+    },
+    "live_perps": 333
+  },
+  "lookahead": "A 1h candle is used only after its close time T; returns use closed candles only.",
+  "pre_event_boundary": "2026-09-27T12:01:27.481000+00:00",
+  "requests": {
+    "candleSnapshot_CACHED": 228,
+    "fundingHistory_CACHED": 45,
+    "metaAndAssetCtxs_CACHED": 11,
+    "perpAnnotation_CACHED": 43,
+    "perpConciseAnnotations_CACHED": 1,
+    "perpDexs_CACHED": 1,
+    "spotMetaAndAssetCtxs_CACHED": 1
+  },
+  "spot_rwa_tokens": [
+    {
+      "day_ntl_volume": 14226888.087689998,
+      "evm_contract": "0x499e347174f237ad28687b947b94c0d49570d1b7",
+      "full_name": null,
+      "mark_px": 1353.9,
+      "pair": "@288",
+      "price_check": "NOT CONSISTENT WITH NAMED UNDERLYING",
+      "quote": "USDC",
+      "reference_perp": "mkts:USTECH",
+      "token": "QQQ",
+      "type": "TOKENIZED ASSET (spot token; issuer claim not verifiable from the Hyperliquid API)"
+    },
+    {
+      "day_ntl_volume": 3136391.7112999996,
+      "evm_contract": "0x08be08c37d93e689518ced744a89f113b4afaad4",
+      "full_name": null,
+      "mark_px": 560.19,
+      "pair": "@276",
+      "price_check": "NOT CHECKABLE",
+      "quote": "USDC",
+      "reference_perp": null,
+      "token": "GLD",
+      "type": "TOKENIZED ASSET (spot token; issuer claim not verifiable from the Hyperliquid API)"
+    },
+    {
+      "day_ntl_volume": 16.957248,
+      "evm_contract": "0xf4d9235269a96aadafc9adae454a0618ebe37949",
+      "full_name": "XAUT0",
+      "mark_px": 0.3696,
+      "pair": "@182",
+      "price_check": "NOT CONSISTENT WITH NAMED UNDERLYING",
+      "quote": "USDC",
+      "reference_perp": "xyz:GOLD",
+      "token": "XAUT0",
+      "type": "TOKENIZED ASSET (spot token; issuer claim not verifiable from the Hyperliquid API)"
+    },
+    {
+      "day_ntl_volume": 12.525,
+      "evm_contract": "0xb7bf37783db41a2851b77c6917280c56312c833a",
+      "full_name": null,
+      "mark_px": 83.5,
+      "pair": "@279",
+      "price_check": "NOT CONSISTENT WITH NAMED UNDERLYING",
+      "quote": "USDC",
+      "reference_perp": "mkts:US500",
+      "token": "SPY",
+      "type": "TOKENIZED ASSET (spot token; issuer claim not verifiable from the Hyperliquid API)"
+    },
+    {
+      "day_ntl_volume": 12.24453128,
+      "evm_contract": "0x7ef4eba0c0200957e357627ced1884d6cb63e961",
+      "full_name": null,
+      "mark_px": 0.004805,
+      "pair": "@265",
+      "price_check": "NOT CHECKABLE",
+      "quote": "USDC",
+      "reference_perp": null,
+      "token": "SLV",
+      "type": "TOKENIZED ASSET (spot token; issuer claim not verifiable from the Hyperliquid API)"
+    },
+    {
+      "day_ntl_volume": 0.01348344,
+      "evm_contract": "0x896ab745155e8c354183face6bff6270c01fb106",
+      "full_name": "HyperGold",
+      "mark_px": 9.21e-05,
+      "pair": "@115",
+      "price_check": "NOT CHECKABLE",
+      "quote": "USDC",
+      "reference_perp": null,
+      "token": "HOLD",
+      "type": "TOKENIZED ASSET (spot token; issuer claim not verifiable from the Hyperliquid API)"
+    },
+    {
+      "day_ntl_volume": 0.0,
+      "evm_contract": null,
+      "full_name": "Professional traders unite in DEX eco.",
+      "mark_px": 0.075524,
+      "pair": "@87",
+      "price_check": "NOT CHECKABLE",
+      "quote": "USDC",
+      "reference_perp": null,
+      "token": "NASDAQ",
+      "type": "TOKENIZED ASSET (spot token; issuer claim not verifiable from the Hyperliquid API)"
+    },
+    {
+      "day_ntl_volume": 0.0,
+      "evm_contract": null,
+      "full_name": "Unit SP500 xStock",
+      "mark_px": 0.99001,
+      "pair": "@189",
+      "price_check": "NOT CONSISTENT WITH NAMED UNDERLYING",
+      "quote": "USDC",
+      "reference_perp": "mkts:US500",
+      "token": "USPYX",
+      "type": "TOKENIZED ASSET (spot token; issuer claim not verifiable from the Hyperliquid API)"
+    },
+    {
+      "day_ntl_volume": 0.0,
+      "evm_contract": "0xfdd22ce6d1f66bc0ec89b20bf16ccb6670f55a5a",
+      "full_name": "Theo Short Duration US Treasury Fund",
+      "mark_px": 0.000116,
+      "pair": "@205",
+      "price_check": "NOT CHECKABLE",
+      "quote": "USDC",
+      "reference_perp": null,
+      "token": "THBILL",
+      "type": "TOKENIZED ASSET (spot token; issuer claim not verifiable from the Hyperliquid API)"
+    },
+    {
+      "day_ntl_volume": 0.0,
+      "evm_contract": "0xf4d9235269a96aadafc9adae454a0618ebe37949",
+      "full_name": "XAUT0",
+      "mark_px": 0.01017,
+      "pair": "@209",
+      "price_check": "NOT CONSISTENT WITH NAMED UNDERLYING",
+      "quote": "USDT0",
+      "reference_perp": "xyz:GOLD",
+      "token": "XAUT0",
+      "type": "TOKENIZED ASSET (spot token; issuer claim not verifiable from the Hyperliquid API)"
+    },
+    {
+      "day_ntl_volume": 0.0,
+      "evm_contract": "0x3f56e73ec528ba1e69e66b36dcb4d96174d5580e",
+      "full_name": "Melt QQQ",
+      "mark_px": 0.000476,
+      "pair": "@308",
+      "price_check": "NOT CHECKABLE",
+      "quote": "USDC",
+      "reference_perp": null,
+      "token": "QQQM",
+      "type": "TOKENIZED ASSET (spot token; issuer claim not verifiable from the Hyperliquid API)"
+    },
+    {
+      "day_ntl_volume": 0.0,
+      "evm_contract": "0xa8ddb5cd96b5222afe198316e9a57caa642850d5",
+      "full_name": "Wrapped NVIDIA xStock",
+      "mark_px": 0.0001,
+      "pair": "@702",
+      "price_check": "NOT CHECKABLE",
+      "quote": "USDC",
+      "reference_perp": null,
+      "token": "NVDAX",
+      "type": "TOKENIZED ASSET (spot token; issuer claim not verifiable from the Hyperliquid API)"
+    },
+    {
+      "day_ntl_volume": 0.0,
+      "evm_contract": "0xe7e553cd128f0011777323a0b44a7b96ea1cb540",
+      "full_name": "Wrapped SP500 xStock",
+      "mark_px": 0.99994,
+      "pair": "@703",
+      "price_check": "NOT CONSISTENT WITH NAMED UNDERLYING",
+      "quote": "USDC",
+      "reference_perp": "mkts:US500",
+      "token": "SPYX",
+      "type": "TOKENIZED ASSET (spot token; issuer claim not verifiable from the Hyperliquid API)"
+    },
+    {
+      "day_ntl_volume": 0.0,
+      "evm_contract": "0x4c1ae29c159838fc1b224636e28e086eb69101f7",
+      "full_name": "Wrapped Nasdaq xStock",
+      "mark_px": 0.5,
+      "pair": "@704",
+      "price_check": "NOT CONSISTENT WITH NAMED UNDERLYING",
+      "quote": "USDC",
+      "reference_perp": "mkts:USTECH",
+      "token": "QQQX",
+      "type": "TOKENIZED ASSET (spot token; issuer claim not verifiable from the Hyperliquid API)"
+    },
+    {
+      "day_ntl_volume": 0.0,
+      "evm_contract": "0x6215a58ed045d71f2561aaabe54f4c885c522998",
+      "full_name": "Wrapped SK hynix xStock",
+      "mark_px": 0.5,
+      "pair": "@705",
+      "price_check": "NOT CHECKABLE",
+      "quote": "USDC",
+      "reference_perp": null,
+      "token": "SKHYX",
+      "type": "TOKENIZED ASSET (spot token; issuer claim not verifiable from the Hyperliquid API)"
+    },
+    {
+      "day_ntl_volume": 0.0,
+      "evm_contract": "0xe2047ee3bddb5c99ae428ab83df63f8730698e30",
+      "full_name": "Wrapped Micron Technology xStock",
+      "mark_px": 0.99,
+      "pair": "@706",
+      "price_check": "NOT CHECKABLE",
+      "quote": "USDC",
+      "reference_perp": null,
+      "token": "MUX",
+      "type": "TOKENIZED ASSET (spot token; issuer claim not verifiable from the Hyperliquid API)"
+    },
+    {
+      "day_ntl_volume": 0.0,
+      "evm_contract": null,
+      "full_name": "Wrapped Sandisk Corporation xStock",
+      "mark_px": 0.975,
+      "pair": "@709",
+      "price_check": "NOT CHECKABLE",
+      "quote": "USDC",
+      "reference_perp": null,
+      "token": "SNDKX",
+      "type": "TOKENIZED ASSET (spot token; issuer claim not verifiable from the Hyperliquid API)"
+    },
+    {
+      "day_ntl_volume": 0.0,
+      "evm_contract": null,
+      "full_name": "Wrapped SpaceX xStock",
+      "mark_px": 1e-05,
+      "pair": "@710",
+      "price_check": "NOT CHECKABLE",
+      "quote": "USDC",
+      "reference_perp": null,
+      "token": "SPCXX",
+      "type": "TOKENIZED ASSET (spot token; issuer claim not verifiable from the Hyperliquid API)"
+    },
+    {
+      "day_ntl_volume": 0.0,
+      "evm_contract": null,
+      "full_name": "Wrapped Tesla xStock",
+      "mark_px": 0.84895,
+      "pair": "@712",
+      "price_check": "NOT CHECKABLE",
+      "quote": "USDC",
+      "reference_perp": null,
+      "token": "TSLAX",
+      "type": "TOKENIZED ASSET (spot token; issuer claim not verifiable from the Hyperliquid API)"
+    },
+    {
+      "day_ntl_volume": 0.0,
+      "evm_contract": null,
+      "full_name": "Wrapped Apple xStock",
+      "mark_px": 0.03,
+      "pair": "@713",
+      "price_check": "NOT CHECKABLE",
+      "quote": "USDC",
+      "reference_perp": null,
+      "token": "AAPLX",
+      "type": "TOKENIZED ASSET (spot token; issuer claim not verifiable from the Hyperliquid API)"
+    },
+    {
+      "day_ntl_volume": 0.0,
+      "evm_contract": null,
+      "full_name": "Wrapped Circle xStock",
+      "mark_px": 0.5,
+      "pair": "@714",
+      "price_check": "NOT CHECKABLE",
+      "quote": "USDC",
+      "reference_perp": null,
+      "token": "CRCLX",
+      "type": "TOKENIZED ASSET (spot token; issuer claim not verifiable from the Hyperliquid API)"
+    },
+    {
+      "day_ntl_volume": 0.0,
+      "evm_contract": "0x14f0dfc32e8af769961b31ba3e89389bd6797652",
+      "full_name": "Matrixdock Gold",
+      "mark_px": 0.5,
+      "pair": "@715",
+      "price_check": "NOT CONSISTENT WITH NAMED UNDERLYING",
+      "quote": "USDC",
+      "reference_perp": "xyz:GOLD",
+      "token": "XAUM",
+      "type": "TOKENIZED ASSET (spot token; issuer claim not verifiable from the Hyperliquid API)"
+    }
+  ],
+  "status": "OK",
+  "v1_impact": "NONE: research only; no weight, no methodology version, no Risk Regime Shock score.",
+  "v1_observations_input": 575,
+  "v1_sources_inspected": {
+    "funding/longshort/hypefunding": "Hyperliquid native funding (BTC/ETH, 5-asset, HYPE); researched separately",
+    "global": "CoinGecko total crypto market cap 24h change",
+    "gold": "xyz:GOLD markPx vs prevDayPx (24h %), sign flipped in a 'competing-haven' regime (srcGoldFromHyperliquid)",
+    "nasdaq": "FRED NASDAQCOM, latest vs previous daily observation (srcFredSeries)",
+    "ninemag": "Yahoo quotes of a 9-stock tech/AI basket, cap-weighted day change",
+    "oil": "xyz:BRENTOIL markPx vs prevDayPx (24h %), inverted, satur scale 3 (srcOilFromHyperliquid)",
+    "sp500": "FRED SP500, latest vs previous daily observation (srcFredSeries)",
+    "strc": "STRC preferred price vs $100 par via Yahoo (/strc-proxy)",
+    "usd": "xyz:EUR markPx vs prevDayPx (24h %), satur scale 1.5 (srcUsdFromHyperliquid); one-off backfill used xyz:DXY daily closes",
+    "yield10y": "FRED DGS10, latest vs previous daily observation, inverted (srcFredSeries)"
+  },
+  "window": [
+    "2026-08-18T09:25:21.144000+00:00",
+    "2026-10-06T07:41:45.708000+00:00"
+  ]
+}

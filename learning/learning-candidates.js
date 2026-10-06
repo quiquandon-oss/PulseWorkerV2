@@ -8,6 +8,7 @@ import {
   buildContexts, recalculate, validateRecalculation, CANDIDATE_TYPES, CANDIDATE_STATUSES, VALIDATION_TEXT, nextVersionId,
   isSignalPrototype, isProxySignalCandidate, prototypeFromFinding, DATA_COLLECTION_REQUIRED, PROXY_INVALID_FOR_SIGNAL_VALIDATION,
 } from './learning-method.js';
+import { researchComponentsFor } from './research-components.js';
 
 const EDITABLE = ['DRAFT', DATA_COLLECTION_REQUIRED, 'PENDING_REVIEW', 'NEEDS_MORE_RESEARCH'];
 function parseJson(raw, fallback) { if (typeof raw !== 'string') return fallback; try { return JSON.parse(raw); } catch (_e) { return fallback; } }
@@ -125,6 +126,7 @@ export async function getCandidate(env, candidateId) {
   const a = await analyse(env, c, base);
   const finding = await env.DB.prepare('SELECT provider, findings_json, registered_ts FROM stage7_research_responses WHERE response_id = ?').bind(c.response_id).first();
   const produced = c.produced_version_id ? await getVersion(env, c.produced_version_id) : null;
+  const prototypeSuggestion = c.signal_validity && finding ? prototypeFromFinding(parseJson(finding.findings_json, {}), base.config) : null;
   return {
     ok: true, candidate: c, base_version: { version_id: base.version_id, status: base.status, formula_id: base.formula_id, reason: base.reason, sources: base.config.sources },
     finding: finding ? { provider: finding.provider, registered_ts: finding.registered_ts, ...parseJson(finding.findings_json, {}) } : null,
@@ -132,7 +134,9 @@ export async function getCandidate(env, candidateId) {
     proposed_sources: a.proposed_config ? a.proposed_config.sources : null, proposed_signals: a.proposed_config ? a.proposed_config.signals : null,
     signal_validity: c.signal_validity,
     // What the finding becomes as a new-signal prototype; the human may switch a proxy candidate to it (an explicit edit).
-    prototype_suggestion: c.signal_validity && finding ? prototypeFromFinding(parseJson(finding.findings_json, {}), base.config) : null,
+    prototype_suggestion: prototypeSuggestion,
+    // Read-only research status of the signal's components (e.g. the GDELT geopolitical component); never a V1 input.
+    research_components: researchComponentsFor(c.adjustment, prototypeSuggestion),
     analysis_history: c.analysis && Array.isArray(c.analysis.history) ? c.analysis.history : [],
   };
 }

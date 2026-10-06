@@ -350,6 +350,7 @@ import {
   baselineConfig, applyAdjustment, normalizeAdjustment, scoreWithConfig, dataAvailability, recalculate, buildContexts,
   validateRecalculation, candidateFromFinding, nextVersionId, describeAdjustment,
 } from '../learning/learning-method.js';
+import { riskRegimeShockComponents, researchComponentsFor } from '../learning/research-components.js';
 
 describe('methodology: adjustments and scoring', () => {
   const base = baselineConfig();
@@ -872,6 +873,8 @@ describe('NEW_SIGNAL -> signal prototype, data collection first (Event #15 regre
     expect(view.signal_validity).toBe('PROXY_INVALID_FOR_SIGNAL_VALIDATION');
     expect(view.validation.signal_validity).toBe('PROXY_INVALID_FOR_SIGNAL_VALIDATION');
     expect(view.prototype_suggestion).toMatchObject({ type: 'SIGNAL_PROTOTYPE', signal_name: 'Risk Regime Shock' });
+    // the legacy Candidate #1 shape already shows the Risk Regime Shock components (GDELT geopolitical) read-only
+    expect(view.research_components.components[0]).toMatchObject({ id: 'gdelt_geopolitical', v1_weight: null, v1_impact: 'NONE' });
     let journey = (await call(ctx.env, '/api/learning/market')).json.events.find((e) => e.event_id === 15).journey;
     expect(journey.find((s) => s.key === 'VALIDATION')).toMatchObject({ state: 'WARN', text: 'Proxy result: not a validation of the new signal' });
     // reading never rewrites the stored row
@@ -892,6 +895,46 @@ describe('NEW_SIGNAL -> signal prototype, data collection first (Event #15 regre
     expect(view.analysis_history.every((h) => h.adjustment.type === 'ADD_SIGNAL' && h.superseded_ts)).toBe(true);
     journey = (await call(ctx.env, '/api/learning/market')).json.events.find((e) => e.event_id === 15).journey;
     expect(journey.find((s) => s.key === 'IMPACT').text).toBe('Not calculable yet: historical data required');
+  });
+
+  it('Risk Regime Shock shows its research components (GDELT geopolitical) read-only, with no weight and no V1 impact', async () => {
+    const { ctx, id } = await setup();
+    const before = counts(ctx.db);
+    const view = (await call(ctx.env, `/api/learning/candidate?id=${id}`)).json;
+    const rc = view.research_components;
+    expect(rc.signal_id).toBe('risk_regime_shock');
+    expect(rc.components.map((c) => c.id)).toEqual(['gdelt_geopolitical', 'oil_shock', 'treasury_shock', 'equity_volatility_shock', 'usd_rates_shock', 'liquidation_shock']);
+    const gd = rc.components[0];
+    expect(gd.source).toMatchObject({ name: 'GDELT 2.0 Event Database', api_key_required: false, update_frequency: '15 minutes', url: 'http://data.gdeltproject.org/gdeltv2/' });
+    expect(gd.fields_used).toContain('DATEADDED');
+    expect(gd.timestamp_policy).toMatch(/DATEADDED/);
+    expect(gd.transformation).toMatch(/Goldstein is used for sign only/);
+    expect(gd).toMatchObject({ v1_weight: null, v1_impact: 'NONE' });
+    expect(rc.components.slice(1).every((c) => c.status === 'NOT_STARTED' && c.v1_weight === null)).toBe(true);
+    expect(rc.combination).toMatch(/^NOT_DEFINED/);
+    // the committed artifact decides what is claimed: no live result -> nothing about Event #15 is asserted
+    if (gd.live_run.status !== 'OK') expect(gd.event15).toMatchObject({ status: 'NOT_MEASURED' });
+    // reading writes nothing, and the candidate itself is unchanged
+    expect(counts(ctx.db)).toEqual(before);
+    expect(view.candidate.status).toBe('DATA_COLLECTION_REQUIRED');
+    expect(JSON.stringify(view.candidate.adjustment)).not.toMatch(/"weight"|"confidence"/);
+    // an existing-source candidate does not get them
+    await call(ctx.env, '/api/learning/candidate/update', { method: 'POST', token: ctx.token, body: { candidate_id: id, fields: { candidate_type: 'SOURCE_WEIGHT_ADJUSTMENT' }, adjustment: { type: 'CHANGE_WEIGHT', source_id: 'etfflows', weight: 0, confidence: 0.8 } } });
+    expect((await call(ctx.env, `/api/learning/candidate?id=${id}`)).json.research_components).toBeNull();
+  });
+
+  it('component status follows the research artifact: a completed live run is reported, never invented', () => {
+    const base = JSON.parse(readFileSync(join(__dirname, '..', 'research', 'results', 'gdelt_risk_regime_shock.json'), 'utf8'));
+    const pending = riskRegimeShockComponents({ ...base, status: 'LIVE_FETCH_FAILED', error: 'blocked' }).components[0];
+    expect(pending.status).toBe('BUILT_LIVE_DATA_PENDING');
+    expect(pending.event15.status).toBe('NOT_MEASURED');
+    const okArtifact = { ...base, status: 'OK', event15: { detected: true, first_elevated: '2026-09-28T01:00:00+00:00', elevated_before_event: true, elevated_during_decline_24h: true, persistence_hours_longest_run: 4, at_event: { geo_shock_score: 95 }, counts_6h_before_event: { geo_events: 10 } }, v1_coverage: { v1_observations: 575, coverage_pct: 80 } };
+    const done = riskRegimeShockComponents(okArtifact).components[0];
+    expect(done.status).toBe('RESEARCH_RESULT_AVAILABLE');
+    expect(done.event15).toMatchObject({ detected: true, score_at_event: 95 });
+    expect(done.v1_weight).toBeNull();
+    expect(researchComponentsFor({ type: 'CHANGE_WEIGHT', source_id: 'etfflows' }, null)).toBeNull();
+    expect(researchComponentsFor({ type: 'ADD_SIGNAL', derived_from: 'macrogeo' }, { signal_id: 'risk_regime_shock' }).signal_id).toBe('risk_regime_shock');
   });
 
   it('the parser keeps the new optional signal fields and the research pack asks for them', () => {

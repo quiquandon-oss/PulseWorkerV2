@@ -1,0 +1,112 @@
+{
+  "artifact": "gdelt-risk-regime-shock-research",
+  "error": "GET http://data.gdeltproject.org/gdeltv2/masterfilelist.txt failed after 3 attempts: HTTP Error 403: Forbidden",
+  "event": {
+    "event_id": 15,
+    "event_ts_ms": 1790564484213,
+    "label": "BTC fell 4.1% in 24h (V1 predicted UP)"
+  },
+  "feature_version": "gdelt-geo-features-v1",
+  "fields_used": [
+    "GLOBALEVENTID",
+    "SQLDATE",
+    "Actor1CountryCode",
+    "Actor2CountryCode",
+    "Actor1Type1Code",
+    "Actor2Type1Code",
+    "IsRootEvent",
+    "EventCode",
+    "EventRootCode",
+    "QuadClass",
+    "GoldsteinScale",
+    "NumMentions",
+    "NumSources",
+    "NumArticles",
+    "ActionGeo_CountryCode",
+    "ActionGeo_FullName",
+    "DATEADDED",
+    "SOURCEURL"
+  ],
+  "filter_version": "gdelt-geo-filter-v1",
+  "required_batches": 575,
+  "required_range": [
+    "20260923141500",
+    "20260929134500"
+  ],
+  "source": {
+    "api_key_required": false,
+    "cameo_manual": "http://data.gdeltproject.org/documentation/CAMEO.Manual.1.1b3.pdf",
+    "codebook": "http://data.gdeltproject.org/documentation/GDELT-Event_Codebook-V2.0.pdf",
+    "cost": "free (open data; GDELT asks for citation)",
+    "data_page": "https://www.gdeltproject.org/data.html",
+    "event_files_base": "http://data.gdeltproject.org/gdeltv2/",
+    "file_pattern": "http://data.gdeltproject.org/gdeltv2/YYYYMMDDHHMMSS.export.CSV.zip",
+    "format": "tab-delimited, 61 columns, zipped, no header",
+    "gdelt1_daily_events": "http://data.gdeltproject.org/events/",
+    "history_from": "2015-02-18 (GDELT 2.0 event export files)",
+    "last_update": "http://data.gdeltproject.org/gdeltv2/lastupdate.txt",
+    "master_file_list": "http://data.gdeltproject.org/gdeltv2/masterfilelist.txt",
+    "name": "GDELT 2.0 Event Database",
+    "publisher": "The GDELT Project",
+    "update_frequency": "15 minutes"
+  },
+  "status": "LIVE_FETCH_FAILED",
+  "v1_coverage": {
+    "measured": false,
+    "reason": "GDELT file availability could not be read",
+    "v1_observations": 575
+  },
+  "v1_impact": "NONE: research feature only; no weight, no methodology version, V1 unchanged.",
+  "v1_observations_input": 575,
+  "v1_only_findings": {
+    "gap_hours_around_event": 7.71,
+    "last_v1_before_event": "2026-09-27T20:41:09.856000+00:00",
+    "next_v1_after_event": "2026-09-28T04:23:34.088000+00:00",
+    "readings_72h_before_event": {
+      "geopolitics": {
+        "distinct_values_72h_before": 8,
+        "max": 50,
+        "min": 6
+      },
+      "macrogeo": {
+        "distinct_values_72h_before": 16,
+        "max": 59,
+        "min": 14
+      },
+      "nasdaq": {
+        "distinct_values_72h_before": 2,
+        "max": 62,
+        "min": 50
+      },
+      "oil": {
+        "distinct_values_72h_before": 33,
+        "max": 96,
+        "min": 12
+      },
+      "sp500": {
+        "distinct_values_72h_before": 2,
+        "max": 62,
+        "min": 49
+      },
+      "usd": {
+        "distinct_values_72h_before": 15,
+        "max": 61,
+        "min": 46
+      },
+      "yield10y": {
+        "distinct_values_72h_before": 2,
+        "max": 9,
+        "min": 1
+      }
+    },
+    "v1_cadence_hours": {
+      "gaps_over_6h": 29,
+      "max": 17.27,
+      "median": 1.05
+    }
+  },
+  "v1_range": [
+    1787822721144,
+    1791268905708
+  ]
+}

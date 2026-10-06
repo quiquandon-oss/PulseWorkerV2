@@ -351,6 +351,23 @@ export const LEARNING_LAB_HTML = `<!DOCTYPE html>
     else html += '<div class="card"><h2>Does it improve CryptoPulse?</h2>' + (v && proxy ? '<p class="small">' + chip('PROXY RESULT', 'c-bad') + ' Measured on the proxy adjustment, not on the proposed signal. Not a validation of the new signal.</p>' : '') + (v ? '<p>' + chip(v.status_text, VCLASS[v.status]) + ' ' + esc(v.headline) + '</p>' +
       (v.current_v1 ? '<div class="row"><div class="kv"><div class="k">Current V1 right</div><div class="v">' + esc(v.current_v1.accuracy_pct) + '%</div></div><div class="kv"><div class="k">Adjusted V1 right</div><div class="v" style="color:var(--accent)">' + esc(v.adjusted_v1.accuracy_pct) + '%</div></div><div class="kv"><div class="k">Outcomes checked</div><div class="v">' + esc(v.resolved) + '</div></div><div class="kv"><div class="k">Days they disagree</div><div class="v">' + esc(v.independent.days) + '</div></div></div>' : '') +
       '<details><summary>How this is checked</summary><p class="small">' + esc(v.method) + '. The ' + esc(v.rules.excluded_window_hours) + 'h around the originating event are excluded, so the candidate is not judged on the event that inspired it. Hourly observations overlap a 24h horizon, so the verdict uses at most one disagreement per day: it needs at least ' + esc(v.rules.min_independent_changed_calls) + ' such days and a one-sided sign test at p &le; ' + esc(v.rules.alpha) + '.</p></details>' : '<p class="muted">Waiting for the adjustment.</p>') + '</div>';
+    if (cand.research_components) {
+      var rc = cand.research_components, gd = rc.components[0];
+      html += '<div class="card" id="researchComponents"><h2>Signal components (research only)</h2><p class="small muted">' + esc(rc.combination) + '</p><table>' +
+        rc.components.map(function (k) { return '<tr><td>' + esc(k.input) + '</td><td>' + chip(k.status.replace(/_/g, ' '), k.status === 'NOT_STARTED' ? 'c-muted' : k.status === 'RESEARCH_RESULT_AVAILABLE' ? 'c-acc' : 'c-warn') + '</td><td class="small muted">V1 weight: none</td></tr>'; }).join('') + '</table>' +
+        '<details><summary>Geopolitical component: ' + esc(gd.source.name) + '</summary><table class="small">' +
+        '<tr><td class="muted">Source</td><td>' + link(gd.source.url, gd.source.url) + ' (' + esc(gd.source.cost) + '; API key: ' + (gd.source.api_key_required ? 'required' : 'not required') + ')</td></tr>' +
+        '<tr><td class="muted">Updates / history</td><td>' + esc(gd.source.update_frequency) + ' / ' + esc(gd.source.historical_coverage) + '</td></tr>' +
+        '<tr><td class="muted">Fields used</td><td>' + esc(gd.fields_used.join(', ')) + '</td></tr>' +
+        '<tr><td class="muted">Transformation</td><td>' + esc(gd.transformation) + '</td></tr>' +
+        '<tr><td class="muted">Timestamps</td><td>' + esc(gd.timestamp_policy) + '</td></tr>' +
+        '<tr><td class="muted">No look-ahead</td><td>' + esc(gd.lookahead_policy) + '</td></tr>' +
+        '<tr><td class="muted">Live run</td><td>' + esc(gd.live_run.status) + (gd.live_run.error ? ' <span class="warn">(' + esc(gd.live_run.error) + ')</span>' : '') + '</td></tr>' +
+        '<tr><td class="muted">Event #15</td><td>' + (gd.event15.status === 'NOT_MEASURED' ? esc(gd.event15.reason) : 'Detected: ' + esc(gd.event15.detected) + '; first elevated ' + esc(gd.event15.first_elevated || 'never') + '; score at event ' + esc(gd.event15.score_at_event)) + '</td></tr>' +
+        '<tr><td class="muted">V1 coverage</td><td>' + (gd.v1_coverage && gd.v1_coverage.measured === false ? 'Not measured: ' + esc(gd.v1_coverage.reason) : esc((gd.v1_coverage || {}).coverage_pct) + '% of ' + esc((gd.v1_coverage || {}).v1_observations) + ' V1 observations') + '</td></tr>' +
+        '<tr><td class="muted">Limitations</td><td><ul>' + gd.limitations.map(function (l) { return '<li>' + esc(l) + '</li>'; }).join('') + '</ul></td></tr>' +
+        '</table></details><p class="small muted">Research evidence only. No weight, no methodology version, no change to V1.</p></div>';
+    }
     if (cand.analysis_history && cand.analysis_history.length) html += '<div class="card"><details><summary>Earlier analyses of this candidate (' + cand.analysis_history.length + ', kept for audit)</summary><ul class="small">' + cand.analysis_history.map(function (hh) {
       return '<li>' + esc(hh.adjustment_text) + ' &mdash; validation ' + esc(hh.validation_status) + (hh.signal_validity ? ' ' + chip('PROXY: invalid for signal validation', 'c-bad') : '') + ' <span class="muted">(superseded ' + esc(day(hh.superseded_ts)) + ')</span></li>'; }).join('') + '</ul></details></div>';
     // Decision / outcome

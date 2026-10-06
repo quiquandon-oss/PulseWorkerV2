@@ -1,0 +1,198 @@
+{
+  "artifact": "gdelt-risk-regime-shock-assessment",
+  "assessed_on": "2026-10-06",
+  "candidate1": {
+    "methodology_version": null,
+    "name": "Risk Regime Shock",
+    "role": "REGIME_MODIFIER",
+    "status": "DATA_COLLECTION_REQUIRED",
+    "type": "NEW_SIGNAL",
+    "v1_confidence": null,
+    "v1_weight": null
+  },
+  "design_findings": [
+    {
+      "finding": "Detection rule fired on any single 15-min point; fixed (now needs a >= 1 h persistent period), regression tests added.",
+      "fixed": true
+    },
+    {
+      "finding": "Time-of-day bias: the trailing 72 h baseline mixes all hours; elevated readings cluster 19-01 UTC and never occurred at 03 UTC in 40 days.",
+      "fixed": false,
+      "reason": "changes the signal's methodology; left for human decision. The sensitivity check shows it does not change the Event #15 result."
+    },
+    {
+      "finding": "GDELT machine coding noise: e.g. a Nigerian article geocoded to Dubai and a Jordanian justice-ministry story coded CAMEO 190; verified in the raw rows, not a parser defect.",
+      "fixed": false,
+      "reason": "source property; recorded as a limitation"
+    },
+    {
+      "finding": "The 15-minute score is noisy (1 h autocorrelation 0.28).",
+      "fixed": false,
+      "reason": "smoothing would be a redesign"
+    }
+  ],
+  "event15": {
+    "acceleration": "corridor escalation events flat at ~40-80 per hour through the night; acceleration ratio at the event 0.90 (no build-up)",
+    "breadth": "broad Middle-East activity, not a single story: 1,307 corridor escalation events from 459 articles / 225 domains in the 24 h before; top article 1.4 %, top 10 articles 9.6 %",
+    "categories_24h_before": "armed_conflict 835, assault 157, threat 127, sanctions_reduction 63, coercion 50, force_posture 46, mass_violence 29",
+    "classification": "NOT_SUPPORTIVE",
+    "detected": false,
+    "evidence_against": [
+      "score 48 at the event, below the median at the 575 V1 timestamps (51.6)",
+      "no persistent elevation in -24h..+24h",
+      "the two pre-event elevated points (08:16, 08:46 UTC on 27 Sep) are isolated and occur at a ~2.9 % background rate"
+    ],
+    "first_elevated_point": "2026-09-27T08:16:24Z (isolated 15-min point, ~18.8 h before the event)",
+    "longest_elevated_run_hours": 0.5,
+    "lookahead_safe": "yes: every score uses only batches available 15 min after their timestamp; events placed at DATEADDED",
+    "persistent_elevation_pm24h": false,
+    "regions_24h_before": "Israel/Gaza 481, Iran 242, Yemen 89, US 66, Lebanon 57, Saudi Arabia 54 (ActionGeo country)",
+    "score_at_event": 48.09,
+    "scores_0100_0600_utc": "range 16.5-65.5; no reading >= 90 from 2026-09-27T08:46Z until 2026-09-28T17:01Z (about 14 h after the event)",
+    "time_of_day_sensitivity": {
+      "conclusion": "the null result is not caused by the time-of-day bias",
+      "longest_run_hours_pm24h": 0.25,
+      "note": "sensitivity check only, NOT adopted: same features against a same-clock-time baseline (previous 7 days, +/-60 min)",
+      "score_at_event": 47.62
+    }
+  },
+  "false_positives": {
+    "drivers_on_elevated_points": {
+      "corridor_escalation": 0.73,
+      "escalation_share": 0.73,
+      "geo_share": 0.82,
+      "source_breadth": 0.387
+    },
+    "elevated_points": 111,
+    "elevated_rate": 0.029,
+    "grid_points": 3830,
+    "isolated": 46,
+    "noise": {
+      "lag1_autocorr_15min": 0.804,
+      "lag4_autocorr_1h": 0.284,
+      "median_abs_change_15min": 8.17
+    },
+    "outside_event_window": 50,
+    "periods": 55,
+    "persistent": 9,
+    "persistent_max_hours": 2.0,
+    "representative": [
+      "2026-09-08T23:45Z-09-09T01:30Z (2 h, max 98.3)",
+      "2026-08-31T00:45Z-02:00Z (1.5 h, max 97.9)",
+      "2026-09-09T06:45Z-07:30Z (1 h, max 99.7)"
+    ],
+    "time_of_day": {
+      "elevated_rate_02_14_utc": 0.014,
+      "elevated_rate_03_utc": 0.0,
+      "elevated_rate_19_01_utc": 0.067,
+      "events_per_batch_03_vs_00_utc": [
+        798,
+        1394
+      ]
+    }
+  },
+  "historical_v1": {
+    "coverage_pct": 100.0,
+    "elevated_at_v1_timestamps": 12,
+    "lookahead_exclusions": 0,
+    "median_score": 51.56,
+    "missing_data_exclusions": 0,
+    "p90_score": 77.78,
+    "usable_gdelt_context": 575,
+    "v1_observations": 575
+  },
+  "incremental_value": {
+    "answers": {
+      "broader_source_confirmation": "yes in volume (225 domains), but not concentrated before the event",
+      "continuous_coverage": "yes",
+      "earlier_detection": "no",
+      "event_acceleration": "no (flat)",
+      "information_v1_did_not_capture": "different information, not shown to be relevant"
+    },
+    "conclusion": "D_INSUFFICIENT_EVIDENCE",
+    "event15_v1_gap": "V1 had a 7.7 h observation gap across the event; GDELT had every 15-minute batch, but its reading in that gap was unremarkable",
+    "spearman_event_window_36h": {
+      "note": "small n; opposite sign to the full history",
+      "v1_geopolitics": 0.463,
+      "v1_macrogeo": 0.162
+    },
+    "spearman_full_history": {
+      "n": 575,
+      "v1_geopolitics": -0.07,
+      "v1_macrogeo": 0.139
+    },
+    "summary": "GDELT carries different information from V1 geopolitics (near-zero rank correlation, keeps varying when V1 is saturated, continuous weekend coverage), but on this data that information did not detect Event #15 and did not lead V1's own sharp geopolitical moves. Different is not the same as useful.",
+    "timing_vs_v1_sharp_bearish_moves": {
+      "base_rate_random_6h": 0.297,
+      "gdelt_elevated_in_prior_6h": 1,
+      "moves": 12
+    },
+    "v1_geopolitics_saturated_share": 0.386,
+    "weekend": {
+      "gdelt_events_per_batch": {
+        "weekday": 1168,
+        "weekend": 678
+      },
+      "missing_batches": 0,
+      "score_mean": {
+        "weekday": 53.1,
+        "weekend": 42.9
+      }
+    },
+    "when_v1_geopolitics_gt10": {
+      "elevated": 6,
+      "median": 51.8,
+      "n": 353,
+      "p10": 18.0,
+      "p90": 77.9
+    },
+    "when_v1_geopolitics_saturated_le10": {
+      "elevated": 6,
+      "median": 51.4,
+      "n": 222,
+      "p10": 17.1,
+      "p90": 77.0
+    }
+  },
+  "limitations": [
+    "One event of interest (Event #15): n = 1.",
+    "40 days of history.",
+    "GDELT has no ground truth; elevated periods are candidates, not labelled errors.",
+    "Export-file first-seen counts only (mentions table not used).",
+    "No causality is claimed."
+  ],
+  "live_fetch_audit": [
+    {
+      "fetched_live": 575,
+      "files": 575,
+      "range": [
+        "20260923141500",
+        "20260929134500"
+      ],
+      "run": "event",
+      "status": "OK"
+    },
+    {
+      "bytes_listed": 268224286,
+      "fetched_live": 3547,
+      "files": 4122,
+      "from_cache": 575,
+      "range": [
+        "20260824080000",
+        "20261006061500"
+      ],
+      "run": "history",
+      "status": "OK"
+    },
+    {
+      "files": 4122,
+      "from_cache": 4122,
+      "note": "every cached file re-checked against masterfilelist.txt size + MD5 before use",
+      "run": "final regeneration (committed artifact)",
+      "status": "OK"
+    }
+  ],
+  "nature": "Reviewed interpretation of the real-data run in gdelt_risk_regime_shock.json, for human review only. Not a V1 input, weight, confidence or methodology version.",
+  "recommendation": "INSUFFICIENT DATA — MORE RESEARCH REQUIRED",
+  "recommendation_detail": "Do not advance the current geo_shock_score: it did not detect Event #15 and showed no lead over V1. The source itself is not shown redundant, so a further research iteration (time-of-day normalised baseline decided in advance, more events, out-of-sample) is the only justified next step; otherwise reject."
+}

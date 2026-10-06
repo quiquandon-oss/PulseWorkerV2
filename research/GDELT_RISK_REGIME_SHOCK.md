@@ -184,3 +184,42 @@ same artifact are kept under `previous_runs`.
 The V1 extract is a read-only `SELECT` of stored V1 observation times plus the seven context readings
 (geopolitics, macrogeo, oil, yield10y, nasdaq, sp500, usd). It is not committed. If GDELT is unreachable, the
 artifact status is `LIVE_FETCH_FAILED` and it contains no GDELT results.
+
+## Real-data result (2026-10-06)
+
+Source: official GDELT 2.0 export files from `data.gdeltproject.org`, 4,122 files, 2026-08-24 08:00 to
+2026-10-06 06:15 UTC (268 MB listed), every file checked against `masterfilelist.txt` size + MD5.
+Per-file manifest: `results/gdelt_risk_regime_shock_files.json`; score at every V1 observation:
+`results/gdelt_risk_regime_shock_v1_scores.json` (both hashed in the main artifact). The two earlier
+`LIVE_FETCH_FAILED` runs stay under `previous_runs`. The reviewed interpretation is in
+`results/gdelt_risk_regime_shock_assessment.json`.
+
+**Event #15: NOT SUPPORTIVE.** Score at the event 48.09 (not elevated). No persistent elevation in
+-24h..+24h; the only pre-event elevated readings are two isolated 15-minute points at 08:16 and 08:46 UTC
+on 27 Sep, at the ~2.9 % background rate. The 24 h before the event show broad Middle-East activity
+(1,307 corridor escalation events, 459 articles, 225 domains; top article 1.4 %; Israel/Gaza, Iran, Yemen)
+with no build-up overnight.
+
+**Historical V1 coverage:** 575/575 observations (100 %), no look-ahead or missing-data exclusions.
+
+**Incremental value: D (insufficient evidence).** Rank correlation with V1 geopolitics is -0.07 and with
+macrogeo 0.14 over 575 observations, and the score keeps its full range when V1 geopolitics is saturated
+(<= 10, 39 % of observations). GDELT also has continuous weekend coverage. But it did not detect Event #15,
+and it was elevated in the 6 h before only 1 of 12 sharp V1 geopolitics moves (base rate 30 %).
+
+**False positives:** 111 of 3,830 fifteen-minute readings elevated (2.9 %) in 55 periods: 46 isolated and 9
+persistent (1-2 h), 50 of them outside the Event #15 window.
+
+### Design findings
+- **Fixed:** `detected` was true for any single elevated point, which happens in almost every 48 h window.
+  It now requires a persistent (>= 1 h) period, and the point-level facts stay reported. Regression tests added.
+- **Not fixed (methodology decision):** time-of-day bias. The 72 h baseline mixes all hours, so elevated
+  readings cluster 19-01 UTC (6-9 %) and never occurred at 03 UTC. A same-clock-time sensitivity check
+  (not adopted) gives 47.62 at the event, so the bias does not explain the null result.
+- GDELT machine-coding noise (mis-geocoded and mis-coded rows) was confirmed in the raw rows; it is not a
+  parser defect.
+
+**Recommendation: INSUFFICIENT DATA — MORE RESEARCH REQUIRED.** Do not advance the current score. Only a
+pre-registered iteration (time-of-day normalised baseline, more events, out-of-sample) is justified;
+otherwise reject. Candidate #1 stays NEW_SIGNAL / Risk Regime Shock / REGIME_MODIFIER /
+DATA_COLLECTION_REQUIRED, with no weight, confidence or methodology version.

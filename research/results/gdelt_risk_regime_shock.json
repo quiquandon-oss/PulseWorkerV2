@@ -1,12 +1,2167 @@
 {
   "artifact": "gdelt-risk-regime-shock-research",
-  "error": "GET http://data.gdeltproject.org/gdeltv2/masterfilelist.txt failed after 3 attempts: HTTP Error 403: Forbidden",
+  "coverage_basis": "file availability from the official masterfilelist.txt (size + MD5 per 15-minute export)",
+  "download_bytes_listed": 268224286,
   "event": {
     "event_id": 15,
     "event_ts_ms": 1790564484213,
     "label": "BTC fell 4.1% in 24h (V1 predicted UP)"
   },
+  "event15": {
+    "acceleration_at_event": 0.8987,
+    "any_elevated_point": true,
+    "at_event": {
+      "availability_lag_min": 15,
+      "baseline_coverage": 1.0,
+      "baseline_windows": 288,
+      "batch_used": "2026-09-28T02:45:00+00:00",
+      "elevated": false,
+      "features": {
+        "corridor_escalation": 60.0,
+        "escalation_share": 0.083159,
+        "geo_events": 471.0,
+        "geo_share": 0.16457,
+        "source_breadth": 116.0,
+        "total_events": 2862.0
+      },
+      "geo_shock_score": 48.09,
+      "percentiles": {
+        "corridor_escalation": 62.33,
+        "escalation_share": 61.81,
+        "geo_share": 8.33,
+        "source_breadth": 34.38
+      },
+      "status": "OK",
+      "t": "2026-09-28T03:01:24.213000+00:00"
+    },
+    "corridor_escalation_24h_before": {
+      "by_action_country": {
+        "EG": 23,
+        "IR": 242,
+        "IS": 481,
+        "IZ": 34,
+        "LE": 57,
+        "SA": 54,
+        "UK": 51,
+        "US": 66,
+        "WE": 29,
+        "YM": 89
+      },
+      "by_category": {
+        "armed_conflict": 835,
+        "assault": 157,
+        "coercion": 50,
+        "force_posture": 46,
+        "mass_violence": 29,
+        "sanctions_reduction": 63,
+        "threat": 127
+      },
+      "distinct_articles": 459,
+      "distinct_domains": 225,
+      "events": 1307,
+      "mentions": 5220,
+      "top10_articles_share": 0.0964,
+      "top_article_share": 0.0138
+    },
+    "counts_24h_before_event": {
+      "categories": {
+        "armed_conflict": 3943,
+        "assault": 893,
+        "coercion": 2602,
+        "diplomatic_failure": 1913,
+        "force_posture": 238,
+        "mass_violence": 43,
+        "political_unrest": 641,
+        "sanctions_reduction": 594,
+        "threat": 1365
+      },
+      "corridor_escalation_events": 1307,
+      "escalation_events": 5695,
+      "geo_articles": 4380,
+      "geo_events": 12232,
+      "geo_mentions": 57977,
+      "negative_direction_events": 12232,
+      "total_events": 63436
+    },
+    "counts_6h_before_event": {
+      "categories": {
+        "armed_conflict": 850,
+        "assault": 171,
+        "coercion": 568,
+        "diplomatic_failure": 435,
+        "force_posture": 33,
+        "mass_violence": 10,
+        "political_unrest": 112,
+        "sanctions_reduction": 138,
+        "threat": 336
+      },
+      "corridor_escalation_events": 327,
+      "escalation_events": 1207,
+      "geo_articles": 983,
+      "geo_events": 2653,
+      "geo_mentions": 12977,
+      "negative_direction_events": 2653,
+      "total_events": 14580
+    },
+    "detected": false,
+    "detection_rule": "detected = at least one persistent elevated period (>= 1 h of consecutive readings >= 90) in Event #15 -24h..+24h",
+    "elevated_before_event": true,
+    "elevated_during_decline_24h": true,
+    "elevated_periods": [
+      {
+        "end": "2026-09-27T08:16:24.213000+00:00",
+        "hours": 0.25,
+        "max_score": 90.54,
+        "persistent": false,
+        "points": 1,
+        "start": "2026-09-27T08:16:24.213000+00:00"
+      },
+      {
+        "end": "2026-09-27T08:46:24.213000+00:00",
+        "hours": 0.25,
+        "max_score": 90.19,
+        "persistent": false,
+        "points": 1,
+        "start": "2026-09-27T08:46:24.213000+00:00"
+      },
+      {
+        "end": "2026-09-28T17:01:24.213000+00:00",
+        "hours": 0.25,
+        "max_score": 90.45,
+        "persistent": false,
+        "points": 1,
+        "start": "2026-09-28T17:01:24.213000+00:00"
+      },
+      {
+        "end": "2026-09-28T20:01:24.213000+00:00",
+        "hours": 0.5,
+        "max_score": 92.01,
+        "persistent": false,
+        "points": 2,
+        "start": "2026-09-28T19:46:24.213000+00:00"
+      },
+      {
+        "end": "2026-09-29T00:31:24.213000+00:00",
+        "hours": 0.25,
+        "max_score": 93.58,
+        "persistent": false,
+        "points": 1,
+        "start": "2026-09-29T00:31:24.213000+00:00"
+      }
+    ],
+    "elevated_points_after_event_24h": 4,
+    "event": {
+      "event_id": 15,
+      "event_ts": "2026-09-28T03:01:24.213000+00:00",
+      "event_ts_ms": 1790564484213,
+      "label": "BTC fell 4.1% in 24h (V1 predicted UP)"
+    },
+    "first_elevated": "2026-09-27T08:16:24.213000+00:00",
+    "first_persistent_elevated": null,
+    "grid_points": 193,
+    "lookahead": "Every score uses only batches with batch_ts + 15 min <= the scored time; events are placed at DATEADDED, never at SQLDATE.",
+    "persistence_hours_longest_run": 0.5,
+    "score_series": [
+      {
+        "geo_shock_score": 36.37,
+        "status": "OK",
+        "t": "2026-09-27T03:01:24.213000+00:00"
+      },
+      {
+        "geo_shock_score": 26.57,
+        "status": "OK",
+        "t": "2026-09-27T03:16:24.213000+00:00"
+      },
+      {
+        "geo_shock_score": 47.83,
+        "status": "OK",
+        "t": "2026-09-27T03:31:24.213000+00:00"
+      },
+      {
+        "geo_shock_score": 51.56,
+        "status": "OK",
+        "t": "2026-09-27T03:46:24.213000+00:00"
+      },
+      {
+        "geo_shock_score": 46.79,
+        "status": "OK",
+        "t": "2026-09-27T04:01:24.213000+00:00"
+      },
+      {
+        "geo_shock_score": 28.04,
+        "status": "OK",
+        "t": "2026-09-27T04:16:24.213000+00:00"
+      },
+      {
+        "geo_shock_score": 44.27,
+        "status": "OK",
+        "t": "2026-09-27T04:31:24.213000+00:00"
+      },
+      {
+        "geo_shock_score": 24.91,
+        "status": "OK",
+        "t": "2026-09-27T04:46:24.213000+00:00"
+      },
+      {
+        "geo_shock_score": 23.61,
+        "status": "OK",
+        "t": "2026-09-27T05:01:24.213000+00:00"
+      },
+      {
+        "geo_shock_score": 29.52,
+        "status": "OK",
+        "t": "2026-09-27T05:16:24.213000+00:00"
+      },
+      {
+        "geo_shock_score": 30.39,
+        "status": "OK",
+        "t": "2026-09-27T05:31:24.213000+00:00"
+      },
+      {
+        "geo_shock_score": 32.38,
+        "status": "OK",
+        "t": "2026-09-27T05:46:24.213000+00:00"
+      },
+      {
+        "geo_shock_score": 14.23,
+        "status": "OK",
+        "t": "2026-09-27T06:01:24.213000+00:00"
+      },
+      {
+        "geo_shock_score": 48.44,
+        "status": "OK",
+        "t": "2026-09-27T06:16:24.213000+00:00"
+      },
+      {
+        "geo_shock_score": 61.98,
+        "status": "OK",
+        "t": "2026-09-27T06:31:24.213000+00:00"
+      },
+      {
+        "geo_shock_score": 61.72,
+        "status": "OK",
+        "t": "2026-09-27T06:46:24.213000+00:00"
+      },
+      {
+        "geo_shock_score": 69.44,
+        "status": "OK",
+        "t": "2026-09-27T07:01:24.213000+00:00"
+      },
+      {
+        "geo_shock_score": 63.19,
+        "status": "OK",
+        "t": "2026-09-27T07:16:24.213000+00:00"
+      },
+      {
+        "geo_shock_score": 78.47,
+        "status": "OK",
+        "t": "2026-09-27T07:31:24.213000+00:00"
+      },
+      {
+        "geo_shock_score": 79.16,
+        "status": "OK",
+        "t": "2026-09-27T07:46:24.213000+00:00"
+      },
+      {
+        "geo_shock_score": 84.81,
+        "status": "OK",
+        "t": "2026-09-27T08:01:24.213000+00:00"
+      },
+      {
+        "geo_shock_score": 90.54,
+        "status": "OK",
+        "t": "2026-09-27T08:16:24.213000+00:00"
+      },
+      {
+        "geo_shock_score": 87.59,
+        "status": "OK",
+        "t": "2026-09-27T08:31:24.213000+00:00"
+      },
+      {
+        "geo_shock_score": 90.19,
+        "status": "OK",
+        "t": "2026-09-27T08:46:24.213000+00:00"
+      },
+      {
+        "geo_shock_score": 85.67,
+        "status": "OK",
+        "t": "2026-09-27T09:01:24.213000+00:00"
+      },
+      {
+        "geo_shock_score": 75.34,
+        "status": "OK",
+        "t": "2026-09-27T09:16:24.213000+00:00"
+      },
+      {
+        "geo_shock_score": 60.85,
+        "status": "OK",
+        "t": "2026-09-27T09:31:24.213000+00:00"
+      },
+      {
+        "geo_shock_score": 66.06,
+        "status": "OK",
+        "t": "2026-09-27T09:46:24.213000+00:00"
+      },
+      {
+        "geo_shock_score": 50.87,
+        "status": "OK",
+        "t": "2026-09-27T10:01:24.213000+00:00"
+      },
+      {
+        "geo_shock_score": 29.17,
+        "status": "OK",
+        "t": "2026-09-27T10:16:24.213000+00:00"
+      },
+      {
+        "geo_shock_score": 38.98,
+        "status": "OK",
+        "t": "2026-09-27T10:31:24.213000+00:00"
+      },
+      {
+        "geo_shock_score": 25.27,
+        "status": "OK",
+        "t": "2026-09-27T10:46:24.213000+00:00"
+      },
+      {
+        "geo_shock_score": 30.12,
+        "status": "OK",
+        "t": "2026-09-27T11:01:24.213000+00:00"
+      },
+      {
+        "geo_shock_score": 55.99,
+        "status": "OK",
+        "t": "2026-09-27T11:16:24.213000+00:00"
+      },
+      {
+        "geo_shock_score": 55.47,
+        "status": "OK",
+        "t": "2026-09-27T11:31:24.213000+00:00"
+      },
+      {
+        "geo_shock_score": 61.2,
+        "status": "OK",
+        "t": "2026-09-27T11:46:24.213000+00:00"
+      },
+      {
+        "geo_shock_score": 60.24,
+        "status": "OK",
+        "t": "2026-09-27T12:01:24.213000+00:00"
+      },
+      {
+        "geo_shock_score": 55.99,
+        "status": "OK",
+        "t": "2026-09-27T12:16:24.213000+00:00"
+      },
+      {
+        "geo_shock_score": 60.07,
+        "status": "OK",
+        "t": "2026-09-27T12:31:24.213000+00:00"
+      },
+      {
+        "geo_shock_score": 61.46,
+        "status": "OK",
+        "t": "2026-09-27T12:46:24.213000+00:00"
+      },
+      {
+        "geo_shock_score": 62.59,
+        "status": "OK",
+        "t": "2026-09-27T13:01:24.213000+00:00"
+      },
+      {
+        "geo_shock_score": 62.76,
+        "status": "OK",
+        "t": "2026-09-27T13:16:24.213000+00:00"
+      },
+      {
+        "geo_shock_score": 60.24,
+        "status": "OK",
+        "t": "2026-09-27T13:31:24.213000+00:00"
+      },
+      {
+        "geo_shock_score": 70.14,
+        "status": "OK",
+        "t": "2026-09-27T13:46:24.213000+00:00"
+      },
+      {
+        "geo_shock_score": 48.7,
+        "status": "OK",
+        "t": "2026-09-27T14:01:24.213000+00:00"
+      },
+      {
+        "geo_shock_score": 48.78,
+        "status": "OK",
+        "t": "2026-09-27T14:16:24.213000+00:00"
+      },
+      {
+        "geo_shock_score": 65.88,
+        "status": "OK",
+        "t": "2026-09-27T14:31:24.213000+00:00"
+      },
+      {
+        "geo_shock_score": 62.76,
+        "status": "OK",
+        "t": "2026-09-27T14:46:24.213000+00:00"
+      },
+      {
+        "geo_shock_score": 73.35,
+        "status": "OK",
+        "t": "2026-09-27T15:01:24.213000+00:00"
+      },
+      {
+        "geo_shock_score": 68.92,
+        "status": "OK",
+        "t": "2026-09-27T15:16:24.213000+00:00"
+      },
+      {
+        "geo_shock_score": 74.13,
+        "status": "OK",
+        "t": "2026-09-27T15:31:24.213000+00:00"
+      },
+      {
+        "geo_shock_score": 59.98,
+        "status": "OK",
+        "t": "2026-09-27T15:46:24.213000+00:00"
+      },
+      {
+        "geo_shock_score": 52.95,
+        "status": "OK",
+        "t": "2026-09-27T16:01:24.213000+00:00"
+      },
+      {
+        "geo_shock_score": 49.22,
+        "status": "OK",
+        "t": "2026-09-27T16:16:24.213000+00:00"
+      },
+      {
+        "geo_shock_score": 38.02,
+        "status": "OK",
+        "t": "2026-09-27T16:31:24.213000+00:00"
+      },
+      {
+        "geo_shock_score": 37.67,
+        "status": "OK",
+        "t": "2026-09-27T16:46:24.213000+00:00"
+      },
+      {
+        "geo_shock_score": 27.52,
+        "status": "OK",
+        "t": "2026-09-27T17:01:24.213000+00:00"
+      },
+      {
+        "geo_shock_score": 58.77,
+        "status": "OK",
+        "t": "2026-09-27T17:16:24.213000+00:00"
+      },
+      {
+        "geo_shock_score": 69.8,
+        "status": "OK",
+        "t": "2026-09-27T17:31:24.213000+00:00"
+      },
+      {
+        "geo_shock_score": 76.73,
+        "status": "OK",
+        "t": "2026-09-27T17:46:24.213000+00:00"
+      },
+      {
+        "geo_shock_score": 83.85,
+        "status": "OK",
+        "t": "2026-09-27T18:01:24.213000+00:00"
+      },
+      {
+        "geo_shock_score": 82.47,
+        "status": "OK",
+        "t": "2026-09-27T18:16:24.213000+00:00"
+      },
+      {
+        "geo_shock_score": 83.34,
+        "status": "OK",
+        "t": "2026-09-27T18:31:24.213000+00:00"
+      },
+      {
+        "geo_shock_score": 74.48,
+        "status": "OK",
+        "t": "2026-09-27T18:46:24.213000+00:00"
+      },
+      {
+        "geo_shock_score": 64.33,
+        "status": "OK",
+        "t": "2026-09-27T19:01:24.213000+00:00"
+      },
+      {
+        "geo_shock_score": 66.06,
+        "status": "OK",
+        "t": "2026-09-27T19:16:24.213000+00:00"
+      },
+      {
+        "geo_shock_score": 50.86,
+        "status": "OK",
+        "t": "2026-09-27T19:31:24.213000+00:00"
+      },
+      {
+        "geo_shock_score": 34.98,
+        "status": "OK",
+        "t": "2026-09-27T19:46:24.213000+00:00"
+      },
+      {
+        "geo_shock_score": 63.37,
+        "status": "OK",
+        "t": "2026-09-27T20:01:24.213000+00:00"
+      },
+      {
+        "geo_shock_score": 52.77,
+        "status": "OK",
+        "t": "2026-09-27T20:16:24.213000+00:00"
+      },
+      {
+        "geo_shock_score": 68.4,
+        "status": "OK",
+        "t": "2026-09-27T20:31:24.213000+00:00"
+      },
+      {
+        "geo_shock_score": 77.25,
+        "status": "OK",
+        "t": "2026-09-27T20:46:24.213000+00:00"
+      },
+      {
+        "geo_shock_score": 81.6,
+        "status": "OK",
+        "t": "2026-09-27T21:01:24.213000+00:00"
+      },
+      {
+        "geo_shock_score": 79.6,
+        "status": "OK",
+        "t": "2026-09-27T21:16:24.213000+00:00"
+      },
+      {
+        "geo_shock_score": 69.7,
+        "status": "OK",
+        "t": "2026-09-27T21:31:24.213000+00:00"
+      },
+      {
+        "geo_shock_score": 78.04,
+        "status": "OK",
+        "t": "2026-09-27T21:46:24.213000+00:00"
+      },
+      {
+        "geo_shock_score": 57.9,
+        "status": "OK",
+        "t": "2026-09-27T22:01:24.213000+00:00"
+      },
+      {
+        "geo_shock_score": 55.21,
+        "status": "OK",
+        "t": "2026-09-27T22:16:24.213000+00:00"
+      },
+      {
+        "geo_shock_score": 72.05,
+        "status": "OK",
+        "t": "2026-09-27T22:31:24.213000+00:00"
+      },
+      {
+        "geo_shock_score": 55.81,
+        "status": "OK",
+        "t": "2026-09-27T22:46:24.213000+00:00"
+      },
+      {
+        "geo_shock_score": 55.38,
+        "status": "OK",
+        "t": "2026-09-27T23:01:24.213000+00:00"
+      },
+      {
+        "geo_shock_score": 68.92,
+        "status": "OK",
+        "t": "2026-09-27T23:16:24.213000+00:00"
+      },
+      {
+        "geo_shock_score": 60.33,
+        "status": "OK",
+        "t": "2026-09-27T23:31:24.213000+00:00"
+      },
+      {
+        "geo_shock_score": 25.0,
+        "status": "OK",
+        "t": "2026-09-27T23:46:24.213000+00:00"
+      },
+      {
+        "geo_shock_score": 26.56,
+        "status": "OK",
+        "t": "2026-09-28T00:01:24.213000+00:00"
+      },
+      {
+        "geo_shock_score": 25.87,
+        "status": "OK",
+        "t": "2026-09-28T00:16:24.213000+00:00"
+      },
+      {
+        "geo_shock_score": 22.14,
+        "status": "OK",
+        "t": "2026-09-28T00:31:24.213000+00:00"
+      },
+      {
+        "geo_shock_score": 29.25,
+        "status": "OK",
+        "t": "2026-09-28T00:46:24.213000+00:00"
+      },
+      {
+        "geo_shock_score": 55.03,
+        "status": "OK",
+        "t": "2026-09-28T01:01:24.213000+00:00"
+      },
+      {
+        "geo_shock_score": 62.33,
+        "status": "OK",
+        "t": "2026-09-28T01:16:24.213000+00:00"
+      },
+      {
+        "geo_shock_score": 58.51,
+        "status": "OK",
+        "t": "2026-09-28T01:31:24.213000+00:00"
+      },
+      {
+        "geo_shock_score": 47.83,
+        "status": "OK",
+        "t": "2026-09-28T01:46:24.213000+00:00"
+      },
+      {
+        "geo_shock_score": 45.84,
+        "status": "OK",
+        "t": "2026-09-28T02:01:24.213000+00:00"
+      },
+      {
+        "geo_shock_score": 27.78,
+        "status": "OK",
+        "t": "2026-09-28T02:16:24.213000+00:00"
+      },
+      {
+        "geo_shock_score": 16.5,
+        "status": "OK",
+        "t": "2026-09-28T02:31:24.213000+00:00"
+      },
+      {
+        "geo_shock_score": 32.47,
+        "status": "OK",
+        "t": "2026-09-28T02:46:24.213000+00:00"
+      },
+      {
+        "geo_shock_score": 48.09,
+        "status": "OK",
+        "t": "2026-09-28T03:01:24.213000+00:00"
+      },
+      {
+        "geo_shock_score": 48.78,
+        "status": "OK",
+        "t": "2026-09-28T03:16:24.213000+00:00"
+      },
+      {
+        "geo_shock_score": 43.4,
+        "status": "OK",
+        "t": "2026-09-28T03:31:24.213000+00:00"
+      },
+      {
+        "geo_shock_score": 40.62,
+        "status": "OK",
+        "t": "2026-09-28T03:46:24.213000+00:00"
+      },
+      {
+        "geo_shock_score": 25.09,
+        "status": "OK",
+        "t": "2026-09-28T04:01:24.213000+00:00"
+      },
+      {
+        "geo_shock_score": 34.63,
+        "status": "OK",
+        "t": "2026-09-28T04:16:24.213000+00:00"
+      },
+      {
+        "geo_shock_score": 65.45,
+        "status": "OK",
+        "t": "2026-09-28T04:31:24.213000+00:00"
+      },
+      {
+        "geo_shock_score": 42.36,
+        "status": "OK",
+        "t": "2026-09-28T04:46:24.213000+00:00"
+      },
+      {
+        "geo_shock_score": 49.83,
+        "status": "OK",
+        "t": "2026-09-28T05:01:24.213000+00:00"
+      },
+      {
+        "geo_shock_score": 52.61,
+        "status": "OK",
+        "t": "2026-09-28T05:16:24.213000+00:00"
+      },
+      {
+        "geo_shock_score": 55.64,
+        "status": "OK",
+        "t": "2026-09-28T05:31:24.213000+00:00"
+      },
+      {
+        "geo_shock_score": 54.86,
+        "status": "OK",
+        "t": "2026-09-28T05:46:24.213000+00:00"
+      },
+      {
+        "geo_shock_score": 36.63,
+        "status": "OK",
+        "t": "2026-09-28T06:01:24.213000+00:00"
+      },
+      {
+        "geo_shock_score": 24.74,
+        "status": "OK",
+        "t": "2026-09-28T06:16:24.213000+00:00"
+      },
+      {
+        "geo_shock_score": 59.98,
+        "status": "OK",
+        "t": "2026-09-28T06:31:24.213000+00:00"
+      },
+      {
+        "geo_shock_score": 70.14,
+        "status": "OK",
+        "t": "2026-09-28T06:46:24.213000+00:00"
+      },
+      {
+        "geo_shock_score": 66.58,
+        "status": "OK",
+        "t": "2026-09-28T07:01:24.213000+00:00"
+      },
+      {
+        "geo_shock_score": 73.69,
+        "status": "OK",
+        "t": "2026-09-28T07:16:24.213000+00:00"
+      },
+      {
+        "geo_shock_score": 63.45,
+        "status": "OK",
+        "t": "2026-09-28T07:31:24.213000+00:00"
+      },
+      {
+        "geo_shock_score": 40.72,
+        "status": "OK",
+        "t": "2026-09-28T07:46:24.213000+00:00"
+      },
+      {
+        "geo_shock_score": 46.88,
+        "status": "OK",
+        "t": "2026-09-28T08:01:24.213000+00:00"
+      },
+      {
+        "geo_shock_score": 36.8,
+        "status": "OK",
+        "t": "2026-09-28T08:16:24.213000+00:00"
+      },
+      {
+        "geo_shock_score": 49.13,
+        "status": "OK",
+        "t": "2026-09-28T08:31:24.213000+00:00"
+      },
+      {
+        "geo_shock_score": 76.56,
+        "status": "OK",
+        "t": "2026-09-28T08:46:24.213000+00:00"
+      },
+      {
+        "geo_shock_score": 78.56,
+        "status": "OK",
+        "t": "2026-09-28T09:01:24.213000+00:00"
+      },
+      {
+        "geo_shock_score": 79.25,
+        "status": "OK",
+        "t": "2026-09-28T09:16:24.213000+00:00"
+      },
+      {
+        "geo_shock_score": 81.78,
+        "status": "OK",
+        "t": "2026-09-28T09:31:24.213000+00:00"
+      },
+      {
+        "geo_shock_score": 65.8,
+        "status": "OK",
+        "t": "2026-09-28T09:46:24.213000+00:00"
+      },
+      {
+        "geo_shock_score": 71.01,
+        "status": "OK",
+        "t": "2026-09-28T10:01:24.213000+00:00"
+      },
+      {
+        "geo_shock_score": 67.01,
+        "status": "OK",
+        "t": "2026-09-28T10:16:24.213000+00:00"
+      },
+      {
+        "geo_shock_score": 56.95,
+        "status": "OK",
+        "t": "2026-09-28T10:31:24.213000+00:00"
+      },
+      {
+        "geo_shock_score": 76.04,
+        "status": "OK",
+        "t": "2026-09-28T10:46:24.213000+00:00"
+      },
+      {
+        "geo_shock_score": 63.8,
+        "status": "OK",
+        "t": "2026-09-28T11:01:24.213000+00:00"
+      },
+      {
+        "geo_shock_score": 70.31,
+        "status": "OK",
+        "t": "2026-09-28T11:16:24.213000+00:00"
+      },
+      {
+        "geo_shock_score": 81.43,
+        "status": "OK",
+        "t": "2026-09-28T11:31:24.213000+00:00"
+      },
+      {
+        "geo_shock_score": 64.67,
+        "status": "OK",
+        "t": "2026-09-28T11:46:24.213000+00:00"
+      },
+      {
+        "geo_shock_score": 85.67,
+        "status": "OK",
+        "t": "2026-09-28T12:01:24.213000+00:00"
+      },
+      {
+        "geo_shock_score": 78.99,
+        "status": "OK",
+        "t": "2026-09-28T12:16:24.213000+00:00"
+      },
+      {
+        "geo_shock_score": 74.83,
+        "status": "OK",
+        "t": "2026-09-28T12:31:24.213000+00:00"
+      },
+      {
+        "geo_shock_score": 67.62,
+        "status": "OK",
+        "t": "2026-09-28T12:46:24.213000+00:00"
+      },
+      {
+        "geo_shock_score": 71.09,
+        "status": "OK",
+        "t": "2026-09-28T13:01:24.213000+00:00"
+      },
+      {
+        "geo_shock_score": 35.16,
+        "status": "OK",
+        "t": "2026-09-28T13:16:24.213000+00:00"
+      },
+      {
+        "geo_shock_score": 37.5,
+        "status": "OK",
+        "t": "2026-09-28T13:31:24.213000+00:00"
+      },
+      {
+        "geo_shock_score": 72.57,
+        "status": "OK",
+        "t": "2026-09-28T13:46:24.213000+00:00"
+      },
+      {
+        "geo_shock_score": 67.71,
+        "status": "OK",
+        "t": "2026-09-28T14:01:24.213000+00:00"
+      },
+      {
+        "geo_shock_score": 75.26,
+        "status": "OK",
+        "t": "2026-09-28T14:16:24.213000+00:00"
+      },
+      {
+        "geo_shock_score": 82.89,
+        "status": "OK",
+        "t": "2026-09-28T14:31:24.213000+00:00"
+      },
+      {
+        "geo_shock_score": 80.12,
+        "status": "OK",
+        "t": "2026-09-28T14:46:24.213000+00:00"
+      },
+      {
+        "geo_shock_score": 78.03,
+        "status": "OK",
+        "t": "2026-09-28T15:01:24.213000+00:00"
+      },
+      {
+        "geo_shock_score": 65.89,
+        "status": "OK",
+        "t": "2026-09-28T15:16:24.213000+00:00"
+      },
+      {
+        "geo_shock_score": 45.84,
+        "status": "OK",
+        "t": "2026-09-28T15:31:24.213000+00:00"
+      },
+      {
+        "geo_shock_score": 34.63,
+        "status": "OK",
+        "t": "2026-09-28T15:46:24.213000+00:00"
+      },
+      {
+        "geo_shock_score": 34.02,
+        "status": "OK",
+        "t": "2026-09-28T16:01:24.213000+00:00"
+      },
+      {
+        "geo_shock_score": 44.02,
+        "status": "OK",
+        "t": "2026-09-28T16:16:24.213000+00:00"
+      },
+      {
+        "geo_shock_score": 48.27,
+        "status": "OK",
+        "t": "2026-09-28T16:31:24.213000+00:00"
+      },
+      {
+        "geo_shock_score": 73.7,
+        "status": "OK",
+        "t": "2026-09-28T16:46:24.213000+00:00"
+      },
+      {
+        "geo_shock_score": 90.45,
+        "status": "OK",
+        "t": "2026-09-28T17:01:24.213000+00:00"
+      },
+      {
+        "geo_shock_score": 83.86,
+        "status": "OK",
+        "t": "2026-09-28T17:16:24.213000+00:00"
+      },
+      {
+        "geo_shock_score": 87.24,
+        "status": "OK",
+        "t": "2026-09-28T17:31:24.213000+00:00"
+      },
+      {
+        "geo_shock_score": 88.89,
+        "status": "OK",
+        "t": "2026-09-28T17:46:24.213000+00:00"
+      },
+      {
+        "geo_shock_score": 48.78,
+        "status": "OK",
+        "t": "2026-09-28T18:01:24.213000+00:00"
+      },
+      {
+        "geo_shock_score": 67.36,
+        "status": "OK",
+        "t": "2026-09-28T18:16:24.213000+00:00"
+      },
+      {
+        "geo_shock_score": 70.05,
+        "status": "OK",
+        "t": "2026-09-28T18:31:24.213000+00:00"
+      },
+      {
+        "geo_shock_score": 53.3,
+        "status": "OK",
+        "t": "2026-09-28T18:46:24.213000+00:00"
+      },
+      {
+        "geo_shock_score": 72.48,
+        "status": "OK",
+        "t": "2026-09-28T19:01:24.213000+00:00"
+      },
+      {
+        "geo_shock_score": 70.92,
+        "status": "OK",
+        "t": "2026-09-28T19:16:24.213000+00:00"
+      },
+      {
+        "geo_shock_score": 87.24,
+        "status": "OK",
+        "t": "2026-09-28T19:31:24.213000+00:00"
+      },
+      {
+        "geo_shock_score": 91.49,
+        "status": "OK",
+        "t": "2026-09-28T19:46:24.213000+00:00"
+      },
+      {
+        "geo_shock_score": 92.01,
+        "status": "OK",
+        "t": "2026-09-28T20:01:24.213000+00:00"
+      },
+      {
+        "geo_shock_score": 85.07,
+        "status": "OK",
+        "t": "2026-09-28T20:16:24.213000+00:00"
+      },
+      {
+        "geo_shock_score": 62.67,
+        "status": "OK",
+        "t": "2026-09-28T20:31:24.213000+00:00"
+      },
+      {
+        "geo_shock_score": 67.02,
+        "status": "OK",
+        "t": "2026-09-28T20:46:24.213000+00:00"
+      },
+      {
+        "geo_shock_score": 73.62,
+        "status": "OK",
+        "t": "2026-09-28T21:01:24.213000+00:00"
+      },
+      {
+        "geo_shock_score": 63.55,
+        "status": "OK",
+        "t": "2026-09-28T21:16:24.213000+00:00"
+      },
+      {
+        "geo_shock_score": 62.84,
+        "status": "OK",
+        "t": "2026-09-28T21:31:24.213000+00:00"
+      },
+      {
+        "geo_shock_score": 58.16,
+        "status": "OK",
+        "t": "2026-09-28T21:46:24.213000+00:00"
+      },
+      {
+        "geo_shock_score": 47.57,
+        "status": "OK",
+        "t": "2026-09-28T22:01:24.213000+00:00"
+      },
+      {
+        "geo_shock_score": 54.25,
+        "status": "OK",
+        "t": "2026-09-28T22:16:24.213000+00:00"
+      },
+      {
+        "geo_shock_score": 36.28,
+        "status": "OK",
+        "t": "2026-09-28T22:31:24.213000+00:00"
+      },
+      {
+        "geo_shock_score": 55.91,
+        "status": "OK",
+        "t": "2026-09-28T22:46:24.213000+00:00"
+      },
+      {
+        "geo_shock_score": 45.74,
+        "status": "OK",
+        "t": "2026-09-28T23:01:24.213000+00:00"
+      },
+      {
+        "geo_shock_score": 35.33,
+        "status": "OK",
+        "t": "2026-09-28T23:16:24.213000+00:00"
+      },
+      {
+        "geo_shock_score": 37.94,
+        "status": "OK",
+        "t": "2026-09-28T23:31:24.213000+00:00"
+      },
+      {
+        "geo_shock_score": 61.98,
+        "status": "OK",
+        "t": "2026-09-28T23:46:24.213000+00:00"
+      },
+      {
+        "geo_shock_score": 77.17,
+        "status": "OK",
+        "t": "2026-09-29T00:01:24.213000+00:00"
+      },
+      {
+        "geo_shock_score": 77.52,
+        "status": "OK",
+        "t": "2026-09-29T00:16:24.213000+00:00"
+      },
+      {
+        "geo_shock_score": 93.58,
+        "status": "OK",
+        "t": "2026-09-29T00:31:24.213000+00:00"
+      },
+      {
+        "geo_shock_score": 86.63,
+        "status": "OK",
+        "t": "2026-09-29T00:46:24.213000+00:00"
+      },
+      {
+        "geo_shock_score": 75.09,
+        "status": "OK",
+        "t": "2026-09-29T01:01:24.213000+00:00"
+      },
+      {
+        "geo_shock_score": 62.33,
+        "status": "OK",
+        "t": "2026-09-29T01:16:24.213000+00:00"
+      },
+      {
+        "geo_shock_score": 25.17,
+        "status": "OK",
+        "t": "2026-09-29T01:31:24.213000+00:00"
+      },
+      {
+        "geo_shock_score": 24.21,
+        "status": "OK",
+        "t": "2026-09-29T01:46:24.213000+00:00"
+      },
+      {
+        "geo_shock_score": 32.2,
+        "status": "OK",
+        "t": "2026-09-29T02:01:24.213000+00:00"
+      },
+      {
+        "geo_shock_score": 54.17,
+        "status": "OK",
+        "t": "2026-09-29T02:16:24.213000+00:00"
+      },
+      {
+        "geo_shock_score": 32.9,
+        "status": "OK",
+        "t": "2026-09-29T02:31:24.213000+00:00"
+      },
+      {
+        "geo_shock_score": 63.37,
+        "status": "OK",
+        "t": "2026-09-29T02:46:24.213000+00:00"
+      },
+      {
+        "geo_shock_score": 65.97,
+        "status": "OK",
+        "t": "2026-09-29T03:01:24.213000+00:00"
+      }
+    ],
+    "scored_points": 193,
+    "spearman_vs_v1_geopolitics": 0.463,
+    "spearman_vs_v1_macrogeo": 0.162,
+    "status_counts": {
+      "OK": 193
+    },
+    "top_corridor_escalation_events_24h_before": [
+      {
+        "actor1": "",
+        "actor2": "",
+        "articles": 50,
+        "cameo": "190",
+        "category": "armed_conflict",
+        "date_added": "20260927074500",
+        "event_id": 1325108750,
+        "location": "Gaza, Israel (general), Israel",
+        "mentions": 50,
+        "sources": 10,
+        "url": "https://www.leaderlive.co.uk/news/national/26584888.palestinian-death-toll-gaza-war-rises-74-000/"
+      },
+      {
+        "actor1": "IRN",
+        "actor2": "ISR",
+        "articles": 50,
+        "cameo": "154",
+        "category": "force_posture",
+        "date_added": "20260928011500",
+        "event_id": 1325192703,
+        "location": "Tehran, Tehran, Iran",
+        "mentions": 50,
+        "sources": 1,
+        "url": "https://www.aljazeera.com/news/liveblog/2026/9/28/iran-war-live-tehran-warns-its-fully-prepared-for-war-amid-hormuz-tensions"
+      },
+      {
+        "actor1": "ISR",
+        "actor2": "",
+        "articles": 10,
+        "cameo": "203",
+        "category": "mass_violence",
+        "date_added": "20260927164500",
+        "event_id": 1325156742,
+        "location": "Ashdod, HaDarom, Israel",
+        "mentions": 36,
+        "sources": 1,
+        "url": "https://www.jpost.com/opinion/article-909469"
+      },
+      {
+        "actor1": "ISR",
+        "actor2": "PSE",
+        "articles": 30,
+        "cameo": "190",
+        "category": "armed_conflict",
+        "date_added": "20260928020000",
+        "event_id": 1325195702,
+        "location": "Gaza City, Israel (general), Israel",
+        "mentions": 30,
+        "sources": 3,
+        "url": "http://www.batonrougepost.com/news/279336340/at-least-4-palestinians-killed-12-injured-in-israeli-strikes-across-gaza"
+      },
+      {
+        "actor1": "IRN",
+        "actor2": "USA",
+        "articles": 24,
+        "cameo": "190",
+        "category": "armed_conflict",
+        "date_added": "20260927144500",
+        "event_id": 1325146690,
+        "location": "New York, United States",
+        "mentions": 24,
+        "sources": 4,
+        "url": "http://www.mexicostar.com/news/279331869/allies-back-saudi-arabia-as-houthi-attacks-intensify"
+      },
+      {
+        "actor1": "USA",
+        "actor2": "IRN",
+        "articles": 24,
+        "cameo": "190",
+        "category": "armed_conflict",
+        "date_added": "20260927144500",
+        "event_id": 1325147025,
+        "location": "New York, United States",
+        "mentions": 24,
+        "sources": 4,
+        "url": "http://www.mexicostar.com/news/279331869/allies-back-saudi-arabia-as-houthi-attacks-intensify"
+      },
+      {
+        "actor1": "",
+        "actor2": "ISR",
+        "articles": 20,
+        "cameo": "190",
+        "category": "armed_conflict",
+        "date_added": "20260927094500",
+        "event_id": 1325117885,
+        "location": "Rahat, HaDarom, Israel",
+        "mentions": 20,
+        "sources": 1,
+        "url": "http://www.jpost.com/israel-election-2026/article-909630"
+      },
+      {
+        "actor1": "",
+        "actor2": "",
+        "articles": 10,
+        "cameo": "190",
+        "category": "armed_conflict",
+        "date_added": "20260927104500",
+        "event_id": 1325123306,
+        "location": "Dubai, Dubayy, United Arab Emirates",
+        "mentions": 20,
+        "sources": 1,
+        "url": "https://tribuneonlineng.com/five-miners-three-villagers-shot-dead-in-fresh-plateau-attacks/"
+      },
+      {
+        "actor1": "IRN",
+        "actor2": "USA",
+        "articles": 16,
+        "cameo": "190",
+        "category": "armed_conflict",
+        "date_added": "20260927144500",
+        "event_id": 1325146691,
+        "location": "New York, United States",
+        "mentions": 16,
+        "sources": 4,
+        "url": "http://www.mexicostar.com/news/279331869/allies-back-saudi-arabia-as-houthi-attacks-intensify"
+      },
+      {
+        "actor1": "USA",
+        "actor2": "IRN",
+        "articles": 16,
+        "cameo": "190",
+        "category": "armed_conflict",
+        "date_added": "20260927144500",
+        "event_id": 1325147026,
+        "location": "New York, United States",
+        "mentions": 16,
+        "sources": 4,
+        "url": "http://www.mexicostar.com/news/279331869/allies-back-saudi-arabia-as-houthi-attacks-intensify"
+      },
+      {
+        "actor1": "IRQ",
+        "actor2": "",
+        "articles": 16,
+        "cameo": "1712",
+        "category": "coercion",
+        "date_added": "20260927060000",
+        "event_id": 1325100987,
+        "location": "Penjwen, As Sulaymaniyah, Iraq",
+        "mentions": 16,
+        "sources": 2,
+        "url": "https://economictimes.indiatimes.com/news/international/world-news/worry-and-sorrow-middle-east-war-opens-old-wounds-in-kurdistan/articleshow/134514852.cms"
+      },
+      {
+        "actor1": "SAU",
+        "actor2": "",
+        "articles": 16,
+        "cameo": "194",
+        "category": "armed_conflict",
+        "date_added": "20260927061500",
+        "event_id": 1325102274,
+        "location": "Saudi Arabia",
+        "mentions": 16,
+        "sources": 2,
+        "url": "https://slguardian.org/iran-insists-on-diplomacy-after-trump-rejects-proposal-to-reopen-strait-of-hormuz/"
+      },
+      {
+        "actor1": "JOR",
+        "actor2": "",
+        "articles": 16,
+        "cameo": "190",
+        "category": "armed_conflict",
+        "date_added": "20260927120000",
+        "event_id": 1325132160,
+        "location": "Abu Dhabi, Abu Z¸aby, United Arab Emirates",
+        "mentions": 16,
+        "sources": 2,
+        "url": "http://www.arabherald.com/news/279335307/jordan-justice-minister-praises-uae-expertise-in-combating-digital-transnational-crime"
+      },
+      {
+        "actor1": "ISR",
+        "actor2": "JOR",
+        "articles": 6,
+        "cameo": "190",
+        "category": "armed_conflict",
+        "date_added": "20260927081500",
+        "event_id": 1325111152,
+        "location": "Israel",
+        "mentions": 16,
+        "sources": 1,
+        "url": "https://www.ynetnews.com/article/bjv5dnuqgg"
+      },
+      {
+        "actor1": "",
+        "actor2": "",
+        "articles": 10,
+        "cameo": "193",
+        "category": "armed_conflict",
+        "date_added": "20260927104500",
+        "event_id": 1325123308,
+        "location": "Dubai, Dubayy, United Arab Emirates",
+        "mentions": 15,
+        "sources": 1,
+        "url": "https://tribuneonlineng.com/five-miners-three-villagers-shot-dead-in-fresh-plateau-attacks/"
+      }
+    ],
+    "v1_comparison": [
+      {
+        "gdelt_batch_used": "2026-09-26T15:15:00+00:00",
+        "gdelt_status": "OK",
+        "geo_shock_score": 22.31,
+        "geopolitics": 6,
+        "macrogeo": 36,
+        "nasdaq": 62,
+        "oil": 53,
+        "sp500": 62,
+        "t": "2026-09-26T15:38:13.591000+00:00",
+        "usd": 48,
+        "v1_score": 54.0,
+        "yield10y": 9
+      },
+      {
+        "gdelt_batch_used": "2026-09-26T15:30:00+00:00",
+        "gdelt_status": "OK",
+        "geo_shock_score": 29.43,
+        "geopolitics": 6,
+        "macrogeo": 36,
+        "nasdaq": 62,
+        "oil": 30,
+        "sp500": 62,
+        "t": "2026-09-26T15:53:38.241000+00:00",
+        "usd": 49,
+        "v1_score": 54.0,
+        "yield10y": 9
+      },
+      {
+        "gdelt_batch_used": "2026-09-26T16:00:00+00:00",
+        "gdelt_status": "OK",
+        "geo_shock_score": 71.62,
+        "geopolitics": 6,
+        "macrogeo": 36,
+        "nasdaq": 62,
+        "oil": 12,
+        "sp500": 62,
+        "t": "2026-09-26T16:24:09.270000+00:00",
+        "usd": 46,
+        "v1_score": 53.0,
+        "yield10y": 9
+      },
+      {
+        "gdelt_batch_used": "2026-09-26T17:00:00+00:00",
+        "gdelt_status": "OK",
+        "geo_shock_score": 8.5,
+        "geopolitics": 6,
+        "macrogeo": 36,
+        "nasdaq": 62,
+        "oil": 16,
+        "sp500": 62,
+        "t": "2026-09-26T17:16:55.880000+00:00",
+        "usd": 50,
+        "v1_score": 52.0,
+        "yield10y": 9
+      },
+      {
+        "gdelt_batch_used": "2026-09-26T17:30:00+00:00",
+        "gdelt_status": "OK",
+        "geo_shock_score": 55.38,
+        "geopolitics": 6,
+        "macrogeo": 36,
+        "nasdaq": 62,
+        "oil": 16,
+        "sp500": 62,
+        "t": "2026-09-26T17:58:46.934000+00:00",
+        "usd": 50,
+        "v1_score": 51.0,
+        "yield10y": 9
+      },
+      {
+        "gdelt_batch_used": "2026-09-26T18:15:00+00:00",
+        "gdelt_status": "OK",
+        "geo_shock_score": 51.65,
+        "geopolitics": 6,
+        "macrogeo": 36,
+        "nasdaq": 62,
+        "oil": 19,
+        "sp500": 62,
+        "t": "2026-09-26T18:34:14.756000+00:00",
+        "usd": 49,
+        "v1_score": 52.0,
+        "yield10y": 9
+      },
+      {
+        "gdelt_batch_used": "2026-09-26T20:00:00+00:00",
+        "gdelt_status": "OK",
+        "geo_shock_score": 12.59,
+        "geopolitics": 6,
+        "macrogeo": 36,
+        "nasdaq": 62,
+        "oil": 21,
+        "sp500": 62,
+        "t": "2026-09-26T20:24:05.852000+00:00",
+        "usd": 50,
+        "v1_score": 52.0,
+        "yield10y": 9
+      },
+      {
+        "gdelt_batch_used": "2026-09-26T20:30:00+00:00",
+        "gdelt_status": "OK",
+        "geo_shock_score": 2.52,
+        "geopolitics": 6,
+        "macrogeo": 36,
+        "nasdaq": 62,
+        "oil": 21,
+        "sp500": 62,
+        "t": "2026-09-26T20:51:39.365000+00:00",
+        "usd": 50,
+        "v1_score": 52.0,
+        "yield10y": 9
+      },
+      {
+        "gdelt_batch_used": "2026-09-27T04:15:00+00:00",
+        "gdelt_status": "OK",
+        "geo_shock_score": 44.27,
+        "geopolitics": 6,
+        "macrogeo": 39,
+        "nasdaq": 62,
+        "oil": 47,
+        "sp500": 62,
+        "t": "2026-09-27T04:33:36.678000+00:00",
+        "usd": 52,
+        "v1_score": 54.0,
+        "yield10y": 9
+      },
+      {
+        "gdelt_batch_used": "2026-09-27T05:45:00+00:00",
+        "gdelt_status": "OK",
+        "geo_shock_score": 14.23,
+        "geopolitics": 6,
+        "macrogeo": 39,
+        "nasdaq": 62,
+        "oil": 47,
+        "sp500": 62,
+        "t": "2026-09-27T06:05:13.548000+00:00",
+        "usd": 53,
+        "v1_score": 53.0,
+        "yield10y": 9
+      },
+      {
+        "gdelt_batch_used": "2026-09-27T06:15:00+00:00",
+        "gdelt_status": "OK",
+        "geo_shock_score": 61.98,
+        "geopolitics": 6,
+        "macrogeo": 39,
+        "nasdaq": 62,
+        "oil": 47,
+        "sp500": 62,
+        "t": "2026-09-27T06:43:30.856000+00:00",
+        "usd": 52,
+        "v1_score": 53.0,
+        "yield10y": 9
+      },
+      {
+        "gdelt_batch_used": "2026-09-27T09:00:00+00:00",
+        "gdelt_status": "OK",
+        "geo_shock_score": 75.34,
+        "geopolitics": 9,
+        "macrogeo": 50,
+        "nasdaq": 62,
+        "oil": 43,
+        "sp500": 62,
+        "t": "2026-09-27T09:16:12.461000+00:00",
+        "usd": 49,
+        "v1_score": 53.0,
+        "yield10y": 9
+      },
+      {
+        "gdelt_batch_used": "2026-09-27T09:15:00+00:00",
+        "gdelt_status": "OK",
+        "geo_shock_score": 60.85,
+        "geopolitics": 9,
+        "macrogeo": 50,
+        "nasdaq": 62,
+        "oil": 42,
+        "sp500": 62,
+        "t": "2026-09-27T09:38:50.642000+00:00",
+        "usd": 49,
+        "v1_score": 54.0,
+        "yield10y": 9
+      },
+      {
+        "gdelt_batch_used": "2026-09-27T10:00:00+00:00",
+        "gdelt_status": "OK",
+        "geo_shock_score": 29.17,
+        "geopolitics": 9,
+        "macrogeo": 50,
+        "nasdaq": 62,
+        "oil": 42,
+        "sp500": 62,
+        "t": "2026-09-27T10:19:52.279000+00:00",
+        "usd": 49,
+        "v1_score": 54.0,
+        "yield10y": 9
+      },
+      {
+        "gdelt_batch_used": "2026-09-27T10:30:00+00:00",
+        "gdelt_status": "OK",
+        "geo_shock_score": 25.27,
+        "geopolitics": 9,
+        "macrogeo": 50,
+        "nasdaq": 62,
+        "oil": 42,
+        "sp500": 62,
+        "t": "2026-09-27T10:53:12.671000+00:00",
+        "usd": 48,
+        "v1_score": 54.0,
+        "yield10y": 9
+      },
+      {
+        "gdelt_batch_used": "2026-09-27T11:15:00+00:00",
+        "gdelt_status": "OK",
+        "geo_shock_score": 55.47,
+        "geopolitics": 9,
+        "macrogeo": 50,
+        "nasdaq": 62,
+        "oil": 40,
+        "sp500": 62,
+        "t": "2026-09-27T11:42:04.815000+00:00",
+        "usd": 49,
+        "v1_score": 54.0,
+        "yield10y": 9
+      },
+      {
+        "gdelt_batch_used": "2026-09-27T11:45:00+00:00",
+        "gdelt_status": "OK",
+        "geo_shock_score": 60.24,
+        "geopolitics": 9,
+        "macrogeo": 50,
+        "nasdaq": 62,
+        "oil": 40,
+        "sp500": 62,
+        "t": "2026-09-27T12:06:36.855000+00:00",
+        "usd": 49,
+        "v1_score": 52.0,
+        "yield10y": 9
+      },
+      {
+        "gdelt_batch_used": "2026-09-27T12:15:00+00:00",
+        "gdelt_status": "OK",
+        "geo_shock_score": 60.07,
+        "geopolitics": 9,
+        "macrogeo": 50,
+        "nasdaq": 62,
+        "oil": 43,
+        "sp500": 62,
+        "t": "2026-09-27T12:42:27.504000+00:00",
+        "usd": 49,
+        "v1_score": 52.0,
+        "yield10y": 9
+      },
+      {
+        "gdelt_batch_used": "2026-09-27T12:45:00+00:00",
+        "gdelt_status": "OK",
+        "geo_shock_score": 62.59,
+        "geopolitics": 9,
+        "macrogeo": 50,
+        "nasdaq": 62,
+        "oil": 42,
+        "sp500": 62,
+        "t": "2026-09-27T13:02:55.788000+00:00",
+        "usd": 49,
+        "v1_score": 49.0,
+        "yield10y": 9
+      },
+      {
+        "gdelt_batch_used": "2026-09-27T14:30:00+00:00",
+        "gdelt_status": "OK",
+        "geo_shock_score": 62.76,
+        "geopolitics": 9,
+        "macrogeo": 29,
+        "nasdaq": 62,
+        "oil": 50,
+        "sp500": 62,
+        "t": "2026-09-27T14:45:53.419000+00:00",
+        "usd": 50,
+        "v1_score": 50.0,
+        "yield10y": 9
+      },
+      {
+        "gdelt_batch_used": "2026-09-27T15:00:00+00:00",
+        "gdelt_status": "OK",
+        "geo_shock_score": 68.92,
+        "geopolitics": 9,
+        "macrogeo": 26,
+        "nasdaq": 62,
+        "oil": 54,
+        "sp500": 62,
+        "t": "2026-09-27T15:15:15.585000+00:00",
+        "usd": 51,
+        "v1_score": 49.0,
+        "yield10y": 9
+      },
+      {
+        "gdelt_batch_used": "2026-09-27T16:15:00+00:00",
+        "gdelt_status": "OK",
+        "geo_shock_score": 38.02,
+        "geopolitics": 10,
+        "macrogeo": 26,
+        "nasdaq": 62,
+        "oil": 61,
+        "sp500": 62,
+        "t": "2026-09-27T16:40:32.004000+00:00",
+        "usd": 54,
+        "v1_score": 51.0,
+        "yield10y": 9
+      },
+      {
+        "gdelt_batch_used": "2026-09-27T18:30:00+00:00",
+        "gdelt_status": "OK",
+        "geo_shock_score": 74.48,
+        "geopolitics": 10,
+        "macrogeo": 26,
+        "nasdaq": 62,
+        "oil": 62,
+        "sp500": 62,
+        "t": "2026-09-27T18:59:10.878000+00:00",
+        "usd": 52,
+        "v1_score": 51.0,
+        "yield10y": 9
+      },
+      {
+        "gdelt_batch_used": "2026-09-27T20:00:00+00:00",
+        "gdelt_status": "OK",
+        "geo_shock_score": 52.77,
+        "geopolitics": 10,
+        "macrogeo": 26,
+        "nasdaq": 62,
+        "oil": 62,
+        "sp500": 62,
+        "t": "2026-09-27T20:19:17.309000+00:00",
+        "usd": 51,
+        "v1_score": 52.0,
+        "yield10y": 9
+      },
+      {
+        "gdelt_batch_used": "2026-09-27T20:15:00+00:00",
+        "gdelt_status": "OK",
+        "geo_shock_score": 68.4,
+        "geopolitics": 10,
+        "macrogeo": 26,
+        "nasdaq": 62,
+        "oil": 62,
+        "sp500": 62,
+        "t": "2026-09-27T20:41:09.856000+00:00",
+        "usd": 48,
+        "v1_score": 56.0,
+        "yield10y": 9
+      },
+      {
+        "gdelt_batch_used": "2026-09-28T04:00:00+00:00",
+        "gdelt_status": "OK",
+        "geo_shock_score": 34.63,
+        "geopolitics": 10,
+        "macrogeo": 23,
+        "nasdaq": 62,
+        "oil": 63,
+        "sp500": 62,
+        "t": "2026-09-28T04:23:34.088000+00:00",
+        "usd": 48,
+        "v1_score": 51.0,
+        "yield10y": 9
+      },
+      {
+        "gdelt_batch_used": "2026-09-28T04:45:00+00:00",
+        "gdelt_status": "OK",
+        "geo_shock_score": 49.83,
+        "geopolitics": 10,
+        "macrogeo": 23,
+        "nasdaq": 62,
+        "oil": 57,
+        "sp500": 62,
+        "t": "2026-09-28T05:10:09.534000+00:00",
+        "usd": 46,
+        "v1_score": 49.0,
+        "yield10y": 9
+      },
+      {
+        "gdelt_batch_used": "2026-09-28T06:00:00+00:00",
+        "gdelt_status": "OK",
+        "geo_shock_score": 24.74,
+        "geopolitics": 10,
+        "macrogeo": 27,
+        "nasdaq": 62,
+        "oil": 64,
+        "sp500": 62,
+        "t": "2026-09-28T06:15:57.373000+00:00",
+        "usd": 44,
+        "v1_score": 47.0,
+        "yield10y": 9
+      },
+      {
+        "gdelt_batch_used": "2026-09-28T09:00:00+00:00",
+        "gdelt_status": "OK",
+        "geo_shock_score": 79.25,
+        "geopolitics": 10,
+        "macrogeo": 43,
+        "nasdaq": 62,
+        "oil": 31,
+        "sp500": 62,
+        "t": "2026-09-28T09:25:07.825000+00:00",
+        "usd": 44,
+        "v1_score": 51.0,
+        "yield10y": 9
+      },
+      {
+        "gdelt_batch_used": "2026-09-28T10:00:00+00:00",
+        "gdelt_status": "OK",
+        "geo_shock_score": 67.01,
+        "geopolitics": 10,
+        "macrogeo": 46,
+        "nasdaq": 62,
+        "oil": 29,
+        "sp500": 62,
+        "t": "2026-09-28T10:15:11.170000+00:00",
+        "usd": 42,
+        "v1_score": 52.0,
+        "yield10y": 9
+      },
+      {
+        "gdelt_batch_used": "2026-09-28T11:00:00+00:00",
+        "gdelt_status": "OK",
+        "geo_shock_score": 70.31,
+        "geopolitics": 10,
+        "macrogeo": 50,
+        "nasdaq": 62,
+        "oil": 32,
+        "sp500": 62,
+        "t": "2026-09-28T11:19:05.275000+00:00",
+        "usd": 44,
+        "v1_score": 48.0,
+        "yield10y": 9
+      },
+      {
+        "gdelt_batch_used": "2026-09-28T11:45:00+00:00",
+        "gdelt_status": "OK",
+        "geo_shock_score": 85.67,
+        "geopolitics": 10,
+        "macrogeo": 54,
+        "nasdaq": 62,
+        "oil": 32,
+        "sp500": 62,
+        "t": "2026-09-28T12:03:33.396000+00:00",
+        "usd": 44,
+        "v1_score": 51.0,
+        "yield10y": 9
+      },
+      {
+        "gdelt_batch_used": "2026-09-28T12:30:00+00:00",
+        "gdelt_status": "OK",
+        "geo_shock_score": 67.62,
+        "geopolitics": 12,
+        "macrogeo": 58,
+        "nasdaq": 62,
+        "oil": 61,
+        "sp500": 62,
+        "t": "2026-09-28T12:55:33.531000+00:00",
+        "usd": 42,
+        "v1_score": 52.0,
+        "yield10y": 9
+      },
+      {
+        "gdelt_batch_used": "2026-09-28T13:45:00+00:00",
+        "gdelt_status": "OK",
+        "geo_shock_score": 67.71,
+        "geopolitics": 12,
+        "macrogeo": 29,
+        "nasdaq": 62,
+        "oil": 65,
+        "sp500": 62,
+        "t": "2026-09-28T14:03:49.562000+00:00",
+        "usd": 40,
+        "v1_score": 49.0,
+        "yield10y": 9
+      },
+      {
+        "gdelt_batch_used": "2026-09-28T14:00:00+00:00",
+        "gdelt_status": "OK",
+        "geo_shock_score": 75.26,
+        "geopolitics": 12,
+        "macrogeo": 39,
+        "nasdaq": 62,
+        "oil": 61,
+        "sp500": 62,
+        "t": "2026-09-28T14:25:36.526000+00:00",
+        "usd": 42,
+        "v1_score": 51.0,
+        "yield10y": 9
+      },
+      {
+        "gdelt_batch_used": "2026-09-28T14:45:00+00:00",
+        "gdelt_status": "OK",
+        "geo_shock_score": 78.03,
+        "geopolitics": 12,
+        "macrogeo": 39,
+        "nasdaq": 62,
+        "oil": 34,
+        "sp500": 62,
+        "t": "2026-09-28T15:09:36.121000+00:00",
+        "usd": 41,
+        "v1_score": 52.0,
+        "yield10y": 9
+      },
+      {
+        "gdelt_batch_used": "2026-09-28T15:30:00+00:00",
+        "gdelt_status": "OK",
+        "geo_shock_score": 34.63,
+        "geopolitics": 10,
+        "macrogeo": 61,
+        "nasdaq": 62,
+        "oil": 32,
+        "sp500": 62,
+        "t": "2026-09-28T15:59:00.547000+00:00",
+        "usd": 39,
+        "v1_score": 46.0,
+        "yield10y": 9
+      },
+      {
+        "gdelt_batch_used": "2026-09-28T17:00:00+00:00",
+        "gdelt_status": "OK",
+        "geo_shock_score": 83.86,
+        "geopolitics": 21,
+        "macrogeo": 43,
+        "nasdaq": 62,
+        "oil": 62,
+        "sp500": 62,
+        "t": "2026-09-28T17:27:19.743000+00:00",
+        "usd": 42,
+        "v1_score": 53.0,
+        "yield10y": 9
+      },
+      {
+        "gdelt_batch_used": "2026-09-28T18:15:00+00:00",
+        "gdelt_status": "OK",
+        "geo_shock_score": 70.05,
+        "geopolitics": 34,
+        "macrogeo": 69,
+        "nasdaq": 62,
+        "oil": 67,
+        "sp500": 62,
+        "t": "2026-09-28T18:33:46.164000+00:00",
+        "usd": 41,
+        "v1_score": 51.0,
+        "yield10y": 9
+      },
+      {
+        "gdelt_batch_used": "2026-09-28T19:00:00+00:00",
+        "gdelt_status": "OK",
+        "geo_shock_score": 70.92,
+        "geopolitics": 34,
+        "macrogeo": 79,
+        "nasdaq": 62,
+        "oil": 54,
+        "sp500": 62,
+        "t": "2026-09-28T19:23:58.002000+00:00",
+        "usd": 40,
+        "v1_score": 52.0,
+        "yield10y": 9
+      },
+      {
+        "gdelt_batch_used": "2026-09-28T20:30:00+00:00",
+        "gdelt_status": "OK",
+        "geo_shock_score": 67.02,
+        "geopolitics": 34,
+        "macrogeo": 88,
+        "nasdaq": 62,
+        "oil": 53,
+        "sp500": 62,
+        "t": "2026-09-28T20:46:59.533000+00:00",
+        "usd": 45,
+        "v1_score": 55.0,
+        "yield10y": 58
+      },
+      {
+        "gdelt_batch_used": "2026-09-29T03:45:00+00:00",
+        "gdelt_status": "OK",
+        "geo_shock_score": 10.76,
+        "geopolitics": 27,
+        "macrogeo": 43,
+        "nasdaq": 29,
+        "oil": 40,
+        "sp500": 32,
+        "t": "2026-09-29T04:01:03.075000+00:00",
+        "usd": 42,
+        "v1_score": 45.0,
+        "yield10y": 58
+      },
+      {
+        "gdelt_batch_used": "2026-09-29T05:00:00+00:00",
+        "gdelt_status": "OK",
+        "geo_shock_score": 68.23,
+        "geopolitics": 15,
+        "macrogeo": 41,
+        "nasdaq": 29,
+        "oil": 39,
+        "sp500": 32,
+        "t": "2026-09-29T05:15:56.552000+00:00",
+        "usd": 42,
+        "v1_score": 48.0,
+        "yield10y": 58
+      },
+      {
+        "gdelt_batch_used": "2026-09-29T05:15:00+00:00",
+        "gdelt_status": "OK",
+        "geo_shock_score": 60.77,
+        "geopolitics": 15,
+        "macrogeo": 55,
+        "nasdaq": 29,
+        "oil": 42,
+        "sp500": 32,
+        "t": "2026-09-29T05:40:27.619000+00:00",
+        "usd": 41,
+        "v1_score": 50.0,
+        "yield10y": 58
+      },
+      {
+        "gdelt_batch_used": "2026-09-29T07:30:00+00:00",
+        "gdelt_status": "OK",
+        "geo_shock_score": 49.56,
+        "geopolitics": 15,
+        "macrogeo": 55,
+        "nasdaq": 29,
+        "oil": 61,
+        "sp500": 32,
+        "t": "2026-09-29T07:55:28.760000+00:00",
+        "usd": 40,
+        "v1_score": 48.0,
+        "yield10y": 58
+      },
+      {
+        "gdelt_batch_used": "2026-09-29T08:45:00+00:00",
+        "gdelt_status": "OK",
+        "geo_shock_score": 91.66,
+        "geopolitics": 10,
+        "macrogeo": 36,
+        "nasdaq": 29,
+        "oil": 87,
+        "sp500": 32,
+        "t": "2026-09-29T09:14:11.972000+00:00",
+        "usd": 40,
+        "v1_score": 47.0,
+        "yield10y": 58
+      },
+      {
+        "gdelt_batch_used": "2026-09-29T10:00:00+00:00",
+        "gdelt_status": "OK",
+        "geo_shock_score": 63.02,
+        "geopolitics": 10,
+        "macrogeo": 36,
+        "nasdaq": 29,
+        "oil": 91,
+        "sp500": 32,
+        "t": "2026-09-29T10:15:52.519000+00:00",
+        "usd": 41,
+        "v1_score": 45.0,
+        "yield10y": 58
+      },
+      {
+        "gdelt_batch_used": "2026-09-29T11:00:00+00:00",
+        "gdelt_status": "OK",
+        "geo_shock_score": 56.69,
+        "geopolitics": 10,
+        "macrogeo": 57,
+        "nasdaq": 29,
+        "oil": 94,
+        "sp500": 32,
+        "t": "2026-09-29T11:17:49.702000+00:00",
+        "usd": 43,
+        "v1_score": 49.0,
+        "yield10y": 58
+      },
+      {
+        "gdelt_batch_used": "2026-09-29T11:15:00+00:00",
+        "gdelt_status": "OK",
+        "geo_shock_score": 73.35,
+        "geopolitics": 10,
+        "macrogeo": 64,
+        "nasdaq": 29,
+        "oil": 90,
+        "sp500": 32,
+        "t": "2026-09-29T11:42:11.714000+00:00",
+        "usd": 42,
+        "v1_score": 52.0,
+        "yield10y": 58
+      },
+      {
+        "gdelt_batch_used": "2026-09-29T13:45:00+00:00",
+        "gdelt_status": "OK",
+        "geo_shock_score": 25.69,
+        "geopolitics": 8,
+        "macrogeo": 77,
+        "nasdaq": 29,
+        "oil": 82,
+        "sp500": 32,
+        "t": "2026-09-29T14:12:11.905000+00:00",
+        "usd": 44,
+        "v1_score": 57.0,
+        "yield10y": 58
+      }
+    ]
+  },
+  "false_positives": {
+    "candidate_false_positive_periods": 50,
+    "elevated_points": 111,
+    "elevated_rate": 0.029,
+    "grid": "every 15 minutes across the stored V1 history",
+    "isolated_periods": 46,
+    "periods": 55,
+    "periods_in_event_window": 5,
+    "persistent_periods": 9,
+    "representative_candidates": [
+      {
+        "end": "2026-09-09T01:30:00+00:00",
+        "hours": 2.0,
+        "max_score": 98.26,
+        "persistent": true,
+        "points": 8,
+        "start": "2026-09-08T23:45:00+00:00",
+        "top_categories": {
+          "armed_conflict": 1025,
+          "coercion": 751,
+          "diplomatic_failure": 504
+        }
+      },
+      {
+        "end": "2026-08-31T02:00:00+00:00",
+        "hours": 1.5,
+        "max_score": 97.91,
+        "persistent": true,
+        "points": 6,
+        "start": "2026-08-31T00:45:00+00:00",
+        "top_categories": {
+          "armed_conflict": 472,
+          "coercion": 251,
+          "threat": 152
+        }
+      },
+      {
+        "end": "2026-09-09T07:30:00+00:00",
+        "hours": 1.0,
+        "max_score": 99.66,
+        "persistent": true,
+        "points": 4,
+        "start": "2026-09-09T06:45:00+00:00",
+        "top_categories": {
+          "armed_conflict": 501,
+          "coercion": 386,
+          "diplomatic_failure": 214
+        }
+      },
+      {
+        "end": "2026-09-12T21:00:00+00:00",
+        "hours": 1.0,
+        "max_score": 97.66,
+        "persistent": true,
+        "points": 4,
+        "start": "2026-09-12T20:15:00+00:00",
+        "top_categories": {
+          "armed_conflict": 353,
+          "coercion": 179,
+          "diplomatic_failure": 124
+        }
+      },
+      {
+        "end": "2026-09-19T22:30:00+00:00",
+        "hours": 1.0,
+        "max_score": 98.96,
+        "persistent": true,
+        "points": 4,
+        "start": "2026-09-19T21:45:00+00:00",
+        "top_categories": {
+          "armed_conflict": 296,
+          "coercion": 123,
+          "threat": 77
+        }
+      },
+      {
+        "end": "2026-08-27T22:30:00+00:00",
+        "hours": 0.25,
+        "max_score": 94.01,
+        "persistent": false,
+        "points": 1,
+        "start": "2026-08-27T22:30:00+00:00",
+        "top_categories": {
+          "armed_conflict": 354,
+          "coercion": 299,
+          "diplomatic_failure": 155
+        }
+      },
+      {
+        "end": "2026-08-30T00:15:00+00:00",
+        "hours": 0.25,
+        "max_score": 90.97,
+        "persistent": false,
+        "points": 1,
+        "start": "2026-08-30T00:15:00+00:00",
+        "top_categories": {
+          "armed_conflict": 141,
+          "assault": 52,
+          "coercion": 108
+        }
+      },
+      {
+        "end": "2026-08-30T01:00:00+00:00",
+        "hours": 0.5,
+        "max_score": 95.92,
+        "persistent": false,
+        "points": 2,
+        "start": "2026-08-30T00:45:00+00:00",
+        "top_categories": {
+          "armed_conflict": 261,
+          "coercion": 147,
+          "threat": 69
+        }
+      }
+    ],
+    "scored_points": 3830
+  },
   "feature_version": "gdelt-geo-features-v1",
+  "fetch": {
+    "fetch_status_counts": {
+      "CACHED": 4122
+    },
+    "files_sidecar": {
+      "path": "gdelt_risk_regime_shock_files.json",
+      "sha256": "3d0b66fcb6e5727b0e9641c9f129dcf99912101be5b724d560b0f1d165a4144b"
+    },
+    "row_rejects": {}
+  },
   "fields_used": [
     "GLOBALEVENTID",
     "SQLDATE",
@@ -28,7 +2183,7 @@
     "SOURCEURL"
   ],
   "filter_version": "gdelt-geo-filter-v1",
-  "max_files": 700,
+  "max_files": 5000,
   "previous_runs": [
     {
       "error": "GET http://data.gdeltproject.org/gdeltv2/masterfilelist.txt failed after 3 attempts: HTTP Error 403: Forbidden",
@@ -38,14 +2193,24 @@
         "20260929134500"
       ],
       "status": "LIVE_FETCH_FAILED"
+    },
+    {
+      "error": "GET http://data.gdeltproject.org/gdeltv2/masterfilelist.txt failed after 3 attempts: HTTP Error 403: Forbidden",
+      "required_batches": 575,
+      "required_range": [
+        "20260923141500",
+        "20260929134500"
+      ],
+      "scope": "event",
+      "status": "LIVE_FETCH_FAILED"
     }
   ],
-  "required_batches": 575,
+  "required_batches": 4122,
   "required_range": [
-    "20260923141500",
-    "20260929134500"
+    "20260824080000",
+    "20261006061500"
   ],
-  "scope": "event",
+  "scope": "history",
   "source": {
     "api_key_required": false,
     "cameo_manual": "http://data.gdeltproject.org/documentation/CAMEO.Manual.1.1b3.pdf",
@@ -63,11 +2228,32 @@
     "publisher": "The GDELT Project",
     "update_frequency": "15 minutes"
   },
-  "status": "LIVE_FETCH_FAILED",
+  "status": "OK",
   "v1_coverage": {
-    "measured": false,
-    "reason": "GDELT file availability could not be read",
-    "v1_observations": 575
+    "aligned": 575,
+    "coverage_pct": 100.0,
+    "excluded": {
+      "excluded_incomplete_window": 0,
+      "excluded_insufficient_baseline": 0,
+      "excluded_no_gdelt_before": 0,
+      "excluded_stale_or_missing_batches": 0
+    },
+    "excluded_lookahead_ambiguity": 0,
+    "v1_observations": 575,
+    "with_sufficient_context": 575
+  },
+  "v1_historical_scores": {
+    "elevated": 12,
+    "median_score": 51.56,
+    "p90_score": 77.78,
+    "rows_sidecar": {
+      "path": "gdelt_risk_regime_shock_v1_scores.json",
+      "sha256": "77293fb22789ae068cede5ab053e346e17cc42ce517855cc6c62410e46c452a9"
+    },
+    "scored": 575,
+    "status_counts": {
+      "OK": 575
+    }
   },
   "v1_impact": "NONE: research feature only; no weight, no methodology version, V1 unchanged.",
   "v1_observations_input": 575,

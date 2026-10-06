@@ -928,6 +928,7 @@ describe('NEW_SIGNAL -> signal prototype, data collection first (Event #15 regre
     const pending = riskRegimeShockComponents({ ...base, status: 'LIVE_FETCH_FAILED', error: 'blocked' }).components[0];
     expect(pending.status).toBe('BUILT_LIVE_DATA_PENDING');
     expect(pending.event15.status).toBe('NOT_MEASURED');
+    expect(pending.assessment).toBeNull();                       // a review never outlives a failed run
     const okArtifact = { ...base, status: 'OK', event15: { detected: true, first_elevated: '2026-09-28T01:00:00+00:00', elevated_before_event: true, elevated_during_decline_24h: true, persistence_hours_longest_run: 4, at_event: { geo_shock_score: 95 }, counts_6h_before_event: { geo_events: 10 } }, v1_coverage: { v1_observations: 575, coverage_pct: 80 } };
     const done = riskRegimeShockComponents(okArtifact).components[0];
     expect(done.status).toBe('RESEARCH_RESULT_AVAILABLE');
@@ -935,6 +936,19 @@ describe('NEW_SIGNAL -> signal prototype, data collection first (Event #15 regre
     expect(done.v1_weight).toBeNull();
     expect(researchComponentsFor({ type: 'CHANGE_WEIGHT', source_id: 'etfflows' }, null)).toBeNull();
     expect(researchComponentsFor({ type: 'ADD_SIGNAL', derived_from: 'macrogeo' }, { signal_id: 'risk_regime_shock' }).signal_id).toBe('risk_regime_shock');
+  });
+
+  it('the committed real-data GDELT result is reported as measured, not supportive, and changes nothing in V1', () => {
+    const gd = riskRegimeShockComponents().components[0];
+    expect(gd.status).toBe('RESEARCH_RESULT_AVAILABLE');
+    expect(gd.live_run.status).toBe('OK');
+    expect(gd.event15).toMatchObject({ detected: false, any_elevated_point: true });
+    expect(gd.event15.detection_rule).toMatch(/persistent/);
+    expect(gd.v1_coverage).toMatchObject({ v1_observations: 575, coverage_pct: 100 });
+    expect(gd.false_positives.scored_points).toBeGreaterThan(3000);
+    expect(gd.assessment).toMatchObject({ event15_classification: 'NOT_SUPPORTIVE', incremental_value: 'D_INSUFFICIENT_EVIDENCE',
+      recommendation: 'INSUFFICIENT DATA — MORE RESEARCH REQUIRED' });
+    expect(gd).toMatchObject({ v1_weight: null, v1_impact: 'NONE' });
   });
 
   it('the parser keeps the new optional signal fields and the research pack asks for them', () => {

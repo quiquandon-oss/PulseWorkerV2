@@ -1722,6 +1722,63 @@ indexes (`research_sentiment_archive.observation_ts` is UNIQUE-indexed;
   this project already takes elsewhere (e.g. `MOMENTUM_BLEND_WEIGHT_V1`
   in worker.js).
 
+### Data flow, table ownership and boundaries (pipeline v2)
+
+```
+history, btc_data (V1 writes; read-only here)
+   │  run once per scheduled run, with ONE clock reading (now_ts) supplied by scripts/experiment5-agent/run.py
+   ▼
+research/experiment5_pipeline.py  ──►  in-memory sqlite mirror (throwaway)
+   │  archive new rows · replay pending decisions under their REAL ids · run_agent_cycle · evaluate due decisions
+   ▼
+research_sentiment_archive   (append-only; written only by this pipeline)
+research_hypotheses          (subject LIKE 'experiment5:%'; decision payload append-only, outcome appended
+                              under evidence_summary_json["outcome"], out_of_sample_status set once)
+experiment5_pipeline_runs    (migration 0019; one operational row per execution; never a predictive result)
+   ▲
+worker.js  GET /api/research-lab/experiment5-{overview,decisions,results,sentiment,source-intelligence,status}
+           strictly read-only
+```
+
+| Table | Writer | Readers | Notes |
+| --- | --- | --- | --- |
+| `research_sentiment_archive` (0015) | `experiment5_pipeline.py` | agent, Worker | append-only, unique `observation_ts`, `archived_ts` = the run's supplied clock |
+| `research_hypotheses` (0008) | `experiment5_pipeline.py` (insert decision; one outcome update per decision) | agent, Worker | Experiment 5 rows only (`experiment5:%`); status capped at OBSERVATION/MONITOR |
+| `experiment5_pipeline_runs` (0019) | `experiment5_pipeline.py` via `run.py` | Worker status endpoint | additive; absent table => run reported `SKIPPED_TABLE_MISSING`, never "recorded" |
+
+**Boundaries.** No LLM or other external call anywhere in this experiment ("agentic" here means a deterministic
+rule-based agent). It never changes V1's composite, global source weights, model parameters, asset selection or
+production predictions. It shares no table with Stage 7 (per-event research sentiment) and never reads Stage 7's
+output. No module reads the wall clock; replaying a run with the same inputs and `now_ts` reproduces the same
+writes (guarded by `TestDeterminism`).
+
+**Operational success is not predictive performance.** The status endpoint returns two independent blocks.
+`operational` answers "is the pipeline running" (last run, last success, consecutive failures, rows
+processed/rejected, decisions replayed/created/evaluated, constants in force). `predictive` reports resolved
+counts and the challenger-vs-V1-baseline counts and **never a verdict**: no success criterion or required
+sample size was pre-registered for this experiment (only the pre-existing `EXPERIMENT5_MIN_SAMPLE_FOR_CONCLUSION`
+gate), and none may be invented after seeing results. Defining one is a human decision and is open.
+
+**Replay safety (fixed, regression-tested).** Pending decisions are replayed from D1 under their real
+`hypothesis_id` *before* the agent runs, so locally auto-assigned ids can never collide with them
+(`TestReplayCollisionReproduction`). Decisions created in the *same* run are marked locally deferred so a
+catch-up run can never write an outcome against a local id that aliases a different real row
+(`TestSameRunDecisionIdAliasing`). A malformed `sources_json` observation is excluded, counted and listed in the
+run record rather than aborting the run; it is never rewritten or deleted.
+
+**Idempotency and resolution safety (pre-merge review).** A decision's natural identity is `(subject, anchor_ts)`:
+re-running the pipeline on the same observation never persists a second decision for it (counted as
+`decisions_skipped_duplicate`; resolved decisions count too). The outcome `UPDATE` only applies to an *unresolved*
+`experiment5:%` row (`out_of_sample_status IS NULL`), so the first resolution wins and no other row can be touched.
+Diagnostics about "what the agent saw" describe the agent's 14-day observe window; malformed rows older than that
+are reported separately (`observations_rejected_malformed_outside_observe_window`). A telemetry write that fails
+after a successful run is reported `run_record = WRITE_FAILED` (never `WRITTEN`, never silently dropped) and does not
+turn the run red; a missing table is `SKIPPED_TABLE_MISSING`. A conflicting duplicate `history` timestamp still aborts
+the run loudly (`ArchiveConflictError`, by design) until it ages out of the read window.
+
+**Naming.** README "Experiment 5" (this agentic experiment) is *not* the registry entry `EXP-005` (source
+effectiveness, migrations 0010/0011).
+
 ### Future AI possibilities (not built, explicitly optional)
 
 A bounded, quota-gated Gemini call (reusing the existing

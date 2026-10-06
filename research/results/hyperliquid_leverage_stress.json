@@ -1,0 +1,195 @@
+{
+  "artifact": "hyperliquid-leverage-stress-research",
+  "data": {
+    "requests": {}
+  },
+  "dimensions_expected": {
+    "A_oi_level": {
+      "expected": "AVAILABLE_LIVE",
+      "field": "metaAndAssetCtxs.openInterest",
+      "history": "No open-interest history request is known in the Info API: history only by collecting snapshots from now on."
+    },
+    "B_oi_change": {
+      "expected": "DERIVABLE_FORWARD_ONLY",
+      "field": "derived from collected OI snapshots",
+      "history": "needs A history"
+    },
+    "C_oi_acceleration": {
+      "expected": "DERIVABLE_FORWARD_ONLY",
+      "field": "derived from collected OI snapshots",
+      "history": "needs A history"
+    },
+    "D2_premium_level": {
+      "expected": "AVAILABLE_HISTORICALLY",
+      "field": "fundingHistory.premium / metaAndAssetCtxs.premium",
+      "history": "hourly records"
+    },
+    "D_funding_level": {
+      "expected": "AVAILABLE_HISTORICALLY",
+      "field": "fundingHistory.fundingRate / metaAndAssetCtxs.funding",
+      "history": "hourly records"
+    },
+    "E_funding_change": {
+      "expected": "DERIVABLE",
+      "field": "derived from D",
+      "history": "from D"
+    },
+    "F_funding_extreme_vs_baseline": {
+      "expected": "DERIVABLE",
+      "field": "derived from D / D2",
+      "history": "from D"
+    },
+    "G_price_change": {
+      "expected": "AVAILABLE_HISTORICALLY",
+      "field": "candleSnapshot.c",
+      "history": "most recent candles only (limit to verify)"
+    },
+    "H_volume_acceleration": {
+      "expected": "DERIVABLE",
+      "field": "candleSnapshot.v",
+      "history": "from G candles"
+    },
+    "I_oi_price_divergence": {
+      "expected": "DERIVABLE_FORWARD_ONLY",
+      "field": "A with G",
+      "history": "needs A history"
+    },
+    "J_liquidations": {
+      "expected": "NOT_AVAILABLE",
+      "field": "none aggregate",
+      "history": "No aggregate liquidation request is known in the Info API; per-user fill data is not a market measure."
+    }
+  },
+  "error": "POST https://api.hyperliquid.xyz/info metaAndAssetCtxs failed after 3 attempts: <urlopen error Tunnel connection failed: 403 Forbidden>",
+  "event": {
+    "event_id": 15,
+    "event_ts_ms": 1790564484213,
+    "label": "BTC 84,429 -> 83,480 (-1.1%) in the 24 h to 2026-09-28 03:01 UTC; V1 predicted UP"
+  },
+  "history": {
+    "measured": false,
+    "reason": "Hyperliquid could not be read",
+    "v1_observations": 575
+  },
+  "lookahead": "A 1h candle is used only after its close time T; a funding record only after its time.",
+  "previous_runs": [],
+  "requests": {
+    "candleSnapshot": {
+      "body": {
+        "req": {
+          "coin": "BTC",
+          "endTime": "<ms>",
+          "interval": "1h",
+          "startTime": "<ms>"
+        },
+        "type": "candleSnapshot"
+      },
+      "field_basis": "repo (t, c); docs (T, o, h, l, v, n)"
+    },
+    "fundingHistory": {
+      "body": {
+        "coin": "BTC",
+        "endTime": "<ms>",
+        "startTime": "<ms>",
+        "type": "fundingHistory"
+      },
+      "field_basis": "docs (coin, fundingRate, premium, time)"
+    },
+    "metaAndAssetCtxs": {
+      "body": {
+        "type": "metaAndAssetCtxs"
+      },
+      "field_basis": "repo (funding, markPx, oraclePx, prevDayPx, midPx); docs (openInterest, dayNtlVlm, premium)"
+    }
+  },
+  "required_range": [
+    "2026-08-18T09:25:21.144000+00:00",
+    "2026-10-06T07:41:45.708000+00:00"
+  ],
+  "source": {
+    "authentication": "none (public)",
+    "cost_eur": 0,
+    "docs": "https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/info-endpoint",
+    "endpoint": "https://api.hyperliquid.xyz/info",
+    "method": "POST JSON",
+    "name": "Hyperliquid Info API",
+    "venue_scope": "Hyperliquid perpetuals only; not the whole crypto market"
+  },
+  "status": "LIVE_FETCH_FAILED",
+  "v1_impact": "NONE: research only; no weight, no methodology version, V1 unchanged.",
+  "v1_observations_input": 575,
+  "v1_only_findings": {
+    "around_event15": {
+      "first_after": [
+        {
+          "funding": 42,
+          "hypefunding": 50,
+          "longshort": 46,
+          "t": "2026-09-28T04:23:34.088000+00:00"
+        },
+        {
+          "funding": 43,
+          "hypefunding": 50,
+          "longshort": 45,
+          "t": "2026-09-28T05:10:09.534000+00:00"
+        },
+        {
+          "funding": 45,
+          "hypefunding": 26,
+          "longshort": 43,
+          "t": "2026-09-28T06:15:57.373000+00:00"
+        }
+      ],
+      "last_before": [
+        {
+          "funding": 50,
+          "hypefunding": 50,
+          "longshort": 50,
+          "t": "2026-09-27T18:59:10.878000+00:00"
+        },
+        {
+          "funding": 49,
+          "hypefunding": 50,
+          "longshort": 49,
+          "t": "2026-09-27T20:19:17.309000+00:00"
+        },
+        {
+          "funding": 48,
+          "hypefunding": 50,
+          "longshort": 49,
+          "t": "2026-09-27T20:41:09.856000+00:00"
+        }
+      ]
+    },
+    "note": "V1 subtracts Hyperliquid's fixed funding floor before scoring, so funding sitting at the floor scores exactly 50.",
+    "sources": {
+      "funding": {
+        "distinct": 29,
+        "exactly_50": 387,
+        "exactly_50_share": 0.6766,
+        "max": 73,
+        "min": 33,
+        "missing": 3,
+        "present": 572
+      },
+      "hypefunding": {
+        "distinct": 47,
+        "exactly_50": 428,
+        "exactly_50_share": 0.7483,
+        "max": 95,
+        "min": 12,
+        "missing": 3,
+        "present": 572
+      },
+      "longshort": {
+        "distinct": 35,
+        "exactly_50": 206,
+        "exactly_50_share": 0.3608,
+        "max": 73,
+        "min": 31,
+        "missing": 4,
+        "present": 571
+      }
+    }
+  }
+}

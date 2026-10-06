@@ -201,6 +201,9 @@ def main(argv=None) -> int:
     ap.add_argument("--v1", required=True)
     ap.add_argument("--cache", required=True)
     ap.add_argument("--out", required=True)
+    ap.add_argument("--scope", choices=("event", "history"), default="event",
+                    help="event: Event #15 window only; history: also score every stored V1 observation")
+    ap.add_argument("--max-files", type=int, default=MAX_FILES_PER_RUN, help="hard cap on export files for this run")
     args = ap.parse_args(argv)
     import json
     v1 = json.load(open(args.v1))
@@ -210,8 +213,11 @@ def main(argv=None) -> int:
     cache.mkdir(parents=True, exist_ok=True)
     grid = [event_ts - timedelta(hours=24) + timedelta(minutes=15 * i) for i in range(4 * 48 + 1)]
     v1_window = [datetime.fromtimestamp(t / 1000, tz=timezone.utc) for t in v1_ts if abs(t - EVENT15["event_ts_ms"]) <= 36 * 3600e3]
-    batches = g.required_batches(grid + v1_window)
+    v1_all = [datetime.fromtimestamp(t / 1000, tz=timezone.utc) for t in v1_ts]
+    batches = g.required_batches(grid + v1_window + (v1_all if args.scope == "history" else []))
+    previous = _previous_runs(Path(args.out))
     artifact = {
+        "scope": args.scope, "max_files": args.max_files, "previous_runs": previous,
         "artifact": "gdelt-risk-regime-shock-research", "filter_version": g.FILTER_VERSION, "feature_version": g.FEATURE_VERSION,
         "source": g.GDELT_SOURCE, "fields_used": list(g.FIELDS_USED), "event": EVENT15,
         "required_batches": len(batches), "required_range": [g.stamp(batches[0]), g.stamp(batches[-1])],
@@ -219,15 +225,28 @@ def main(argv=None) -> int:
         "v1_only_findings": v1_only_findings(v1, event_ts),
         "v1_impact": "NONE: research feature only; no weight, no methodology version, V1 unchanged.",
     }
-    if len(batches) > MAX_FILES_PER_RUN:
+    if len(batches) > args.max_files:
         artifact["status"] = "REFUSED_TOO_MANY_FILES"
     else:
         try:
             first_v1 = datetime.fromtimestamp(v1_ts[0] / 1000, tz=timezone.utc)
             idx = master_index(min(batches[0], first_v1 - timedelta(hours=g.BASELINE_HOURS + 2)))
             listed = [g.batch_ts_from_name(u) for u in idx]
+            artifact["download_bytes_listed"] = sum(idx[g.export_url(b)][0] for b in batches if g.export_url(b) in idx)
             series, top, log = build_series(batches, idx, cache, event_ts)
-            artifact.update(status="OK", fetch=log, event15=analyse(series, top, v1, event_ts),
+            ev = analyse(series, top, v1, event_ts)
+            win = (event_ts - timedelta(hours=24), event_ts + timedelta(hours=24))
+            if args.scope == "history":
+                hgrid = _grid(v1_all[0], v1_all[-1])
+                hscores = [g.score_at(series, t) for t in hgrid]
+                artifact["false_positives"] = g.false_positive_summary(hscores, series, exclude=win)
+                artifact["false_positives"]["grid"] = "every 15 minutes across the stored V1 history"
+                artifact["v1_historical_scores"] = g.historical_scores(series, v1_ts)
+            else:
+                scores = [g.score_at(series, t) for t in _grid(event_ts - timedelta(hours=48), event_ts + timedelta(hours=24))]
+                artifact["false_positives"] = g.false_positive_summary(scores, series, exclude=win)
+                artifact["false_positives"]["grid"] = "Event #15 -48h..+24h only (run --scope history for the full V1 history)"
+            artifact.update(status="OK", fetch=log, event15=ev,
                             v1_coverage=g.v1_coverage(v1_ts, listed),
                             coverage_basis="file availability from the official masterfilelist.txt (size + MD5 per 15-minute export)")
         except Exception as e:  # do not fake success
@@ -238,6 +257,24 @@ def main(argv=None) -> int:
     Path(args.out).write_text(g.dumps_deterministic(artifact))
     print(artifact["status"])
     return 0 if artifact["status"] == "OK" else 2
+
+
+def _grid(lo: datetime, hi: datetime) -> List[datetime]:
+    start = lo.replace(minute=(lo.minute // 15) * 15, second=0, microsecond=0)
+    return [start + timedelta(minutes=15 * i) for i in range(int((hi - start).total_seconds() // 900) + 1)]
+
+
+def _previous_runs(path: Path) -> List[Dict]:
+    """Earlier runs written to the same artifact are kept (status, error, scope) as an audit trail."""
+    if not path.exists():
+        return []
+    import json
+    try:
+        old = json.loads(path.read_text())
+    except ValueError:
+        return []
+    keep = {k: old.get(k) for k in ("status", "error", "scope", "required_batches", "required_range") if k in old}
+    return list(old.get("previous_runs", [])) + [keep]
 
 
 def v1_only_findings(v1: List[Dict], event_ts: datetime) -> Dict:

@@ -261,3 +261,93 @@ def test_analysis_and_artifact_are_deterministic():
     spiked = [p for p in pts if "2026-09-28T00:15" <= p["t"] <= "2026-09-28T06:00" and p["status"] == "OK"]
     assert sum(p["geo_shock_score"] >= g.ELEVATED_PCT for p in quiet) <= 0.05 * len(quiet)
     assert spiked and all(p["geo_shock_score"] >= g.ELEVATED_PCT for p in spiked)
+
+
+# ---- elevated periods, false positives, historical V1 scores ----
+def test_elevated_periods_split_isolated_and_persistent():
+    t0 = datetime(2026, 9, 28, tzinfo=UTC)
+    pts = []
+    pattern = [1, 0, 1, 1, 1, 1, 1, 0, 0, 1]          # isolated, 5-point (1.25h) run, isolated
+    for i, e in enumerate(pattern):
+        pts.append({"t": (t0 + timedelta(minutes=15 * i)).isoformat(), "status": "OK", "geo_shock_score": 95.0 if e else 40.0, "elevated": bool(e)})
+    per = g.elevated_periods(pts)
+    assert [(p["points"], p["persistent"]) for p in per] == [(1, False), (5, True), (1, False)]
+    fp = g.false_positive_summary(pts, {}, exclude=None)
+    assert fp["periods"] == 3 and fp["isolated_periods"] == 2 and fp["persistent_periods"] == 1
+    assert fp["elevated_rate"] == 0.7 and fp["candidate_false_positive_periods"] == 3
+    win = (t0 + timedelta(minutes=30), t0 + timedelta(hours=2))
+    assert g.false_positive_summary(pts, {}, exclude=win)["periods_in_event_window"] == 1
+
+
+def test_non_ok_readings_break_a_period_and_historical_scores_report_status():
+    t0 = datetime(2026, 9, 28, tzinfo=UTC)
+    pts = [{"t": (t0 + timedelta(minutes=15 * i)).isoformat(), "status": st, "geo_shock_score": 95.0, "elevated": True}
+           for i, st in enumerate(["OK", "OK", "INCOMPLETE_WINDOW", "OK"])]
+    assert [p["points"] for p in g.elevated_periods(pts)] == [2, 1]
+    s = synthetic_series(datetime(2026, 9, 24, tzinfo=UTC), datetime(2026, 9, 28, 6, tzinfo=UTC))
+    ms = lambda d: int(d.timestamp() * 1000)
+    h = g.historical_scores(s, [ms(E), ms(datetime(2026, 9, 24, 1, tzinfo=UTC))])
+    assert h["status_counts"] == {"INSUFFICIENT_BASELINE": 1, "OK": 1} and h["scored"] == 1
+
+
+def _fake_gdelt(monkeypatch, start, end, spike_from):
+    """In-process stand-in for data.gdeltproject.org: fixture zips + a master list with real MD5s."""
+    files, lines = {}, []
+    b, i = start, 0
+    while b <= end:
+        st = g.stamp(b)
+        rows = [row(eid=i * 100 + k, added=st, root="04", code="040", quad=1, gold=1.0, url=f"https://n{k}.example/{st}") for k in range(20 + i % 5)]
+        rows += [row(eid=i * 100 + 50 + k, added=st, root="14", code="141", quad=3, gold=-6.5, a1="FRA", a2="", geo="FR",
+                     url=f"https://p{k % 3}.example/protest/{st}") for k in range(2 + i % 3)]
+        if b >= spike_from:
+            rows += [row(eid=i * 100 + 70 + k, added=st, url=f"https://w{k}.example/world/hormuz/{st}") for k in range(12)]
+        data = zip_of(rows, name=f"{st}.export.CSV")
+        url = g.export_url(b)
+        files[url] = data
+        lines.append(f"{len(data)} {g.md5_hex(data)} {url}")
+        b += timedelta(minutes=15)
+        i += 1
+    master = ("\n".join(lines) + "\n").encode()
+
+    def fake_get(url, headers=None, **k):
+        if url == g.GDELT_SOURCE["master_file_list"]:
+            return 200, master
+        return (200, files[url]) if url in files else (404, b"")
+    monkeypatch.setattr(run, "http_get", fake_get)
+    monkeypatch.setattr(run.time, "sleep", lambda s: None)
+
+
+def test_full_runner_ok_path_end_to_end_with_audit_trail(tmp_path, monkeypatch):
+    _fake_gdelt(monkeypatch, datetime(2026, 9, 23, tzinfo=UTC), datetime(2026, 9, 29, 16, tzinfo=UTC), spike_from=datetime(2026, 9, 28, 0, tzinfo=UTC))
+    ms = lambda d: int(d.timestamp() * 1000)
+    v1 = [{"ts": ms(E + timedelta(hours=h)), "g": 10, "m": 30, "o": 60, "y": 9, "n": 62, "s": 62, "u": 48, "score": 55} for h in (-30, -12, -6, 1, 5, 20)]
+    (tmp_path / "v1.json").write_text(json.dumps(v1))
+    out = tmp_path / "a.json"
+    out.write_text(json.dumps({"status": "LIVE_FETCH_FAILED", "error": "HTTP Error 403", "scope": "event"}))   # earlier failed run
+    args = ["--v1", str(tmp_path / "v1.json"), "--cache", str(tmp_path / "c"), "--out", str(out)]
+    assert run.main(args) == 0
+    a = json.loads(out.read_text())
+    assert a["status"] == "OK" and a["previous_runs"] == [{"status": "LIVE_FETCH_FAILED", "error": "HTTP Error 403", "scope": "event"}]
+    assert a["fetch"]["fetch_status_counts"] == {"FETCHED": a["required_batches"]}
+    e = a["event15"]
+    assert e["detected"] and e["elevated_before_event"] and e["first_elevated"] >= "2026-09-28T00:15"
+    assert e["counts_6h_before_event"]["categories"]["armed_conflict"] > 0
+    assert e["top_corridor_escalation_events_24h_before"][0]["category"] == "armed_conflict"
+    assert a["v1_coverage"]["v1_observations"] == 6 and a["v1_coverage"]["with_sufficient_context"] >= 4
+    assert a["false_positives"]["periods_in_event_window"] >= 1
+    # rerun: everything comes from the cache, the result is byte-identical apart from the audit trail
+    first = a
+    assert run.main(args) == 0
+    b2 = json.loads(out.read_text())
+    assert b2["fetch"]["fetch_status_counts"] == {"CACHED": first["required_batches"]}
+    assert b2["event15"] == first["event15"] and len(b2["previous_runs"]) == 2
+
+
+def test_history_scope_respects_the_file_cap(tmp_path, monkeypatch):
+    _fake_gdelt(monkeypatch, datetime(2026, 9, 28, tzinfo=UTC), datetime(2026, 9, 28, 1, tzinfo=UTC), spike_from=datetime(2026, 9, 29, tzinfo=UTC))
+    v1 = [{"ts": int((E - timedelta(days=d)).timestamp() * 1000), "g": 1, "m": 1, "o": 1, "y": 1, "n": 1, "s": 1, "u": 1, "score": 50} for d in range(30, -1, -1)]
+    (tmp_path / "v1.json").write_text(json.dumps(v1))
+    out = tmp_path / "a.json"
+    assert run.main(["--v1", str(tmp_path / "v1.json"), "--cache", str(tmp_path / "c"), "--out", str(out), "--scope", "history"]) == 2
+    a = json.loads(out.read_text())
+    assert a["status"] == "REFUSED_TOO_MANY_FILES" and a["required_batches"] > 700 and "fetch" not in a

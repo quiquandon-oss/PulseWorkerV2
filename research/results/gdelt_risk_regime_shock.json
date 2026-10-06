@@ -28,11 +28,24 @@
     "SOURCEURL"
   ],
   "filter_version": "gdelt-geo-filter-v1",
+  "max_files": 700,
+  "previous_runs": [
+    {
+      "error": "GET http://data.gdeltproject.org/gdeltv2/masterfilelist.txt failed after 3 attempts: HTTP Error 403: Forbidden",
+      "required_batches": 575,
+      "required_range": [
+        "20260923141500",
+        "20260929134500"
+      ],
+      "status": "LIVE_FETCH_FAILED"
+    }
+  ],
   "required_batches": 575,
   "required_range": [
     "20260923141500",
     "20260929134500"
   ],
+  "scope": "event",
   "source": {
     "api_key_required": false,
     "cameo_manual": "http://data.gdeltproject.org/documentation/CAMEO.Manual.1.1b3.pdf",

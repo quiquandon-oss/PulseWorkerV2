@@ -495,5 +495,86 @@ def v1_coverage(v1_ts_ms: Sequence[int], available_batches: Iterable[datetime]) 
     }
 
 
+# ---- Elevated periods / false-positive analysis ----
+PERSISTENT_MIN = timedelta(hours=1)   # an elevated period shorter than 1 hour is "isolated"
+
+
+def elevated_periods(scores: Sequence[Dict]) -> List[Dict]:
+    """Contiguous runs of elevated readings on a 15-minute grid (non-OK readings break a run)."""
+    out, cur = [], None
+    for s in scores:
+        if s.get("status") == "OK" and s.get("elevated"):
+            if cur is None:
+                cur = {"start": s["t"], "end": s["t"], "points": 0, "max_score": 0.0}
+            cur["end"] = s["t"]
+            cur["points"] += 1
+            cur["max_score"] = max(cur["max_score"], s["geo_shock_score"])
+        elif cur is not None:
+            out.append(cur)
+            cur = None
+    if cur is not None:
+        out.append(cur)
+    for p in out:
+        p["hours"] = p["points"] * BATCH_MINUTES / 60
+        p["persistent"] = p["hours"] >= PERSISTENT_MIN.seconds / 3600
+    return out
+
+
+def false_positive_summary(scores: Sequence[Dict], series: Dict[datetime, Dict], exclude: Optional[Tuple[datetime, datetime]] = None) -> Dict:
+    """Elevated-period statistics. Periods inside `exclude` (the Event #15 window) are counted separately;
+    everything else is a *candidate* false positive: GDELT has no ground truth, so each one is listed with its
+    dominant categories for human review rather than labelled true or false automatically."""
+    ok = [s for s in scores if s.get("status") == "OK"]
+    periods = elevated_periods(scores)
+
+    def in_ex(p):
+        return exclude is not None and exclude[0] <= datetime.fromisoformat(p["start"]) <= exclude[1]
+
+    def cats(p):
+        lo, hi = datetime.fromisoformat(p["start"]), datetime.fromisoformat(p["end"])
+        c = Counter()
+        for b, v in series.items():
+            if lo - timedelta(hours=1) < b + AVAILABILITY_LAG <= hi:
+                c.update(v.get("categories", {}))
+        return dict(c.most_common(3))
+
+    outside = [p for p in periods if not in_ex(p)]
+    rep = sorted(outside, key=lambda p: (-p["points"], p["start"]))[:5] + [p for p in outside if not p["persistent"]][:3]
+    seen, reps = set(), []
+    for p in rep:
+        if p["start"] not in seen:
+            seen.add(p["start"])
+            reps.append({**p, "top_categories": cats(p)})
+    return {
+        "scored_points": len(ok),
+        "elevated_points": sum(1 for s in ok if s["elevated"]),
+        "elevated_rate": round(sum(1 for s in ok if s["elevated"]) / len(ok), 4) if ok else None,
+        "periods": len(periods),
+        "isolated_periods": sum(1 for p in periods if not p["persistent"]),
+        "persistent_periods": sum(1 for p in periods if p["persistent"]),
+        "periods_in_event_window": len(periods) - len(outside),
+        "candidate_false_positive_periods": len(outside),
+        "representative_candidates": reps,
+    }
+
+
+def historical_scores(series: Dict[datetime, Dict], v1_ts_ms: Sequence[int]) -> Dict:
+    """geo_shock_score at each stored V1 observation time (point-in-time), with status counts."""
+    rows = []
+    for ms in v1_ts_ms:
+        t = datetime.fromtimestamp(ms / 1000, tz=timezone.utc)
+        r = score_at(series, t)
+        rows.append({"ts": ms, "status": r["status"], "geo_shock_score": r.get("geo_shock_score"), "elevated": r.get("elevated")})
+    vals = sorted(r["geo_shock_score"] for r in rows if r["geo_shock_score"] is not None)
+    return {
+        "status_counts": dict(sorted(Counter(r["status"] for r in rows).items())),
+        "scored": len(vals),
+        "elevated": sum(1 for r in rows if r["elevated"]),
+        "median_score": vals[len(vals) // 2] if vals else None,
+        "p90_score": vals[int(0.9 * (len(vals) - 1))] if vals else None,
+        "rows": rows,
+    }
+
+
 def dumps_deterministic(obj) -> str:
     return json.dumps(obj, sort_keys=True, indent=2, ensure_ascii=False, default=str) + "\n"

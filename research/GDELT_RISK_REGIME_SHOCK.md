@@ -174,6 +174,13 @@ python3 research/gdelt_research_run.py --v1 <read-only V1 extract.json> --cache 
   --out research/results/gdelt_risk_regime_shock.json
 ```
 
+`--scope history` additionally scores every stored V1 observation and measures false positives across
+the whole V1 history. That needs about 4,100 files, so it must be requested explicitly with
+`--max-files`; the master list's byte total is recorded first. Elevated periods outside the Event #15
+window are reported as **candidate** false positives, with their dominant categories for human review.
+GDELT has no ground truth, so nothing is labelled true or false automatically. Earlier runs written to the
+same artifact are kept under `previous_runs`.
+
 The V1 extract is a read-only `SELECT` of stored V1 observation times plus the seven context readings
 (geopolitics, macrogeo, oil, yield10y, nasdaq, sp500, usd). It is not committed. If GDELT is unreachable, the
 artifact status is `LIVE_FETCH_FAILED` and it contains no GDELT results.

@@ -1,0 +1,334 @@
+# Event #15 and the 123 episodes: point-in-time human research
+
+**Question:** what was actually happening before V1 failed, and which observable dimensions were missing or
+under-represented by V1?
+
+Research only. No score, no weights, no thresholds of our own, no methodology version, no V1 change, no
+Candidate #1 change, no production write, no deployment. Nothing here is validated. Event #15 is n = 1.
+
+- Code: `risk_regime_event_research.py` (reads only the committed artifacts). Output:
+  `results/risk_regime_event_research.json`. Tests: `test_risk_regime_event_research.py`.
+- **Locked timing.** Prediction boundary **2026-09-27 12:01:27 UTC** (PRED-1125; the latest V1 observation
+  before it is 11:42:04, score 54 → UP). Event 2026-09-28 03:01 UTC (RE-15).
+  - Sensitivity only: RE-15's own failing run (PREDRUN-24h-1124) starts at 09:01. At 09:01 the conclusions are
+    the same, except that the frozen geo_shock flag was on (it was off at 12:00).
+- **"Abnormal" rule.** This is the repository's existing, disclosed convention from
+  `hyperliquid_leverage_stress.py`, reused unchanged: a measure is abnormal when it falls outside the 5th–95th
+  percentile of its own trailing 7 days, built only from values available before the time assessed. For the
+  daily DeFiLlama series the history is the previous 30 days. Too little history means `None`, never filled.
+- **Labels.**
+  - **PRE-EVENT:** available at or before the boundary. This is the only evidence used.
+  - **CONTEMPORANEOUS:** the same measure at the outcome time (and on the hourly path from the boundary to the
+    event).
+  - **POST-EVENT:** 24 h after the event. Excluded.
+- **V1 scale.** V1 source readings run 0–100 with 50 as neutral and below 50 bearish (`tanh` saturation in
+  `CryptoPulse/index.html`; `yield10y` is inverted).
+
+## 1. Event #15 research conclusion
+
+**Before the boundary, almost nothing was abnormal.** The prediction was made on a Sunday at midday. Crypto
+was calm and drifting up:
+- BTC +0.88 % over 24 h (71st percentile of its week).
+- DVOL 34.75 (12th percentile).
+- Hyperliquid funding at its 1.25e-5 floor; premium −2.1 bp (43rd percentile).
+
+The Hyperliquid macro perps were in weekend mode: every 24 h move was below 0.5 % and inside its range.
+
+V1's own readings were ordinary for that week. The score was 54 (49th percentile). Geopolitics and 10Y both
+read 9 (strongly bearish), but they had read that way all week (32nd and 33rd percentile). S&P 500 and Nasdaq
+were frozen at Friday's FRED values (62).
+
+Only two PRE-EVENT measures were outside their ranges:
+- **GDELT batch volume.** The single 11:45 batch held 2,644 events (99.7th percentile), with escalation and
+  corridor counts spiking with it. This was a volume spike, not a change in composition:
+  - The escalation share was a normal 8.2 %. The corridor share (3.5 %) sat at the 94.8th percentile, inside
+    the band.
+  - The 7 days before contained 14 batches above 2,000 events.
+  - The 24 h event volume was low (6.6th percentile, weekend).
+  - geo_shock read 60.2, not elevated.
+- **USDC supply.** The 26 Sep daily point fell 1.27 % (−0.97 bn), the lowest of its 30 days and about 7× its
+  median absolute daily move. The total stablecoin supply fell only 0.23 % (10th percentile).
+
+**What made the call fail happened after the boundary (CONTEMPORANEOUS).** The first abnormal readings:
+
+| Time (UTC) | Abnormal readings |
+|---|---|
+| 01:01 Mon 28 Sep | GOLD (−1.2 % over 6 h), SILVER (−1.9 % over 6 h), COPPER (−1.6 % over 24 h) |
+| 02:01 | Funding left the floor; premium (−4.9 bp); XYZ100 (−0.65 % over 6 h) |
+
+All of these readings were at or below the 3rd percentile.
+
+By the event (03:01):
+- GOLD −2.0 %, SILVER −3.4 %, COPPER −1.9 % (0th–7th percentile).
+- Funding −7e-6 and premium −5.5 bp (0.6th percentile).
+- DVOL +0.7 (84th percentile, not abnormal).
+- BTC −1.26 % over 24 h (14th percentile, not abnormal).
+
+The move was a cross-asset repricing when the weekend ended. Crypto leverage unwound alongside it. BTC itself
+did not make an abnormal move.
+
+**Answer for Event #15.** The information that explains the failure did not exist at 12:01 Sunday. No
+collected dimension shows it coming. The pre-event anomalies (one GDELT batch, one USDC daily point) are single
+observations with no visible link to the outcome. The one pre-event dimension that could have shown risk
+building up inside crypto, venue open interest and liquidations, is not available
+(Bybit/Binance geo-blocked; Xoomar unidentified).
+
+## 2. Pre-event dimension matrix (Event #15)
+
+The rank is the percentile within the series' own trailing history (A = abnormal by the convention). The
+classification applies relative to V1:
+- **NEW_SIGNAL:** new information with some pre-event support (candidate, unvalidated).
+- **NEW_SOURCE:** new information, but no pre-event support.
+- **HIGHER_RESOLUTION:** the same information as V1, faster or finer.
+- **REDUNDANT:** the same information as V1.
+- **INCONCLUSIVE:** cannot be assessed.
+
+| # | Dimension | PRE-EVENT value (rank) | Abnormal at boundary? | Moving before? | Meaningful or noise? | In V1? | V1 resolution | Class | CONTEMPORANEOUS / POST (not evidence) |
+|---|---|---|---|---|---|---|---|---|---|
+| 1 | BTC price/returns | +0.88 % 24 h (71); +0.51 % 6 h (72) | no | slow drift up | noise (1.1× median move) | partly: `global` market cap 24 h, F&G | similar (24 h) | REDUNDANT | −1.26 % (14) at event; not abnormal |
+| 2 | Deribit DVOL | 34.75 (12); +0.39 24 h (79) | no | no | noise | no | — | NEW_SOURCE | +0.70 (84) at event |
+| 3 | HL funding | 1.25e-5 floor (53) | no | flat | none | yes (`funding`, 50 = floor) | same | REDUNDANT | left floor 02:01; −7e-6 (0.6) at event **A** |
+| 4 | HL premium | −2.1 bp (43); +1.5 bp 24 h (76) | no | slightly less negative | noise | indirectly (funding derives from premium; V1 floors it) | V1 sees only the floored funding | HIGHER_RESOLUTION | −4.9 bp at 02:01; −5.5 bp (0.6) at event **A** |
+| 5 | HL SP500 / XYZ100 | +0.09 % (52) / +0.17 % (43) | no | no (weekend) | noise | yes (`sp500`, `nasdaq` FRED daily, frozen at 62) | daily; stale all weekend | HIGHER_RESOLUTION | XYZ100 −0.65 % 6 h at 02:01 **A** |
+| 6 | GOLD | −0.02 % (74) | no | no | noise | yes (`gold`, same instrument; not in the 10-source extract) | same | REDUNDANT | −2.0 % (0) at event **A** |
+| 7 | SILVER | −0.11 % (61) | no | no | noise | no | — | NEW_SOURCE | −3.4 % 6 h (0) at event **A** |
+| 8 | COPPER | 0.00 % (35) | no | no | noise | no | — | NEW_SOURCE | −1.9 % (0.6) at event **A** |
+| 9 | BRENTOIL | +0.47 % (55) | no | no | noise | yes (`oil`, same instrument; read 40) | same | REDUNDANT | −0.98 % (36) at event |
+| 10 | EUR | −0.05 % (61); 6 h (33) | no | no | noise | yes (`usd` = xyz:EUR inverted; read 49) | same | REDUNDANT | 6 h abnormal from 17:01 Sunday |
+| 11 | 10Y | −0.5 bp (39) | no | no | noise | yes (`yield10y` FRED daily; read 9 all week) | daily, stale over the weekend | HIGHER_RESOLUTION | +2.9 bp (69) at event |
+| 12 | Stablecoin total | −0.23 % daily (10) | no | mild contraction | small (−0.72 bn) | no | — | NEW_SOURCE | +0.74 % on the 27 Sep point (100) **A** |
+| 13 | USDT | +0.02 % (73) | no | no | noise | no | — | NEW_SOURCE | — |
+| 14 | USDC | **−1.27 % daily (0) A** | **yes** | yes (single day) | sizeable (−0.97 bn), one daily point | no | — | NEW_SOURCE (INCONCLUSIVE: one day) | −0.06 % (37) |
+| 15 | DEX volume | 7.46 bn (10); −26 % daily (7) | no | down | Saturday effect likely | no | — | NEW_SOURCE | — |
+| 16 | TVL | +0.33 % (50) | no | no | noise | no | — | NEW_SOURCE | — |
+| 17 | GDELT raw event volume | **batch 2,644 (99.7) A**; 24 h 59,333 (6.6) | **yes** (batch) | last 3 h at 1.45× the prior 21 h rate | volume artefact more than a signal | no (V1 `geopolitics` is BBC headline sentiment; ρ −0.07) | — | NEW_SOURCE | 24 h sum low through Sunday |
+| 18 | GDELT escalation | **batch 218 (99.9) A**; share 8.7 % (77) | **yes** (batch) | 1.40× | share normal: moves with the volume | no | — | REDUNDANT with #17 | — |
+| 19 | GDELT corridor escalation | **batch 93 (100) A**; 24 h 962 (6.6) | **yes** (batch) | 1.91× | batch share 3.5 % (94.8, inside band) | no | — | INCONCLUSIVE | — |
+| 20 | geo_shock | 60.2 (69), not elevated | no (12:00) / yes (09:00 grid point) | isolated 08:16/08:46 flags | earlier study: NOT SUPPORTIVE | no | — | INCONCLUSIVE | 48.1 at event |
+| 21 | GDELT DOC article volume | conflict 1,160 / monetary 189 / energy 136 / crypto 33 in 24 h | no 7-day baseline (DOC collected in event windows only) | conflict 1.45× (last 6 h vs prior 18 h) | cannot say | partly (`geopolitics`, `macrogeo`, `cryptonews` headline sentiment) | V1 = sentiment of a few feeds | INCONCLUSIVE | — |
+| 22 | DOC topic distribution | conflict 76 %, monetary 13 %, energy 9 %, crypto 2 % | no baseline | — | cannot say | partly (V1 `geopolitics` = 9) | — | INCONCLUSIVE | — |
+| 23 | Article concentration/acceleration | conflict articles over 290 domains (top domain 2 %); GDELT events last 3 h at 1.45× the prior 21 h (corridor 1.91×) | no baseline | modest acceleration | dispersed, no single story | no | — | INCONCLUSIVE | — |
+| 24 | V1 source readings | score 54 (49); geopolitics 9 (32); yield10y 9 (33); oil 40 (41); usd 49; macrogeo 50; nasdaq/sp500 62; funding / longshort / hypefunding 50 | no | no | V1 was bearish on geopolitics and yields, but that was its normal state that week | (is V1) | — | — | no V1 reading between 20:41 Sun and 04:23 Mon |
+
+## 3. V1 coverage matrix
+
+| Information | V1 source (weight × confidence) | How V1 sees it | Gap |
+|---|---|---|---|
+| Crypto leverage cost | `funding` HL BTC/ETH (15 × 1.0), `longshort` HL 5-asset (10 × 0.5), `hypefunding` (4 × 0.4) | funding level mapped to 0–100; the floor reads ≈ 50 | premium below the floor is invisible; no open interest, no liquidations |
+| Crypto leverage size (OI) | none | — | **missing** (Bybit/Binance geo-blocked; Hyperliquid has no free OI history) |
+| Liquidations | none | — | **missing** (no €0 source) |
+| Implied volatility | none | — | missing (DVOL now collected) |
+| Equities | `sp500`, `nasdaq` FRED daily (6 × 0.7 each), `ninemag` | daily % change | stale from Friday close to Monday close; HL 24/7 perps available |
+| Rates | `yield10y` FRED DGS10 daily (5 × 0.6) | daily change, inverted | same weekend staleness; read 9 for days |
+| Oil, gold, USD | `oil`, `gold`, `usd` = HL BRENTOIL, GOLD, xyz:EUR (6, 5, 8) | 24 h change | none in instrument; V1 has no silver or copper |
+| Stablecoin liquidity | none (`global` = total crypto market cap) | — | missing (DeFiLlama now collected) |
+| DeFi activity | `onchain` (BTC on-chain activity, 8 × 0.5) | different | DEX volume and TVL missing |
+| Geopolitics | `geopolitics` BBC World headline sentiment (10 × 0.6), `macrogeo` | sentiment of a few RSS headlines | no event-volume, escalation or article-flow measure; GDELT not in V1 |
+| Crypto news | `cryptonews`, `regulatory`, `sosovalue` | headline sentiment | DOC crypto volume is small and noisy |
+
+Not decomposable here: about 10 V1 sources (fng, cryptonews, regulatory, sosovalue, etfflows, onchain, global,
+ninemag, foufi, gold) are not in the 10-source V1 extract. Why V1 read 54 despite geopolitics 9 and yield10y 9
+therefore cannot be traced from these artifacts.
+
+## 4. 123-episode recurring-pattern analysis
+
+**Setup.**
+- **Boundaries:**
+  - prediction failures: the prediction time;
+  - runs and failure clusters: the first prediction of the run;
+  - large-move, volatility and regime events: event time − 24 h (disclosed approximation);
+  - RE-15: locked.
+- **Deduplication.** The 123 episodes collapse to **77 distinct boundary hours**, because 12 h and 24 h twins
+  and runs share a boundary. Those 77 hours fall on **33 calendar days**.
+- **Comparison groups.**
+  - the base rate at all 575 V1 observations, using the identical rule;
+  - V1 UP calls that failed vs V1 UP calls that were correct (V1 fails 307 of 575 resolved calls; there are
+    194 failed and 192 correct UP calls).
+- **Base rates.** Each dimension counts as abnormal if any of its measures is (2–11 measures per dimension).
+  Base rates are therefore 10–38 % per dimension, and 71 % for the 11 V1 readings.
+
+| Dimension | Base (575 obs, 41 days) | Unique episodes PRE (77) | V1 UP failed PRE | V1 UP correct PRE | V1 UP failed CONTEMP. (+24 h) | V1 UP correct CONTEMP. |
+|---|---|---|---|---|---|---|
+| BTC returns | 23 % | 18 % | 19 % | 30 % | 22 % | 19 % |
+| DVOL | 25 % | 17 % | **10 %** | 28 % | **27 %** | 12 % |
+| HL funding | 14 % | 16 % | 13 % | 15 % | 25 % | 17 % |
+| HL premium | 22 % | 20 % | 24 % | 31 % | **33 %** | 21 % |
+| SP500 / XYZ100 | 30 % | 34 % | 22 % | 29 % | 27 % | 23 % |
+| GOLD | 21 % | 17 % | 15 % | 21 % | **24 %** | 10 % |
+| SILVER | 19 % | 18 % | 19 % | 16 % | **30 %** | 10 % |
+| COPPER | 20 % | 18 % | 20 % | 17 % | **30 %** | 10 % |
+| BRENTOIL | 27 % | 20 % | 24 % | 25 % | 19 % | 28 % |
+| EUR | 21 % | 15 % | 15 % | 18 % | 12 % | 20 % |
+| 10Y | 25 % | 24 % | 22 % | 31 % | 27 % | 16 % |
+| Stablecoin total | 17 % | **30 %** (5 days) | 17 % | 19 % | **26 %** | 6 % |
+| USDT | 9 % | 13 % | 13 % | 12 % | 14 % | 6 % |
+| USDC | 20 % | **30 %** | 24 % | 15 % | 20 % | 18 % |
+| DEX volume | 22 % | 27 % | 20 % | 27 % | 11 % | 29 % |
+| TVL | 10 % | 10 % | 2 % | 17 % | 8 % | 4 % |
+| GDELT raw volume | 27 % | 22 % | **33 %** | 22 % | 31 % | 27 % |
+| GDELT escalation | 38 % | 39 % | 39 % | 33 % | 44 % | 33 % |
+| GDELT corridor | 30 % | 18 % | 27 % | 24 % | 37 % | 27 % |
+| geo_shock | 10 % | 9 % | 8 % | 13 % | 10 % | 6 % |
+| V1 readings | 71 % | 61 % | 60 % | 71 % | 73 % | 70 % |
+
+**Direction and day counts behind the larger differences.** Abnormal is two-sided, so the tail matters:
+
+| Measure (tail) | Before failed UP calls | Before correct UP calls | Read with |
+|---|---|---|---|
+| GDELT 24 h event volume, high tail | 43 obs on 7 days | 1 obs on 1 day | 27–28 Aug have only ~3 days of GDELT history; the other days are Tue/Wed (GDELT weekday cycle) |
+| USDC daily change, low tail | 25 obs on 5 days (15 of them on 27 Sep) | 5 obs on 3 days | very few days |
+| DVOL level, low tail | 7 obs on 1 day | 25 obs on 8 days | low implied volatility came with *correct* UP calls |
+| Stablecoin total, high tail | 26 obs on 3 days | 31 obs on 3 days | no difference |
+
+**Recurring PRE-EVENT combinations (unique episodes).** The most frequent pairs are near their base rates and
+come from few days:
+
+| Pair | Episodes (of 77) | Days | Base rate |
+|---|---|---|---|
+| SP500/XYZ100 + V1 readings | 17 (22 %) | 12 | 25 % |
+| Stablecoin total + USDC | 14 (18 %) | 5 | 12 % |
+| GDELT raw + escalation | 13 (17 %) | 7 | 21 % |
+| USDC + GDELT escalation | 11 (14 %) | 5 | 8 % |
+| GOLD + SILVER | 11 (14 %) | 8 | 13 % |
+
+No triple combination recurs beyond a handful of days.
+
+**Weekend gap check.** Event #15's shape (Sunday boundary, Monday-open repricing) does not recur as a V1
+weakness. V1 UP calls whose 24 h window crosses the Sunday 22:00 UTC reopen failed 44 % of the time (31 of 71,
+7 days), against 52 % for other UP calls.
+
+**Answers.**
+
+**A. What repeatedly appears before V1 failures?** Nothing robust. The only notable PRE-EVENT differences:
+- **High 24 h GDELT event volume** before failed UP calls: 7 days vs 1. It is confounded by the GDELT weekday
+  cycle and by the short early baseline.
+- **USDC supply contraction:** 5 days vs 3, dominated by 27 Sep.
+
+Both rest on very few independent days. A further pattern runs the other way round: calls made in *calm*
+conditions (low DVOL, quiet BTC) fail at least as often as others. Failures look like shocks that arrive after
+the call, not stress that was visible before it.
+
+**B. Which dimensions are genuinely missing from V1?**
+- venue open interest and liquidations (not obtainable here);
+- implied volatility (DVOL);
+- stablecoin liquidity (USDC/USDT/total);
+- DEX volume and TVL;
+- silver and copper;
+- event-volume news flow (GDELT events and DOC);
+- the Hyperliquid premium below the funding floor.
+
+**C. Which apparent signals are merely contemporaneous or post-event?**
+- the metals sell-off (GOLD/SILVER/COPPER);
+- funding leaving the floor and the premium collapse;
+- the DVOL rise;
+- the XYZ100 drop;
+- the 27 Sep stablecoin jump.
+
+All of these appear at the outcome time of failed UP calls (24–33 % against 10–21 % for correct ones), and none
+appears before.
+
+**D. Which existing V1 sources already capture the information?**
+- funding/longshort (same Hyperliquid funding);
+- oil, gold, usd (same Hyperliquid instruments);
+- sp500, nasdaq, yield10y (same markets, daily and stale over the weekend);
+- geopolitics (headline sentiment). It already read strongly bearish (6–9) from 26 Sep 08:48, about
+  27 hours before the boundary.
+
+**E. Which dimensions are redundant?**
+- BTC 24 h returns vs V1 `global`;
+- GDELT escalation vs GDELT raw volume (the escalation share stays normal while volume moves);
+- HL funding vs V1 funding;
+- BRENTOIL/GOLD/EUR vs V1 oil/gold/usd.
+
+**F. Which mechanisms deserve investigation?** See section 6.
+
+## 5. Missing-dimension ranking (research priority, no weights)
+
+1. **Crypto leverage positioning: venue open interest and liquidations (Bybit/Binance, Xoomar).**
+   - *Potentially decisive and unavailable.* Event #15's contemporaneous footprint is a leverage unwind:
+     Hyperliquid funding left its floor at 02:01 and the premium fell to the 0.6th percentile.
+   - Only open interest could show whether leverage was building *before* 12:01. Hyperliquid's funding floor
+     hides that, and V1 has no open-interest source.
+   - Every other crypto-structure dimension we hold was quiet. This is the one pre-event dimension whose absence
+     could change the Event #15 conclusion.
+2. **Cross-asset breadth at higher resolution (HL SP500/XYZ100/10Y/metals 24/7).** It carries the actual shock
+   (contemporaneously) and fixes V1's weekend staleness. It showed nothing pre-event at Event #15, so its value
+   is speed, not foresight. Class: HIGHER_RESOLUTION / NEW_SOURCE (silver, copper).
+3. **Stablecoin liquidity (USDC, total).** It is the only crypto-native PRE-EVENT anomaly at Event #15, and it
+   appears weakly before failed UP calls. It is daily and rests on 5 days. NEW_SOURCE, INCONCLUSIVE.
+4. **News-flow volume (GDELT events 24 h volume; DOC).** Weakly over-represented before failed UP calls, with
+   confounds (weekday cycle, early baseline). DOC has no baseline. NEW_SOURCE, INCONCLUSIVE.
+5. **Implied volatility (DVOL).** Not a pre-event warning (if anything, low DVOL accompanied *correct* calls).
+   It rises contemporaneously. NEW_SOURCE.
+6. **DEX volume and TVL.** Nothing beyond day-of-week effects. NEW_SOURCE with no support.
+
+## 6. Candidate signal mechanisms (descriptive names; none validated; no weights)
+
+| Mechanism | What it would describe | Status of evidence |
+|---|---|---|
+| **leverage build-up and unwind** | open interest rising while funding is pinned at the floor, then unwinding | contemporaneous footprint at Event #15 (funding/premium); pre-event data **missing** (open interest geo-blocked) |
+| **cross-asset risk-off breadth** | simultaneous metals, equity and crypto-premium sell-off | contemporaneous at Event #15 and at +24 h of failed UP calls; **not pre-event** |
+| **market-closure information gap** | calls issued while TradFi is closed and V1's FRED sources are stale | Event #15 fits; no recurrence (44 % vs 52 % failure) |
+| **stablecoin liquidity contraction** | USDC/total supply falling before risk-off | Event #15 pre-event anomaly; 5 days vs 3 across V1 failures; daily data |
+| **geopolitical information acceleration** | a rising 24 h event and article volume | the Event #15 batch spike is a volume artefact; 7 days vs 1 for failed UP calls, confounded |
+| **calm-regime complacency** | low implied volatility and quiet markets at call time, followed by an unannounced shock | low DVOL sat with correct calls; the failed-call DVOL median is higher; descriptive only |
+
+## 7. Data quality and limitations
+
+- **Sample size.** n = 1 for Event #15. The 123 episodes are 77 distinct boundary hours on 33 days. The 575 V1
+  observations cover 41 days, with overlapping 24 h outcomes. Effective independent evidence is roughly
+  30–40 days, so every difference above is within what chance and clustering can produce.
+- **Multiple comparisons.** 21 dimensions, 2–11 measures each, and several groups. Some differences of
+  10–20 points are expected by chance alone.
+- **Abnormal rule.** It is two-sided and flags about 10 % of times per measure by construction. Dimensions with
+  more measures flag more often. Base rates are reported for that reason.
+- **Missing dimensions.** Bybit/Binance open interest and funding: no data (provider geo-restriction).
+  Liquidations: no source.
+- **GDELT DOC.**
+  - It was collected only in the 16 event windows, so it has no 7-day baseline and cannot be assessed at
+    prediction-failure boundaries outside those windows.
+  - For Event #15 only 24 of the 96 15-minute buckets in the 24 h before the boundary exist (the provider
+    returned nothing before 27 Sep 00:15).
+  - The article list is capped at 250 per call: conflict articles stop at 06:45.
+- **GDELT events.** Starts 24 Aug, so episodes before about 31 Aug have short baselines.
+- **Day-of-week effects.** GDELT volume and DEX volume both cycle weekly; the trailing 7-day window mixes
+  weekdays and weekends.
+- **DeFiLlama.** Daily points are taken as available at day start + 24 h (conservative). One daily point carries
+  a whole day.
+- **V1.** The extract has 10 of about 20 V1 sources, so the score cannot be decomposed. V1 has no observation
+  from 20:41 Sunday to 04:23 Monday.
+- **Boundaries.** For large-move, volatility and regime events the boundary is event time − 24 h (an
+  approximation). The episodes are knn-core-v1 ("V2") failures; V1's own calls are analysed separately
+  (UP failed vs UP correct).
+
+## 8. Recommended next experiment
+
+**Recommendation: SOURCE GAP STILL MATERIAL.**
+
+- **Why not signal design.** No collected dimension was abnormal before Event #15 in a way linked to the
+  outcome. Across V1 failures, every recurring pre-event pattern rests on too few days. Designing a signal from
+  this would be fitting noise.
+- **Why not only more raw analysis.** The analysis points at one mechanism, a leverage build-up and unwind. Its
+  pre-event half is exactly the data we cannot see.
+
+**Is getting Bybit/Binance from a permitted non-US runner worth doing before signal design? Yes, and first.**
+- It costs €0.
+- The collectors already exist and are tested; only the run location changes.
+- It is time-critical: Binance keeps only 30 days of open interest, so Event #15 leaves its window on about
+  **27 Oct 2026**. Bybit open-interest depth is unknown until queried.
+- It is the only dimension that can test the leverage build-up half of the mechanism and second-venue funding
+  (Hyperliquid's floor hides funding variation).
+
+**Experiment, unchanged rules.**
+1. Run the existing `risk_regime_reconstruction.py --live` from a runner in a permitted location for Bybit and
+   Binance OI and funding. No code change; the source of record stays the same.
+2. Re-run `risk_regime_event_research.py` unchanged and read:
+   - Was BTC open interest abnormal (high, or rising) before 27 Sep 12:01 while funding sat at the floor?
+   - Did other-venue funding differ from Hyperliquid's floor?
+   - Do these appear before failed V1 UP calls more than before correct ones, counted in distinct days?
+3. In parallel, start a forward point-in-time collection of open interest and DOC so baselines exist for the
+   next events. This needs a human-approved collection plan; it is not started here.
+
+If open interest shows nothing before Event #15 either, the honest conclusion is that this failure was not
+foreseeable from €0 data. The useful contribution of the new sources would then be speed (24/7 cross-asset,
+premium), not foresight.

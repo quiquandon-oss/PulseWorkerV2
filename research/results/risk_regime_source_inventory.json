@@ -16,16 +16,836 @@
   "available_at",
   "raw"
  ],
- "generated_at": "2026-10-06T19:05:58.090000+00:00",
+ "generated_at": "2026-10-08T16:40:10.841000+00:00",
  "http": {
   "gdelt_doc": {
-   "blocked": 1
+   "cached": 79,
+   "http_200": 49,
+   "http_429": 165,
+   "network_error": 1
   },
   "http": {
-   "blocked": 9
+   "geo_blocked": 4,
+   "http_200": 16,
+   "http_403": 2,
+   "http_451": 2
   }
  },
  "series_quality": {
+  "defillama_dex|ALL_DEXS|dex_volume_usd": {
+   "conflicting_duplicates": 0,
+   "coverage_basis": "requested window",
+   "coverage_pct": 100.0,
+   "coverage_within_own_range_pct": 100.0,
+   "duplicates_dropped": 0,
+   "expected": 49,
+   "first": "2026-08-19T00:00:00+00:00",
+   "gaps": 0,
+   "historical_depth_days": 48.0,
+   "historical_or_live": [
+    "historical"
+   ],
+   "largest_gaps": [],
+   "last": "2026-10-06T00:00:00+00:00",
+   "median_spacing_min": 1440.0,
+   "missing_pct": 0.0,
+   "no_lookahead": "available_at rule applied per observation",
+   "observations": 49,
+   "resolution": "1d",
+   "timestamp_anomalies": {}
+  },
+  "defillama_stablecoins|ALL_STABLECOINS|circulating_usd": {
+   "conflicting_duplicates": 0,
+   "coverage_basis": "requested window",
+   "coverage_pct": 100.0,
+   "coverage_within_own_range_pct": 100.0,
+   "duplicates_dropped": 0,
+   "expected": 49,
+   "first": "2026-08-19T00:00:00+00:00",
+   "gaps": 0,
+   "historical_depth_days": 48.0,
+   "historical_or_live": [
+    "historical"
+   ],
+   "largest_gaps": [],
+   "last": "2026-10-06T00:00:00+00:00",
+   "median_spacing_min": 1440.0,
+   "missing_pct": 0.0,
+   "no_lookahead": "available_at rule applied per observation",
+   "observations": 49,
+   "resolution": "1d",
+   "timestamp_anomalies": {}
+  },
+  "defillama_stablecoins|USDC|circulating_usd": {
+   "conflicting_duplicates": 0,
+   "coverage_basis": "requested window",
+   "coverage_pct": 100.0,
+   "coverage_within_own_range_pct": 100.0,
+   "duplicates_dropped": 0,
+   "expected": 49,
+   "first": "2026-08-19T00:00:00+00:00",
+   "gaps": 0,
+   "historical_depth_days": 48.0,
+   "historical_or_live": [
+    "historical"
+   ],
+   "largest_gaps": [],
+   "last": "2026-10-06T00:00:00+00:00",
+   "median_spacing_min": 1440.0,
+   "missing_pct": 0.0,
+   "no_lookahead": "available_at rule applied per observation",
+   "observations": 49,
+   "resolution": "1d",
+   "timestamp_anomalies": {}
+  },
+  "defillama_stablecoins|USDT|circulating_usd": {
+   "conflicting_duplicates": 0,
+   "coverage_basis": "requested window",
+   "coverage_pct": 100.0,
+   "coverage_within_own_range_pct": 100.0,
+   "duplicates_dropped": 0,
+   "expected": 49,
+   "first": "2026-08-19T00:00:00+00:00",
+   "gaps": 0,
+   "historical_depth_days": 48.0,
+   "historical_or_live": [
+    "historical"
+   ],
+   "largest_gaps": [],
+   "last": "2026-10-06T00:00:00+00:00",
+   "median_spacing_min": 1440.0,
+   "missing_pct": 0.0,
+   "no_lookahead": "available_at rule applied per observation",
+   "observations": 49,
+   "resolution": "1d",
+   "timestamp_anomalies": {}
+  },
+  "defillama_stablecoins|chain:Arbitrum|circulating_usd": {
+   "conflicting_duplicates": 0,
+   "coverage_basis": "requested window",
+   "coverage_pct": 100.0,
+   "coverage_within_own_range_pct": 100.0,
+   "duplicates_dropped": 0,
+   "expected": 49,
+   "first": "2026-08-19T00:00:00+00:00",
+   "gaps": 0,
+   "historical_depth_days": 48.0,
+   "historical_or_live": [
+    "historical"
+   ],
+   "largest_gaps": [],
+   "last": "2026-10-06T00:00:00+00:00",
+   "median_spacing_min": 1440.0,
+   "missing_pct": 0.0,
+   "no_lookahead": "available_at rule applied per observation",
+   "observations": 49,
+   "resolution": "1d",
+   "timestamp_anomalies": {}
+  },
+  "defillama_stablecoins|chain:BSC|circulating_usd": {
+   "conflicting_duplicates": 0,
+   "coverage_basis": "requested window",
+   "coverage_pct": 100.0,
+   "coverage_within_own_range_pct": 100.0,
+   "duplicates_dropped": 0,
+   "expected": 49,
+   "first": "2026-08-19T00:00:00+00:00",
+   "gaps": 0,
+   "historical_depth_days": 48.0,
+   "historical_or_live": [
+    "historical"
+   ],
+   "largest_gaps": [],
+   "last": "2026-10-06T00:00:00+00:00",
+   "median_spacing_min": 1440.0,
+   "missing_pct": 0.0,
+   "no_lookahead": "available_at rule applied per observation",
+   "observations": 49,
+   "resolution": "1d",
+   "timestamp_anomalies": {}
+  },
+  "defillama_stablecoins|chain:Ethereum|circulating_usd": {
+   "conflicting_duplicates": 0,
+   "coverage_basis": "requested window",
+   "coverage_pct": 100.0,
+   "coverage_within_own_range_pct": 100.0,
+   "duplicates_dropped": 0,
+   "expected": 49,
+   "first": "2026-08-19T00:00:00+00:00",
+   "gaps": 0,
+   "historical_depth_days": 48.0,
+   "historical_or_live": [
+    "historical"
+   ],
+   "largest_gaps": [],
+   "last": "2026-10-06T00:00:00+00:00",
+   "median_spacing_min": 1440.0,
+   "missing_pct": 0.0,
+   "no_lookahead": "available_at rule applied per observation",
+   "observations": 49,
+   "resolution": "1d",
+   "timestamp_anomalies": {}
+  },
+  "defillama_stablecoins|chain:Solana|circulating_usd": {
+   "conflicting_duplicates": 0,
+   "coverage_basis": "requested window",
+   "coverage_pct": 100.0,
+   "coverage_within_own_range_pct": 100.0,
+   "duplicates_dropped": 0,
+   "expected": 49,
+   "first": "2026-08-19T00:00:00+00:00",
+   "gaps": 0,
+   "historical_depth_days": 48.0,
+   "historical_or_live": [
+    "historical"
+   ],
+   "largest_gaps": [],
+   "last": "2026-10-06T00:00:00+00:00",
+   "median_spacing_min": 1440.0,
+   "missing_pct": 0.0,
+   "no_lookahead": "available_at rule applied per observation",
+   "observations": 49,
+   "resolution": "1d",
+   "timestamp_anomalies": {}
+  },
+  "defillama_stablecoins|chain:Tron|circulating_usd": {
+   "conflicting_duplicates": 0,
+   "coverage_basis": "requested window",
+   "coverage_pct": 100.0,
+   "coverage_within_own_range_pct": 100.0,
+   "duplicates_dropped": 0,
+   "expected": 49,
+   "first": "2026-08-19T00:00:00+00:00",
+   "gaps": 0,
+   "historical_depth_days": 48.0,
+   "historical_or_live": [
+    "historical"
+   ],
+   "largest_gaps": [],
+   "last": "2026-10-06T00:00:00+00:00",
+   "median_spacing_min": 1440.0,
+   "missing_pct": 0.0,
+   "no_lookahead": "available_at rule applied per observation",
+   "observations": 49,
+   "resolution": "1d",
+   "timestamp_anomalies": {}
+  },
+  "defillama_tvl|ALL_CHAINS|tvl_usd": {
+   "conflicting_duplicates": 0,
+   "coverage_basis": "requested window",
+   "coverage_pct": 100.0,
+   "coverage_within_own_range_pct": 100.0,
+   "duplicates_dropped": 0,
+   "expected": 49,
+   "first": "2026-08-19T00:00:00+00:00",
+   "gaps": 0,
+   "historical_depth_days": 48.0,
+   "historical_or_live": [
+    "historical"
+   ],
+   "largest_gaps": [],
+   "last": "2026-10-06T00:00:00+00:00",
+   "median_spacing_min": 1440.0,
+   "missing_pct": 0.0,
+   "no_lookahead": "available_at rule applied per observation",
+   "observations": 49,
+   "resolution": "1d",
+   "timestamp_anomalies": {}
+  },
+  "defillama_tvl|chain:Ethereum|tvl_usd": {
+   "conflicting_duplicates": 0,
+   "coverage_basis": "requested window",
+   "coverage_pct": 100.0,
+   "coverage_within_own_range_pct": 100.0,
+   "duplicates_dropped": 0,
+   "expected": 49,
+   "first": "2026-08-19T00:00:00+00:00",
+   "gaps": 0,
+   "historical_depth_days": 48.0,
+   "historical_or_live": [
+    "historical"
+   ],
+   "largest_gaps": [],
+   "last": "2026-10-06T00:00:00+00:00",
+   "median_spacing_min": 1440.0,
+   "missing_pct": 0.0,
+   "no_lookahead": "available_at rule applied per observation",
+   "observations": 49,
+   "resolution": "1d",
+   "timestamp_anomalies": {}
+  },
+  "defillama_tvl|chain:Solana|tvl_usd": {
+   "conflicting_duplicates": 0,
+   "coverage_basis": "requested window",
+   "coverage_pct": 100.0,
+   "coverage_within_own_range_pct": 100.0,
+   "duplicates_dropped": 0,
+   "expected": 49,
+   "first": "2026-08-19T00:00:00+00:00",
+   "gaps": 0,
+   "historical_depth_days": 48.0,
+   "historical_or_live": [
+    "historical"
+   ],
+   "largest_gaps": [],
+   "last": "2026-10-06T00:00:00+00:00",
+   "median_spacing_min": 1440.0,
+   "missing_pct": 0.0,
+   "no_lookahead": "available_at rule applied per observation",
+   "observations": 49,
+   "resolution": "1d",
+   "timestamp_anomalies": {}
+  },
+  "defillama_tvl|chain:Tron|tvl_usd": {
+   "conflicting_duplicates": 0,
+   "coverage_basis": "requested window",
+   "coverage_pct": 100.0,
+   "coverage_within_own_range_pct": 100.0,
+   "duplicates_dropped": 0,
+   "expected": 49,
+   "first": "2026-08-19T00:00:00+00:00",
+   "gaps": 0,
+   "historical_depth_days": 48.0,
+   "historical_or_live": [
+    "historical"
+   ],
+   "largest_gaps": [],
+   "last": "2026-10-06T00:00:00+00:00",
+   "median_spacing_min": 1440.0,
+   "missing_pct": 0.0,
+   "no_lookahead": "available_at rule applied per observation",
+   "observations": 49,
+   "resolution": "1d",
+   "timestamp_anomalies": {}
+  },
+  "deribit_dvol|BTC DVOL|dvol_close": {
+   "conflicting_duplicates": 0,
+   "coverage_basis": "requested window",
+   "coverage_pct": 99.91,
+   "coverage_within_own_range_pct": 100.0,
+   "duplicates_dropped": 0,
+   "expected": 1175,
+   "first": "2026-08-18T10:00:00+00:00",
+   "gaps": 0,
+   "historical_depth_days": 48.88,
+   "historical_or_live": [
+    "historical"
+   ],
+   "largest_gaps": [],
+   "last": "2026-10-06T07:00:00+00:00",
+   "median_spacing_min": 60.0,
+   "missing_pct": 0.09,
+   "no_lookahead": "available_at rule applied per observation",
+   "observations": 1174,
+   "resolution": "1h",
+   "timestamp_anomalies": {}
+  },
+  "deribit_dvol|BTC DVOL|dvol_high": {
+   "conflicting_duplicates": 0,
+   "coverage_basis": "requested window",
+   "coverage_pct": 99.91,
+   "coverage_within_own_range_pct": 100.0,
+   "duplicates_dropped": 0,
+   "expected": 1175,
+   "first": "2026-08-18T10:00:00+00:00",
+   "gaps": 0,
+   "historical_depth_days": 48.88,
+   "historical_or_live": [
+    "historical"
+   ],
+   "largest_gaps": [],
+   "last": "2026-10-06T07:00:00+00:00",
+   "median_spacing_min": 60.0,
+   "missing_pct": 0.09,
+   "no_lookahead": "available_at rule applied per observation",
+   "observations": 1174,
+   "resolution": "1h",
+   "timestamp_anomalies": {}
+  },
+  "deribit_dvol|BTC DVOL|dvol_low": {
+   "conflicting_duplicates": 0,
+   "coverage_basis": "requested window",
+   "coverage_pct": 99.91,
+   "coverage_within_own_range_pct": 100.0,
+   "duplicates_dropped": 0,
+   "expected": 1175,
+   "first": "2026-08-18T10:00:00+00:00",
+   "gaps": 0,
+   "historical_depth_days": 48.88,
+   "historical_or_live": [
+    "historical"
+   ],
+   "largest_gaps": [],
+   "last": "2026-10-06T07:00:00+00:00",
+   "median_spacing_min": 60.0,
+   "missing_pct": 0.09,
+   "no_lookahead": "available_at rule applied per observation",
+   "observations": 1174,
+   "resolution": "1h",
+   "timestamp_anomalies": {}
+  },
+  "deribit_dvol|BTC DVOL|dvol_open": {
+   "conflicting_duplicates": 0,
+   "coverage_basis": "requested window",
+   "coverage_pct": 99.91,
+   "coverage_within_own_range_pct": 100.0,
+   "duplicates_dropped": 0,
+   "expected": 1175,
+   "first": "2026-08-18T10:00:00+00:00",
+   "gaps": 0,
+   "historical_depth_days": 48.88,
+   "historical_or_live": [
+    "historical"
+   ],
+   "largest_gaps": [],
+   "last": "2026-10-06T07:00:00+00:00",
+   "median_spacing_min": 60.0,
+   "missing_pct": 0.09,
+   "no_lookahead": "available_at rule applied per observation",
+   "observations": 1174,
+   "resolution": "1h",
+   "timestamp_anomalies": {}
+  },
+  "deribit_options_snapshot|BTC options|max_pain_10OCT26": {
+   "coverage_status": "NO_DATA",
+   "observations": 0
+  },
+  "deribit_options_snapshot|BTC options|max_pain_11OCT26": {
+   "coverage_status": "NO_DATA",
+   "observations": 0
+  },
+  "deribit_options_snapshot|BTC options|max_pain_12OCT26": {
+   "coverage_status": "NO_DATA",
+   "observations": 0
+  },
+  "deribit_options_snapshot|BTC options|max_pain_16OCT26": {
+   "coverage_status": "NO_DATA",
+   "observations": 0
+  },
+  "deribit_options_snapshot|BTC options|max_pain_23OCT26": {
+   "coverage_status": "NO_DATA",
+   "observations": 0
+  },
+  "deribit_options_snapshot|BTC options|max_pain_24SEP27": {
+   "coverage_status": "NO_DATA",
+   "observations": 0
+  },
+  "deribit_options_snapshot|BTC options|max_pain_25DEC26": {
+   "coverage_status": "NO_DATA",
+   "observations": 0
+  },
+  "deribit_options_snapshot|BTC options|max_pain_25JUN27": {
+   "coverage_status": "NO_DATA",
+   "observations": 0
+  },
+  "deribit_options_snapshot|BTC options|max_pain_26MAR27": {
+   "coverage_status": "NO_DATA",
+   "observations": 0
+  },
+  "deribit_options_snapshot|BTC options|max_pain_27NOV26": {
+   "coverage_status": "NO_DATA",
+   "observations": 0
+  },
+  "deribit_options_snapshot|BTC options|max_pain_30OCT26": {
+   "coverage_status": "NO_DATA",
+   "observations": 0
+  },
+  "deribit_options_snapshot|BTC options|max_pain_9OCT26": {
+   "coverage_status": "NO_DATA",
+   "observations": 0
+  },
+  "deribit_options_snapshot|BTC options|options_open_interest_total": {
+   "coverage_status": "NO_DATA",
+   "observations": 0
+  },
+  "deribit_options_snapshot|BTC options|put_call_oi_ratio": {
+   "coverage_status": "NO_DATA",
+   "observations": 0
+  },
+  "gdelt_doc|topic:crypto|article_count": {
+   "conflicting_duplicates": 0,
+   "coverage_basis": "requested window",
+   "coverage_pct": 15.99,
+   "coverage_within_own_range_pct": 19.03,
+   "duplicates_dropped": 1090,
+   "expected": 4698,
+   "first": "2026-08-19T00:15:00+00:00",
+   "gaps": 135,
+   "historical_depth_days": 41.1,
+   "historical_or_live": [
+    "historical"
+   ],
+   "largest_gaps": [
+    {
+     "from": "2026-08-22T23:15:00+00:00",
+     "missing_intervals": 2690,
+     "to": "2026-09-20T00:00:00+00:00"
+    },
+    {
+     "from": "2026-09-25T09:45:00+00:00",
+     "missing_intervals": 153,
+     "to": "2026-09-27T00:15:00+00:00"
+    },
+    {
+     "from": "2026-09-20T00:00:00+00:00",
+     "missing_intervals": 97,
+     "to": "2026-09-21T00:30:00+00:00"
+    },
+    {
+     "from": "2026-09-22T11:00:00+00:00",
+     "missing_intervals": 11,
+     "to": "2026-09-22T14:00:00+00:00"
+    },
+    {
+     "from": "2026-09-27T22:30:00+00:00",
+     "missing_intervals": 9,
+     "to": "2026-09-28T01:00:00+00:00"
+    }
+   ],
+   "last": "2026-09-29T02:45:00+00:00",
+   "median_spacing_min": 15.0,
+   "missing_pct": 84.01,
+   "no_lookahead": "available_at rule applied per observation",
+   "observations": 751,
+   "resolution": "15m",
+   "timestamp_anomalies": {}
+  },
+  "gdelt_doc|topic:crypto|monitored_articles_total": {
+   "conflicting_duplicates": 0,
+   "coverage_basis": "requested window",
+   "coverage_pct": 15.99,
+   "coverage_within_own_range_pct": 19.03,
+   "duplicates_dropped": 1090,
+   "expected": 4698,
+   "first": "2026-08-19T00:15:00+00:00",
+   "gaps": 135,
+   "historical_depth_days": 41.1,
+   "historical_or_live": [
+    "historical"
+   ],
+   "largest_gaps": [
+    {
+     "from": "2026-08-22T23:15:00+00:00",
+     "missing_intervals": 2690,
+     "to": "2026-09-20T00:00:00+00:00"
+    },
+    {
+     "from": "2026-09-25T09:45:00+00:00",
+     "missing_intervals": 153,
+     "to": "2026-09-27T00:15:00+00:00"
+    },
+    {
+     "from": "2026-09-20T00:00:00+00:00",
+     "missing_intervals": 97,
+     "to": "2026-09-21T00:30:00+00:00"
+    },
+    {
+     "from": "2026-09-22T11:00:00+00:00",
+     "missing_intervals": 11,
+     "to": "2026-09-22T14:00:00+00:00"
+    },
+    {
+     "from": "2026-09-27T22:30:00+00:00",
+     "missing_intervals": 9,
+     "to": "2026-09-28T01:00:00+00:00"
+    }
+   ],
+   "last": "2026-09-29T02:45:00+00:00",
+   "median_spacing_min": 15.0,
+   "missing_pct": 84.01,
+   "no_lookahead": "available_at rule applied per observation",
+   "observations": 751,
+   "resolution": "15m",
+   "timestamp_anomalies": {}
+  },
+  "gdelt_doc|topic:energy|article_count": {
+   "conflicting_duplicates": 0,
+   "coverage_basis": "requested window",
+   "coverage_pct": 15.99,
+   "coverage_within_own_range_pct": 19.03,
+   "duplicates_dropped": 1090,
+   "expected": 4698,
+   "first": "2026-08-19T00:15:00+00:00",
+   "gaps": 135,
+   "historical_depth_days": 41.1,
+   "historical_or_live": [
+    "historical"
+   ],
+   "largest_gaps": [
+    {
+     "from": "2026-08-22T23:15:00+00:00",
+     "missing_intervals": 2690,
+     "to": "2026-09-20T00:00:00+00:00"
+    },
+    {
+     "from": "2026-09-25T09:45:00+00:00",
+     "missing_intervals": 153,
+     "to": "2026-09-27T00:15:00+00:00"
+    },
+    {
+     "from": "2026-09-20T00:00:00+00:00",
+     "missing_intervals": 97,
+     "to": "2026-09-21T00:30:00+00:00"
+    },
+    {
+     "from": "2026-09-22T11:00:00+00:00",
+     "missing_intervals": 11,
+     "to": "2026-09-22T14:00:00+00:00"
+    },
+    {
+     "from": "2026-09-27T22:30:00+00:00",
+     "missing_intervals": 9,
+     "to": "2026-09-28T01:00:00+00:00"
+    }
+   ],
+   "last": "2026-09-29T02:45:00+00:00",
+   "median_spacing_min": 15.0,
+   "missing_pct": 84.01,
+   "no_lookahead": "available_at rule applied per observation",
+   "observations": 751,
+   "resolution": "15m",
+   "timestamp_anomalies": {}
+  },
+  "gdelt_doc|topic:energy|monitored_articles_total": {
+   "conflicting_duplicates": 0,
+   "coverage_basis": "requested window",
+   "coverage_pct": 15.99,
+   "coverage_within_own_range_pct": 19.03,
+   "duplicates_dropped": 1090,
+   "expected": 4698,
+   "first": "2026-08-19T00:15:00+00:00",
+   "gaps": 135,
+   "historical_depth_days": 41.1,
+   "historical_or_live": [
+    "historical"
+   ],
+   "largest_gaps": [
+    {
+     "from": "2026-08-22T23:15:00+00:00",
+     "missing_intervals": 2690,
+     "to": "2026-09-20T00:00:00+00:00"
+    },
+    {
+     "from": "2026-09-25T09:45:00+00:00",
+     "missing_intervals": 153,
+     "to": "2026-09-27T00:15:00+00:00"
+    },
+    {
+     "from": "2026-09-20T00:00:00+00:00",
+     "missing_intervals": 97,
+     "to": "2026-09-21T00:30:00+00:00"
+    },
+    {
+     "from": "2026-09-22T11:00:00+00:00",
+     "missing_intervals": 11,
+     "to": "2026-09-22T14:00:00+00:00"
+    },
+    {
+     "from": "2026-09-27T22:30:00+00:00",
+     "missing_intervals": 9,
+     "to": "2026-09-28T01:00:00+00:00"
+    }
+   ],
+   "last": "2026-09-29T02:45:00+00:00",
+   "median_spacing_min": 15.0,
+   "missing_pct": 84.01,
+   "no_lookahead": "available_at rule applied per observation",
+   "observations": 751,
+   "resolution": "15m",
+   "timestamp_anomalies": {}
+  },
+  "gdelt_doc|topic:geopolitical_conflict|article_count": {
+   "conflicting_duplicates": 0,
+   "coverage_basis": "requested window",
+   "coverage_pct": 15.99,
+   "coverage_within_own_range_pct": 19.03,
+   "duplicates_dropped": 1090,
+   "expected": 4698,
+   "first": "2026-08-19T00:15:00+00:00",
+   "gaps": 135,
+   "historical_depth_days": 41.1,
+   "historical_or_live": [
+    "historical"
+   ],
+   "largest_gaps": [
+    {
+     "from": "2026-08-22T23:15:00+00:00",
+     "missing_intervals": 2690,
+     "to": "2026-09-20T00:00:00+00:00"
+    },
+    {
+     "from": "2026-09-25T09:45:00+00:00",
+     "missing_intervals": 153,
+     "to": "2026-09-27T00:15:00+00:00"
+    },
+    {
+     "from": "2026-09-20T00:00:00+00:00",
+     "missing_intervals": 97,
+     "to": "2026-09-21T00:30:00+00:00"
+    },
+    {
+     "from": "2026-09-22T11:00:00+00:00",
+     "missing_intervals": 11,
+     "to": "2026-09-22T14:00:00+00:00"
+    },
+    {
+     "from": "2026-09-27T22:30:00+00:00",
+     "missing_intervals": 9,
+     "to": "2026-09-28T01:00:00+00:00"
+    }
+   ],
+   "last": "2026-09-29T02:45:00+00:00",
+   "median_spacing_min": 15.0,
+   "missing_pct": 84.01,
+   "no_lookahead": "available_at rule applied per observation",
+   "observations": 751,
+   "resolution": "15m",
+   "timestamp_anomalies": {}
+  },
+  "gdelt_doc|topic:geopolitical_conflict|monitored_articles_total": {
+   "conflicting_duplicates": 0,
+   "coverage_basis": "requested window",
+   "coverage_pct": 15.99,
+   "coverage_within_own_range_pct": 19.03,
+   "duplicates_dropped": 1090,
+   "expected": 4698,
+   "first": "2026-08-19T00:15:00+00:00",
+   "gaps": 135,
+   "historical_depth_days": 41.1,
+   "historical_or_live": [
+    "historical"
+   ],
+   "largest_gaps": [
+    {
+     "from": "2026-08-22T23:15:00+00:00",
+     "missing_intervals": 2690,
+     "to": "2026-09-20T00:00:00+00:00"
+    },
+    {
+     "from": "2026-09-25T09:45:00+00:00",
+     "missing_intervals": 153,
+     "to": "2026-09-27T00:15:00+00:00"
+    },
+    {
+     "from": "2026-09-20T00:00:00+00:00",
+     "missing_intervals": 97,
+     "to": "2026-09-21T00:30:00+00:00"
+    },
+    {
+     "from": "2026-09-22T11:00:00+00:00",
+     "missing_intervals": 11,
+     "to": "2026-09-22T14:00:00+00:00"
+    },
+    {
+     "from": "2026-09-27T22:30:00+00:00",
+     "missing_intervals": 9,
+     "to": "2026-09-28T01:00:00+00:00"
+    }
+   ],
+   "last": "2026-09-29T02:45:00+00:00",
+   "median_spacing_min": 15.0,
+   "missing_pct": 84.01,
+   "no_lookahead": "available_at rule applied per observation",
+   "observations": 751,
+   "resolution": "15m",
+   "timestamp_anomalies": {}
+  },
+  "gdelt_doc|topic:monetary_policy|article_count": {
+   "conflicting_duplicates": 0,
+   "coverage_basis": "requested window",
+   "coverage_pct": 15.99,
+   "coverage_within_own_range_pct": 19.03,
+   "duplicates_dropped": 1090,
+   "expected": 4698,
+   "first": "2026-08-19T00:15:00+00:00",
+   "gaps": 135,
+   "historical_depth_days": 41.1,
+   "historical_or_live": [
+    "historical"
+   ],
+   "largest_gaps": [
+    {
+     "from": "2026-08-22T23:15:00+00:00",
+     "missing_intervals": 2690,
+     "to": "2026-09-20T00:00:00+00:00"
+    },
+    {
+     "from": "2026-09-25T09:45:00+00:00",
+     "missing_intervals": 153,
+     "to": "2026-09-27T00:15:00+00:00"
+    },
+    {
+     "from": "2026-09-20T00:00:00+00:00",
+     "missing_intervals": 97,
+     "to": "2026-09-21T00:30:00+00:00"
+    },
+    {
+     "from": "2026-09-22T11:00:00+00:00",
+     "missing_intervals": 11,
+     "to": "2026-09-22T14:00:00+00:00"
+    },
+    {
+     "from": "2026-09-27T22:30:00+00:00",
+     "missing_intervals": 9,
+     "to": "2026-09-28T01:00:00+00:00"
+    }
+   ],
+   "last": "2026-09-29T02:45:00+00:00",
+   "median_spacing_min": 15.0,
+   "missing_pct": 84.01,
+   "no_lookahead": "available_at rule applied per observation",
+   "observations": 751,
+   "resolution": "15m",
+   "timestamp_anomalies": {}
+  },
+  "gdelt_doc|topic:monetary_policy|monitored_articles_total": {
+   "conflicting_duplicates": 0,
+   "coverage_basis": "requested window",
+   "coverage_pct": 15.99,
+   "coverage_within_own_range_pct": 19.03,
+   "duplicates_dropped": 1090,
+   "expected": 4698,
+   "first": "2026-08-19T00:15:00+00:00",
+   "gaps": 135,
+   "historical_depth_days": 41.1,
+   "historical_or_live": [
+    "historical"
+   ],
+   "largest_gaps": [
+    {
+     "from": "2026-08-22T23:15:00+00:00",
+     "missing_intervals": 2690,
+     "to": "2026-09-20T00:00:00+00:00"
+    },
+    {
+     "from": "2026-09-25T09:45:00+00:00",
+     "missing_intervals": 153,
+     "to": "2026-09-27T00:15:00+00:00"
+    },
+    {
+     "from": "2026-09-20T00:00:00+00:00",
+     "missing_intervals": 97,
+     "to": "2026-09-21T00:30:00+00:00"
+    },
+    {
+     "from": "2026-09-22T11:00:00+00:00",
+     "missing_intervals": 11,
+     "to": "2026-09-22T14:00:00+00:00"
+    },
+    {
+     "from": "2026-09-27T22:30:00+00:00",
+     "missing_intervals": 9,
+     "to": "2026-09-28T01:00:00+00:00"
+    }
+   ],
+   "last": "2026-09-29T02:45:00+00:00",
+   "median_spacing_min": 15.0,
+   "missing_pct": 84.01,
+   "no_lookahead": "available_at rule applied per observation",
+   "observations": 751,
+   "resolution": "15m",
+   "timestamp_anomalies": {}
+  },
   "gdelt_events|GDELT 2.0 events|corridor_escalation_events": {
    "conflicting_duplicates": 0,
    "coverage_basis": "requested window",
@@ -636,25 +1456,27 @@
    "event15_series_available_at_event": 0,
    "event15_series_available_before_boundary": 0,
    "first": null,
+   "first_any": null,
    "group": "derivatives",
    "history": "full funding history",
    "instrument": "BTCUSDT perpetual",
    "last": null,
+   "last_any": null,
    "observations": 0,
    "pagination": "limit <= 1000; page by startTime",
    "provider": "Binance USD-M Futures",
    "rate_limit": "shared 500 requests / 5 min per IP for this endpoint",
    "resolution": "8h settlement",
    "run": {
-    "error": "BLOCKED_BY_NETWORK_POLICY: fapi.binance.com refused by the environment proxy",
+    "error": "BLOCKED_BY_PROVIDER_GEO_RESTRICTION: fapi.binance.com refuses this environment's egress location (HTTP 451): b'{\\n  \"code\": 0,\\n  \"msg\": \"Service unavailable from a restricted location according to \\'b. Eligibility\\' in https://www.binance.com/en/terms. Please contact custom'",
     "observations": 0,
     "pages": 0,
     "requests": 0,
     "source": "binance_funding",
-    "status": "BLOCKED_BY_NETWORK_POLICY"
+    "status": "BLOCKED_BY_PROVIDER_GEO_RESTRICTION"
    },
    "series": 0,
-   "status": "BLOCKED_BY_NETWORK_POLICY",
+   "status": "BLOCKED_BY_PROVIDER_GEO_RESTRICTION",
    "unit": "rate per 8h interval",
    "v1_overlap": "separate venue of V1's funding dimension (V1 reads Hyperliquid funding)"
   },
@@ -668,25 +1490,27 @@
    "event15_series_available_at_event": 0,
    "event15_series_available_before_boundary": 0,
    "first": null,
+   "first_any": null,
    "group": "derivatives",
    "history": "ONLY THE LATEST 30 DAYS (Binance documented retention). Older history is NOT available and is not claimed.",
    "instrument": "BTCUSDT perpetual",
    "last": null,
+   "last_any": null,
    "observations": 0,
    "pagination": "limit <= 500; page by startTime",
    "provider": "Binance USD-M Futures",
    "rate_limit": "1,000 requests / 5 min per IP for /futures/data endpoints",
    "resolution": "1h (5m..1d)",
    "run": {
-    "error": "BLOCKED_BY_NETWORK_POLICY: fapi.binance.com refused by the environment proxy",
+    "error": "BLOCKED_BY_PROVIDER_GEO_RESTRICTION: fapi.binance.com refuses this environment's egress location (HTTP 451): b'{\\n  \"code\": 0,\\n  \"msg\": \"Service unavailable from a restricted location according to \\'b. Eligibility\\' in https://www.binance.com/en/terms. Please contact custom'",
     "observations": 0,
     "pages": 0,
     "requests": 0,
     "source": "binance_oi",
-    "status": "BLOCKED_BY_NETWORK_POLICY"
+    "status": "BLOCKED_BY_PROVIDER_GEO_RESTRICTION"
    },
    "series": 0,
-   "status": "BLOCKED_BY_NETWORK_POLICY",
+   "status": "BLOCKED_BY_PROVIDER_GEO_RESTRICTION",
    "unit": "BTC (sumOpenInterest) and USD (sumOpenInterestValue)",
    "v1_overlap": "none: V1 has no open-interest source"
   },
@@ -700,25 +1524,27 @@
    "event15_series_available_at_event": 0,
    "event15_series_available_before_boundary": 0,
    "first": null,
+   "first_any": null,
    "group": "derivatives",
    "history": "full funding history of the symbol",
    "instrument": "BTCUSDT linear perpetual",
    "last": null,
+   "last_any": null,
    "observations": 0,
    "pagination": "limit <= 200; page by endTime",
    "provider": "Bybit",
    "rate_limit": "600 requests / 5 s per IP",
    "resolution": "8h settlement",
    "run": {
-    "error": "BLOCKED_BY_NETWORK_POLICY: api.bybit.com refused by the environment proxy",
+    "error": "BLOCKED_BY_PROVIDER_GEO_RESTRICTION: api.bybit.com refuses this environment's egress location (HTTP 403): b'{\\n    error:The Amazon CloudFront distribution is configured to block access from your country\\n}'",
     "observations": 0,
     "pages": 0,
     "requests": 0,
     "source": "bybit_funding",
-    "status": "BLOCKED_BY_NETWORK_POLICY"
+    "status": "BLOCKED_BY_PROVIDER_GEO_RESTRICTION"
    },
    "series": 0,
-   "status": "BLOCKED_BY_NETWORK_POLICY",
+   "status": "BLOCKED_BY_PROVIDER_GEO_RESTRICTION",
    "unit": "rate per 8h interval",
    "v1_overlap": "separate venue of V1's funding dimension (V1 reads Hyperliquid funding)"
   },
@@ -732,25 +1558,27 @@
    "event15_series_available_at_event": 0,
    "event15_series_available_before_boundary": 0,
    "first": null,
+   "first_any": null,
    "group": "derivatives",
    "history": "investigated by paging backwards until the API returns nothing (depth recorded in the run)",
    "instrument": "BTCUSDT linear perpetual",
    "last": null,
+   "last_any": null,
    "observations": 0,
    "pagination": "limit <= 200 rows per call; nextPageCursor",
    "provider": "Bybit",
    "rate_limit": "public market endpoints: 600 requests / 5 s per IP (IP rate limit, Bybit docs)",
    "resolution": "1h (5min/15min/30min/1h/4h/1d available)",
    "run": {
-    "error": "BLOCKED_BY_NETWORK_POLICY: api.bybit.com refused by the environment proxy",
+    "error": "BLOCKED_BY_PROVIDER_GEO_RESTRICTION: api.bybit.com refuses this environment's egress location (HTTP 403): b'{\\n    error:The Amazon CloudFront distribution is configured to block access from your country\\n}'",
     "observations": 0,
     "pages": 0,
     "requests": 0,
     "source": "bybit_oi",
-    "status": "BLOCKED_BY_NETWORK_POLICY"
+    "status": "BLOCKED_BY_PROVIDER_GEO_RESTRICTION"
    },
    "series": 0,
-   "status": "BLOCKED_BY_NETWORK_POLICY",
+   "status": "BLOCKED_BY_PROVIDER_GEO_RESTRICTION",
    "unit": "BTC (open interest in base coin)",
    "v1_overlap": "none: V1 has no open-interest source"
   },
@@ -761,29 +1589,31 @@
    "dimension": "NEW DIMENSION",
    "docs": "https://api-docs.defillama.com/#tag/volumes",
    "endpoint": "GET https://api.llama.fi/overview/dexs?excludeTotalDataChartBreakdown=true&dataType=dailyVolume",
-   "event15_series_available_at_event": 0,
-   "event15_series_available_before_boundary": 0,
-   "first": null,
+   "event15_series_available_at_event": 1,
+   "event15_series_available_before_boundary": 1,
+   "first": "2026-08-19T00:00:00+00:00",
+   "first_any": "2026-07-20T00:00:00+00:00",
    "group": "defi",
    "history": "daily since 2020",
    "instrument": "all DEXs (aggregate)",
-   "last": null,
-   "observations": 0,
+   "last": "2026-10-06T00:00:00+00:00",
+   "last_any": "2026-10-06T00:00:00+00:00",
+   "observations": 79,
    "pagination": "none",
    "provider": "DeFiLlama",
    "rate_limit": "fair use",
    "resolution": "1d",
    "run": {
-    "error": "BLOCKED_BY_NETWORK_POLICY: api.llama.fi refused by the environment proxy",
-    "observations": 0,
-    "pages": 0,
-    "requests": 0,
+    "note": "",
+    "observations": 79,
+    "pages": 1,
+    "requests": 1,
     "source": "defillama_dex",
-    "status": "BLOCKED_BY_NETWORK_POLICY"
+    "status": "OK"
    },
    "semantics": "on-chain DEX activity, NOT exchange flows",
-   "series": 0,
-   "status": "BLOCKED_BY_NETWORK_POLICY",
+   "series": 1,
+   "status": "OK",
    "unit": "USD volume per day",
    "v1_overlap": "none"
   },
@@ -794,29 +1624,31 @@
    "dimension": "NEW DIMENSION",
    "docs": "https://api-docs.defillama.com/#tag/stablecoins",
    "endpoint": "GET https://stablecoins.llama.fi/stablecoincharts/all ; /stablecoin/{id} ; /stablecoincharts/{chain}",
-   "event15_series_available_at_event": 0,
-   "event15_series_available_before_boundary": 0,
-   "first": null,
+   "event15_series_available_at_event": 8,
+   "event15_series_available_before_boundary": 8,
+   "first": "2026-08-19T00:00:00+00:00",
+   "first_any": "2026-07-20T00:00:00+00:00",
    "group": "stablecoins",
    "history": "daily since 2017-2020 depending on series",
    "instrument": "all stablecoins / USDT / USDC / chain totals",
-   "last": null,
-   "observations": 0,
+   "last": "2026-10-06T00:00:00+00:00",
+   "last_any": "2026-10-06T00:00:00+00:00",
+   "observations": 632,
    "pagination": "none (full series per call)",
    "provider": "DeFiLlama",
    "rate_limit": "free API, fair use (documented ~500 requests/min)",
    "resolution": "1d",
    "run": {
-    "error": "BLOCKED_BY_NETWORK_POLICY: stablecoins.llama.fi refused by the environment proxy",
-    "observations": 0,
-    "pages": 0,
-    "requests": 0,
+    "note": "",
+    "observations": 632,
+    "pages": 8,
+    "requests": 8,
     "source": "defillama_stablecoins",
-    "status": "BLOCKED_BY_NETWORK_POLICY"
+    "status": "OK"
    },
    "semantics": "supply/circulation, NOT exchange inflow/outflow",
-   "series": 0,
-   "status": "BLOCKED_BY_NETWORK_POLICY",
+   "series": 8,
+   "status": "OK",
    "unit": "USD circulating",
    "v1_overlap": "none (V1 'global' is total crypto market cap, not stablecoin supply)"
   },
@@ -827,28 +1659,30 @@
    "dimension": "NEW DIMENSION",
    "docs": "https://api-docs.defillama.com/#tag/tvl",
    "endpoint": "GET https://api.llama.fi/v2/historicalChainTvl ; /v2/historicalChainTvl/{chain}",
-   "event15_series_available_at_event": 0,
-   "event15_series_available_before_boundary": 0,
-   "first": null,
+   "event15_series_available_at_event": 4,
+   "event15_series_available_before_boundary": 4,
+   "first": "2026-08-19T00:00:00+00:00",
+   "first_any": "2026-07-20T00:00:00+00:00",
    "group": "defi",
    "history": "daily since 2018",
    "instrument": "DeFi TVL (all chains, and per chain)",
-   "last": null,
-   "observations": 0,
+   "last": "2026-10-06T00:00:00+00:00",
+   "last_any": "2026-10-06T00:00:00+00:00",
+   "observations": 316,
    "pagination": "none",
    "provider": "DeFiLlama",
    "rate_limit": "fair use",
    "resolution": "1d",
    "run": {
-    "error": "BLOCKED_BY_NETWORK_POLICY: api.llama.fi refused by the environment proxy",
-    "observations": 0,
-    "pages": 0,
-    "requests": 0,
+    "note": "",
+    "observations": 316,
+    "pages": 4,
+    "requests": 4,
     "source": "defillama_tvl",
-    "status": "BLOCKED_BY_NETWORK_POLICY"
+    "status": "OK"
    },
-   "series": 0,
-   "status": "BLOCKED_BY_NETWORK_POLICY",
+   "series": 4,
+   "status": "OK",
    "unit": "USD",
    "v1_overlap": "none"
   },
@@ -859,28 +1693,30 @@
    "dimension": "NEW DIMENSION",
    "docs": "https://docs.deribit.com/#public-get_volatility_index_data",
    "endpoint": "GET https://www.deribit.com/api/v2/public/get_volatility_index_data?currency=BTC&resolution=3600",
-   "event15_series_available_at_event": 0,
-   "event15_series_available_before_boundary": 0,
-   "first": null,
+   "event15_series_available_at_event": 4,
+   "event15_series_available_before_boundary": 4,
+   "first": "2026-08-18T10:00:00+00:00",
+   "first_any": "2026-08-18T09:00:00+00:00",
    "group": "options",
    "history": "DVOL history since 2021",
    "instrument": "BTC DVOL index",
-   "last": null,
-   "observations": 0,
+   "last": "2026-10-06T07:00:00+00:00",
+   "last_any": "2026-10-06T07:00:00+00:00",
+   "observations": 4700,
    "pagination": "<= 1,000 candles per call; `continuation`",
    "provider": "Deribit",
    "rate_limit": "non-matching-engine credit pool (~20 requests / s sustained)",
    "resolution": "1h candles (open/high/low/close)",
    "run": {
-    "error": "BLOCKED_BY_NETWORK_POLICY: www.deribit.com refused by the environment proxy",
-    "observations": 0,
-    "pages": 0,
-    "requests": 0,
+    "note": "",
+    "observations": 4700,
+    "pages": 2,
+    "requests": 2,
     "source": "deribit_dvol",
-    "status": "BLOCKED_BY_NETWORK_POLICY"
+    "status": "OK"
    },
-   "series": 0,
-   "status": "BLOCKED_BY_NETWORK_POLICY",
+   "series": 4,
+   "status": "OK",
    "unit": "annualised implied volatility, %",
    "v1_overlap": "none: V1 has no implied-volatility source"
   },
@@ -889,8 +1725,10 @@
    "event15_series_available_at_event": 0,
    "event15_series_available_before_boundary": 0,
    "first": null,
+   "first_any": null,
    "group": "options",
    "last": null,
+   "last_any": null,
    "observations": 0,
    "provider": "Deribit",
    "reason": "Historical options open interest, put/call ratio and max pain are not provided by the free API (only the current book). They are not reconstructed or fabricated.",
@@ -908,25 +1746,27 @@
    "event15_series_available_at_event": 0,
    "event15_series_available_before_boundary": 0,
    "first": null,
+   "first_any": "2026-10-08T16:40:10.841000+00:00",
    "group": "options",
    "history": "LIVE ONLY: the API returns the current book; no historical options OI, put/call or max pain exists for free",
    "instrument": "BTC options (all strikes/expiries)",
    "last": null,
-   "observations": 0,
+   "last_any": "2026-10-08T16:40:10.841000+00:00",
+   "observations": 14,
    "pagination": "none",
    "provider": "Deribit",
    "rate_limit": "as above",
    "resolution": "point-in-time snapshot",
    "run": {
-    "error": "BLOCKED_BY_NETWORK_POLICY: www.deribit.com refused by the environment proxy",
-    "observations": 0,
-    "pages": 0,
-    "requests": 0,
+    "note": "live snapshot only",
+    "observations": 14,
+    "pages": 1,
+    "requests": 1,
     "source": "deribit_options_snapshot",
-    "status": "BLOCKED_BY_NETWORK_POLICY"
+    "status": "OK"
    },
-   "series": 0,
-   "status": "BLOCKED_BY_NETWORK_POLICY",
+   "series": 14,
+   "status": "OK",
    "unit": "contracts (BTC)",
    "v1_overlap": "none"
   },
@@ -935,8 +1775,10 @@
    "event15_series_available_at_event": 0,
    "event15_series_available_before_boundary": 0,
    "first": null,
+   "first_any": null,
    "group": "on_chain",
    "last": null,
+   "last_any": null,
    "observations": 0,
    "reason": "Genuine exchange inflow/outflow needs exchange wallet labelling (CryptoQuant, Glassnode, Nansen): paid or key-gated. DeFiLlama stablecoin/DEX data is NOT a substitute and is not labelled as flows.",
    "run": {},
@@ -950,28 +1792,30 @@
    "dimension": "NEW DIMENSION",
    "docs": "https://blog.gdeltproject.org/gdelt-doc-2-0-api-debuts/",
    "endpoint": "GET https://api.gdeltproject.org/api/v2/doc/doc?mode=TimelineVolRaw|ArtList&format=json",
-   "event15_series_available_at_event": 0,
-   "event15_series_available_before_boundary": 0,
-   "first": null,
+   "event15_series_available_at_event": 8,
+   "event15_series_available_before_boundary": 8,
+   "first": "2026-08-19T00:15:00+00:00",
+   "first_any": "2026-08-19T00:15:00+00:00",
    "group": "news",
    "history": "ROLLING LAST ~3 MONTHS only (DOC 2.0 search window)",
    "instrument": "GDELT DOC 2.0 article search",
-   "last": null,
-   "observations": 0,
+   "last": "2026-09-29T02:45:00+00:00",
+   "last_any": "2026-09-29T02:45:00+00:00",
+   "observations": 6008,
    "pagination": "ArtList max 250 articles per call (split by time window)",
    "provider": "GDELT Project",
    "rate_limit": "GDELT asks for at most one request every 5 seconds",
    "resolution": "15 min timelines for short spans; article seen-dates to the minute",
    "run": {
-    "error": "BLOCKED_BY_NETWORK_POLICY: api.gdeltproject.org refused by the environment proxy",
-    "observations": 0,
-    "pages": 0,
-    "requests": 0,
+    "note": "ArtList capped at 250 articles per topic per window",
+    "observations": 14728,
+    "pages": 128,
+    "requests": 128,
     "source": "gdelt_doc",
-    "status": "BLOCKED_BY_NETWORK_POLICY"
+    "status": "OK"
    },
-   "series": 0,
-   "status": "BLOCKED_BY_NETWORK_POLICY",
+   "series": 8,
+   "status": "OK",
    "unit": "article counts; normalised = per monitored articles",
    "v1_overlap": "partly overlaps V1 news sources (cryptonews, geopolitics, sosovalue headlines) as text-volume, not as scores"
   },
@@ -985,10 +1829,12 @@
    "event15_series_available_at_event": 7,
    "event15_series_available_before_boundary": 7,
    "first": "2026-08-24T08:00:00+00:00",
+   "first_any": "2026-08-24T08:00:00+00:00",
    "group": "geopolitical",
    "history": "2015-present",
    "instrument": "GDELT 2.0 Event exports",
    "last": "2026-10-06T06:30:00+00:00",
+   "last_any": "2026-10-06T06:30:00+00:00",
    "observations": 28562,
    "pagination": "one file per batch",
    "provider": "GDELT Project",
@@ -1001,7 +1847,7 @@
     },
     "geo_shock_grid": "_geo_grid_gdelt-geo-filter-v1_gdelt-geo-features-v1_1787822721144_1791268905708.json",
     "observations": 28562,
-    "retrieved_at": "2026-10-06T17:55:43.241000+00:00",
+    "retrieved_at": "2026-10-08T13:09:03.118000+00:00",
     "status": "OK"
    },
    "series": 7,
@@ -1019,10 +1865,12 @@
    "event15_series_available_at_event": 2,
    "event15_series_available_before_boundary": 2,
    "first": "2026-08-18T10:00:00.049000+00:00",
+   "first_any": "2026-08-18T10:00:00.049000+00:00",
    "group": "derivatives",
    "history": "full",
    "instrument": "BTC perpetual",
    "last": "2026-10-06T07:00:00.032000+00:00",
+   "last_any": "2026-10-06T07:00:00.032000+00:00",
    "observations": 2348,
    "pagination": "500 rows per call",
    "provider": "Hyperliquid",
@@ -1034,7 +1882,7 @@
      "fundingHistory_CACHED": 4,
      "fundingHistory_page_max_rows": 500
     },
-    "retrieved_at": "2026-10-06T17:02:04.307000+00:00",
+    "retrieved_at": "2026-10-08T13:26:02.744000+00:00",
     "status": "OK"
    },
    "series": 2,
@@ -1052,10 +1900,12 @@
    "event15_series_available_at_event": 18,
    "event15_series_available_before_boundary": 18,
    "first": "2026-08-18T10:00:00+00:00",
+   "first_any": "2026-08-18T09:00:00+00:00",
    "group": "cross_asset",
    "history": "1h back ~208 days (rolling); HIP-3 macro perps listed Dec 2025-Aug 2026",
    "instrument": "BTC, xyz:SP500, xyz:XYZ100, xyz:GOLD, xyz:SILVER, xyz:COPPER, xyz:BRENTOIL, xyz:EUR, para:10Y",
    "last": "2026-10-06T07:00:00+00:00",
+   "last_any": "2026-10-06T07:00:00+00:00",
    "observations": 21150,
    "pagination": "500 rows per call; only the most recent 5,000 candles per interval",
    "provider": "Hyperliquid",
@@ -1066,7 +1916,7 @@
     "requests": {
      "candleSnapshot_CACHED": 27
     },
-    "retrieved_at": "2026-10-06T17:30:07.584000+00:00",
+    "retrieved_at": "2026-10-08T13:25:18.992000+00:00",
     "status": "OK"
    },
    "series": 18,
@@ -1079,8 +1929,10 @@
    "event15_series_available_at_event": 0,
    "event15_series_available_before_boundary": 0,
    "first": null,
+   "first_any": null,
    "group": "liquidations",
    "last": null,
+   "last_any": null,
    "observations": 0,
    "provider": "Bybit / Binance",
    "reason": "Neither exchange offers free historical liquidation data over REST: Binance's public forceOrders history endpoint was withdrawn, and Bybit/Binance publish liquidations only on live WebSocket streams. That supports prospective collection only, which is out of scope here.",
@@ -1093,8 +1945,10 @@
    "event15_series_available_at_event": 0,
    "event15_series_available_before_boundary": 0,
    "first": null,
+   "first_any": null,
    "group": "liquidations",
    "last": null,
+   "last_any": null,
    "observations": 0,
    "provider": "Xoomar (as named in the brief)",
    "reason": "No public 'Xoomar' endpoint could be identified: not referenced anywhere in the CryptoPulse repositories and not found by web search. Needs the exact URL from the requester. No substitute used.",
@@ -1107,8 +1961,10 @@
    "event15_series_available_at_event": 0,
    "event15_series_available_before_boundary": 0,
    "first": null,
+   "first_any": null,
    "group": "on_chain",
    "last": null,
+   "last_any": null,
    "observations": 0,
    "reason": "Long-term-holder supply/flows need UTXO-age analytics (Glassnode, CryptoQuant): paid. Further source research required.",
    "run": {},
@@ -1120,8 +1976,10 @@
    "event15_series_available_at_event": 0,
    "event15_series_available_before_boundary": 0,
    "first": null,
+   "first_any": null,
    "group": "on_chain",
    "last": null,
+   "last_any": null,
    "observations": 0,
    "reason": "Miner-to-exchange flows need miner address labelling (paid providers). Free mempool.space / blockchain.com data covers hashrate, fees and pool block counts, which are miner ACTIVITY, not flows, and are not substituted.",
    "run": {},
@@ -1133,8 +1991,10 @@
    "event15_series_available_at_event": 0,
    "event15_series_available_before_boundary": 0,
    "first": null,
+   "first_any": null,
    "group": "on_chain",
    "last": null,
+   "last_any": null,
    "observations": 0,
    "reason": "Entity-labelled whale flows need address clustering (Glassnode, CryptoQuant, Arkham, Whale Alert history): paid or key-gated. Further source research required.",
    "run": {},

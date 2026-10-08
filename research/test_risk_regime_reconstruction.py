@@ -139,6 +139,11 @@ def test_runner_end_to_end_with_fixtures(tmp_path, monkeypatch):
     def boom(url):
         raise OSError("Tunnel connection failed: 403 Forbidden")
     monkeypatch.setattr(s.Http, "_urlopen", staticmethod(boom))
+    # A live-only snapshot is timestamped at retrieval, i.e. outside the research window (regression: crashed the inventory).
+    snap_ts = E + 30 * 24 * H
+    snap = s._mk("deribit_options_snapshot", "BTC options", "options_open_interest_total", snap_ts, 1.0, "BTC", "snapshot",
+                 snap_ts, "https://www.deribit.com/x", snap_ts, {}, live=True)
+    monkeypatch.setattr(s, "collect_deribit_options_snapshot", lambda http, now: s._result("deribit_options_snapshot", [snap], 1, 1))
     v1 = [{"ts": B - k * 3 * H, "score": 55.0, "g": 10, "m": 50, "o": 50, "y": 50, "n": 50, "s": 50, "u": 50, "fd": 50, "ls": 50, "hf": 50}
           for k in range(40, 0, -1)] + [{"ts": B + 60_000, "score": 60.0}]
     preds = [{"id": 1125, "ts": B, "horizon_h": 12, "p_up": 0.7333, "realized_up": 0, "realized_return": -0.57}]
@@ -161,6 +166,8 @@ def test_runner_end_to_end_with_fixtures(tmp_path, monkeypatch):
     assert inv["sources"]["hyperliquid_hip3"]["status"] == "OK"
     assert inv["sources"]["bybit_oi"]["status"] == "BLOCKED_BY_NETWORK_POLICY" and inv["sources"]["bybit_oi"]["observations"] == 0
     assert inv["sources"]["liquidations_xoomar"]["status"] == "RESEARCH_REQUIRED"
+    snap_inv = inv["sources"]["deribit_options_snapshot"]
+    assert snap_inv["status"] == "OK" and snap_inv["first"] is None and snap_inv["first_any"] is not None
     ev = json.loads((out / "risk_regime_event15.json").read_text())
     assert [r["label"] for r in ev["timeline"]][6] == "prediction boundary"
     assert ev["gdelt_relevant_events_available_before_boundary"] == 1

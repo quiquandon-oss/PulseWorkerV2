@@ -2,8 +2,8 @@
 
 Each collector turns one public, key-free endpoint into observations of the common contract
 (`risk_regime_data.make_obs`). Collectors never substitute another source when one fails: they return their
-status (OK / BLOCKED_BY_NETWORK_POLICY / PROVIDER_ERROR / EMPTY) and no observations. Sources with no
-legitimate €0 history are registered as NOT_AVAILABLE or RESEARCH_REQUIRED with the reason.
+status (OK / BLOCKED_BY_NETWORK_POLICY / BLOCKED_BY_PROVIDER_GEO_RESTRICTION / PROVIDER_ERROR / EMPTY) and no
+observations. Sources with no legitimate €0 history are registered as NOT_AVAILABLE or RESEARCH_REQUIRED with the reason.
 
 Existing verified research is reused, not re-implemented:
 - Hyperliquid hourly candles: `hyperliquid_asset_universe_run.candles` (same cache, same request bodies).
@@ -13,6 +13,7 @@ Existing verified research is reused, not re-implemented:
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import time
 import urllib.error
@@ -23,7 +24,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
-from risk_regime_data import DAY, HISTORICAL, HOUR, LIVE, make_obs
+from risk_regime_data import DAY, HISTORICAL, HOUR, LIVE, iso, make_obs
 
 UTC = timezone.utc
 USER_AGENT = "CryptoPulse-research/1.0 (read-only research; contact via repository)"
@@ -180,18 +181,29 @@ class SourceError(RuntimeError):
         self.status = status
 
 
+RATE_LIMIT_TEXT = b"Please limit requests"
+GEO_BLOCK_MARKERS = (b"block access from your country", b"restricted location")
+
+
 class Http:
     """Minimal JSON GET with retry/backoff on 429 and 5xx. A proxy CONNECT refusal is reported as
-    BLOCKED_BY_NETWORK_POLICY (not retried as if it were the provider). `opener` and `sleep` are injectable."""
+    BLOCKED_BY_NETWORK_POLICY (not retried as if it were the provider); a provider's own refusal of the caller's
+    country is BLOCKED_BY_PROVIDER_GEO_RESTRICTION. `opener` and `sleep` are injectable."""
 
     def __init__(self, opener: Optional[Callable] = None, sleep: Callable = time.sleep, retries: int = 3,
-                 min_interval_s: float = 0.0, log: Optional[Counter] = None):
+                 min_interval_s: float = 0.0, log: Optional[Counter] = None, max_backoff_s: Optional[float] = None,
+                 cache_dir: Optional[Path] = None):
         self.opener = opener or self._urlopen
         self.sleep = sleep
         self.retries = retries
         self.min_interval_s = min_interval_s
+        self.max_backoff_s = max_backoff_s
         self.log = log if log is not None else Counter()
         self._last = 0.0
+        # Optional response cache: only successful JSON bodies, stored with their real retrieval time so that a
+        # rerun resumes without re-requesting and provenance keeps the original fetch time.
+        self.cache_dir = Path(cache_dir) if cache_dir else None
+        self.last_retrieved_at: Optional[int] = None
 
     @staticmethod
     def _urlopen(url: str, timeout: int = 30) -> Tuple[int, bytes]:
@@ -204,6 +216,12 @@ class Http:
 
     def get_json(self, url: str, params: Optional[Dict] = None):
         full = url + ("?" + urllib.parse.urlencode(params) if params else "")
+        cpath = self.cache_dir / (hashlib.sha256(full.encode()).hexdigest() + ".json") if self.cache_dir else None
+        if cpath is not None and cpath.exists():
+            hit = json.loads(cpath.read_text())
+            self.log["cached"] += 1
+            self.last_retrieved_at = hit["retrieved_at"]
+            return hit["body"]
         last = None
         for attempt in range(self.retries):
             if self.min_interval_s:
@@ -223,16 +241,28 @@ class Http:
                 self.sleep(2 ** attempt)
                 continue
             self.log[f"http_{status}"] += 1
+            if body[:64].lstrip().startswith(RATE_LIMIT_TEXT):
+                status = 429                     # GDELT DOC sends its rate-limit notice as plain text
+            if status in (403, 451) and any(m in body[:500].lower() for m in GEO_BLOCK_MARKERS):
+                self.log["geo_blocked"] += 1
+                raise SourceError("BLOCKED_BY_PROVIDER_GEO_RESTRICTION",
+                                  f"{urllib.parse.urlparse(url).netloc} refuses this environment's egress location (HTTP {status}): {body[:160]!r}")
             if status == 429 or 500 <= status < 600:
                 last = f"HTTP {status}"
-                self.sleep(5 * (attempt + 1))
+                b = 5 * (attempt + 1)
+                self.sleep(min(b, self.max_backoff_s) if self.max_backoff_s else b)
                 continue
             if status != 200:
                 raise SourceError("PROVIDER_ERROR", f"HTTP {status} from {urllib.parse.urlparse(url).netloc}: {body[:200]!r}")
             try:
-                return json.loads(body)
+                parsed = json.loads(body)
             except ValueError:
                 raise SourceError("MALFORMED_RESPONSE", f"non-JSON body from {url}")
+            self.last_retrieved_at = int(time.time() * 1000)
+            if cpath is not None:
+                cpath.parent.mkdir(parents=True, exist_ok=True)
+                cpath.write_text(json.dumps({"url": full, "retrieved_at": self.last_retrieved_at, "body": parsed}))
+            return parsed
         raise SourceError("PROVIDER_ERROR", f"{url}: {last} after {self.retries} attempts")
 
 
@@ -606,16 +636,29 @@ def parse_doc_articles(payload, topic: str, retrieved_at: int, url: str) -> List
 def collect_gdelt_doc(http: Http, windows: Sequence[Tuple[int, int]], retrieved_at: int, articles: bool = True) -> Dict:
     """Timeline volume (raw counts + monitored total) per topic, and article lists, for each window. The DOC API
     only searches its rolling ~3-month window: anything older returns empty and is reported, not filled."""
-    obs, arts, req = [], [], 0
+    obs, arts, req, failed = [], [], 0, []
     for lo, hi in windows:
         for topic, q in DOC_TOPICS.items():
-            params = {"query": q, "mode": "TimelineVolRaw", "format": "json", "STARTDATETIME": _doc_dt(lo), "ENDDATETIME": _doc_dt(hi)}
-            obs += parse_doc_timeline(http.get_json(GDELT_DOC, params), topic, retrieved_at, GDELT_DOC); req += 1
+            jobs = [("TimelineVolRaw", {"query": q, "mode": "TimelineVolRaw", "format": "json", "STARTDATETIME": _doc_dt(lo), "ENDDATETIME": _doc_dt(hi)}, parse_doc_timeline)]
             if articles:
-                params = {"query": q, "mode": "ArtList", "format": "json", "maxrecords": 250, "sort": "DateAsc",
-                          "STARTDATETIME": _doc_dt(lo), "ENDDATETIME": _doc_dt(hi)}
-                arts += parse_doc_articles(http.get_json(GDELT_DOC, params), topic, retrieved_at, GDELT_DOC); req += 1
+                jobs.append(("ArtList", {"query": q, "mode": "ArtList", "format": "json", "maxrecords": 250, "sort": "DateAsc",
+                                         "STARTDATETIME": _doc_dt(lo), "ENDDATETIME": _doc_dt(hi)}, parse_doc_articles))
+            for mode, params, parse in jobs:
+                req += 1
+                try:
+                    payload = http.get_json(GDELT_DOC, params)
+                except SourceError as e:
+                    # One rate-limited request no longer discards the others: it is named as a gap, nothing is filled.
+                    failed.append({"window": [iso(lo), iso(hi)], "topic": topic, "mode": mode, "status": e.status, "error": str(e)})
+                    continue
+                got = parse(payload, topic, http.last_retrieved_at or retrieved_at, GDELT_DOC)
+                (obs if mode == "TimelineVolRaw" else arts).extend(got)
+    if failed and not obs and not arts:
+        raise SourceError(failed[-1]["status"], f"all {req} DOC requests failed; last: {failed[-1]['error']}")
     r = _result("gdelt_doc", obs, req, req, "ArtList capped at 250 articles per topic per window")
+    if failed:
+        r["status"] = "PARTIAL"
+        r["failed_requests"] = failed
     r["articles"] = arts
     return r
 

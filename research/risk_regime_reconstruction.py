@@ -253,7 +253,9 @@ def main(argv=None) -> int:
 
     # --- live third-party sources (each reports its own status; nothing substituted) ---
     http = s.Http(log=Counter())
-    doc_http = s.Http(min_interval_s=5.5, log=Counter())
+    # DOC rate-limits per (shared) egress IP: patient capped retries, and successful responses are cached next to the
+    # GDELT export cache (with their real retrieval time) so an interrupted run resumes instead of starting over.
+    doc_http = s.Http(min_interval_s=5.5, retries=40, max_backoff_s=10, cache_dir=gcache / "_doc_api", log=Counter())
     re_windows = [(e["event_ts"] - 24 * HOUR, e["event_ts"] + 24 * HOUR) for e in events]
     ev_window = (EVENT15["prediction_boundary_ms"] - 24 * HOUR, EVENT15["event_ms"] + 24 * HOUR)
     live_jobs = {
@@ -294,8 +296,11 @@ def main(argv=None) -> int:
         run = runs.get(sid, {})
         inventory["sources"][sid] = {**meta, "status": meta.get("status") or run.get("status", "NOT_RUN"), "run": run,
                                      "series": len(sk), "observations": sum(len(store.series(k)) for k in sk),
-                                     "first": min((q["|".join(k)].get("first") for k in sk), default=None),
-                                     "last": max((q["|".join(k)].get("last") for k in sk), default=None),
+                                     "first": min((f for k in sk if (f := q["|".join(k)].get("first"))), default=None),
+                                     "last": max((f for k in sk if (f := q["|".join(k)].get("last"))), default=None),
+                                     # a live-only snapshot is timestamped at retrieval, outside the research window
+                                     "first_any": min((d.iso(store.series(k)[0]["timestamp"]) for k in sk), default=None),
+                                     "last_any": max((d.iso(store.series(k)[-1]["timestamp"]) for k in sk), default=None),
                                      "event15_series_available_before_boundary": len(before),
                                      "event15_series_available_at_event": len(at_event)}
     inventory["http"] = runs["_http_log"]

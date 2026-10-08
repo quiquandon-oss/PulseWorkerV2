@@ -16,7 +16,10 @@ Machine-readable: `results/risk_regime_event15.json`; interactive: the Event Res
 | Hyperliquid cross-asset (9 instruments) | yes | yes |
 | Hyperliquid BTC funding/premium | yes | yes |
 | GDELT 2.0 events (counts, geo_shock, 38,492 conflict-category event rows in −24h…+24h) | yes | yes (11,356 rows published before 12:01) |
-| Bybit / Binance OI and funding, Deribit DVOL, DeFiLlama, GDELT DOC | would (history exists; Binance OI until ~27 Oct 2026, DOC until ~late Dec 2026) | **not collected: blocked by network policy** |
+| Deribit DVOL (hourly) | yes | yes |
+| DeFiLlama stablecoins / DEX volume / TVL (daily) | yes | yes (the 26 Sep daily point, available 27 Sep 00:00) |
+| GDELT DOC article volume + articles (4 topics) | yes (buckets from 27 Sep 00:15; the provider returned none earlier) | yes |
+| Bybit / Binance OI and funding | would (history exists; Binance OI only until ~27 Oct 2026) | **not collected: provider geo-restriction (HTTP 403 / 451)** |
 | Deribit options OI / put-call / max pain | no (no history) | no |
 | Liquidations | no (Xoomar unidentified; exchanges have no free history) | no |
 | Whale / miner / LTH / exchange flows | no (no €0 source) | no |
@@ -43,9 +46,20 @@ Machine-readable: `results/risk_regime_event15.json`; interactive: the Event Res
 | GDELT corridor escalation / batch | 6 | 9 | 2 | 8 | 23 | 13 | **93** | **28** | 9 | 17 | 12 | 10 | 7 |
 | GDELT publishing domains / batch | 18 | 18 | 22 | 30 | 32 | 27 | **34** | **37** | 28 | 33 | 45 | 52 | 49 |
 | geo_shock (frozen component) | 16.0 | 8.3 | 14.2 | 85.7 | 30.1 | 55.5 | **60.2** | **48.1** | 25.1 | 36.6 | 78.6 | 78.0 | 66.0 |
-| Bybit/Binance OI & funding, DVOL, DeFiLlama, DOC | n/c | n/c | n/c | n/c | n/c | n/c | **n/c** | **n/c** | n/c | n/c | n/c | n/c | n/c |
+| Deribit DVOL close | 34.36 | 34.92 | 34.84 | 34.90 | 34.73 | 34.73 | **34.75** | **35.57** | 35.62 | 35.59 | 36.17 | 35.87 | 36.17 |
+| Stablecoins total (bn USD, daily) | 308.51 | 307.80 | 307.80 | 307.80 | 307.80 | 307.80 | **307.80** | **310.09** | 310.09 | 310.09 | 310.09 | 310.09 | 311.47 |
+| USDT (bn USD, daily) | 183.75 | 183.79 | 183.79 | 183.79 | 183.79 | 183.79 | **183.79** | **183.79** | 183.79 | 183.79 | 183.79 | 183.79 | 183.79 |
+| USDC (bn USD, daily) | 76.44 | 75.47 | 75.47 | 75.47 | 75.47 | 75.47 | **75.47** | **75.42** | 75.42 | 75.42 | 75.42 | 75.42 | 75.25 |
+| DEX volume (bn USD, daily) | 10.10 | 7.46 | 7.46 | 7.46 | 7.46 | 7.46 | **7.46** | **7.50** | 7.50 | 7.50 | 7.50 | 7.50 | 11.47 |
+| DeFi TVL (bn USD, daily) | 95.12 | 95.43 | 95.43 | 95.43 | 95.43 | 95.43 | **95.43** | **95.48** | 95.48 | 95.48 | 95.48 | 95.48 | 95.44 |
+| DOC crypto articles / 15 min | 0 (stale) | 0 (stale) | 1 | 4 | 1 | 2 | **1** | **0 (stale)** | 1 | 2 | 2 | 0 | 4 |
+| DOC monetary-policy articles / 15 min | 1 (stale) | 1 (stale) | 10 | 5 | 6 | 13 | **0** | **0 (stale)** | 23 | 32 | 8 | 11 | 27 |
+| DOC conflict articles / 15 min | 3 (stale) | 3 (stale) | 48 | 38 | 91 | 63 | **14** | **6 (stale)** | 56 | 61 | 29 | 29 | 90 |
+| DOC energy articles / 15 min | 0 (stale) | 0 (stale) | 2 | 2 | 4 | 9 | **1** | **3 (stale)** | 27 | 18 | 11 | 13 | 45 |
+| DOC monitored articles / 15 min | 229 (stale) | 229 (stale) | 1,455 | 914 | 2,053 | 1,870 | **404** | **197 (stale)** | 1,630 | 2,527 | 1,126 | 1,146 | 2,484 |
+| Bybit/Binance OI & funding | n/c | n/c | n/c | n/c | n/c | n/c | **n/c** | **n/c** | n/c | n/c | n/c | n/c | n/c |
 
-n/c = not collected (blocked). Hyperliquid volumes are in the JSON and on the page.
+n/c = not collected (Bybit/Binance refuse this environment's egress location). n/a = nothing available at that time (DOC: the provider returned no bucket before 27 Sep 00:15). (stale) = latest available value older than the source's freshness limit, shown with its age in the JSON/page. Daily DeFiLlama points are available at day start + 24 h. Hyperliquid volumes, DVOL high/low/open, per-chain stablecoins/TVL and DOC articles are in the JSON and on the page.
 
 ## What the raw data shows (observations, not conclusions)
 
@@ -61,8 +75,10 @@ n/c = not collected (blocked). Hyperliquid volumes are in the JSON and on the pa
   SILVER −3.4 %, COPPER −1.9 %, XYZ100 −0.8 %, SP500 −0.3 %, BRENTOIL −1.2 %, 10Y +3.4 bp; BTC funding left the
   floor and turned negative; the premium more than doubled in magnitude (−0.000207 → −0.000552).
 - **After the event** the move continued in metals (GOLD 4,121 at +12h) and the 10Y yield rose to 5.27 % at +12h.
-- The information this layer was built to add (open interest, liquidations, implied volatility, stablecoin
-  supply, article first-seen times) is **not yet in the data** for Event #15.
+- Since the 2026-10-08 live run, implied volatility (DVOL), stablecoin supply, DEX volume, TVL and DOC article
+  volume/first-seen times are in the data for Event #15 (values above, pre-boundary table in
+  `RISK_REGIME_COLLECTION_RUN.md`). Venue open interest/funding (Bybit/Binance) and liquidations are still
+  missing.
 
 ## Other failure episodes that can now be reconstructed
 

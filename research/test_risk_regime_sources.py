@@ -78,6 +78,32 @@ def test_http_blocked_proxy_is_not_retried_and_is_named():
     assert e.value.status == "BLOCKED_BY_NETWORK_POLICY" and "api.bybit.com" in str(e.value)
 
 
+def test_http_provider_geo_block_is_named_and_not_retried():
+    body = b'{\n    error:The Amazon CloudFront distribution is configured to block access from your country\n}'
+    cli, op = http(lambda p, q: (403, body))
+    with pytest.raises(s.SourceError) as e:
+        cli.get_json("https://api.bybit.com/v5/x")
+    assert e.value.status == "BLOCKED_BY_PROVIDER_GEO_RESTRICTION" and "api.bybit.com" in str(e.value)
+    assert len(op.calls) == 1
+    cli, _ = http(lambda p, q: (451, b'{"code": 0, "msg": "Service unavailable from a restricted location"}'))
+    with pytest.raises(s.SourceError) as e:
+        cli.get_json("https://fapi.binance.com/x")
+    assert e.value.status == "BLOCKED_BY_PROVIDER_GEO_RESTRICTION"
+    cli, _ = http(lambda p, q: (403, {"err": "forbidden"}))      # a plain 403 stays a provider error
+    with pytest.raises(s.SourceError) as e:
+        cli.get_json("https://x.example/a")
+    assert e.value.status == "PROVIDER_ERROR"
+
+
+def test_http_gdelt_rate_limit_text_is_retried_as_429():
+    n = Counter()
+    def h(path, q):
+        n["c"] += 1
+        return (200, b"Please limit requests to one every 5 seconds") if n["c"] == 1 else (200, {"ok": True})
+    cli, _ = http(h)
+    assert cli.get_json("https://api.gdeltproject.org/api/v2/doc/doc") == {"ok": True} and n["c"] == 2
+
+
 def test_http_provider_error_and_malformed():
     cli, _ = http(lambda p, q: (404, {"err": 1}))
     with pytest.raises(s.SourceError) as e:
@@ -282,6 +308,44 @@ def test_gdelt_doc_outside_search_window_is_empty_not_filled():
     cli, _ = http(lambda p, q: (200, {}))
     r = s.collect_gdelt_doc(cli, [(T0, T0 + H)], NOW)
     assert r["status"] == "EMPTY" and r["observations"] == [] and r["articles"] == []
+
+
+def test_gdelt_doc_failed_request_is_a_named_gap_not_a_total_loss():
+    def h(path, q):
+        if "bitcoin" in q["query"] and q["mode"] == "ArtList":
+            return 429, b"Please limit requests to one every 5 seconds"
+        return 200, {"timeline": [{"series": "Article Count", "data": [{"date": "20260927T120000Z", "value": 1}]}]} if q["mode"] == "TimelineVolRaw" else {}
+    cli, _ = http(h, retries=2)
+    r = s.collect_gdelt_doc(cli, [(T0, T0 + H)], NOW)
+    assert r["status"] == "PARTIAL" and len(r["observations"]) == len(s.DOC_TOPICS)
+    assert [(f["topic"], f["mode"]) for f in r["failed_requests"]] == [("crypto", "ArtList")]
+    cli, _ = http(lambda p, q: (429, b"Please limit requests"), retries=1)
+    assert s.run_collector(s.collect_gdelt_doc, cli, [(T0, T0 + H)], NOW)["status"] == "PROVIDER_ERROR"
+
+
+def test_http_cache_resumes_with_original_retrieval_time(tmp_path):
+    n = Counter()
+    def h(path, q):
+        n["c"] += 1
+        return 200, {"ok": n["c"]}
+    cli, _ = http(h, cache_dir=tmp_path)
+    assert cli.get_json("https://x.example/a", {"q": 1}) == {"ok": 1}
+    first = cli.last_retrieved_at
+    cli2, op2 = http(h, cache_dir=tmp_path)
+    assert cli2.get_json("https://x.example/a", {"q": 1}) == {"ok": 1} and op2.calls == []
+    assert cli2.last_retrieved_at == first and cli2.log["cached"] == 1
+    cli3, _ = http(lambda p, q: (429, {}), cache_dir=tmp_path / "x", retries=1)
+    with pytest.raises(s.SourceError):
+        cli3.get_json("https://x.example/b")
+    assert not (tmp_path / "x").exists()                           # failures are never cached
+
+
+def test_http_backoff_cap():
+    slept = []
+    cli = s.Http(opener=FakeOpener(lambda p, q: (429, {})), sleep=slept.append, retries=5, max_backoff_s=10)
+    with pytest.raises(s.SourceError):
+        cli.get_json("https://x.example/a")
+    assert max(slept) == 10
 
 
 # ---------------- reused sources ----------------

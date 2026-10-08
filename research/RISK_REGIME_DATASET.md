@@ -24,8 +24,10 @@ reusable index of real failure episodes. Raw values only: no score, no weights, 
 | `btc_outcome_24h` | `outcome_engine.compute_forward_returns_from_history`, **unchanged**, over an in-memory copy of the read-only `btc_data` extract (759 rows) |
 | `research` | `{series: [value, age_minutes]}`: the latest observation of each research series whose `available_at` ≤ `ts`; `null` = nothing available |
 
-27 research series are attached today (Hyperliquid 9 instruments × close/volume, Hyperliquid BTC
-funding/premium, GDELT 6 batch counts, geo_shock). Blocked sources appear as soon as they are collected.
+66 research series are attached (live run of 2026-10-08): Hyperliquid 9 instruments × close/volume, Hyperliquid
+BTC funding/premium, GDELT 6 batch counts, geo_shock, Deribit DVOL OHLC, DeFiLlama stablecoins (8) / DEX
+volume / TVL (4), GDELT DOC 4 topics × article count / monitored total, and the Deribit options snapshot (live
+only, so `null` at every past V1 timestamp). Bybit/Binance are not attached (provider geo-restriction).
 
 ## Failure / event index (`failure_index`)
 
@@ -72,5 +74,10 @@ python3 research/risk_regime_reconstruction.py --v1 <v1_full.json> --predictions
   --hl-funding-cache <leverage-study cache> --gdelt-cache <GDELT export cache> --out-dir research/results --live
 ```
 
-The four inputs are read-only `SELECT` extracts (sha256 recorded in `risk_regime_history.json`). Without
+The four inputs are read-only `SELECT` extracts (sha256 recorded in `risk_regime_history.json`). In the
+2026-10-08 run the V1, `research_events` (event_id ≤ 15, i.e. those detected before the 2026-10-06 run) and
+`btc_data` (V1 first − 24 h … 2026-10-06 19:05 UTC) extracts reproduce the earlier sha256 exactly. The
+`predictions` extract (`id, ts, horizon_hours AS horizon_h, p_up, realized_up, realized_return` over the V1
+range, 190 rows) carries `realized_return` at full precision where the earlier one was rounded, so its hash
+differs; the failure index (430 entries, same ids and types) and every outcome are unchanged. Without
 `--live` the third-party APIs are not called and are reported `NOT_RUN`.

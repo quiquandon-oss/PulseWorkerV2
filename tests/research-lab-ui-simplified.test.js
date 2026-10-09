@@ -61,6 +61,20 @@ describe('primary Research Lab: structure and actions', () => {
   });
 });
 
+describe('primary Research Lab: read-only visitors (staging review finding)', () => {
+  it('signed-out visitors get a read-only hint next to every action that saves, and signed-in users never do', () => {
+    expect(script).toContain("function roHint() { return signedIn ? '' :");
+    expect(script.match(/<h2>Your decision<\/h2>' \+ roHint\(\)/g)).toHaveLength(2);   // both decision cards
+    expect(script).toContain("roHint() + '<div class=\"btns\"><button class=\"btn\" id=\"confirm\">");
+    expect(script).toContain("(editable ? roHint() : '')");
+    expect(script.match(/function roHint[^\n]*/)[0]).not.toMatch(/not signed in|admin token/i);   // walkthrough prompt detector
+    expect(script).toContain('renderSession(); if (market && !draft) render();');
+  });
+  it('the learning list uses the three decision groups', () => {
+    for (const g of ["'Needs your decision'", "'In progress'", "'Decided'"]) expect(script).toContain(g);
+  });
+});
+
 describe('Advanced page: one grouped home, every technical page kept', () => {
   it('groups all 12 pages, each exactly once, in three sections', async () => {
     const html = await advancedHtml();

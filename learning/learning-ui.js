@@ -62,7 +62,7 @@ export const LEARNING_LAB_HTML = `<!DOCTYPE html>
       ? '<span>&#128275; Signed in on this device</span> <a href="/research-lab/signout">Sign out</a>'
       : '<span>&#128274; Read-only</span> <a href="/research-lab/signin">Sign in this device</a>';
   }
-  fetch('/api/learning/session', { credentials: 'same-origin' }).then(function (r) { return r.json(); }).then(function (d) { signedIn = !!(d && d.signed_in); renderSession(); }, function () { renderSession(); });
+  fetch('/api/learning/session', { credentials: 'same-origin' }).then(function (r) { return r.json(); }).then(function (d) { signedIn = !!(d && d.signed_in); renderSession(); if (market && !draft) render(); }, function () { renderSession(); });
 
   function esc(s) { return String(s === null || s === undefined ? '' : s).replace(/[&<>"']/g, function (c) { return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]; }); }
   function link(url, text) { return /^https?:\\/\\//i.test(url || '') ? '<a href="' + esc(url) + '" target="_blank" rel="noopener noreferrer">' + esc(text || url) + '</a>' : esc(text || ''); }
@@ -74,6 +74,8 @@ export const LEARNING_LAB_HTML = `<!DOCTYPE html>
     return fetch(path, { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json', 'X-CryptoPulse-Research': '1' }, body: JSON.stringify(body) })
       .then(function (r) { return r.json(); });
   }
+  // Shown only to a read-only (signed-out) visitor next to actions that save something.
+  function roHint() { return signedIn ? '' : '<p class="small muted ro-hint">Read-only on this device: <a href="/research-lab/signin">sign in</a> to save changes or record a decision.</p>'; }
   function needToken(msgEl) { if (signedIn) return false; msgEl.className = 'small err'; msgEl.innerHTML = 'This device is not signed in. <a href="/research-lab/signin">Sign in once</a>, then save.'; return true; }
   var VERDICT_CLASS = { EXPLAINED: 'c-good', PARTIALLY_EXPLAINED: 'c-warn', NOT_EXPLAINED: 'c-bad' };
   var ICON = { EXPLAINS: ['&#10003;', 'c-good'], PARTIAL: ['?', 'c-warn'], CONTRADICTS: ['&#10005;', 'c-bad'], SILENT: ['&ndash;', 'c-muted'], MISSING: ['&#8709;', 'c-muted'], NOT_APPLICABLE: ['&ndash;', 'c-muted'] };
@@ -193,7 +195,7 @@ export const LEARNING_LAB_HTML = `<!DOCTYPE html>
       '<div class="grid2"><div><label>Confidence</label><select data-f="confidence">' + opt(['LOW','MEDIUM','HIGH'], f.confidence) + '</select></div><div><label>Sentiment for BTC</label><select data-f="sentiment_assessment">' + opt(['POSITIVE','NEGATIVE','MIXED','INDETERMINATE'], f.sentiment_assessment) + '</select></div></div>' +
       '<label>Limitations</label><input data-f="limitations" value="' + esc(f.limitations) + '"></div>' +
       '<div class="card"><h2>5. Confirm</h2><label style="text-transform:none; font-size:14px; color:var(--text)"><input type="checkbox" id="reviewed" style="width:auto"> I checked this finding and its citations. It is not fabricated.</label>' +
-      '<div class="btns"><button class="btn" id="confirm">CONFIRM FINDING</button></div><div id="confirmMsg" class="small"></div></div>';
+      roHint() + '<div class="btns"><button class="btn" id="confirm">CONFIRM FINDING</button></div><div id="confirmMsg" class="small"></div></div>';
   }
   function readDraft() {
     var f = JSON.parse(JSON.stringify(draft));
@@ -352,18 +354,18 @@ export const LEARNING_LAB_HTML = `<!DOCTYPE html>
       (proto ? '<div class="big" id="newSignal"><p class="headline" style="font-size:16px">New signal discovered &mdash; historical data required</p><p class="small">CryptoPulse cannot validate this signal yet because V1 does not currently collect the required inputs. It has no weight and no confidence: those can only be proposed after its data exists and it has been validated.</p></div>' : '') +
       '<table class="sum"><tr><td>Proposes</td><td>' + esc(r ? r.adjustment_text : 'Not defined yet') + '</td></tr><tr><td>Why</td><td>' + esc(c.reason) + '</td></tr>' +
       '<tr><td>V1 impact</td><td>' + esc(impact) + '</td></tr><tr><td>Validation</td><td>' + vline + '</td></tr><tr><td>Evidence</td><td>' + (c.evidence.length ? esc(c.evidence.length) + ' linked item(s)' : '<span class="warn">No linked evidence</span>') + '</td></tr></table>' +
-      (next ? '<p class="next">' + next + '</p>' : '') + (nextBtn ? '<div class="btns">' + nextBtn + '</div>' : '') + '<div id="submitMsg" class="small"></div></div>';
+      (next ? '<p class="next">' + next + '</p>' : '') + (nextBtn ? '<div class="btns">' + nextBtn + '</div>' + (editable ? roHint() : '') : '') + '<div id="submitMsg" class="small"></div></div>';
     if (proxy) html += '<div class="card" id="proxyWarn"><h2>' + chip('PROXY: INVALID FOR SIGNAL VALIDATION', 'c-bad') + '</h2><p>This candidate was generated automatically as the 24h change of an existing V1 source with a default weight and confidence. The V1 impact and validation shown below measure that <b>proxy</b>, not the new signal the research proposed, so they say nothing about whether the new signal works.</p><p class="small muted">The result is kept for audit. Switching to a signal prototype keeps it in the candidate\\'s history.</p>' +
       (editable && cand.prototype_suggestion ? '<div class="btns"><button class="btn" id="toProto">Switch to signal prototype (data collection first)</button></div><p class="small muted">Fills the editor below from the confirmed finding. Nothing is saved until you press Save.</p>' : '') + '</div>';
     // ---- 2. Decision (only the actions the backend accepts for this candidate) ----
     if (c.status === 'PENDING_REVIEW' && proto) {
-      html += '<div class="card" id="decision"><h2>Your decision</h2><p class="small">V1 impact: not calculable yet (historical data required). Validation: ' + chip('NOT SUPPORTED YET / DATA REQUIRED', 'c-warn') + '</p>' +
+      html += '<div class="card" id="decision"><h2>Your decision</h2>' + roHint() + '<p class="small">V1 impact: not calculable yet (historical data required). Validation: ' + chip('NOT SUPPORTED YET / DATA REQUIRED', 'c-warn') + '</p>' +
         '<label for="who">Your name</label><input id="who" autocomplete="name"><label for="note">Note</label><input id="note">' +
         '<div class="btns"><button class="btn" data-d="APPROVE">Approve data-collection plan</button><button class="btn bad" data-d="REJECT">Reject</button><button class="btn secondary" data-d="NEEDS_MORE_RESEARCH">Investigate more</button></div><div id="decMsg" class="small"></div>' +
         '<p class="small muted">Approving records the data-collection plan only. It creates no V1 methodology version, activates no source and changes nothing in V1.</p></div>';
     } else if (c.status === 'PENDING_REVIEW') {
       var needAck = !!(v && v.status !== 'SUPPORTED');
-      html += '<div class="card" id="decision"><h2>Your decision</h2><p class="small">Validation: ' + (v ? chip(vtext(v.status), VCLASS[v.status]) : '') + '</p>' +
+      html += '<div class="card" id="decision"><h2>Your decision</h2>' + roHint() + '<p class="small">Validation: ' + (v ? chip(vtext(v.status), VCLASS[v.status]) : '') + '</p>' +
         '<label for="who">Your name</label><input id="who" autocomplete="name"><label for="note">Note</label><input id="note">' +
         (needAck && !proxy ? '<label style="text-transform:none; font-size:14px; color:var(--text)"><input type="checkbox" id="ack" style="width:auto"> Approve without supporting validation (recorded on the version)</label><p class="small muted">The validation has not shown an improvement, so approval is only accepted with this box ticked.</p>' : '') +
         '<div class="btns">' + (proxy ? '' : '<button class="btn" data-d="APPROVE"' + (needAck ? ' disabled' : '') + '>Approve V1 change</button>') + '<button class="btn bad" data-d="REJECT">Reject</button><button class="btn secondary" data-d="NEEDS_MORE_RESEARCH">Investigate more</button></div><div id="decMsg" class="small"></div>' +

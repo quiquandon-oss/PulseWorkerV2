@@ -17,15 +17,17 @@
    "with_gaps": []
   },
   "binance_oi_archive": {
-   "complete": 0,
-   "files": {},
-   "first": null,
-   "last": null,
-   "latest_complete": null,
-   "observations": 0,
-   "partitions": 0,
+   "complete": 1,
+   "files": {
+    "2026-10-08": "43e220f6400fefd897939ff9eddaefaa04383ae9f90ae61b539ffdcb30eb4c63"
+   },
+   "first": "2026-10-08",
+   "last": "2026-10-08",
+   "latest_complete": "2026-10-08",
+   "observations": 576,
+   "partitions": 1,
    "retention": "archive keeps daily files back to 2021-12; no expiry is documented",
-   "stale": null,
+   "stale": false,
    "units": {
     "open_interest": "BTC",
     "open_interest_usd": "USD"

@@ -1,0 +1,43 @@
+{
+ "artifact": "risk-regime-forward-run",
+ "attempts": [
+  {
+   "completeness": "COMPLETE",
+   "duplicates_dropped": 0,
+   "expected_slots": 576,
+   "files": {
+    "checksum_ok": 1
+   },
+   "fingerprint": "34a3e2eac199076bd0693b7089bc63b0c3ebb36ecd1e45777ef628c1e1787d75",
+   "internal_conflicts": {},
+   "missing_ranges": {},
+   "missing_slots": 0,
+   "observations": 576,
+   "partition": "2026-10-08",
+   "source": "binance_oi_archive",
+   "status": "WRITTEN"
+  }
+ ],
+ "errors": [],
+ "finished_at": "2026-10-09T13:37:26.128000+00:00",
+ "location": {
+  "checked_at": "2026-10-09T13:37:25.389000+00:00",
+  "colo": "ORD",
+  "ip_sha256_prefix": "83d3801f8f85",
+  "loc": "US",
+  "source": "https://www.cloudflare.com/cdn-cgi/trace",
+  "status": 200
+ },
+ "run_id": "37938143802",
+ "sources": [
+  "binance_oi_archive",
+  "binance_funding_archive",
+  "hyperliquid_hip3",
+  "hyperliquid_btc_funding"
+ ],
+ "stale_sources": [],
+ "started_at": "2026-10-09T13:37:24.080000+00:00",
+ "summary": {
+  "WRITTEN": 1
+ }
+}

@@ -1,0 +1,36 @@
+{
+ "artifact": "risk-regime-forward-run",
+ "attempts": [
+  {
+   "error": "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<Error><Code>NoSuchKey</Code><Message>The specified key does not exist.</Message><Key>data/futures/um/daily/metrics/BTCUSDT/BTCUSDT-metrics-2026-10-08.zip</Key><",
+   "files": {
+    "http_404": 1
+   },
+   "partition": "2026-10-08",
+   "source": "binance_oi_archive",
+   "status": "NOT_YET_PUBLISHED"
+  }
+ ],
+ "errors": [],
+ "finished_at": "2026-10-09T05:11:53.001000+00:00",
+ "location": {
+  "checked_at": "2026-10-09T05:11:52.801000+00:00",
+  "colo": "IAD",
+  "ip_sha256_prefix": "980a870be637",
+  "loc": "US",
+  "source": "https://www.cloudflare.com/cdn-cgi/trace",
+  "status": 200
+ },
+ "run_id": "37887407604",
+ "sources": [
+  "binance_oi_archive",
+  "binance_funding_archive",
+  "hyperliquid_hip3",
+  "hyperliquid_btc_funding"
+ ],
+ "stale_sources": [],
+ "started_at": "2026-10-09T05:11:50.890000+00:00",
+ "summary": {
+  "NOT_YET_PUBLISHED": 1
+ }
+}

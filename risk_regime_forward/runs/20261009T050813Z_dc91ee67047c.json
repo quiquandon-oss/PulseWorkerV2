@@ -1,0 +1,114 @@
+{
+ "artifact": "risk-regime-forward-run",
+ "attempts": [
+  {
+   "completeness": "COMPLETE",
+   "duplicates_dropped": 0,
+   "expected_slots": 288,
+   "fingerprint": "db93f33c49713dc6f657cb92249cc1dde67b5d93a6957f37a265ff8513582194",
+   "internal_conflicts": {},
+   "missing_ranges": {},
+   "missing_slots": 0,
+   "observations": 288,
+   "partition": "2026-10-06",
+   "source": "hyperliquid_hip3",
+   "status": "WRITTEN"
+  },
+  {
+   "completeness": "COMPLETE",
+   "duplicates_dropped": 0,
+   "expected_slots": 432,
+   "fingerprint": "9efea38ce97ffee9b9ad939590f8efad07c518648e55b52818e4bb7b3269276e",
+   "internal_conflicts": {},
+   "missing_ranges": {},
+   "missing_slots": 0,
+   "observations": 432,
+   "partition": "2026-10-07",
+   "source": "hyperliquid_hip3",
+   "status": "WRITTEN"
+  },
+  {
+   "completeness": "COMPLETE",
+   "duplicates_dropped": 0,
+   "expected_slots": 432,
+   "fingerprint": "ecab8533968702c3cd9685aea15d4b9180130bb22b52f92f102995dde2b921f7",
+   "internal_conflicts": {},
+   "missing_ranges": {},
+   "missing_slots": 0,
+   "observations": 432,
+   "partition": "2026-10-08",
+   "source": "hyperliquid_hip3",
+   "status": "WRITTEN"
+  },
+  {
+   "completeness": "COMPLETE",
+   "duplicates_dropped": 0,
+   "expected_slots": 32,
+   "fingerprint": "724eefd8c27884ab417f781ff4700b0d704735ddaec02d2a5aca0f5b09b6eb0c",
+   "internal_conflicts": {},
+   "missing_ranges": {},
+   "missing_slots": 0,
+   "observations": 32,
+   "partition": "2026-10-06",
+   "source": "hyperliquid_btc_funding",
+   "status": "WRITTEN"
+  },
+  {
+   "completeness": "COMPLETE",
+   "duplicates_dropped": 0,
+   "expected_slots": 48,
+   "fingerprint": "da9c2ec0e281255f90beaf93f2fad9c455be46d13a19f5daeb88ff67ac32c35c",
+   "internal_conflicts": {},
+   "missing_ranges": {},
+   "missing_slots": 0,
+   "observations": 48,
+   "partition": "2026-10-07",
+   "source": "hyperliquid_btc_funding",
+   "status": "WRITTEN"
+  },
+  {
+   "completeness": "COMPLETE",
+   "duplicates_dropped": 0,
+   "expected_slots": 48,
+   "fingerprint": "017f60223e23baae9c452c33a4d7b6f9799e906f845097c8347ec3865dda215d",
+   "internal_conflicts": {},
+   "missing_ranges": {},
+   "missing_slots": 0,
+   "observations": 48,
+   "partition": "2026-10-08",
+   "source": "hyperliquid_btc_funding",
+   "status": "WRITTEN"
+  },
+  {
+   "partition": null,
+   "requests": {
+    "candleSnapshot_FETCHED": 9,
+    "fundingHistory_FETCHED": 2,
+    "fundingHistory_page_max_rows": 72
+   },
+   "source": "hyperliquid",
+   "status": "REQUEST_LOG"
+  }
+ ],
+ "errors": [],
+ "finished_at": "2026-10-09T05:08:29.877000+00:00",
+ "location": {
+  "checked_at": "2026-10-09T05:08:15.442000+00:00",
+  "colo": null,
+  "ip_sha256_prefix": null,
+  "loc": null,
+  "source": "https://www.cloudflare.com/cdn-cgi/trace",
+  "status": -1
+ },
+ "run_id": "dc91ee67047c",
+ "sources": [
+  "hyperliquid_hip3",
+  "hyperliquid_btc_funding"
+ ],
+ "stale_sources": [],
+ "started_at": "2026-10-09T05:08:13.234000+00:00",
+ "summary": {
+  "REQUEST_LOG": 1,
+  "WRITTEN": 6
+ }
+}

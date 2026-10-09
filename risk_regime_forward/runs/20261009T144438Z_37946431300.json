@@ -1,0 +1,24 @@
+{
+ "artifact": "risk-regime-forward-run",
+ "attempts": [],
+ "errors": [],
+ "finished_at": "2026-10-09T14:44:39.578000+00:00",
+ "location": {
+  "checked_at": "2026-10-09T14:44:39.576000+00:00",
+  "colo": "LAX",
+  "ip_sha256_prefix": "c026606dd211",
+  "loc": "US",
+  "source": "https://www.cloudflare.com/cdn-cgi/trace",
+  "status": 200
+ },
+ "run_id": "37946431300",
+ "sources": [
+  "binance_oi_archive",
+  "binance_funding_archive",
+  "hyperliquid_hip3",
+  "hyperliquid_btc_funding"
+ ],
+ "stale_sources": [],
+ "started_at": "2026-10-09T14:44:38.014000+00:00",
+ "summary": {}
+}

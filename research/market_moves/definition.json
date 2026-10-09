@@ -1,0 +1,56 @@
+{
+  "definition_id": "market-moves-primary",
+  "definition_version": "1.0.0",
+  "frozen_note": "Frozen before any detector was run on the collected data and before any return was computed. Changing any value creates a new version that cannot reuse results already seen.",
+  "primary_event": {
+    "name": "significant_24h_move",
+    "assets": ["BTC", "ETH", "LINK"],
+    "price": "hourly candle close (field c), Hyperliquid perpetual",
+    "sampling": "1h; observation at hour t = close of the candle whose close_ts is t - 1 ms; the value is known only from available_at = close_ts + 1 ms",
+    "return": "R24(t) = C(t) / C(t - 24h) - 1, a simple percentage return, computed exactly from the provider decimal strings (Decimal), never rounded before classification",
+    "classification": {"UP": "R24 > +0.03 (strictly greater)", "DOWN": "R24 < -0.03 (strictly less)", "NONE": "-0.03 <= R24 <= +0.03"},
+    "threshold": 0.03,
+    "operator": "strict inequality on |R24|; exactly +3% or -3% is NOT a crossing",
+    "log_return_note": "Internally L24 = ln(C(t)/C(t-24h)) may be reported. R24 > 0.03 is identical to L24 > ln(1.03) = 0.0295588; R24 < -0.03 is identical to L24 < ln(0.97) = -0.0304592. Classification always uses the exact ratio C(t)/C(t-24h) against 1.03 and 0.97, so the log transform cannot move a boundary case.",
+    "reference_selection": "C(t - 24h) is the close of the observation whose close time is nearest to (t - 24h), searched only within +/- 1 h of t - 24h; ties go to the earlier observation. Selection is by distance to the 24-hour target, never by calendar day or 'latest at or before', so timestamp jitter cannot silently turn a 24-hour return into a 48-hour one (production defect RE-8). The actual elapsed time between the two observations is recorded.",
+    "coverage_rule": "VALID only if (a) the 24-hour reference exists within the tolerance and (b) no gap between consecutive available observations in [t - 24h - tolerance, t] exceeds 2 h. Otherwise LOW_COVERAGE: no classification, no crossing, no interpolation, no distant substitute."
+  },
+  "episode": {
+    "start": "the first VALID crossing (UP or DOWN) when no episode is active starts an episode and emits one alert",
+    "same_direction_continuation": "further VALID crossings in the same direction while the episode is active belong to it (no new alert); every crossing's timestamp and observations are kept",
+    "merge_after_resolution": "a same-direction crossing within 24 h after the last crossing of a resolved episode re-opens that episode (no new alert; recorded as merged)",
+    "opposite_direction": "a VALID crossing in the opposite direction ends the active episode at that hour (resolution_reason OPPOSITE_CROSSING) and starts a new episode in the new direction with its own alert; opposite-direction episodes are never merged",
+    "onset": "estimated at first detection from data available then: the hour of the lowest close (UP) or highest close (DOWN) among VALID-window observations in [first_crossing_t - 24h, first_crossing_t]; ties go to the latest such hour. Uncertainty interval = [open_ts, close_ts] of that candle. Never revised with later data.",
+    "first_detection": "available_at of the first crossing's candle plus collection latency (0 for retrospective candle replay; reported separately when measured)",
+    "confirmation": "the earliest of: (a) persistence: the same-direction crossing condition is VALID and true at each of the 3 hourly closes after first detection (t+1h, t+2h, t+3h), confirmation at t+3h; (b) magnitude: |R24| >= 1.5 x threshold (= 0.045 for the primary rule) at any hour of the episode, confirmation at that hour. A LOW_COVERAGE hour breaks persistence (a).",
+    "resolution": "the episode ends at the 6th consecutive VALID hourly close with |R24| < 0.02; LOW_COVERAGE hours do not count and reset the run; an episode still active at the end of the scored period is OPEN",
+    "magnitude": "retrospective, computed only after resolution: peak excursion of closes from the onset close between onset and resolution (UP: max close / onset close - 1; DOWN: min close / onset close - 1); never available to the alert"
+  },
+  "identifiers": "episode_id = <detector>:<asset>:<first_crossing_close_ts>:<direction>; stable, never timestamp-only",
+  "detectors": {
+    "B0": {
+      "name": "production LARGE_MOVE, faithful replay",
+      "implementation": "research/event_detector.py detect_large_moves, imported unchanged from main b48fa33",
+      "input": "read-only extract of production btc_data (ts, btc_price) as it exists now, including its backfilled rows",
+      "schedule": "called as the live pipeline does: every 6 h at 00/06/12/18 UTC with window [run - 3 d, run]; an event fingerprint is emitted once; alert time = the first run that emits it",
+      "threshold": "4% absolute 24h on the first reading of each UTC day (production constants, unchanged)",
+      "assets": "BTC only (production has no ETH or LINK move detector, so B0 emits nothing for them)"
+    },
+    "B0h": {
+      "name": "production LARGE_MOVE algorithm on clean 3-hourly candle readings (algorithm-only sensitivity)",
+      "implementation": "the same unchanged function and run schedule",
+      "input": "for each asset, readings at 00/03/06/.../21 UTC equal to the close of the candle that closes at that tick, timestamped at available_at",
+      "purpose": "separates the algorithm's own behaviour from production data defects; applied counterfactually to ETH and LINK"
+    },
+    "B1": {"name": "primary detector", "rule": "primary_event and episode rules above, hourly closes", "note": "B1 on the candle data defines the reference episodes; its row checks implementation consistency only"},
+    "B2": {"name": "4-hour detector", "rule": "R4(t) = C(t)/C(t - 4h) - 1, UP if > +0.025, DOWN if < -0.025; reference within +/- 1 h of t - 4h; same gap rule over [t - 4h - tolerance, t]; same episode rules with confirmation at |R4| >= 0.0375 or 3-hour persistence and resolution after 6 VALID hours with |R4| < 0.0167", "objective": "a different objective (4-hour moves); its alerts are scored against the primary 24-hour reference episodes and labelled as such, and its own episode count is reported separately"},
+    "B3": {
+      "name": "volatility-adjusted detector (sensitivity, not a replacement for B1)",
+      "rule": "L24(t) = ln(C(t)/C(t - 24h)); threshold T(t) = k x sigma_1h(t) x sqrt(24); UP if L24 > T, DOWN if L24 < -T",
+      "sigma": "sample standard deviation of hourly log returns between consecutive VALID hourly closes, over the 720 hourly returns ending at the 24-hour reference observation (so the window (t - 24h, t] being judged is excluded)",
+      "insufficient_history": "fewer than 648 (90%) valid hourly returns in that 720-hour window: INSUFFICIENT_HISTORY, no classification",
+      "k": {"primary": 2.5, "secondary": 3.0},
+      "episode": "same rules with confirmation at 1.5 x T and resolution after 6 VALID hours with |L24| < (2/3) x T"
+    }
+  }
+}

@@ -1,0 +1,69 @@
+{
+ "plan_id": "market-moves-evaluation",
+ "plan_version": "1.0.0",
+ "definition_file": "research/market_moves/definition.json",
+ "definition_sha256_rule": "sha256 of the canonical JSON of definition.json (sort_keys, separators (',', ':'), ASCII); pinned in definition.sha256",
+ "data_snapshot": {
+  "branch": "research-data/market-moves",
+  "commit": "0eb5be0",
+  "observations_sha256": {
+   "BTC": "e0141555ced46de20e130e184f995aa506f122fb2302cc8b52ffe3ef38a6501d",
+   "ETH": "c15ea7f3ac2942ebf269a5fc5e3af7884c07510a6c6a520f16f104a812ee6fc9",
+   "LINK": "9937e4e861eaba2bcaef8c0790b933bea6f40c448b112a7521a50194607aaad2"
+  },
+  "coverage_utc": "candle open 2026-03-23 22:00 to 2026-10-09 20:00 (availability through 2026-10-09 21:00)",
+  "status": "retrospective reference, not a record of what CryptoPulse knew at the time"
+ },
+ "split": {
+  "method": "chronological; the first ~60% of the data span is development, the final ~40% is the untouched evaluation period",
+  "warmup_end_utc": "2026-04-24T00:00:00Z",
+  "development_scored_utc": [
+   "2026-04-24T00:00:00Z",
+   "2026-07-22T00:00:00Z"
+  ],
+  "evaluation_scored_utc": [
+   "2026-07-22T00:00:00Z",
+   "2026-10-09T21:00:00Z"
+  ],
+  "development_isolation": "a development run receives only observations with available_at < 2026-07-22T00:00:00Z; nothing in the evaluation period is loaded, replayed or computed",
+  "warmup": "the 31 days before 2026-04-24 provide history (24-hour references, 30-day volatility) but are not scored, so all detectors are scored on the same hours",
+  "sealing": "evaluation-period metrics are computed only by an explicit, separately authorised run that passes this plan's sha256; without it the evaluator refuses"
+ },
+ "reference_episodes": "B1 applied to the candle data of the scored period (with warm-up history); an episode belongs to a period by its first crossing; at a period end an active episode is OPEN and its matching window ends at the period end",
+ "matching": {
+  "hit": "an alert with the same direction as a reference episode and alert time in [onset_ts, resolution_ts] (inclusive; resolution_ts = period end if OPEN); the first such alert is the hit",
+  "duplicate": "any further alert matching an already-hit episode; reported separately, not counted as a hit or a false alarm",
+  "false_alarm": "an alert matching no reference episode; an alert of the right direction that falls within 24 h after an episode's resolution is additionally labelled LATE (still a false alarm)",
+  "miss": "a reference episode with no matching alert",
+  "not_evaluable": "for B0 only: a reference episode for which production btc_data has no reading on some UTC day in [day(first_crossing) - 1, day(resolution)]; counted as input-coverage failure, not a detector miss",
+  "direction_accuracy": "among alerts whose time falls inside any reference episode window, the share whose direction matches that episode"
+ },
+ "metrics": [
+  "precision = hits / (hits + false_alarms), with a Wilson 95% interval",
+  "recall = hits / (hits + misses), excluding not_evaluable, with a Wilson 95% interval",
+  "misses, false alarms, false alarms per 30 scored days",
+  "detection delay from onset (alert_time - onset_ts, hours): median and 90th percentile over hits",
+  "delay from the reference first detection (alert_time - reference first_detection)",
+  "direction accuracy",
+  "peak magnitude of hit and missed episodes",
+  "duplicate alerts and duplicates per hit",
+  "confirmation share and delay (reference episodes)",
+  "data coverage (VALID / LOW_COVERAGE / INSUFFICIENT_HISTORY hours) and, for B0, production input freshness"
+ ],
+ "breakdowns": [
+  "asset",
+  "direction",
+  "volatility regime: tercile of sigma_1h (720 h, as in B3) at the episode's first crossing; cut points = 33rd/67th percentiles of sigma_1h over all development scored hours across assets, computed in the development run and reused unchanged for evaluation",
+  "data quality: episodes with any LOW_COVERAGE hour in [onset - 24h, resolution] versus none"
+ ],
+ "small_sample_rule": "fewer than 20 reference episodes in a cell: the cell is labelled INSUFFICIENT_SAMPLE and shows counts only; no rates are emphasised and no superiority is claimed from it",
+ "baselines": [
+  "B0",
+  "B0h",
+  "B1",
+  "B2",
+  "B3 (k=2.5, k=3.0)"
+ ],
+ "claims_rule": "no detector is called better because it detects more events; precision, false alarms per 30 days, coverage and delay are always reported together; no claim is made from the development period alone",
+ "definition_sha256": "c3ef65830c3bf729354749a94c2038c072fa72f99b5977608f41aa6bd19c0b92"
+}

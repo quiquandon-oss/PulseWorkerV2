@@ -1,0 +1,26 @@
+{
+  "erratum_id": "T-A-ADDENDUM-1-ERRATUM-1",
+  "corrects": {
+    "file": "research/v1_candidate_registration_addendum_1.json",
+    "sha256_file_bytes": "c2ebdfcb75a1690b25f3a327bf7537f8ee6853e16a0dc6295bebd18b8ac7ae9c",
+    "commit": "fbedd2033ce47c1b61be27d25f63ce5cada20a7b",
+    "kept": "The original addendum is kept byte-for-byte and is not edited. Its statistical plan (candidates, boundary, unit, settled-day rule, fixed horizon of 30 units, tests, thresholds, missing-data rules, permitted fields) remains the operative plan unchanged."
+  },
+  "field_corrected": "frozen_utc",
+  "original_value": "2026-10-09T17:05:00Z",
+  "finding": "The original value is wrong. It was typed into the file as an anticipated time a few minutes ahead, not read from a clock, and it is later than the file's own creation, commit and push. It must not be cited as the freeze time.",
+  "recorded_chronology_utc": {
+    "branch_reset_to_main_bdfb2cb": "2026-10-09T16:57:41Z (local branch reflog)",
+    "addendum_file_created": "2026-10-09T16:58:27.130Z (filesystem birth and modification time)",
+    "addendum_committed": "2026-10-09T16:58:48Z (commit fbedd20 author and committer date; SSH-signed commit)",
+    "addendum_pushed": "2026-10-09T16:58:51Z (remote-tracking reflog entry 'update by push')",
+    "evaluator_committed_and_pushed": "2026-10-09T17:02:46Z / 17:02:48Z (commit fc91def)",
+    "first_post_boundary_extract_written": "2026-10-09T17:03:09.935Z (filesystem time of results/v1_prospective/2026-10-09/btc_extract.json)",
+    "first_progress_record_committed_and_pushed": "2026-10-09T17:03:34Z / 17:03:36Z (commit 8acb691)"
+  },
+  "operative_freeze_time_utc": "2026-10-09T16:58:51Z, the push of fbedd20 (the latest of creation, commit and push)",
+  "evidence_limits": "All times above come from the clock of the machine that made the commits (git commit dates, reflog, file system). GitHub stores the same commit and files, but its commit dates are client-supplied; a server-side push receipt time was not available to the tools used. The ordering claim below therefore does not depend on these clocks.",
+  "clock_independent_ordering": "The first post-boundary extract (taken after the push, per the sequence above) shows the latest btc_data price at ts 1791558043621 = 2026-10-09T15:00:43Z, before the boundary. A 24h outcome for an observation after the boundary needs a price at or after observation + 18h (24h horizon minus the 6h tolerance), so no prospective outcome could exist before 2026-10-10T10:00Z, whichever clock is used. No outcome direction, hit, accuracy or p-value was computed at any point.",
+  "plan_status": "operative plan = original addendum c2ebdfcb... + this erratum (metadata only). No hypothesis, transformation, threshold, minimum or rule is changed by this erratum.",
+  "written_utc_note": "This erratum was written on 2026-10-09 after 17:41Z (clock reading before writing); its own commit time is authoritative."
+}

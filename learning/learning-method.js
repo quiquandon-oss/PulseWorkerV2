@@ -404,27 +404,12 @@ export function realizedDirection(btcRows, ts, rules = VALIDATION_RULES) {
   return r > 0 ? 'UP' : r < 0 ? 'DOWN' : 'FLAT';
 }
 
-export function validateRecalculation(recalc, btcRows, { eventTs = null, rules = VALIDATION_RULES } = {}) {
-  const head = { method: rules.method, rules: { horizon_hours: 24, min_independent_changed_calls: rules.minIndependentChanged, alpha: rules.alpha, excluded_window_hours: rules.excludeAroundEventMs / HOUR } };
-  if (recalc.availability && recalc.availability.status === DATA_COLLECTION_REQUIRED) {
-    return { ...head, status: 'DATA_REQUIRED', resolved: 0,
-      headline: 'CryptoPulse cannot validate this signal yet because V1 does not currently collect the required inputs.' };
-  }
-  if (!recalc.possible) {
-    return { ...head, status: 'NOT_ENOUGH_DATA', headline: 'Cannot be validated yet: no historical data for the new input.', resolved: 0 };
-  }
-  const rows = [];
-  for (const p of recalc.all_points || []) {
-    if (eventTs !== null && Math.abs(p.ts - eventTs) <= rules.excludeAroundEventMs) continue; // never validate on the event that inspired it
-    const realized = realizedDirection(btcRows, p.ts, rules);
-    if (!realized || realized === 'FLAT') continue;
-    const base = p.reconstructed >= 50 ? 'UP' : 'DOWN';
-    const prop = p.proposed >= 50 ? 'UP' : 'DOWN';
-    rows.push({ ts: p.ts, day: new Date(p.ts).toISOString().slice(0, 10), realized, base_hit: base === realized, prop_hit: prop === realized, changed: base !== prop });
-  }
+// Verdict for one set of resolved rows (unchanged EXP-005 rule: one changed call per UTC day, one-sided binomial).
+function verdict(rows, rules) {
   const pct = (a, b) => (b ? Math.round((a / b) * 1000) / 10 : null);
   const baseHits = rows.filter((r) => r.base_hit).length;
   const propHits = rows.filter((r) => r.prop_hit).length;
+  const stored = rows.filter((r) => r.stored_hit !== null);
   const changed = rows.filter((r) => r.changed);
   // Observations overlap (hourly, 24h horizon), so significance uses at most one changed call per UTC day.
   const perDay = new Map();
@@ -442,16 +427,54 @@ export function validateRecalculation(recalc, btcRows, { eventTs = null, rules =
   else if (worsened > improved && pWorse <= rules.alpha) { status = 'NOT_SUPPORTED'; headline = `The adjusted V1 was wrong more often on the days it disagreed with current V1 (${worsened} vs ${improved}).`; }
   else { status = 'INCONCLUSIVE'; headline = `No clear difference on the days the two disagreed (${improved} better, ${worsened} worse).`; }
   return {
-    ...head, status, headline, resolved: rows.length,
+    status, headline, resolved: rows.length,
     current_v1: { hits: baseHits, total: rows.length, accuracy_pct: pct(baseHits, rows.length) },
     adjusted_v1: { hits: propHits, total: rows.length, accuracy_pct: pct(propHits, rows.length) },
+    // The call V1 actually made (stored score), next to the reconstructed baseline the comparison uses.
+    stored_v1: { hits: stored.filter((r) => r.stored_hit).length, total: stored.length, accuracy_pct: pct(stored.filter((r) => r.stored_hit).length, stored.length),
+      reconstruction_call_disagreements: stored.filter((r) => r.stored_call !== r.base_call).length },
     changed_calls: changed.length,
     independent: { days: indep.length, improved, worsened, p_better: pBetter === null ? null : Math.round(pBetter * 1000) / 1000, p_worse: pWorse === null ? null : Math.round(pWorse * 1000) / 1000 },
   };
 }
 
+// discoveredAt (optional, ms): when the candidate was created. With it, the verdict uses ONLY observations made after
+// that time (holdout); observations the researcher could already see are reported separately as exploratory
+// (in-sample) and never decide the status. Without it, behaviour is unchanged.
+export function validateRecalculation(recalc, btcRows, { eventTs = null, discoveredAt = null, rules = VALIDATION_RULES } = {}) {
+  const head = { method: rules.method, rules: { horizon_hours: 24, min_independent_changed_calls: rules.minIndependentChanged, alpha: rules.alpha, excluded_window_hours: rules.excludeAroundEventMs / HOUR } };
+  if (recalc.availability && recalc.availability.status === DATA_COLLECTION_REQUIRED) {
+    return { ...head, status: 'DATA_REQUIRED', resolved: 0,
+      headline: 'CryptoPulse cannot validate this signal yet because V1 does not currently collect the required inputs.' };
+  }
+  if (!recalc.possible) {
+    return { ...head, status: 'NOT_ENOUGH_DATA', headline: 'Cannot be validated yet: no historical data for the new input.', resolved: 0 };
+  }
+  const rows = [];
+  for (const p of recalc.all_points || []) {
+    if (eventTs !== null && Math.abs(p.ts - eventTs) <= rules.excludeAroundEventMs) continue; // never validate on the event that inspired it
+    const realized = realizedDirection(btcRows, p.ts, rules);
+    if (!realized || realized === 'FLAT') continue;
+    const base = p.reconstructed >= 50 ? 'UP' : 'DOWN';
+    const prop = p.proposed >= 50 ? 'UP' : 'DOWN';
+    const storedCall = typeof p.stored === 'number' ? (p.stored >= 50 ? 'UP' : 'DOWN') : null;
+    rows.push({ ts: p.ts, day: new Date(p.ts).toISOString().slice(0, 10), realized, base_call: base, base_hit: base === realized, prop_hit: prop === realized,
+      changed: base !== prop, stored_call: storedCall, stored_hit: storedCall === null ? null : storedCall === realized });
+  }
+  if (discoveredAt === null || discoveredAt === undefined) return { ...head, ...verdict(rows, rules) };
+  const discovery = rows.filter((r) => r.ts <= discoveredAt);
+  const holdout = rows.filter((r) => r.ts > discoveredAt);
+  const out = verdict(holdout, rules);
+  if (!holdout.length || out.status === 'NOT_ENOUGH_DATA' || out.status === 'VALIDATING') {
+    out.status = 'AWAITING_HOLDOUT';
+    out.headline = `Validated only on V1 observations made after this candidate was created: ${out.independent.days} independent disagreement day(s) so far, ${rules.minIndependentChanged} needed.`;
+  }
+  return { ...head, ...out, discovered_at: discoveredAt, validation_scope: 'HOLDOUT (observations after the candidate was created)',
+    exploratory_in_sample: { label: 'EXPLORATORY: observations the researcher could already see; not a validation', ...verdict(discovery, rules) } };
+}
+
 export const VALIDATION_TEXT = Object.freeze({
-  DATA_REQUIRED: 'Not supported yet: data required', NOT_ENOUGH_DATA: 'Not enough data', VALIDATING: 'Validating', SUPPORTED: 'Supported', NOT_SUPPORTED: 'Not supported', INCONCLUSIVE: 'Inconclusive',
+  DATA_REQUIRED: 'Not supported yet: data required', NOT_ENOUGH_DATA: 'Not enough data', AWAITING_HOLDOUT: 'Awaiting out-of-sample data', VALIDATING: 'Validating', SUPPORTED: 'Supported', NOT_SUPPORTED: 'Not supported', INCONCLUSIVE: 'Inconclusive',
 });
 
 export function nextVersionId(existingIds) {

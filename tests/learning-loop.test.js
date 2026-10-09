@@ -489,7 +489,7 @@ describe('Full journey: finding -> candidate -> adjustment -> recalculation -> v
     expect(view.recalculation.event).toMatchObject({ stored: 66, reconstructed: 70, proposed: 70, delta: 0 });
     expect(view.recalculation.observations).toBeGreaterThan(90);
     expect(view.recalculation.reconstruction.exact_matches).toBe(0);
-    expect(['VALIDATING', 'INCONCLUSIVE', 'NOT_ENOUGH_DATA']).toContain(view.validation.status);
+    expect(['VALIDATING', 'INCONCLUSIVE', 'NOT_ENOUGH_DATA', 'AWAITING_HOLDOUT']).toContain(view.validation.status);
     // Slice 5: decision needs a name and, without supporting validation, an explicit acknowledgement
     expect((await call(ctx.env, '/api/learning/candidate/decide', { method: 'POST', token: ctx.token, body: { candidate_id: id, decision: 'APPROVE' } })).status).toBe(400);
     const noAck = await call(ctx.env, '/api/learning/candidate/decide', { method: 'POST', token: ctx.token, body: { candidate_id: id, decision: 'APPROVE', approver: 'Olivier' } });
@@ -854,7 +854,7 @@ describe('NEW_SIGNAL -> signal prototype, data collection first (Event #15 regre
     const view = (await call(ctx.env, `/api/learning/candidate?id=${id}`)).json;
     expect(view.recalculation.possible).toBe(true);
     expect(view.recalculation.event).toMatchObject({ stored: 66, reconstructed: 70, proposed: 70, delta: 0 });
-    expect(['VALIDATING', 'INCONCLUSIVE', 'NOT_ENOUGH_DATA', 'SUPPORTED', 'NOT_SUPPORTED']).toContain(view.validation.status);
+    expect(['VALIDATING', 'INCONCLUSIVE', 'NOT_ENOUGH_DATA', 'SUPPORTED', 'NOT_SUPPORTED', 'AWAITING_HOLDOUT']).toContain(view.validation.status);
     // the prototype's earlier analysis is kept, not overwritten
     expect(view.analysis_history).toHaveLength(1);
     expect(view.analysis_history[0]).toMatchObject({ availability: 'DATA_COLLECTION_REQUIRED', adjustment: { type: 'SIGNAL_PROTOTYPE' } });

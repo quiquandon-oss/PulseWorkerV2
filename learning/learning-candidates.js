@@ -80,7 +80,7 @@ async function analyse(env, candidate, baseVersion) {
   const [obs, btc] = await Promise.all([loadAllV1Observations(env), loadAllBtc(env)]);
   const contexts = buildContexts(obs, btc);
   const recalc = recalculate(baseVersion.config, candidate.adjustment, contexts, { eventTs });
-  const validation = validateRecalculation(recalc, btc, { eventTs });
+  const validation = validateRecalculation(recalc, btc, { eventTs, discoveredAt: candidate.created_ts ?? null }); // verdict on holdout only
   const { all_points, proposed_config, ...recalcView } = recalc;
   const proxy = isProxySignalCandidate(candidate.candidate_type, candidate.adjustment);
   return {

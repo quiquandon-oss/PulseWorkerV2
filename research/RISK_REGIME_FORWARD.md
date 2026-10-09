@@ -148,7 +148,19 @@ The evaluation is not automated: it needs a production read and a human to run i
 - **Collected now (this container):** `hyperliquid_hip3` and `hyperliquid_btc_funding` for 2026-10-06 08:00 →
   2026-10-08 23:00 UTC. That is 3 complete day partitions per source (1,280 observations, 0 missing slots, 0
   overlap with the frozen data). A second run was a no-op with byte-identical data.
-- **Binance archive:** pending the one verification run on the GitHub runner (see the run records).
+- **Binance archive:** one verification run on the GitHub runner, run `37887407604`
+  (`runs/20261009T051150Z_37887407604.json`).
+  - **Location:** `loc=US`, `colo=IAD`.
+  - **OI, 2026-10-08:** `NOT_YET_PUBLISHED`. The archive answered 404 `NoSuchKey` at 05:11 UTC on 9 Oct. Nothing
+    was written; the next run retries.
+  - **Funding, October:** not attempted, because the month has not closed.
+  - **Hyperliquid:** partitions already complete, so not re-attempted.
+  - **No new Binance data has been collected yet.**
+  - **Publication timing:** on 9 Oct the 7 Oct file was available by 04:24 UTC and the 8 Oct file was not by
+    05:11. Same-morning publication of the previous day is therefore not guaranteed, and a single daily run can
+    lag one day. The retry rule absorbs this without gaps. Moving the proposed run later (for example 10:40 UTC)
+    is a reasonable alternative; the evaluation is unaffected either way, because availability is judged on
+    `available_at`, not on collection time.
 - **Evaluation:** no evaluated calls exist yet (the start is 2026-10-10). The result is `INSUFFICIENT_SAMPLE` by
   construction.
 

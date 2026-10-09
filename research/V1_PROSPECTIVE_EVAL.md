@@ -62,11 +62,47 @@ or activated, Candidate #1 is untouched, and nothing writes to production D1.
   - **Progress step:** no credentials.
   - **Commit step:** the only step with the GitHub token. It adds files only, under `v1_prospective/runs/` on
     `research-data/v1-prospective`, with a single fixed-refspec push.
-- **Installing it (after review, by a person):**
-  1. Create a Cloudflare API token limited to D1 read on this account. Store it as `RESEARCH_D1_READONLY_TOKEN`.
-  2. Run the extractor once by hand with that token, to confirm the D1 query API accepts a read-only token.
-  3. Create the orphan branch `research-data/v1-prospective`.
-  4. Copy the stub to `.github/workflows/` on main, with `V1_PROSPECTIVE_CODE_SHA` replaced by the reviewed commit.
+### Read-only access: what is and is not known
+- Cloudflare's permission reference lists **D1 Read** ("grants read access to D1") and **D1 Edit/Write** ("grants write
+  access to D1"). It does not say which of them the D1 query endpoint
+  (`POST /accounts/{account_id}/d1/database/{database_id}/query`) accepts.
+- **Not yet tested:** no D1 Read token has been tried against this endpoint. The workflow stays inert until the manual
+  test below succeeds.
+- **If the endpoint refuses D1 Read:** the run fails closed (HTTP 403, nothing written). Do **not** fall back to
+  `CLOUDFLARE_API_TOKEN`. The alternative (a D1 Edit token limited to this one database, or a read-only proxy Worker)
+  is a separate decision.
+
+### Installation gates (all required, in order)
+1. **Create the token.** Cloudflare dashboard → My Profile → API Tokens → Create Token → Create Custom Token.
+   - Name: `research-d1-readonly`.
+   - Permissions: **Account → D1 → Read**. Nothing else.
+   - Account Resources: Include → the account that owns `sentiment-history`.
+   - Optional: an expiry date. Client IP filtering is not useful for GitHub-hosted runners.
+   - Check the summary screen shows only `D1:Read`, then create the token and copy it once.
+2. **Run the manual test** on your own machine, from a checkout of this branch:
+   ```sh
+   export RESEARCH_D1_READONLY_TOKEN='<paste>'      # do not commit or echo it
+   mkdir -p /tmp/v1p-test && node research/v1_prospective_extract.mjs --out-dir /tmp/v1p-test
+   node research/v1_prospective_eval.mjs --mode progress --v1 /tmp/v1p-test/v1_extract.json \
+     --btc /tmp/v1p-test/btc_extract.json --out /tmp/v1p-test/progress.json
+   unset RESEARCH_D1_READONLY_TOKEN
+   ```
+   - **Success:** the first command prints row counts. The second prints `T-A1: AWAITING_HOLDOUT, units n/30` and
+     the same line for T-A2.
+   - The extractor runs only three fixed SELECTs and stops on any response that reports a change.
+   - **Do not** test the token by attempting a write against production D1.
+3. **Store the secret.** GitHub → repository Settings → Secrets and variables → Actions → New repository secret
+   `RESEARCH_D1_READONLY_TOKEN`. Or run `gh secret set RESEARCH_D1_READONLY_TOKEN` and paste the token at the prompt.
+4. **Review the run's write path:** the stub, its `contents: write` permission, and its target branch
+   `research-data/v1-prospective`.
+5. **Create the empty data branch:**
+   ```sh
+   git switch --orphan research-data/v1-prospective && git commit --allow-empty -m "Research data: T-A1/T-A2 progress records"
+   git push -u origin research-data/v1-prospective
+   ```
+6. **Install:** copy `research/scheduler/v1-prospective-progress.yml` to `.github/workflows/` on main, with
+   `V1_PROSPECTIVE_CODE_SHA` replaced by the reviewed 40-hex commit of this branch. Merge only with explicit
+   authorisation.
 
 ## Running it by hand (read-only)
 1. Extract with the statements recorded in the manifest. All are SELECTs on `research_sentiment_archive`, `history` and

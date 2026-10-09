@@ -75,13 +75,15 @@ index.json                                rebuilt from the partitions each run (
 
 ## 3. Cadence (proposed, not enabled)
 
-**Proposal: daily at 06:40 UTC.**
+**Authorised: daily at 10:40 UTC** (06:40 was the first proposal; moved later after the publication check).
 - **Retention:** daily is far inside Hyperliquid's 5,000-hour limit, so one missed run loses nothing.
-- **Publication:** Binance publishes each day's file after the day ends. 06:40 UTC usually catches the previous
-  day, and a late file is simply picked up by the next run.
+- **Publication:** Binance publishes each day's file after the day ends. 10:40 UTC gives the previous
+  day's file more time (it was still unpublished at 05:11 UTC on 9 Oct), and a late file is simply picked up by
+  the next run.
 - **Evaluation fit:** V1 calls resolve in 24 h, so day-level collection matches the day-level unit of analysis.
 - **Monthly funding:** daily runs pick up the monthly file within a day of its publication.
-- **Collisions:** 06:40 avoids the existing jobs at 07:00 (V1), 07:30, 08:00 and the 6-hourly :00 runs.
+- **Collisions:** 10:40 avoids the existing jobs at :00 (including Monday 10:00 and the daily 11:00), 07:30 and
+  08:00.
 - **Cost:** about 1–3 minutes of runner time per run.
 - **Why not more often:** the archive is daily, so intraday runs would only re-check unchanged partitions.
 
@@ -164,15 +166,61 @@ The evaluation is not automated: it needs a production read and a human to run i
 - **Evaluation:** no evaluated calls exist yet (the start is 2026-10-10). The result is `INSUFFICIENT_SAMPLE` by
   construction.
 
-## 6. Authorisation needed before collection runs automatically
+## 6. Enabling (2026-10-09): branch strategy, isolation, and the one remaining step
 
-1. Explicit approval to run a scheduled research workflow on GitHub-hosted runners. These are US-located; Binance
-   REST and Bybit refuse them; the Binance archive serves them.
-2. In `.github/workflows/research-forward-collection.yml`, uncomment the two `schedule` lines.
-3. Make the workflow reach the **default branch** (`main`), because GitHub runs schedules only from there. That
-   means a merge or a cherry-pick of the workflow, the collector and its dependencies, which needs separate
-   approval since main deploys the Worker on some paths. The workflow itself touches no Worker file. Its commits
-   would then go to `main` unless it is edited to push to a dedicated data branch, which is the recommended edit
-   at that point.
-4. Separately, for the evaluation: a person (or an approved read-only job) produces the V1 and BTC extracts above.
-   No D1 write is involved.
+**Authorised.** Daily research-only collection of:
+- Binance OI (archive);
+- Binance funding (monthly archive);
+- Hyperliquid cross-asset and BTC funding/premium;
+- at **10:40 UTC**, writing research data **only** to a dedicated research-data branch.
+
+**Not authorised.** Merging into main, deployment, D1 writes, V1 / Candidate #1 changes, signal design, paid
+sources, new secrets.
+
+**Branch strategy.**
+- `research-data/risk-regime-forward` is an **orphan** data-only branch, with no shared history, no code, no
+  workflows and no Worker files. It is the store of record from now on.
+  - It was seeded with a byte-identical copy of `research/results/risk_regime_forward/` at `8307af6` (22 files,
+    sha256-compared).
+  - The research-branch copy stays as that frozen seed snapshot and is no longer written.
+- The code stays on `claude/sweet-meitner-66ntx8`. Workflows check it out read-only (`persist-credentials: false`)
+  and run it against a separate checkout of the data branch.
+- **Writes are guarded.** The job commits only from the data checkout, refuses any staged path outside
+  `risk_regime_forward/`, and pushes only `HEAD:refs/heads/research-data/risk-regime-forward`.
+
+**The schedule needs one file on `main`. It is not installed.** GitHub runs `schedule` (and `workflow_dispatch` /
+`repository_dispatch`) only from workflow files on the default branch. No GitHub-supported scheduling exists for a
+workflow that lives only on another branch. The research *implementation* does not need to reach main, but a
+scheduler definition must. It is prepared, inert, at `research/scheduler/research-forward-schedule.yml`:
+- `on: schedule: cron '40 10 * * *'` only;
+- `permissions: contents: write` only;
+- no secrets;
+- the code checked out at a pinned research SHA.
+
+Installing it means writing that one file to `.github/workflows/` on `main`. Your authorisation covered the
+research-data branch only, so **the schedule is left disabled**, as your instruction requires when a safeguard
+cannot be completed.
+
+**Deployment-isolation evidence** (static; `test_research_workflow_isolation.py`, plus inspection of every
+workflow on `main`):
+
+| Path to production | Why it cannot happen |
+|---|---|
+| Schedule | the stub's only trigger is `schedule`; its job runs a Python collector and `git push` to the data branch; it has no Cloudflare / wrangler steps and references no secrets |
+| Push events | `deploy.yml` runs only on pushes to `main` touching `worker.js`, `wrangler.toml`, `package.json`, `package-lock.json` or `deploy.yml`. Pushes to the data branch are not `main`, and the data branch contains no workflow files, so a push there starts nothing. Installing the stub on `main` touches none of deploy's paths. `test.yml` on a push to main runs only its `test` job; every staging/production job requires `workflow_dispatch` |
+| Generated commits | made with `GITHUB_TOKEN`, which by GitHub design never starts new workflow runs (only dispatch events are excepted); and they go to the data branch only |
+| Workflow chaining | no workflow on `main` uses `workflow_run`; `stage7-staging-dispatcher` dispatches only `stage7-research-pipeline.yml` on its own branch; our jobs have no `actions` permission, no `gh` / `curl`, and cannot dispatch |
+| Credentials | no deployment credentials or secrets; actions pinned to commit SHAs; the code checkout keeps no token |
+
+**Not verifiable from here.** Branch protection on `main`, because the GitHub tools available cannot read it.
+Isolation does not rely on it.
+
+**The single authorisation still needed.** Approval to add `research/scheduler/research-forward-schedule.yml`
+(with `RESEARCH_CODE_SHA` replaced by the reviewed research commit) as `.github/workflows/research-forward-schedule.yml`
+on `main`. That is one file, with no code, Worker or package change. After that the first scheduled run is the next
+10:40 UTC.
+
+**Evaluation input.** Point `--forward` at a checkout of the data branch (`<checkout>/risk_regime_forward`). The
+pre-registration is unchanged (sha256 `46c0d52b…`).
+
+## 7. Verification runs

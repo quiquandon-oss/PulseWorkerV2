@@ -80,7 +80,8 @@ async function analyse(env, candidate, baseVersion) {
   const [obs, btc] = await Promise.all([loadAllV1Observations(env), loadAllBtc(env)]);
   const contexts = buildContexts(obs, btc);
   const recalc = recalculate(baseVersion.config, candidate.adjustment, contexts, { eventTs });
-  const validation = validateRecalculation(recalc, btc, { eventTs, discoveredAt: candidate.created_ts ?? null }); // verdict on holdout only
+  // Holdout only, fail closed: a missing creation time can never fall back to an in-sample verdict.
+  const validation = validateRecalculation(recalc, btc, { eventTs, discoveredAt: candidate.created_ts, requireHoldout: true });
   const { all_points, proposed_config, ...recalcView } = recalc;
   const proxy = isProxySignalCandidate(candidate.candidate_type, candidate.adjustment);
   return {
@@ -246,7 +247,9 @@ export async function decideCandidate(env, { candidateId, decision, approver, no
   const ids = ((await env.DB.prepare('SELECT version_id FROM v1_methodology_versions').all()).results || []).map((r) => r.version_id);
   const versionId = nextVersionId(ids);
   const config = applyAdjustment(base.config, c.adjustment);
-  const validation = { status: a.validation.status, headline: a.validation.headline, method: a.validation.method, current_v1: a.validation.current_v1, adjusted_v1: a.validation.adjusted_v1, independent: a.validation.independent, approved_without_support: a.validation.status !== 'SUPPORTED' };
+  const validation = { status: a.validation.status, headline: a.validation.headline, method: a.validation.method, current_v1: a.validation.current_v1, adjusted_v1: a.validation.adjusted_v1, independent: a.validation.independent, approved_without_support: a.validation.status !== 'SUPPORTED',
+    validation_scope: a.validation.validation_scope || null, discovered_at: a.validation.discovered_at ?? null, baseline_used: a.validation.baseline_used || null, stored_v1: a.validation.stored_v1 || null,
+    reconstruction_mismatch: a.validation.reconstruction_mismatch || null, exploratory_in_sample_status: a.validation.exploratory_in_sample ? a.validation.exploratory_in_sample.status : null };
   await env.DB.prepare(
     `INSERT INTO v1_methodology_versions (version_id, parent_version_id, formula_id, config_json, created_ts, reason, candidate_id, status, approved_by, approved_ts, effective_ts, validation_json)
      VALUES (?, ?, ?, ?, ?, ?, ?, 'APPROVED', ?, ?, NULL, ?)`

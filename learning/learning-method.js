@@ -438,10 +438,19 @@ function verdict(rows, rules) {
   };
 }
 
-// discoveredAt (optional, ms): when the candidate was created. With it, the verdict uses ONLY observations made after
-// that time (holdout); observations the researcher could already see are reported separately as exploratory
-// (in-sample) and never decide the status. Without it, behaviour is unchanged.
-export function validateRecalculation(recalc, btcRows, { eventTs = null, discoveredAt = null, rules = VALIDATION_RULES } = {}) {
+// discoveredAt (ms): when the candidate was created. With it, the verdict uses ONLY observations made after that time
+// (holdout); observations the researcher could already see are reported separately as exploratory (in-sample) and never
+// decide the status. requireHoldout: the product path sets it, so a missing or invalid creation time fails closed
+// (AWAITING_HOLDOUT) instead of silently falling back to an in-sample verdict. Without discoveredAt and requireHoldout,
+// behaviour is unchanged (legacy path).
+//
+// Baseline: the comparison is adjusted V1 vs RECONSTRUCTED V1 (v1.0 published defaults, recomputed from stored readings),
+// so that the only difference between the two sides is the adjustment. The stored V1 call (what V1 actually said) is
+// reported separately. A holdout SUPPORTED verdict must also hold with every day removed on which the reconstructed call
+// differs from the stored call, so a reconstruction mismatch can never count as a candidate win.
+export const BASELINE_USED = 'RECONSTRUCTED_V1: v1.0 published defaults recomputed from stored source readings (not the stored historical calls)';
+
+export function validateRecalculation(recalc, btcRows, { eventTs = null, discoveredAt = null, requireHoldout = false, rules = VALIDATION_RULES } = {}) {
   const head = { method: rules.method, rules: { horizon_hours: 24, min_independent_changed_calls: rules.minIndependentChanged, alpha: rules.alpha, excluded_window_hours: rules.excludeAroundEventMs / HOUR } };
   if (recalc.availability && recalc.availability.status === DATA_COLLECTION_REQUIRED) {
     return { ...head, status: 'DATA_REQUIRED', resolved: 0,
@@ -451,7 +460,9 @@ export function validateRecalculation(recalc, btcRows, { eventTs = null, discove
     return { ...head, status: 'NOT_ENOUGH_DATA', headline: 'Cannot be validated yet: no historical data for the new input.', resolved: 0 };
   }
   const rows = [];
+  let invalidTs = 0;
   for (const p of recalc.all_points || []) {
+    if (!Number.isFinite(p.ts)) { invalidTs++; continue; }
     if (eventTs !== null && Math.abs(p.ts - eventTs) <= rules.excludeAroundEventMs) continue; // never validate on the event that inspired it
     const realized = realizedDirection(btcRows, p.ts, rules);
     if (!realized || realized === 'FLAT') continue;
@@ -461,15 +472,41 @@ export function validateRecalculation(recalc, btcRows, { eventTs = null, discove
     rows.push({ ts: p.ts, day: new Date(p.ts).toISOString().slice(0, 10), realized, base_call: base, base_hit: base === realized, prop_hit: prop === realized,
       changed: base !== prop, stored_call: storedCall, stored_hit: storedCall === null ? null : storedCall === realized });
   }
-  if (discoveredAt === null || discoveredAt === undefined) return { ...head, ...verdict(rows, rules) };
+  const holdoutMode = requireHoldout || (discoveredAt !== null && discoveredAt !== undefined);
+  if (!holdoutMode) return { ...head, ...verdict(rows, rules) };                       // legacy path, unchanged
+  rows.sort((a, b) => a.ts - b.ts);                                                    // day units must not depend on input order
+  const scope = { validation_scope: 'HOLDOUT (observations after the candidate was created)', baseline_used: BASELINE_USED, invalid_timestamps_excluded: invalidTs };
+  if (!Number.isFinite(discoveredAt)) {
+    return { ...head, ...scope, status: 'AWAITING_HOLDOUT', resolved: 0, discovered_at: null,
+      headline: 'The candidate\'s creation time is missing or invalid, so no out-of-sample verdict is possible. Nothing is validated in-sample instead.' };
+  }
   const discovery = rows.filter((r) => r.ts <= discoveredAt);
   const holdout = rows.filter((r) => r.ts > discoveredAt);
   const out = verdict(holdout, rules);
+  const mismatch = (r) => r.stored_call !== null && r.stored_call !== r.base_call;
+  const indepDays = new Map();
+  for (const r of holdout) if (r.changed && !indepDays.has(r.day)) indepDays.set(r.day, r);
+  const indep = [...indepDays.values()];
+  out.reconstruction_mismatch = { holdout_rows: holdout.filter(mismatch).length, independent_days: indep.filter(mismatch).length };
+  const vsStored = indep.filter((r) => r.stored_hit !== null);
+  out.vs_stored_v1 = { days: vsStored.length, adjusted_right_stored_wrong: vsStored.filter((r) => r.prop_hit && !r.stored_hit).length,
+    adjusted_wrong_stored_right: vsStored.filter((r) => !r.prop_hit && r.stored_hit).length };
+  if (out.status === 'SUPPORTED') {
+    const robust = verdict(holdout.filter((r) => !mismatch(r)), rules);
+    if (robust.status !== 'SUPPORTED') {
+      out.status = 'INCONCLUSIVE';
+      out.headline = `Better than the reconstructed V1 on the days they disagreed, but not once the ${out.reconstruction_mismatch.independent_days} day(s) where the reconstruction differs from V1's actual stored call are removed. Not counted as a win.`;
+    } else {
+      out.headline = `On data after this candidate was created, the adjusted V1 was right more often than the reconstructed V1 on the days they disagreed (${out.independent.improved} vs ${out.independent.worsened}); this holds with reconstruction-mismatch days removed.`;
+    }
+  } else if (out.status === 'NOT_SUPPORTED') {
+    out.headline = `On data after this candidate was created, the adjusted V1 was wrong more often than the reconstructed V1 on the days they disagreed (${out.independent.worsened} vs ${out.independent.improved}).`;
+  }
   if (!holdout.length || out.status === 'NOT_ENOUGH_DATA' || out.status === 'VALIDATING') {
     out.status = 'AWAITING_HOLDOUT';
     out.headline = `Validated only on V1 observations made after this candidate was created: ${out.independent.days} independent disagreement day(s) so far, ${rules.minIndependentChanged} needed.`;
   }
-  return { ...head, ...out, discovered_at: discoveredAt, validation_scope: 'HOLDOUT (observations after the candidate was created)',
+  return { ...head, ...scope, ...out, discovered_at: discoveredAt,
     exploratory_in_sample: { label: 'EXPLORATORY: observations the researcher could already see; not a validation', ...verdict(discovery, rules) } };
 }
 

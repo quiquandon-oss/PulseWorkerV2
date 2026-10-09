@@ -489,11 +489,15 @@ describe('Full journey: finding -> candidate -> adjustment -> recalculation -> v
     expect(view.recalculation.event).toMatchObject({ stored: 66, reconstructed: 70, proposed: 70, delta: 0 });
     expect(view.recalculation.observations).toBeGreaterThan(90);
     expect(view.recalculation.reconstruction.exact_matches).toBe(0);
-    expect(['VALIDATING', 'INCONCLUSIVE', 'NOT_ENOUGH_DATA', 'AWAITING_HOLDOUT']).toContain(view.validation.status);
+    // the fixture candidate is created after every stored observation: no out-of-sample data yet
+    expect(view.validation.status).toBe('AWAITING_HOLDOUT');
+    expect(view.validation.validation_scope).toMatch(/^HOLDOUT/);
+    expect(view.validation.exploratory_in_sample.label).toMatch(/^EXPLORATORY/);
     // Slice 5: decision needs a name and, without supporting validation, an explicit acknowledgement
     expect((await call(ctx.env, '/api/learning/candidate/decide', { method: 'POST', token: ctx.token, body: { candidate_id: id, decision: 'APPROVE' } })).status).toBe(400);
     const noAck = await call(ctx.env, '/api/learning/candidate/decide', { method: 'POST', token: ctx.token, body: { candidate_id: id, decision: 'APPROVE', approver: 'Olivier' } });
     expect(noAck.status).toBe(409);
+    expect(noAck.json.validation_status).toBe('AWAITING_HOLDOUT');           // awaiting holdout is never approvable as supported
     const ok = await call(ctx.env, '/api/learning/candidate/decide', { method: 'POST', token: ctx.token, body: { candidate_id: id, decision: 'APPROVE', approver: 'Olivier', note: 'test', acknowledge_unsupported: true } });
     expect(ok.json).toMatchObject({ ok: true, candidate_status: 'ACCEPTED', version_id: 'v1.1' });
     // Slice 6: version v1.1 is APPROVED (ready), not active; baseline persisted once
@@ -502,7 +506,8 @@ describe('Full journey: finding -> candidate -> adjustment -> recalculation -> v
     const v11 = versions[1];
     expect(v11).toMatchObject({ parent_version_id: 'v1.0', candidate_id: id, approved_by: 'Olivier', formula_id: 'v1-weighted-mean@1' });
     expect(JSON.parse(v11.config_json).sources.find((s) => s.id === 'etfflows').weight).toBe(0);
-    expect(JSON.parse(v11.validation_json).approved_without_support).toBe(true);
+    expect(JSON.parse(v11.validation_json)).toMatchObject({ approved_without_support: true, status: 'AWAITING_HOLDOUT',
+      validation_scope: expect.stringMatching(/^HOLDOUT/), baseline_used: expect.stringMatching(/^RECONSTRUCTED_V1/) });   // override is auditable
     expect((await call(ctx.env, '/api/learning/versions')).json.versions.map((v) => v.version_id)).toEqual(['v1.0', 'v1.1']);
     view = (await call(ctx.env, `/api/learning/candidate?id=${id}`)).json;
     expect(view.produced_version).toMatchObject({ version_id: 'v1.1', status: 'APPROVED' });

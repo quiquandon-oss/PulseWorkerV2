@@ -28,3 +28,11 @@ def test_spearman():
     assert abs(fa.spearman(list(range(10)), list(range(10))) - 1) < 1e-12
     assert abs(fa.spearman(list(range(10)), list(range(10, 0, -1))) + 1) < 1e-12
     assert fa.spearman([1, 2], [1, 2]) is None
+
+
+def test_registered_candidates_are_frozen():
+    import hashlib
+    import json
+    reg = json.loads((Path(__file__).resolve().parent / "v1_candidate_registration.json").read_text())
+    assert hashlib.sha256(json.dumps(reg, sort_keys=True).encode()).hexdigest() == "66067b324743bad052f4404d7ecbaaac76e6678116026ddd22dc8d73b22a266d"
+    assert reg["registered_utc"] == "2026-10-09T16:00:00Z" and [c["id"] for c in reg["candidates"]] == ["T-A1", "T-A2", "T-A3"]

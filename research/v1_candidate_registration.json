@@ -1,0 +1,42 @@
+{
+ "baseline": "v1.0 = V1_METHODOLOGY_V1 defaults (learning-core), stored V1 calls reported alongside",
+ "candidates": [
+  {
+   "adjustment": {
+    "group": "BREADTH",
+    "invert": true,
+    "source_id": "fng",
+    "type": "CHANGE_CLASSIFICATION"
+   },
+   "evaluator": "product: learning-method recalculate + validateRecalculation(discoveredAt)",
+   "id": "T-A1",
+   "origin": "fng forward rho -0.33 [-0.58, 0.01], 41 frozen days (exploratory)"
+  },
+  {
+   "adjustment": {
+    "source_id": "etfflows",
+    "type": "REMOVE_SOURCE"
+   },
+   "evaluator": "product: learning-method recalculate + validateRecalculation(discoveredAt)",
+   "id": "T-A2",
+   "origin": "etfflows 77% saturated (<=10 or >=90), forward rho -0.20 [-0.52, 0.12] (exploratory)"
+  },
+  {
+   "adjustment": {
+    "source_ids": [
+     "sp500",
+     "nasdaq",
+     "yield10y"
+    ],
+    "type": "REMOVE_SOURCES (research replay)"
+   },
+   "evaluator": "research replay: v1_failure_analysis.v1_composite(drop=...) under the same holdout, outcome and day-independence rules (the product takes one adjustment per candidate)",
+   "id": "T-A3",
+   "origin": "FRED daily inputs unchanged in ~97% of weekend observations; forward rho ~0 (exploratory)"
+  }
+ ],
+ "family_alpha": "product verdict rule unchanged (alpha 0.1 per candidate); a RESEARCH claim of support requires p <= 0.1/3 (Bonferroni over the 3 registered candidates)",
+ "holdout_rule": "learning-method.validateRecalculation(recalc, btc, {discoveredAt: Date.parse(registered_utc)}): only V1 observations after registration decide; EXP-005 24h outcome; one changed call per UTC day; one-sided binomial, alpha 0.1, >= 5 independent disagreement days (existing product rules, unchanged)",
+ "not_changed": "no V1 weights, sources or methodology change; no activation; Candidate #1 untouched; OI pre-registration 46c0d52b untouched",
+ "registered_utc": "2026-10-09T16:00:00Z"
+}

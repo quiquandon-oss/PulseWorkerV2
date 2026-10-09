@@ -1,0 +1,98 @@
+{
+  "addendum_id": "T-A-ADDENDUM-1",
+  "title": "Fixed-horizon prospective evaluation plan for T-A1 and T-A2",
+  "frozen_utc": "2026-10-09T17:05:00Z",
+  "frozen_note": "Written and committed before any BTC price, V1 call outcome or other resolved outcome after the holdout boundary was read. At freeze time no prospective outcome could exist: the first post-boundary V1 observation is at 2026-10-09T16:16Z and its 24h outcome cannot resolve before 2026-10-10T16:16Z.",
+  "hash_rule": "sha256 of this file's exact bytes (ASCII, as committed). Any change to this file is a new addendum and cannot reuse data already seen.",
+
+  "parent_registration": {
+    "file": "research/v1_candidate_registration.json",
+    "sha256_canonical": "66067b324743bad052f4404d7ecbaaac76e6678116026ddd22dc8d73b22a266d",
+    "sha256_canonical_rule": "python: hashlib.sha256(json.dumps(reg, sort_keys=True).encode()).hexdigest()",
+    "sha256_file_bytes": "ac88bf2df2968f8ddfe62f76aa10be76ee765cd13f7dc226e929aa54669a7455",
+    "registered_in_commit": "7dd5ab65ed300a9a05ee9eba8f45f0c3a05af195",
+    "registered_utc": "2026-10-09T16:00:00Z",
+    "unchanged": "The parent registration is copied byte-identical and is not modified. This addendum adds a stopping rule and fixes details the registration left open; it changes no transformation, threshold, minimum or test."
+  },
+
+  "candidates_evaluated": [
+    {"id": "T-A1", "adjustment": {"type": "CHANGE_CLASSIFICATION", "source_id": "fng", "group": "BREADTH", "invert": true}},
+    {"id": "T-A2", "adjustment": {"type": "REMOVE_SOURCE", "source_id": "etfflows"}}
+  ],
+  "candidates_not_evaluated_here": "T-A3 (research replay) is not evaluated by this plan but stays in the registered family of 3 for the research-wide correction.",
+
+  "holdout": {
+    "boundary_utc": "2026-10-09T16:00:00Z",
+    "boundary_ms": 1791561600000,
+    "rule": "only V1 observations with observation timestamp STRICTLY greater than boundary_ms are used; everything at or before it is excluded and only counted"
+  },
+
+  "evaluator_implementation": {
+    "commit": "bdfb2cb21a2e0814273d276a9bd84b09d74625a4",
+    "files_git_blob_sha1": {
+      "learning/learning-method.js": "ae4b9e13726144334ea9b3975d0726338c0de22e",
+      "learning/learning-core.js": "d34ecdb0ea24ce458c310a851dc4a66f05d5ac74"
+    },
+    "pinning_rule": "the evaluator refuses to run unless the imported files have exactly these git blob hashes",
+    "functions": "baselineConfig(); normalizeAdjustment(adjustment) must return ok with the registered adjustment unchanged; buildContexts(observations, btc); recalculate(baselineConfig(), adjustment, contexts, {eventTs: null}); validateRecalculation(recalc, btc, {eventTs: null, discoveredAt: 1791561600000, requireHoldout: true, rules})",
+    "safeguards_kept": "holdout split (ts > discoveredAt), fail-closed timestamps, reconstructed-V1 baseline, stored V1 calls reported, and the reconstruction-mismatch robustness rule: a SUPPORTED verdict must also be SUPPORTED with every row removed whose stored V1 call differs from the reconstructed call, otherwise INCONCLUSIVE"
+  },
+
+  "inputs": {
+    "v1_observations": "union of research_sentiment_archive (observation_ts AS ts, score, sources_json) and history (ts, score, sources_json), the archive row preferred when both hold the same ts; readings = JSON.parse(sources_json), or {} if unparsable; stored = score (the product's loadAllV1Observations rule)",
+    "btc_prices": "btc_data (ts, btc_price)",
+    "read_only": "SELECT-only extracts from production D1, saved as files with a manifest (as_of_ms = time the extract was taken, the exact statements, row counts). Inputs are identified by sha256 of their file bytes. The evaluator never connects to D1.",
+    "point_in_time": "each call is computed only from the source readings stored with that observation; the outcome uses BTC prices after it, as the outcome rule requires; no other later information is used"
+  },
+
+  "call_and_outcome_rule": "unchanged deployed rules: reconstructed V1 = v1.0 defaults recomputed from the stored readings (scoreWithConfig), adjusted V1 = the same with the registered adjustment; call UP if score >= 50 else DOWN; stored V1 call = UP if stored score >= 50 else DOWN; realized direction = realizedDirection(): nearest BTC price at or before the observation (gap <= 4h) to the nearest price at or before observation + 24h (gap <= 6h, and strictly after the observation); FLAT and unresolved are excluded",
+
+  "unit": {
+    "name": "independent disagreement day",
+    "definition": "For one candidate: a UTC calendar day D (00:00:00.000 to 23:59:59.999 UTC) that is SETTLED and contains at least one ELIGIBLE observation. Its unit is the earliest eligible observation of D. At most one unit per UTC day.",
+    "eligible_observation": "observation ts > boundary_ms, finite ts, both reconstructed and adjusted V1 scores computable, realized direction resolved and not FLAT, and adjusted call != reconstructed call",
+    "settled_day": "day D is settled only if extract as_of_ms >= end(D) + 36h AND the BTC extract contains a price at or after end(D) + 24h. 36h = 24h outcome horizon + 6h archive copy cadence + 6h margin. Unsettled days supply no unit and are not inspected.",
+    "same_as_validator": "this is exactly the validator's own rule (first changed, resolved, non-FLAT row per UTC day); at the fixed look the validator's independent.days must equal 30, otherwise the run is an INTEGRITY_ERROR and no verdict is produced"
+  },
+
+  "fixed_horizon": {
+    "units_required": 30,
+    "rule": "Each candidate is evaluated exactly once, when its 30th settled unit exists. Units are ordered by day. Let D30 be the day of the 30th unit. The analysis set is every observation with boundary_ms < ts < end(D30) + 1 ms (i.e. through the end of D30). Later days are never added to that candidate's analysis.",
+    "per_candidate": "T-A1 and T-A2 are looked at independently, each at its own 30th unit. The look for one candidate does not depend on the other's result. No candidate is selected, dropped or re-specified on the basis of any result.",
+    "no_interim": "Before its look a candidate gets no hit counts, accuracies, improved/worsened counts, p-values, win rates, comparisons with stored V1, or SUPPORTED / NOT_SUPPORTED / PASS / FAIL status. Its status is AWAITING_HOLDOUT.",
+    "if_never_30": "No result is ever computed. The candidate stays AWAITING_HOLDOUT. There is no calendar cutoff and the 30-unit requirement is never lowered. If a human stops collection, it is recorded as STOPPED_WITHOUT_VERDICT with no statistic."
+  },
+
+  "tests_at_the_look": {
+    "product_level": "validateRecalculation with the deployed VALIDATION_RULES unchanged (one-sided exact binomial vs p = 0.5 on the 30 units, alpha 0.1, minimum 5 independent days, mismatch robustness rule). Reported as the product rule's status.",
+    "research_level": "the same call with rules = VALIDATION_RULES with alpha replaced by 0.1/3 (the registered Bonferroni correction over the 3 registered candidates), so both the main test and the mismatch robustness re-test use 0.1/3.",
+    "research_claim": "SUPPORTED only if the research-level status is SUPPORTED; NOT_SUPPORTED only if it is NOT_SUPPORTED; otherwise INCONCLUSIVE. At n = 30 this means at least 21 improved of 30 for SUPPORTED (P(X>=21) = 0.0214) or at least 21 worsened for NOT_SUPPORTED.",
+    "improved_definition": "a unit is improved if the adjusted call matches the realized direction (on a unit the two calls differ, so exactly one of them is right)",
+    "effect_measures": "improved and worsened counts out of 30; improvement proportion improved/30 with an exact two-sided 95% Clopper-Pearson interval; validator p_better and p_worse; descriptive only (not tested): accuracy of reconstructed, adjusted and stored V1 over all resolved rows in the analysis set, vs_stored_v1 counts and reconstruction_mismatch counts from the validator"
+  },
+
+  "missing_and_invalid_data": {
+    "pre_boundary_or_equal": "excluded; counted",
+    "invalid_timestamp": "non-finite ts: excluded; counted (validator invalid_timestamps_excluded)",
+    "duplicate_timestamp": "archive row kept, history row dropped; counted",
+    "unparsable_sources_json": "readings {} -> no score -> excluded; counted",
+    "target_source_missing": "fng (T-A1) or etfflows (T-A2) missing: both sides drop the source and renormalise, the calls cannot differ, so the observation can never be a unit; counted",
+    "stored_score_missing": "stored call null: kept, never counted as a reconstruction mismatch; counted",
+    "missing_outcome": "unresolved (BTC gap) or FLAT: excluded; counted",
+    "reconstruction_mismatch": "stored call != reconstructed call: kept in the main test; handled at the look only by the deployed robustness rule; counted before the look as a data-quality field",
+    "incomplete_day": "unsettled days supply nothing",
+    "changed_settled_day": "if a later extract changes the observations of a day that was already settled in an earlier progress record (per-day digest of ts and stored score), the run is an INTEGRITY_CONFLICT and no look is taken until a human resolves it"
+  },
+
+  "permitted_before_the_look": [
+    "extract provenance: input sha256, as_of, row counts, first/last timestamps",
+    "observation counts by exclusion reason (as listed above)",
+    "per settled day: observations, observations with each target source, reconstruction-mismatch count, whether the day supplied a unit, and a digest",
+    "number of units accumulated per candidate (0..30) and the settled-day frontier",
+    "coverage: settled days with and without V1 observations"
+  ],
+
+  "separation": "Exploratory historical results (research/results/v1_failure_analysis.json, the 575 frozen observations of 2026-08-27 to 2026-10-06) are hypothesis-generating only and never enter this evaluation. The 30 archive rows between 2026-10-06 and the boundary are neither exploratory evidence nor prospective; they are excluded. Every output names its scope.",
+
+  "not_changed": "no V1 source, weight, score or methodology change; no Learning candidate or methodology version created or activated; Candidate #1 untouched; T-A1/T-A2 transformations and thresholds unchanged; OI pre-registration 46c0d52b47350a7c7e83841e83ff646d8e5d0f5b9146d98908dab32411ff3e93 and forward collection untouched; no production D1 write"
+}

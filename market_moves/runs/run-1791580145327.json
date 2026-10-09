@@ -1,0 +1,254 @@
+{
+ "assets": {
+  "BTC": {
+   "confirmed_identical": 4799,
+   "duplicates_in_response": 0,
+   "excluded_forming": 1,
+   "fetched_closed_candles": 4799,
+   "first_open_ts": 1774303200000,
+   "last_open_ts": 1791576000000,
+   "new": 0,
+   "observations_sha256": "e0141555ced46de20e130e184f995aa506f122fb2302cc8b52ffe3ef38a6501d",
+   "requests": [
+    {
+     "candles": 1000,
+     "request": {
+      "req": {
+       "coin": "BTC",
+       "endTime": 1777903199999,
+       "interval": "1h",
+       "startTime": 1774303200000
+      },
+      "type": "candleSnapshot"
+     },
+     "retrieved_at": 1791580146093
+    },
+    {
+     "candles": 1000,
+     "request": {
+      "req": {
+       "coin": "BTC",
+       "endTime": 1781503199999,
+       "interval": "1h",
+       "startTime": 1777903200000
+      },
+      "type": "candleSnapshot"
+     },
+     "retrieved_at": 1791580148055
+    },
+    {
+     "candles": 1000,
+     "request": {
+      "req": {
+       "coin": "BTC",
+       "endTime": 1785103199999,
+       "interval": "1h",
+       "startTime": 1781503200000
+      },
+      "type": "candleSnapshot"
+     },
+     "retrieved_at": 1791580150097
+    },
+    {
+     "candles": 1000,
+     "request": {
+      "req": {
+       "coin": "BTC",
+       "endTime": 1788703199999,
+       "interval": "1h",
+       "startTime": 1785103200000
+      },
+      "type": "candleSnapshot"
+     },
+     "retrieved_at": 1791580152012
+    },
+    {
+     "candles": 800,
+     "request": {
+      "req": {
+       "coin": "BTC",
+       "endTime": 1791583199999,
+       "interval": "1h",
+       "startTime": 1788703200000
+      },
+      "type": "candleSnapshot"
+     },
+     "retrieved_at": 1791580154136
+    }
+   ],
+   "revisions": 0,
+   "revisions_sha256": ""
+  },
+  "ETH": {
+   "confirmed_identical": 4799,
+   "duplicates_in_response": 0,
+   "excluded_forming": 1,
+   "fetched_closed_candles": 4799,
+   "first_open_ts": 1774303200000,
+   "last_open_ts": 1791576000000,
+   "new": 0,
+   "observations_sha256": "c15ea7f3ac2942ebf269a5fc5e3af7884c07510a6c6a520f16f104a812ee6fc9",
+   "requests": [
+    {
+     "candles": 1000,
+     "request": {
+      "req": {
+       "coin": "ETH",
+       "endTime": 1777903199999,
+       "interval": "1h",
+       "startTime": 1774303200000
+      },
+      "type": "candleSnapshot"
+     },
+     "retrieved_at": 1791580156275
+    },
+    {
+     "candles": 1000,
+     "request": {
+      "req": {
+       "coin": "ETH",
+       "endTime": 1781503199999,
+       "interval": "1h",
+       "startTime": 1777903200000
+      },
+      "type": "candleSnapshot"
+     },
+     "retrieved_at": 1791580158383
+    },
+    {
+     "candles": 1000,
+     "request": {
+      "req": {
+       "coin": "ETH",
+       "endTime": 1785103199999,
+       "interval": "1h",
+       "startTime": 1781503200000
+      },
+      "type": "candleSnapshot"
+     },
+     "retrieved_at": 1791580160648
+    },
+    {
+     "candles": 1000,
+     "request": {
+      "req": {
+       "coin": "ETH",
+       "endTime": 1788703199999,
+       "interval": "1h",
+       "startTime": 1785103200000
+      },
+      "type": "candleSnapshot"
+     },
+     "retrieved_at": 1791580162615
+    },
+    {
+     "candles": 800,
+     "request": {
+      "req": {
+       "coin": "ETH",
+       "endTime": 1791583199999,
+       "interval": "1h",
+       "startTime": 1788703200000
+      },
+      "type": "candleSnapshot"
+     },
+     "retrieved_at": 1791580164857
+    }
+   ],
+   "revisions": 0,
+   "revisions_sha256": ""
+  },
+  "LINK": {
+   "confirmed_identical": 4799,
+   "duplicates_in_response": 0,
+   "excluded_forming": 1,
+   "fetched_closed_candles": 4799,
+   "first_open_ts": 1774303200000,
+   "last_open_ts": 1791576000000,
+   "new": 0,
+   "observations_sha256": "9937e4e861eaba2bcaef8c0790b933bea6f40c448b112a7521a50194607aaad2",
+   "requests": [
+    {
+     "candles": 1000,
+     "request": {
+      "req": {
+       "coin": "LINK",
+       "endTime": 1777903199999,
+       "interval": "1h",
+       "startTime": 1774303200000
+      },
+      "type": "candleSnapshot"
+     },
+     "retrieved_at": 1791580166873
+    },
+    {
+     "candles": 1000,
+     "request": {
+      "req": {
+       "coin": "LINK",
+       "endTime": 1781503199999,
+       "interval": "1h",
+       "startTime": 1777903200000
+      },
+      "type": "candleSnapshot"
+     },
+     "retrieved_at": 1791580168997
+    },
+    {
+     "candles": 1000,
+     "request": {
+      "req": {
+       "coin": "LINK",
+       "endTime": 1785103199999,
+       "interval": "1h",
+       "startTime": 1781503200000
+      },
+      "type": "candleSnapshot"
+     },
+     "retrieved_at": 1791580171257
+    },
+    {
+     "candles": 1000,
+     "request": {
+      "req": {
+       "coin": "LINK",
+       "endTime": 1788703199999,
+       "interval": "1h",
+       "startTime": 1785103200000
+      },
+      "type": "candleSnapshot"
+     },
+     "retrieved_at": 1791580173228
+    },
+    {
+     "candles": 800,
+     "request": {
+      "req": {
+       "coin": "LINK",
+       "endTime": 1791583199999,
+       "interval": "1h",
+       "startTime": 1788703200000
+      },
+      "type": "candleSnapshot"
+     },
+     "retrieved_at": 1791580175258
+    }
+   ],
+   "revisions": 0,
+   "revisions_sha256": ""
+  }
+ },
+ "collector_version": "market-moves-collect-v1",
+ "endpoint": "https://api.hyperliquid.xyz/info",
+ "finished_at": 1791580176815,
+ "interval": "1h",
+ "requested_days": 200,
+ "requested_open_ts_range": [
+  1774303200000,
+  1791583200000
+ ],
+ "run_id": "run-1791580145327",
+ "source": "hyperliquid",
+ "started_at": 1791580145327,
+ "volume_meaning": "Hyperliquid candle field 'v': traded volume of the perpetual during the candle, in units of the base asset (e.g. BTC), on Hyperliquid only; 'n': number of trades. Venue-specific, not market-wide."
+}

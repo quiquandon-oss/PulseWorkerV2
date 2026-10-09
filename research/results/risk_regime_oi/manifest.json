@@ -1,0 +1,211 @@
+{
+ "artifact": "risk-regime-oi-collection",
+ "collected_at": "2026-10-09T04:24:38.122000+00:00",
+ "dedup": {
+  "binance_funding_archive|BTCUSDT|funding_rate": {
+   "conflicts": 0,
+   "duplicates_dropped": 0
+  },
+  "binance_oi_archive|BTCUSDT|open_interest": {
+   "conflicts": 0,
+   "duplicates_dropped": 0
+  },
+  "binance_oi_archive|BTCUSDT|open_interest_usd": {
+   "conflicts": 0,
+   "duplicates_dropped": 0
+  }
+ },
+ "files": {
+  "observations.jsonl.gz": "0cadd101115773a828412dee0b142a6614b39b4b92ada6403ef119d637451d01",
+  "raw_responses.jsonl.gz": "336ab2a698af1c12a426864ac55787badad7f0accbd5c2cab3e03c360064a755"
+ },
+ "http_log": {
+  "geo_blocked": 4,
+  "http_403": 2,
+  "http_451": 2
+ },
+ "location": {
+  "checked_at": "2026-10-09T04:24:38.213000+00:00",
+  "colo": "LAX",
+  "ip_sha256_prefix": "f6c21672fce7",
+  "loc": "US",
+  "source": "https://www.cloudflare.com/cdn-cgi/trace",
+  "status": 200
+ },
+ "probes": {
+  "binance_archive": {
+   "body_excerpt": "ad957aafe9d977ecf27500645e2a5ae7f4fcae83d0da9390d0f3ace5aa9da4bf  BTCUSDT-metrics-2026-09-27.zip\n",
+   "status": 200,
+   "url": "https://data.binance.vision/data/futures/um/daily/metrics/BTCUSDT/BTCUSDT-metrics-2026-09-27.zip.CHECKSUM"
+  },
+  "binance_fapi": {
+   "body_excerpt": "{\n  \"code\": 0,\n  \"msg\": \"Service unavailable from a restricted location according to 'b. Eligibility' in https://www.binance.com/en/terms. Please contact customer service if you believe you received t",
+   "status": 451,
+   "url": "https://fapi.binance.com/fapi/v1/time"
+  },
+  "bybit": {
+   "body_excerpt": "{\n    error:The Amazon CloudFront distribution is configured to block access from your country\n}",
+   "status": 403,
+   "url": "https://api.bybit.com/v5/market/time"
+  }
+ },
+ "rules": "no proxy, no credentials, no paid source, no substitution; refused requests are recorded, not retried elsewhere",
+ "sources": {
+  "binance_funding": {
+   "auth": "none",
+   "availability_rule": "fundingTime",
+   "by_metric": {},
+   "cost_eur": 0,
+   "dimension": "HIGHER-RESOLUTION VERSION OF EXISTING V1 DIMENSION",
+   "docs": "https://developers.binance.com/docs/derivatives/usds-margined-futures/market-data/rest-api/Get-Funding-Rate-History",
+   "endpoint": "GET https://fapi.binance.com/fapi/v1/fundingRate?symbol=BTCUSDT",
+   "error": "BLOCKED_BY_PROVIDER_GEO_RESTRICTION: fapi.binance.com refuses this environment's egress location (HTTP 451): b'{\\n  \"code\": 0,\\n  \"msg\": \"Service unavailable from a restricted location according to \\'b. Eligibility\\' in https://www.binance.com/en/terms. Please contact custom'",
+   "first": null,
+   "group": "derivatives",
+   "history": "full funding history",
+   "instrument": "BTCUSDT perpetual",
+   "last": null,
+   "note": null,
+   "observations": 0,
+   "pagination": "limit <= 1000; page by startTime",
+   "provider": "Binance USD-M Futures",
+   "rate_limit": "shared 500 requests / 5 min per IP for this endpoint",
+   "requests": 0,
+   "resolution": "8h settlement",
+   "status": "BLOCKED_BY_PROVIDER_GEO_RESTRICTION",
+   "unit": "rate per 8h interval",
+   "v1_overlap": "separate venue of V1's funding dimension (V1 reads Hyperliquid funding)"
+  },
+  "binance_funding_archive": {
+   "auth": "none",
+   "availability_rule": "calc_time (settlement)",
+   "by_metric": {
+    "funding_rate": 819
+   },
+   "cost_eur": 0,
+   "dimension": "HIGHER-RESOLUTION VERSION OF EXISTING V1 DIMENSION",
+   "docs": "https://github.com/binance/binance-public-data",
+   "endpoint": "GET https://data.binance.vision/data/futures/um/monthly/fundingRate/BTCUSDT/BTCUSDT-fundingRate-YYYY-MM.zip (+ .CHECKSUM)",
+   "files": {
+    "checksum_ok": 9,
+    "http_404": 1
+   },
+   "first": "2026-01-01T00:00:00.008000+00:00",
+   "group": "derivatives",
+   "history": "monthly files; the current month is not yet published",
+   "instrument": "BTCUSDT perpetual",
+   "last": "2026-09-30T16:00:00.002000+00:00",
+   "observations": 819,
+   "provider": "Binance USD-M Futures (public data archive)",
+   "requested_files": 10,
+   "resolution": "8h settlement",
+   "status": "OK",
+   "unit": "rate per funding interval",
+   "v1_overlap": "separate venue of V1's funding dimension (V1 reads Hyperliquid funding)"
+  },
+  "binance_oi": {
+   "auth": "none",
+   "availability_rule": "bar timestamp + 1 interval",
+   "by_metric": {},
+   "cost_eur": 0,
+   "dimension": "NEW DIMENSION",
+   "docs": "https://developers.binance.com/docs/derivatives/usds-margined-futures/market-data/rest-api/Open-Interest-Statistics",
+   "endpoint": "GET https://fapi.binance.com/futures/data/openInterestHist?symbol=BTCUSDT&period=1h",
+   "error": "BLOCKED_BY_PROVIDER_GEO_RESTRICTION: fapi.binance.com refuses this environment's egress location (HTTP 451): b'{\\n  \"code\": 0,\\n  \"msg\": \"Service unavailable from a restricted location according to \\'b. Eligibility\\' in https://www.binance.com/en/terms. Please contact custom'",
+   "first": null,
+   "group": "derivatives",
+   "history": "ONLY THE LATEST 30 DAYS (Binance documented retention). Older history is NOT available and is not claimed.",
+   "instrument": "BTCUSDT perpetual",
+   "last": null,
+   "note": null,
+   "observations": 0,
+   "pagination": "limit <= 500; page by startTime",
+   "provider": "Binance USD-M Futures",
+   "rate_limit": "1,000 requests / 5 min per IP for /futures/data endpoints",
+   "requests": 0,
+   "resolution": "1h (5m..1d)",
+   "status": "BLOCKED_BY_PROVIDER_GEO_RESTRICTION",
+   "unit": "BTC (sumOpenInterest) and USD (sumOpenInterestValue)",
+   "v1_overlap": "none: V1 has no open-interest source"
+  },
+  "binance_oi_archive": {
+   "auth": "none",
+   "availability_rule": "create_time + 5 min: the same statistic was served live by /futures/data/openInterestHist (period 5m); the archive file itself appears after the day ends (recorded in raw)",
+   "by_metric": {
+    "open_interest": 80640,
+    "open_interest_usd": 80640
+   },
+   "cost_eur": 0,
+   "dimension": "NEW DIMENSION",
+   "docs": "https://github.com/binance/binance-public-data",
+   "endpoint": "GET https://data.binance.vision/data/futures/um/daily/metrics/BTCUSDT/BTCUSDT-metrics-YYYY-MM-DD.zip (+ .CHECKSUM)",
+   "files": {
+    "checksum_ok": 280,
+    "http_404": 1
+   },
+   "first": "2026-01-01T00:00:00+00:00",
+   "group": "derivatives",
+   "history": "daily files since 2021-12; each day's file is published after the day ends",
+   "instrument": "BTCUSDT perpetual",
+   "last": "2026-10-07T23:55:00+00:00",
+   "observations": 161280,
+   "provider": "Binance USD-M Futures (public data archive)",
+   "requested_files": 281,
+   "resolution": "5m",
+   "status": "OK",
+   "unit": "BTC (sum_open_interest) and USD (sum_open_interest_value)",
+   "v1_overlap": "none: V1 has no open-interest source"
+  },
+  "bybit_funding": {
+   "auth": "none",
+   "availability_rule": "funding settlement timestamp (the rate is final at settlement)",
+   "by_metric": {},
+   "cost_eur": 0,
+   "dimension": "HIGHER-RESOLUTION VERSION OF EXISTING V1 DIMENSION",
+   "docs": "https://bybit-exchange.github.io/docs/v5/market/history-fund-rate",
+   "endpoint": "GET https://api.bybit.com/v5/market/funding/history?category=linear&symbol=BTCUSDT",
+   "error": "BLOCKED_BY_PROVIDER_GEO_RESTRICTION: api.bybit.com refuses this environment's egress location (HTTP 403): b'{\\n    error:The Amazon CloudFront distribution is configured to block access from your country\\n}'",
+   "first": null,
+   "group": "derivatives",
+   "history": "full funding history of the symbol",
+   "instrument": "BTCUSDT linear perpetual",
+   "last": null,
+   "note": null,
+   "observations": 0,
+   "pagination": "limit <= 200; page by endTime",
+   "provider": "Bybit",
+   "rate_limit": "600 requests / 5 s per IP",
+   "requests": 0,
+   "resolution": "8h settlement",
+   "status": "BLOCKED_BY_PROVIDER_GEO_RESTRICTION",
+   "unit": "rate per 8h interval",
+   "v1_overlap": "separate venue of V1's funding dimension (V1 reads Hyperliquid funding)"
+  },
+  "bybit_oi": {
+   "auth": "none",
+   "availability_rule": "bar timestamp + 1 interval (an hourly OI reading is used only after its hour closed)",
+   "by_metric": {},
+   "cost_eur": 0,
+   "dimension": "NEW DIMENSION",
+   "docs": "https://bybit-exchange.github.io/docs/v5/market/open-interest",
+   "endpoint": "GET https://api.bybit.com/v5/market/open-interest?category=linear&symbol=BTCUSDT&intervalTime=1h",
+   "error": "BLOCKED_BY_PROVIDER_GEO_RESTRICTION: api.bybit.com refuses this environment's egress location (HTTP 403): b'{\\n    error:The Amazon CloudFront distribution is configured to block access from your country\\n}'",
+   "first": null,
+   "group": "derivatives",
+   "history": "investigated by paging backwards until the API returns nothing (depth recorded in the run)",
+   "instrument": "BTCUSDT linear perpetual",
+   "last": null,
+   "note": null,
+   "observations": 0,
+   "pagination": "limit <= 200 rows per call; nextPageCursor",
+   "provider": "Bybit",
+   "rate_limit": "public market endpoints: 600 requests / 5 s per IP (IP rate limit, Bybit docs)",
+   "requests": 0,
+   "resolution": "1h (5min/15min/30min/1h/4h/1d available)",
+   "status": "BLOCKED_BY_PROVIDER_GEO_RESTRICTION",
+   "unit": "BTC (open interest in base coin)",
+   "v1_overlap": "none: V1 has no open-interest source"
+  }
+ },
+ "window_start": "2026-01-01T00:00:00+00:00"
+}

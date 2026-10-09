@@ -7706,7 +7706,7 @@ const RESEARCH_LAB_HTML = `<!DOCTYPE html>
   nav.tabs button {
     flex-shrink: 0; background: transparent; color: var(--muted); border: 1px solid var(--border);
     border-radius: 999px; padding: 7px 14px; cursor: pointer; font-size: 13px; font-weight: 600;
-    white-space: nowrap; min-height: 32px;
+    white-space: nowrap; min-height: 40px;
   }
   nav.tabs button.active { color: #fff; border-color: transparent; background: linear-gradient(135deg, var(--accent), var(--accent-2)); }
   nav.tabs .nav-home { font-weight: 700; }

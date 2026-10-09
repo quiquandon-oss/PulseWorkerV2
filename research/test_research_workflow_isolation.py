@@ -31,12 +31,17 @@ def common_checks(p):
     steps = wf["jobs"]["collect"]["steps"]
     code = [s for s in steps if s.get("with", {}).get("path") == "code"][0]
     data = [s for s in steps if s.get("with", {}).get("path") == "data"][0]
-    assert code["with"]["persist-credentials"] is False                  # the code checkout cannot push
+    assert code["with"]["persist-credentials"] is False                  # no checkout keeps a token:
+    assert data["with"]["persist-credentials"] is False                  # the collector step runs without credentials
     assert data["with"]["ref"] == DATA_BRANCH
+    with_token = [s for s in steps if "github.token" in str(s.get("env", {}))]
+    assert len(with_token) == 1 and with_token[0]["env"]["PUSH_TOKEN"] == "${{ github.token }}"   # only the commit step
+    assert "github.token" not in "".join(str(s) for s in steps if s is not with_token[0])
     assert all(re.fullmatch(r"actions/checkout@[0-9a-f]{40}", s["uses"]) for s in steps if "uses" in s)   # pinned actions
     run = "\n".join(s.get("run", "") for s in steps)
     pushes = re.findall(r"git push[^\n]*", run)
     assert pushes and all('"HEAD:refs/heads/${TARGET}"' in x for x in pushes)
+    assert all('"$remote"' in x for x in pushes) and run.count("git push") == 1        # exactly one push command
     commit = [s for s in steps if s.get("env", {}).get("TARGET")][0]
     assert commit["env"]["TARGET"] == DATA_BRANCH and commit["working-directory"] == "data"
     assert "grep -v '^risk_regime_forward/'" in run                       # refuses anything outside the data dir
@@ -68,3 +73,19 @@ def test_deploy_cannot_be_reached_from_these_workflows():
     assert ".github/workflows/research-forward-schedule.yml" not in paths
     for p in WF.glob("*.yml"):                                           # nothing listens for other workflows' completion
         assert "workflow_run" not in (load(p)["on"] or {}), p.name
+
+
+def verify_installed_scheduler(path, pinned_sha):
+    """Used before installing the scheduler on main: the stub's checks plus a pinned 40-hex research commit."""
+    wf = common_checks(Path(path))
+    assert set(wf["on"]) == {"schedule"} and wf["on"]["schedule"] == [{"cron": "40 10 * * *"}]
+    code = [s for s in wf["jobs"]["collect"]["steps"] if s.get("with", {}).get("path") == "code"][0]
+    assert re.fullmatch(r"[0-9a-f]{40}", pinned_sha) and code["with"]["ref"] == pinned_sha
+    assert "RESEARCH_CODE_SHA" not in Path(path).read_text()
+    return True
+
+
+def test_installed_scheduler_check_rejects_unpinned_stub():
+    import pytest
+    with pytest.raises(AssertionError):
+        verify_installed_scheduler(STUB, "RESEARCH_CODE_SHA")

@@ -20,6 +20,7 @@ on:
 
 permissions:
   contents: write          # only to push to research-data/risk-regime-forward; no actions/deployments/id-token/packages
+                           # (no `actions` permission: this token cannot dispatch or re-run workflows)
 
 concurrency:
   group: research-forward-collection     # shared with the other trigger: never two writers at once
@@ -43,6 +44,7 @@ jobs:
           ref: research-data/risk-regime-forward
           path: data
           fetch-depth: 0
+          persist-credentials: false        # the collector step runs with no credentials on disk
 
       - name: "Collect (idempotent; NOT_YET_PUBLISHED / MISSING / gaps / conflicts recorded, never filled)"
         run: python3 code/research/risk_regime_forward.py --store data/risk_regime_forward --max-days 60
@@ -52,6 +54,7 @@ jobs:
         working-directory: data
         env:
           TARGET: research-data/risk-regime-forward
+          PUSH_TOKEN: ${{ github.token }}   # only this step sees the token; it can push only the fixed refspec below
         run: |
           set -euo pipefail
           [ "$(git rev-parse --abbrev-ref HEAD)" = "$TARGET" ] || { echo "::error::data checkout is not $TARGET"; exit 1; }
@@ -62,8 +65,9 @@ jobs:
           outside=$(git diff --cached --name-only | grep -v '^risk_regime_forward/' || true)
           if [ -n "$outside" ]; then echo "::error::refusing to commit outside risk_regime_forward/: $outside"; exit 1; fi
           git commit -m "Research data: forward collection run ${GITHUB_RUN_ID} (${GITHUB_EVENT_NAME})"
+          remote="https://x-access-token:${PUSH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
           for i in 1 2 3 4; do
-            git push origin "HEAD:refs/heads/${TARGET}" && exit 0
-            sleep $((2**i)); git pull --rebase origin "$TARGET"
+            git push "$remote" "HEAD:refs/heads/${TARGET}" && exit 0
+            sleep $((2**i)); git pull --rebase "$remote" "$TARGET"
           done
           exit 1

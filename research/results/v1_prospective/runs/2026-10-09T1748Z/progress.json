@@ -1,0 +1,141 @@
+{
+ "evaluator": {
+  "name": "v1_prospective_eval",
+  "plan": "research/v1_candidate_registration_addendum_1.json",
+  "plan_sha256": "c2ebdfcb75a1690b25f3a327bf7537f8ee6853e16a0dc6295bebd18b8ac7ae9c",
+  "erratum": "research/v1_candidate_registration_addendum_1_erratum_1.json",
+  "erratum_sha256": "5397fe70cf1415aa239beb944350340a48d711244e4d16b1f18edc8c313cb15d",
+  "registration_sha256_bytes": "ac88bf2df2968f8ddfe62f76aa10be76ee765cd13f7dc226e929aa54669a7455",
+  "implementation_commit": "bdfb2cb21a2e0814273d276a9bd84b09d74625a4",
+  "implementation_blobs": {
+   "learning/learning-method.js": "ae4b9e13726144334ea9b3975d0726338c0de22e",
+   "learning/learning-core.js": "d34ecdb0ea24ce458c310a851dc4a66f05d5ac74"
+  },
+  "code_commit": "5d66f7d3e6398f087aabc08f1302e01300d78330"
+ },
+ "mode": "progress",
+ "scope": "PROSPECTIVE: V1 observations strictly after 2026-10-09T16:00:00Z only",
+ "exploratory_reference": "Exploratory historical findings (research/results/v1_failure_analysis.json; 575 frozen observations 2026-08-27..2026-10-06) are hypothesis-generating only and are not used here.",
+ "inputs": {
+  "hashes": {
+   "v1_sha256": "e9904aebf6517efacfd1c000642e3e7e4c68ecaeea5b6245ab1858a2882695ca",
+   "btc_sha256": "7d74ca0cc93319db3d666227cec54ec4556765b79a91ccd694c9e22ead3d07c6"
+  },
+  "v1_manifest": {
+   "extractor": "manual: same fixed statements via the Cloudflare D1 query tool (read-only)",
+   "as_of_ms": 1791568105044,
+   "as_of_utc": "2026-10-09T17:48:25.044Z",
+   "database": "sentiment-history (f91ca980-b886-423a-bd6f-f3baea46d181), production, SELECT only",
+   "statements": [
+    "SELECT observation_ts AS ts, score, sources_json FROM research_sentiment_archive WHERE observation_ts > 1791561600000 ORDER BY observation_ts",
+    "SELECT ts, score, sources_json FROM history WHERE ts > 1791561600000 ORDER BY ts"
+   ],
+   "rows": {
+    "archive": 0,
+    "history": 3
+   },
+   "d1_meta": [
+    {
+     "changes": 0,
+     "rows_written": 0,
+     "changed_db": false,
+     "rows_read": 1
+    },
+    {
+     "changes": 0,
+     "rows_written": 0,
+     "changed_db": false,
+     "rows_read": 3
+    }
+   ]
+  },
+  "btc_manifest": {
+   "extractor": "manual: same fixed statements via the Cloudflare D1 query tool (read-only)",
+   "as_of_ms": 1791568105044,
+   "as_of_utc": "2026-10-09T17:48:25.044Z",
+   "database": "sentiment-history (f91ca980-b886-423a-bd6f-f3baea46d181), production, SELECT only",
+   "statements": [
+    "SELECT ts, btc_price FROM btc_data WHERE ts >= 1791547200000 ORDER BY ts"
+   ],
+   "rows": 4,
+   "d1_meta": [
+    {
+     "changes": 0,
+     "rows_written": 0,
+     "changed_db": false,
+     "rows_read": 4
+    }
+   ]
+  },
+  "as_of_utc": "2026-10-09T17:48:25.044Z",
+  "btc_rows": 4,
+  "btc_last_utc": "2026-10-09T15:00:43.621Z"
+ },
+ "observation_counts": {
+  "archive_rows": 0,
+  "history_rows": 3,
+  "invalid_timestamp": 0,
+  "duplicate_timestamp": 0,
+  "unparsable_sources_json": 0,
+  "at_or_before_boundary": 0,
+  "after_boundary": 3
+ },
+ "coverage": {
+  "holdout_days_with_observations": 1,
+  "settled_days_with_observations": 0,
+  "settled_frontier": null
+ },
+ "days": [
+  {
+   "day": "2026-10-09",
+   "settled": false,
+   "observations": 3,
+   "with_fng": 3,
+   "with_etfflows": 3,
+   "stored_score_missing": 0,
+   "reconstruction_call_mismatch": 0,
+   "unit_for": [],
+   "digest": "f9151ee741dc928c5d2c8f25de051e63fd3397e0ae63533eb461ec9b47640b15"
+  }
+ ],
+ "candidates": [
+  {
+   "id": "T-A1",
+   "adjustment": {
+    "type": "CHANGE_CLASSIFICATION",
+    "source_id": "fng",
+    "group": "BREADTH",
+    "invert": true
+   },
+   "units_required": 30,
+   "units_accumulated": 0,
+   "look_eligible": false,
+   "exclusions": {
+    "no_reconstruction": 0,
+    "target_source_missing": 0,
+    "outcome_unresolved_or_flat": 0,
+    "unsettled_observations": 3
+   },
+   "status": "AWAITING_HOLDOUT",
+   "look": null
+  },
+  {
+   "id": "T-A2",
+   "adjustment": {
+    "type": "REMOVE_SOURCE",
+    "source_id": "etfflows"
+   },
+   "units_required": 30,
+   "units_accumulated": 0,
+   "look_eligible": false,
+   "exclusions": {
+    "no_reconstruction": 0,
+    "target_source_missing": 0,
+    "outcome_unresolved_or_flat": 0,
+    "unsettled_observations": 3
+   },
+   "status": "AWAITING_HOLDOUT",
+   "look": null
+  }
+ ]
+}

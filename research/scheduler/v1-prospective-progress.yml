@@ -1,0 +1,92 @@
+# RESEARCH ONLY -- T-A1 / T-A2 daily PROGRESS run. INERT STUB: not installed, so it never runs.
+#
+# GitHub runs `schedule` only from a workflow file on the default branch. This file sits in research/scheduler/ and
+# does nothing until a human, after review, copies it to .github/workflows/ on main and replaces V1_PROSPECTIVE_CODE_SHA
+# with the reviewed 40-hex commit (see research/V1_PROSPECTIVE_EVAL.md, "Installing the progress run").
+#
+# What it does, daily at 11:40 UTC (one hour after the forward collection at 10:40 UTC):
+#   1. extract: three fixed SELECT statements on production D1 (research/v1_prospective_extract.mjs), with the
+#      dedicated read-only secret RESEARCH_D1_READONLY_TOKEN only; no fallback to any other token;
+#   2. progress: research/v1_prospective_eval.mjs --mode progress (never a look), checked against the key whitelist
+#      before it is written, compared with EVERY earlier record for changed settled days;
+#   3. commit: the new run directory only, to the research-data/v1-prospective branch (added files only).
+# It never runs a fixed look, never writes to D1, has no deploy path and no secret other than the read-only token.
+name: v1-prospective-progress
+
+on:
+  schedule:
+    - cron: '40 11 * * *'
+
+permissions:
+  contents: write          # only to push the progress record to research-data/v1-prospective; nothing else
+
+concurrency:
+  group: v1-prospective-progress
+  cancel-in-progress: false
+
+jobs:
+  progress:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: "Check out the reviewed evaluator (read-only: no credentials kept)"
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683   # v4.2.2
+        with:
+          ref: V1_PROSPECTIVE_CODE_SHA
+          path: code
+          persist-credentials: false
+
+      - name: "Check out the progress-record branch (the only write target)"
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683   # v4.2.2
+        with:
+          ref: research-data/v1-prospective
+          path: data
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: "Read-only extract (fixed SELECTs; aborts on any reported change)"
+        env:
+          RESEARCH_D1_READONLY_TOKEN: ${{ secrets.RESEARCH_D1_READONLY_TOKEN }}
+        run: |
+          set -euo pipefail
+          [ -n "${RESEARCH_D1_READONLY_TOKEN}" ] || { echo "::error::RESEARCH_D1_READONLY_TOKEN is not configured; no fallback"; exit 1; }
+          run_dir="data/v1_prospective/runs/$(date -u +%Y-%m-%dT%H%MZ)"
+          [ ! -e "$run_dir" ] || { echo "::error::$run_dir already exists; records are append-only"; exit 1; }
+          mkdir -p "$run_dir"
+          echo "RUN_DIR=$run_dir" >> "$GITHUB_ENV"
+          node code/research/v1_prospective_extract.mjs --out-dir "$run_dir"
+
+      - name: "Progress record (no credentials; progress mode only, whitelist-checked)"
+        run: |
+          set -euo pipefail
+          node --version
+          prev=()
+          for f in $(ls data/v1_prospective/runs/*/progress.json 2>/dev/null | sort); do prev+=(--previous "$f"); done
+          node code/research/v1_prospective_eval.mjs --mode progress \
+            --v1 "$RUN_DIR/v1_extract.json" --btc "$RUN_DIR/btc_extract.json" --out "$RUN_DIR/progress.json" \
+            --code-commit "$(git -C code rev-parse HEAD)" "${prev[@]}"
+
+      - name: "Commit the new run directory to the research-data branch only"
+        if: success()
+        working-directory: data
+        env:
+          TARGET: research-data/v1-prospective
+          PUSH_TOKEN: ${{ github.token }}   # only this step sees the token; it can push only the fixed refspec below
+        run: |
+          set -euo pipefail
+          [ "$(git rev-parse --abbrev-ref HEAD)" = "$TARGET" ] || { echo "::error::data checkout is not $TARGET"; exit 1; }
+          git config user.name "v1-prospective-progress[bot]"
+          git config user.email "v1-prospective-progress@users.noreply.github.com"
+          git add -A v1_prospective
+          if git diff --cached --quiet; then echo "nothing to commit"; exit 0; fi
+          outside=$(git diff --cached --name-only | grep -v '^v1_prospective/runs/' || true)
+          if [ -n "$outside" ]; then echo "::error::refusing to commit outside v1_prospective/runs/: $outside"; exit 1; fi
+          changed=$(git diff --cached --name-status | grep -v '^A' || true)
+          if [ -n "$changed" ]; then echo "::error::append-only: refusing to modify or delete existing records: $changed"; exit 1; fi
+          git commit -m "Research data: T-A1/T-A2 progress run ${GITHUB_RUN_ID}"
+          remote="https://x-access-token:${PUSH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          for i in 1 2 3 4; do
+            git push "$remote" "HEAD:refs/heads/${TARGET}" && exit 0
+            sleep $((2**i)); git pull --rebase "$remote" "$TARGET"
+          done
+          exit 1

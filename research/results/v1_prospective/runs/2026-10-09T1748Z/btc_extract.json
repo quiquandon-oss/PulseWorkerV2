@@ -1,0 +1,38 @@
+{
+ "manifest": {
+  "extractor": "manual: same fixed statements via the Cloudflare D1 query tool (read-only)",
+  "as_of_ms": 1791568105044,
+  "as_of_utc": "2026-10-09T17:48:25.044Z",
+  "database": "sentiment-history (f91ca980-b886-423a-bd6f-f3baea46d181), production, SELECT only",
+  "statements": [
+   "SELECT ts, btc_price FROM btc_data WHERE ts >= 1791547200000 ORDER BY ts"
+  ],
+  "rows": 4,
+  "d1_meta": [
+   {
+    "changes": 0,
+    "rows_written": 0,
+    "changed_db": false,
+    "rows_read": 4
+   }
+  ]
+ },
+ "rows": [
+  {
+   "ts": 1791547243382,
+   "btc_price": 83187
+  },
+  {
+   "ts": 1791547243406,
+   "btc_price": 83187
+  },
+  {
+   "ts": 1791558043397,
+   "btc_price": 82964
+  },
+  {
+   "ts": 1791558043621,
+   "btc_price": 82964
+  }
+ ]
+}

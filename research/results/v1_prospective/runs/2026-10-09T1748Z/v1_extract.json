@@ -1,0 +1,48 @@
+{
+ "manifest": {
+  "extractor": "manual: same fixed statements via the Cloudflare D1 query tool (read-only)",
+  "as_of_ms": 1791568105044,
+  "as_of_utc": "2026-10-09T17:48:25.044Z",
+  "database": "sentiment-history (f91ca980-b886-423a-bd6f-f3baea46d181), production, SELECT only",
+  "statements": [
+   "SELECT observation_ts AS ts, score, sources_json FROM research_sentiment_archive WHERE observation_ts > 1791561600000 ORDER BY observation_ts",
+   "SELECT ts, score, sources_json FROM history WHERE ts > 1791561600000 ORDER BY ts"
+  ],
+  "rows": {
+   "archive": 0,
+   "history": 3
+  },
+  "d1_meta": [
+   {
+    "changes": 0,
+    "rows_written": 0,
+    "changed_db": false,
+    "rows_read": 1
+   },
+   {
+    "changes": 0,
+    "rows_written": 0,
+    "changed_db": false,
+    "rows_read": 3
+   }
+  ]
+ },
+ "archive": [],
+ "history": [
+  {
+   "ts": 1791562579647,
+   "score": 46,
+   "sources_json": "{\"fng\":59,\"funding\":46,\"longshort\":48,\"global\":58,\"cryptonews\":43,\"macrogeo\":61,\"geopolitics\":6,\"regulatory\":21,\"sosovalue\":42,\"onchain\":91,\"oil\":76,\"yield10y\":42,\"usd\":51,\"nasdaq\":22,\"sp500\":39,\"ninemag\":70,\"foufi\":50,\"etfflows\":1,\"hypefunding\":50,\"gold\":87,\"strc\":49}"
+  },
+  {
+   "ts": 1791564825718,
+   "score": 48,
+   "sources_json": "{\"fng\":59,\"funding\":40,\"longshort\":45,\"global\":60,\"cryptonews\":43,\"macrogeo\":61,\"geopolitics\":6,\"regulatory\":21,\"sosovalue\":88,\"onchain\":91,\"oil\":56,\"yield10y\":42,\"usd\":49,\"nasdaq\":22,\"sp500\":39,\"ninemag\":72,\"foufi\":50,\"etfflows\":1,\"hypefunding\":50,\"gold\":84,\"strc\":49}"
+  },
+  {
+   "ts": 1791567457642,
+   "score": 47,
+   "sources_json": "{\"fng\":59,\"funding\":40,\"longshort\":45,\"global\":57,\"cryptonews\":43,\"macrogeo\":61,\"geopolitics\":10,\"regulatory\":21,\"sosovalue\":79,\"onchain\":90,\"oil\":60,\"yield10y\":42,\"usd\":42,\"nasdaq\":22,\"sp500\":39,\"ninemag\":65,\"foufi\":50,\"etfflows\":1,\"hypefunding\":50,\"gold\":82,\"strc\":49}"
+  }
+ ]
+}

@@ -5,8 +5,10 @@ import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
-  evaluate, verifyPins, mergeObservations, clopperPearson, BOUNDARY_MS, UNITS_REQUIRED, ADDENDUM_FILE, REGISTRATION_FILE, PINNED_BLOBS,
+  evaluate, verifyPins, mergeObservations, clopperPearson, isResolvable, assertProgressOnly, unitsAgree, renderRecord,
+  BOUNDARY_MS, UNITS_REQUIRED, ADDENDUM_FILE, ERRATUM_FILE, REGISTRATION_FILE, PINNED_BLOBS,
 } from '../research/v1_prospective_eval.mjs';
+import { realizedDirection, recalculate, baselineConfig, buildContexts, validateRecalculation } from '../learning/learning-method.js';
 import { V1_METHODOLOGY_V1 } from '../learning/learning-core.js';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
@@ -46,6 +48,7 @@ function fixture({ days = 30, improved = 30, extraPerDay = 0, storedMismatch = f
 }
 const ta1 = (out) => out.candidates.find((c) => c.id === 'T-A1');
 const ta2 = (out) => out.candidates.find((c) => c.id === 'T-A2');
+const lookAt = (f, id = 'T-A1') => evaluate({ ...f, mode: 'look', lookCandidate: id });
 
 function keysDeep(o, acc = new Set()) {
   if (o && typeof o === 'object') for (const [k, v] of Object.entries(o)) { acc.add(k); keysDeep(v, acc); }
@@ -57,7 +60,7 @@ describe('plan and pins', () => {
   it('runs only on the frozen addendum, the unchanged registration and the bdfb2cb validator', () => {
     expect(verifyPins()).toBe(true);
     const dir = mkdtempSync(join(tmpdir(), 'pins-'));
-    for (const f of [ADDENDUM_FILE, REGISTRATION_FILE, ...Object.keys(PINNED_BLOBS)]) {
+    for (const f of [ADDENDUM_FILE, ERRATUM_FILE, REGISTRATION_FILE, ...Object.keys(PINNED_BLOBS)]) {
       mkdirSync(join(dir, dirname(f)), { recursive: true });
       copyFileSync(join(ROOT, f), join(dir, f));
     }
@@ -151,8 +154,11 @@ describe('fixed horizon: exactly 30 units, no interim results', () => {
     for (const k of FORBIDDEN) expect(keys.has(k)).toBe(false);
     expect(JSON.stringify(out)).not.toMatch(/SUPPORTED|INCONCLUSIVE|PASS|FAIL/);
   });
-  it('30 units: evaluated once, on exactly 30 independent days', () => {
-    const out = evaluate(fixture({ days: 30, improved: 30 }));
+  it('30 units: progress mode only reports LOOK_ELIGIBLE; the look runs only when requested', () => {
+    const prog = evaluate(fixture({ days: 30, improved: 30 }));
+    expect(ta1(prog)).toMatchObject({ status: 'LOOK_ELIGIBLE', look_eligible: true, look: null, units_accumulated: 30 });
+    expect(assertProgressOnly(prog)).toBe(true);
+    const out = lookAt(fixture({ days: 30, improved: 30 }));
     const c = ta1(out);
     expect(c.status).toBe('EVALUATED');
     expect(c.look.product_level.independent.days).toBe(30);
@@ -162,36 +168,36 @@ describe('fixed horizon: exactly 30 units, no interim results', () => {
     expect(ta2(out).status).toBe('AWAITING_HOLDOUT');      // each candidate on its own horizon
   });
   it('more than 30 units: the look still uses only the days through the 30th unit', () => {
-    const at30 = evaluate(fixture({ days: 30, improved: 30 }));
-    const at40 = evaluate(fixture({ days: 40, improved: 30 }));   // days 31-40 are all T-A1 failures
+    const at30 = lookAt(fixture({ days: 30, improved: 30 }));
+    const at40 = lookAt(fixture({ days: 40, improved: 30 }));   // days 31-40 are all T-A1 failures
     expect(ta1(at40).units_accumulated).toBe(30);
     expect(ta1(at40).look.analysis_window.to_exclusive_utc).toBe('2026-11-09T00:00:00.000Z');
     expect(ta1(at40).look).toEqual(ta1(at30).look);
   });
   it('no look-ahead: later observations and prices do not change the look', () => {
-    const a = evaluate(fixture({ days: 30, improved: 20 }));
+    const a = lookAt(fixture({ days: 30, improved: 20 }));
     const f = fixture({ days: 30, improved: 20 });
     f.v1.archive.push({ ts: DAY0 + 31 * DAY, score: 10, sources_json: JSON.stringify(readings({ fng: 5 })) });
     f.btc.rows.push({ ts: DAY0 + 40 * DAY, btc_price: 1 });
     f.v1.manifest.as_of_ms += 20 * DAY; f.btc.manifest.as_of_ms += 20 * DAY;
-    expect(ta1(evaluate(f)).look).toEqual(ta1(a).look);
+    expect(ta1(lookAt(f)).look).toEqual(ta1(a).look);
   });
 });
 
 describe('thresholds as registered', () => {
   it('20 of 30 passes the product rule (alpha 0.1) but not the research claim (alpha 0.1/3)', () => {
-    const c = ta1(evaluate(fixture({ days: 30, improved: 20 })));
+    const c = ta1(lookAt(fixture({ days: 30, improved: 20 })));
     expect(c.look.product_level.status).toBe('SUPPORTED');
     expect(c.look.research_level.status).toBe('INCONCLUSIVE');
     expect(c.look.research_claim).toBe('INCONCLUSIVE');
   });
   it('21 of 30 meets the research claim', () => {
-    const c = ta1(evaluate(fixture({ days: 30, improved: 21 })));
+    const c = ta1(lookAt(fixture({ days: 30, improved: 21 })));
     expect(c.look.research_claim).toBe('SUPPORTED');
     expect(c.look.effect.ci95_clopper_pearson.lower).toBeGreaterThan(0.5);
   });
   it('9 of 30 (21 worse) is NOT_SUPPORTED at the research level', () => {
-    expect(ta1(evaluate(fixture({ days: 30, improved: 9 }))).look.research_claim).toBe('NOT_SUPPORTED');
+    expect(ta1(lookAt(fixture({ days: 30, improved: 9 }))).look.research_claim).toBe('NOT_SUPPORTED');
   });
   it('Clopper-Pearson matches known values', () => {
     expect(clopperPearson(21, 30)).toEqual({ lower: 0.506, upper: 0.8527 });
@@ -202,7 +208,7 @@ describe('thresholds as registered', () => {
 
 describe('reconstruction mismatch safeguard (deployed rule kept)', () => {
   it('a win that rests on days where the stored V1 call differs from the reconstruction is not counted', () => {
-    const out = evaluate(fixture({ days: 30, improved: 30, storedMismatch: true }));
+    const out = lookAt(fixture({ days: 30, improved: 30, storedMismatch: true }));
     const c = ta1(out);
     expect(out.days.every((d) => d.reconstruction_call_mismatch === 1)).toBe(true);
     expect(c.look.product_level.reconstruction_mismatch.independent_days).toBe(30);
@@ -232,9 +238,71 @@ describe('isolation: no D1, no methodology activation', () => {
   it('the evaluator only reads files and imports the pinned validator', () => {
     const src = readFileSync(join(ROOT, 'research/v1_prospective_eval.mjs'), 'utf8');
     const imports = [...src.matchAll(/from '([^']+)'/g)].map((m) => m[1]);
-    expect(imports.every((i) => i.startsWith('node:') || i === '../learning/learning-method.js')).toBe(true);
+    expect(imports.every((i) => i.startsWith('node:') || i === '../learning/learning-method.js' || i === '../learning/learning-core.js')).toBe(true);
+    expect(src.includes('realizedDirection(')).toBe(false);          // outcome directions are formed only inside the validator
     for (const bad of ['env.DB', '.prepare(', 'INSERT', 'UPDATE ', 'DELETE ', 'fetch(', 'wrangler', 'v1_methodology_versions', 'learning_candidates', 'effective_ts', 'decideCandidate', 'createCandidate']) {
       expect(src.includes(bad), bad).toBe(false);
     }
+  });
+});
+
+describe('progress gating (scheduled run)', () => {
+  it('isResolvable agrees with realizedDirection being UP or DOWN, without forming a direction', () => {
+    let seed = 7;
+    const rnd = () => { seed = (seed * 1103515245 + 12345) % 2147483648; return seed / 2147483648; };
+    for (let trial = 0; trial < 200; trial++) {
+      const rows = [];
+      let t = DAY0;
+      for (let i = 0; i < 20; i++) { t += Math.floor(rnd() * 8 * HOUR); rows.push({ ts: t, btc_price: 100 + Math.floor(rnd() * 3) }); }
+      const ts = DAY0 + Math.floor(rnd() * 3 * DAY);
+      const d = realizedDirection(rows, ts);
+      expect(isResolvable(rows, ts)).toBe(d === 'UP' || d === 'DOWN');
+    }
+  });
+  it('a look cannot be run for a candidate that is not eligible; nothing is evaluated', () => {
+    expect(() => lookAt(fixture({ days: 29 }))).toThrow(/not eligible/);
+    expect(() => evaluate({ ...fixture({ days: 30 }), mode: 'look' })).toThrow(/candidate/);
+  });
+  it('looking at one candidate leaves the other progress-only', () => {
+    const f = fixture({ days: 30 });
+    f.v1.archive = f.v1.archive.map((o) => ({ ...o, sources_json: JSON.stringify(readings({ fng: 40, etfflows: 95 })) }));   // T-A2 disagrees, T-A1 not
+    const out = lookAt(f, 'T-A2');
+    expect(ta2(out).status).toBe('EVALUATED');
+    expect(ta1(out)).toMatchObject({ status: 'AWAITING_HOLDOUT', look: null });
+  });
+  it('the progress whitelist rejects a look, a verdict or any statistic', () => {
+    expect(assertProgressOnly(evaluate(fixture({ days: 12 })))).toBe(true);
+    expect(() => assertProgressOnly(lookAt(fixture({ days: 30 })))).toThrow(/non-permitted/);
+    for (const inject of [{ hits: 3 }, { p_better: 0.2 }, { accuracy_pct: 55 }, { improved: 4 }, { status: 'SUPPORTED' }]) {
+      const out = evaluate(fixture({ days: 12 }));
+      Object.assign(out.candidates[0], inject);
+      expect(() => assertProgressOnly(out)).toThrow(/non-permitted/);
+    }
+  });
+  it('the validator must count exactly the frozen-rule units (wrong unit set -> disagreement)', () => {
+    const f = fixture({ days: 30, improved: 18 });
+    const { holdout } = mergeObservations(f.v1.archive, []);
+    const recalc = recalculate(baselineConfig(), { type: 'CHANGE_CLASSIFICATION', source_id: 'fng', group: 'BREADTH', invert: true }, buildContexts(holdout, f.btc.rows), { eventTs: null });
+    const opts = { eventTs: null, discoveredAt: BOUNDARY_MS, requireHoldout: true };
+    const full = validateRecalculation(recalc, f.btc.rows, opts);
+    const right = new Set(holdout.map((o) => o.ts));
+    expect(unitsAgree(recalc, f.btc.rows, right, full, opts)).toBe(true);
+    const missingOne = new Set([...right].slice(1));
+    expect(unitsAgree(recalc, f.btc.rows, missingOne, full, opts)).toBe(false);
+  });
+  it('a settled day is checked against every earlier record, not only the latest', () => {
+    const first = evaluate(fixture({ days: 12 }));
+    const f2 = fixture({ days: 12 });
+    f2.v1.archive[2] = { ...f2.v1.archive[2], score: 54 };
+    const second = evaluate(f2);                              // a run without --previous would hide the change
+    const out = evaluate({ ...fixture({ days: 12 }), previous: [first, second] });
+    expect(ta1(out).status).toBe('INTEGRITY_CONFLICT');
+    expect(ta1(out).look_eligible).toBe(false);
+  });
+  it('identical inputs render byte-identical progress records', () => {
+    const a = renderRecord(evaluate(fixture({ days: 12 })));
+    const b = renderRecord(evaluate(fixture({ days: 12 })));
+    expect(a).toBe(b);
+    expect(a.endsWith('\n')).toBe(true);
   });
 });

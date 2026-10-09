@@ -99,7 +99,7 @@ const SIGNAL_SAMPLE = `SAMPLE ANSWER for the new-signal walkthrough (synthetic f
   await page.click('#save'); await page.waitForFunction(() => /Current V1 \(reconstructed\)/i.test(document.body.innerText), null, { timeout: 20000 }); await countPrompts();
   const body = (await page.innerText('#app')).replace(/\s+/g, ' ');
   check('Save Adjustment -> V1 Impact shown (stored / reconstructed / proposed)', /Stored V1 \(reference\).*Current V1 \(reconstructed\).*Proposed V1/i.test(body));
-  check('Validation shown', /Does it improve CryptoPulse\?\s*(Not enough data|Validating|Supported|Not supported|Inconclusive)/i.test(body), (body.match(/Does it improve CryptoPulse\? .{0,60}/i) || [''])[0]);
+  check('Validation shown', /Does it improve CryptoPulse\?\s*(Not enough data|Awaiting out-of-sample data|Validating|Supported|Not supported|Inconclusive)/i.test(body), (body.match(/Does it improve CryptoPulse\? .{0,60}/i) || [''])[0]);
   check('no admin token requested at any step after sign-in', tokenPrompts === 0, `prompts=${tokenPrompts}`);
   await page.reload(); await page.waitForFunction(() => /Signed in on this device/.test(document.getElementById('sessionBox').innerText));
   check('still signed in after reload', true);
@@ -129,7 +129,7 @@ const SIGNAL_SAMPLE = `SAMPLE ANSWER for the new-signal walkthrough (synthetic f
     check('NEW_SIGNAL: journey shows data required', /Not calculable yet: historical data required/.test(t) && /Not supported yet: data required/.test(t));
     await page.click('#submit'); await page.waitForSelector('[data-d="APPROVE"]', { timeout: 20000 }); await countPrompts();
     const t2 = (await page.innerText('#app')).replace(/\s+/g, ' ');
-    check('NEW_SIGNAL: submit for review was a human click -> PENDING REVIEW', /Learning candidate #\d+ PENDING REVIEW/i.test(t2));
+    check('NEW_SIGNAL: submit for review was a human click -> PENDING_REVIEW (shown as "Ready for review")', /Learning candidate #\d+ Ready for review/i.test(t2));
     check('NEW_SIGNAL: decision offers only the data-collection plan', /Approve data-collection plan/.test(t2) && !/Approve V1 change/.test(t2) && (await page.locator('#ack').count()) === 0);
     check('NEW_SIGNAL: nothing approved, no V1 version created', (await learningState()).versions === versionsBefore);
   }

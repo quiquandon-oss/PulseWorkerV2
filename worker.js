@@ -7709,6 +7709,13 @@ const RESEARCH_LAB_HTML = `<!DOCTYPE html>
     white-space: nowrap; min-height: 32px;
   }
   nav.tabs button.active { color: #fff; border-color: transparent; background: linear-gradient(135deg, var(--accent), var(--accent-2)); }
+  nav.tabs .nav-home { font-weight: 700; }
+  .backlink { font-size: 12.5px; color: var(--accent); text-decoration: none; }
+  details.adv-group { background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius); margin-bottom: 12px; }
+  details.adv-group > summary { cursor: pointer; padding: 14px 16px; font-weight: 700; font-size: 15px; list-style-position: inside; }
+  details.adv-group > summary span { display: block; font-weight: 400; font-size: 12.5px; color: var(--muted); margin-top: 2px; }
+  .adv-item { display: block; width: 100%; text-align: left; background: transparent; color: inherit; border: 0; border-top: 1px solid var(--border); padding: 12px 16px; cursor: pointer; font: inherit; min-height: 44px; }
+  .adv-item b { display: block; font-size: 14px; } .adv-item span { font-size: 12.5px; color: var(--muted); }
   main { padding: 16px; max-width: 720px; margin: 0 auto; }
   .card {
     background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius);
@@ -7913,7 +7920,7 @@ const RESEARCH_LAB_HTML = `<!DOCTYPE html>
     </div>
     <span class="ro-badge">READ-ONLY</span>
   </div>
-  <p class="subtitle">Observe market events and the evidence collected around them.</p>
+  <p class="subtitle">Technical tools: data, experiments and diagnostics. <a class="backlink" href="/research-lab">&larr; Back to the Research Lab</a></p>
   <div class="freshness" id="freshnessRow"><span class="dot" id="freshDot"></span><span id="freshText">Checking data freshness&hellip;</span></div>
   <nav class="tabs" id="nav"></nav>
 </header>
@@ -7928,7 +7935,21 @@ const RESEARCH_LAB_HTML = `<!DOCTYPE html>
   var stage7RequestsById = {};
   var nav = document.getElementById('nav');
   var app = document.getElementById('app');
-  var current = 'Dashboard';
+  // Advanced home: the 12 technical pages grouped in three collapsible sections (every page and route unchanged).
+  var GROUPS = [
+    { title: 'Data &amp; Sources', blurb: 'What was collected: events, news evidence, V1 sources and sentiment.', pages: [
+      ['Events', 'Every detected market event'], ['Evidence', 'News collected around one event and the BTC reaction'],
+      ['Sources', 'V1 sources and their measured effectiveness (EXP-005)'], ['Sentiment', 'Composite sentiment and source intelligence'],
+      ['Market', 'Sentiment against the BTC price']] },
+    { title: 'Experiments &amp; Validation', blurb: 'Research experiments, their results and how they are judged.', pages: [
+      ['Experiment 5', 'Deterministic challenger: lifecycle and decisions'], ['Results', 'Challenger against the V1 baseline'],
+      ['Methodology', 'Definitions, population and known limitations'], ['Timeline', 'Research timeline']] },
+    { title: 'System Diagnostics', blurb: 'Collection health, pipeline stages and research requests.', pages: [
+      ['Dashboard', 'Collection overview, key counts and data freshness'], ['Pipeline', 'Research pipeline stages, feeds and gaps'],
+      ['Stage 7', 'Research requests and AI response registration (admin token required)']] },
+  ];
+  function groupOf(page) { for (var g = 0; g < GROUPS.length; g++) for (var k = 0; k < GROUPS[g].pages.length; k++) if (GROUPS[g].pages[k][0] === page) return GROUPS[g]; return null; }
+  var current = 'Home';
   var selectedEventId = null;
   var chartRange = '7d';
   var lastDashboard = null;
@@ -7995,7 +8016,9 @@ const RESEARCH_LAB_HTML = `<!DOCTYPE html>
   }
 
   function renderNav() {
-    nav.innerHTML = PAGES.map(function (p) {
+    var grp = groupOf(current);
+    nav.innerHTML = current === 'Home' ? '' : '<button data-page="Home" class="nav-home">&larr; All tools</button>' + (grp ? grp.pages : []).map(function (pp) {
+      var p = pp[0];
       return '<button data-page="' + p + '" class="' + (p === current ? 'active' : '') + '">' + p + '</button>';
     }).join('');
     var btns = nav.querySelectorAll('button');
@@ -9272,9 +9295,23 @@ const RESEARCH_LAB_HTML = `<!DOCTYPE html>
     }
   }
 
+  async function renderHome() {
+    app.innerHTML = GROUPS.map(function (g, gi) {
+      return '<details class="adv-group"' + (gi === 0 ? ' open' : '') + '><summary>' + g.title + '<span>' + g.blurb + '</span></summary>' +
+        g.pages.map(function (pp) { return '<button class="adv-item" data-open="' + pp[0] + '"><b>' + pp[0] + '</b><span>' + pp[1] + '</span></button>'; }).join('') + '</details>';
+    }).join('') + '<p class="subtitle">Every page here is read-only except Stage 7 response registration, which needs the admin token.</p>';
+    var items = app.querySelectorAll('[data-open]');
+    for (var i = 0; i < items.length; i++) items[i].addEventListener('click', function (e) { current = e.currentTarget.dataset.open; selectedEventId = null; render(); window.scrollTo(0, 0); });
+    if (!lastDashboard) {
+      var d = await fetchJson('/api/research-lab/dashboard');
+      if (d && d.ok) { lastDashboard = d; renderFreshness(d); }
+    }
+  }
+
   async function render() {
     renderNav();
     if (lastDashboard) renderFreshness(lastDashboard);
+    if (current === 'Home') return renderHome();
     if (current === 'Dashboard') return renderDashboard();
     if (current === 'Experiment 5') return renderExperiment5();
     if (current === 'Sentiment') return renderSentiment();

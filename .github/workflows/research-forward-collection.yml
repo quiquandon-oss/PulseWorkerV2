@@ -1,0 +1,58 @@
+# RESEARCH ONLY -- Risk Regime forward collection (research/risk_regime_forward.py).
+#
+# Collects NEW observations after the frozen historical datasets: Binance BTCUSDT OI (5-minute, Binance public data
+# archive, SHA-256 checked), Binance funding (monthly archive files), Hyperliquid cross-asset candles and BTC
+# funding/premium (established implementation). Append-only, idempotent store; gaps listed, never filled; every run
+# leaves a run record. No secrets, no D1, no deploy, no proxy, no paid source. Bybit and liquidations are NOT
+# collected (no permitted route).
+#
+# SCHEDULE IS NOT ENABLED. Proposed cadence: daily at 06:40 UTC (see RISK_REGIME_FORWARD.md). To enable it, a human
+# must (1) authorise it, (2) uncomment the two `schedule` lines below, and (3) have the workflow on the repository's
+# DEFAULT branch: GitHub runs `schedule` triggers only from the default branch, so on this research branch the
+# lines would be inert even if uncommented.
+#
+# The only active trigger is a push to the research branch that changes this file or the collector (a one-off
+# verification run). There is no workflow_dispatch.
+name: research-forward-collection
+
+on:
+  push:
+    branches: [claude/sweet-meitner-66ntx8]
+    paths:
+      - .github/workflows/research-forward-collection.yml
+      - research/risk_regime_forward.py
+  # schedule:
+  #   - cron: '40 6 * * *'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: research-forward-collection
+  cancel-in-progress: false
+
+jobs:
+  collect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref_name }}
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Collect (idempotent; records location, failures, gaps and staleness)
+        run: python3 research/risk_regime_forward.py --store research/results/risk_regime_forward --max-days 60
+
+      - name: Commit the run record and any new partitions
+        if: always()
+        run: |
+          git config user.name "research-forward-collection[bot]"
+          git config user.email "research-forward-collection@users.noreply.github.com"
+          git add research/results/risk_regime_forward
+          if git diff --cached --quiet; then echo "nothing to commit"; exit 0; fi
+          git commit -m "Research data: forward collection run ${GITHUB_RUN_ID}"
+          for i in 1 2 3 4; do git pull --rebase origin "${GITHUB_REF_NAME}" && git push origin "HEAD:${GITHUB_REF_NAME}" && break; sleep $((2**i)); done

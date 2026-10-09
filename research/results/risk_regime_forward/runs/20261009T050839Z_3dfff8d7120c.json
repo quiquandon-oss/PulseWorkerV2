@@ -1,0 +1,22 @@
+{
+ "artifact": "risk-regime-forward-run",
+ "attempts": [],
+ "errors": [],
+ "finished_at": "2026-10-09T05:08:41.900000+00:00",
+ "location": {
+  "checked_at": "2026-10-09T05:08:41.895000+00:00",
+  "colo": null,
+  "ip_sha256_prefix": null,
+  "loc": null,
+  "source": "https://www.cloudflare.com/cdn-cgi/trace",
+  "status": -1
+ },
+ "run_id": "3dfff8d7120c",
+ "sources": [
+  "hyperliquid_hip3",
+  "hyperliquid_btc_funding"
+ ],
+ "stale_sources": [],
+ "started_at": "2026-10-09T05:08:39.693000+00:00",
+ "summary": {}
+}

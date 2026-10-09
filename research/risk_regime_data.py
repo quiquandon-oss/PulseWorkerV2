@@ -33,7 +33,7 @@ DAY = 24 * HOUR
 FIELDS = ("source", "provider", "instrument", "metric", "timestamp", "value", "unit", "interval", "retrieved_at",
           "historical_or_live", "source_url", "coverage_status", "available_at")
 HISTORICAL, LIVE = "historical", "live"
-INTERVAL_MS = {"15m": 15 * 60_000, "1h": HOUR, "8h": 8 * HOUR, "1d": DAY, "event": None, "snapshot": None}
+INTERVAL_MS = {"5m": 5 * 60_000, "15m": 15 * 60_000, "1h": HOUR, "8h": 8 * HOUR, "1d": DAY, "event": None, "snapshot": None}
 
 
 class ContractError(ValueError):

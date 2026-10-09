@@ -1,0 +1,50 @@
+# RESEARCH ONLY -- Risk Regime venue open-interest / funding collection.
+#
+# Why this exists: the Claude cloud container's egress is refused by Bybit (HTTP 403) and Binance (HTTP 451).
+# This job runs the EXISTING collectors on a GitHub-hosted runner, but it first records where the runner
+# actually is (Cloudflare trace: country / colo) and how each provider answers. It does not assume the runner is
+# outside the US, uses no proxy, no credentials and no secrets, and a provider that refuses the runner's
+# location is reported as refused (no data). Results are committed back to this research branch only.
+#
+# Scope: triggers ONLY on pushes to the research branch that touch this file or the collector. It has no
+# schedule and no dispatch, touches no D1, deploys nothing, and never runs on main.
+name: research-oi-collection
+
+on:
+  push:
+    branches: [claude/sweet-meitner-66ntx8]
+    paths:
+      - .github/workflows/research-oi-collection.yml
+      - research/risk_regime_oi_collect.py
+
+permissions:
+  contents: write
+
+concurrency:
+  group: research-oi-collection
+  cancel-in-progress: false
+
+jobs:
+  collect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: claude/sweet-meitner-66ntx8
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Collect (records runner location and provider answers first)
+        run: python3 research/risk_regime_oi_collect.py --out-dir research/results/risk_regime_oi --start 2026-01-01
+
+      - name: Commit collected research data to the research branch
+        run: |
+          git config user.name "research-oi-collection[bot]"
+          git config user.email "research-oi-collection@users.noreply.github.com"
+          git add research/results/risk_regime_oi
+          if git diff --cached --quiet; then echo "nothing collected"; exit 0; fi
+          git commit -m "Research data: venue OI/funding collection run ${GITHUB_RUN_ID} (runner location recorded in manifest)"
+          for i in 1 2 3 4; do git pull --rebase origin claude/sweet-meitner-66ntx8 && git push origin HEAD:claude/sweet-meitner-66ntx8 && break; sleep $((2**i)); done

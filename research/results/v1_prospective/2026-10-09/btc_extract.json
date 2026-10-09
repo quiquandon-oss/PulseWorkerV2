@@ -1,0 +1,29 @@
+{
+ "manifest": {
+  "as_of_ms": 1791565389912,
+  "database": "sentiment-history (f91ca980-b886-423a-bd6f-f3baea46d181), production, read-only via Cloudflare D1 query API",
+  "changes_reported": 0,
+  "statements": [
+   "SELECT ts, btc_price FROM btc_data WHERE ts >= 1791547200000 ORDER BY ts"
+  ],
+  "rows": 4
+ },
+ "rows": [
+  {
+   "ts": 1791547243382,
+   "btc_price": 83187
+  },
+  {
+   "ts": 1791547243406,
+   "btc_price": 83187
+  },
+  {
+   "ts": 1791558043397,
+   "btc_price": 82964
+  },
+  {
+   "ts": 1791558043621,
+   "btc_price": 82964
+  }
+ ]
+}

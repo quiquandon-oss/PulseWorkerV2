@@ -89,6 +89,26 @@ DIMENSIONS = {
 }
 EVIDENCE_DIMS = [k for k, (_, m) in DIMENSIONS.items() if m]
 
+# Optional venue open-interest extension (only with --oi-observations; the default run is unchanged).
+# Binance public data archive (risk_regime_oi_collect.py): coin-denominated OI (BTC) is kept apart from USD
+# notional (which moves with price), and venue funding apart from both. Same abnormality rule as every other measure.
+OI_KEY = "binance_oi_archive|BTCUSDT|open_interest"
+OI_USD_KEY = "binance_oi_archive|BTCUSDT|open_interest_usd"
+BN_FUNDING = "binance_funding_archive|BTCUSDT|funding_rate"
+OI_HORIZONS = {"chg1": HOUR, "chg6": 6 * HOUR, "chg24": DAY, "chg72": 3 * DAY}
+OI_DIMENSIONS = {
+    25: ("Binance BTC open interest (coin, BTC)", ["oi.level", "oi.chg1", "oi.chg6", "oi.chg24", "oi.chg72"]),
+    26: ("Binance BTC open interest (USD notional)", ["oi_usd.chg24"]),
+    27: ("Binance BTC funding (8h settlements)", ["bnfund.level", "bnfund.chg24"]),
+}
+OI_MEASURES = [m for _, ms in OI_DIMENSIONS.values() for m in ms]
+
+
+def enable_oi() -> None:
+    """Adds the OI dimensions to the module's dimension list (opt-in; used by main() with --oi-observations)."""
+    DIMENSIONS.update(OI_DIMENSIONS)
+    EVIDENCE_DIMS[:] = [k for k, (_, m) in DIMENSIONS.items() if m]
+
 
 # ---------------- point-in-time store ----------------
 class PIT:
@@ -190,6 +210,15 @@ def measure(p: PIT, name: str, t: int, v1: "V1") -> Optional[float]:
         return o["value"] if kind == "level" else (1.0 if o["raw"].get("elevated") else 0.0)
     if base == "v1":
         return v1.value(kind, t)
+    if base in ("oi", "oi_usd"):
+        key = OI_KEY if base == "oi" else OI_USD_KEY
+        return m_level(p, key, t, MAX_AGE["hourly"]) if kind == "level" else m_change(p, key, t, OI_HORIZONS[kind], True)
+    if base == "bnfund":
+        a = p.asof(BN_FUNDING, t, 9 * HOUR)
+        if kind == "level":
+            return None if a is None else a["value"]
+        b = p.asof(BN_FUNDING, t - DAY, 9 * HOUR)
+        return None if a is None or b is None else a["value"] - b["value"]
     raise KeyError(name)
 
 
@@ -357,14 +386,80 @@ def pair_rates(flag_rows: Sequence[Dict[int, Optional[bool]]]) -> Dict[str, Dict
     return out
 
 
+def oi_path(p: PIT, b: int, e: int) -> List[Dict]:
+    """Hourly coin OI and Binance funding from boundary - 72 h to event + 24 h, labelled by availability."""
+    out = []
+    for k in range(-72, int((e - b) / HOUR) + 25):
+        t = b + k * HOUR
+        o, f = p.asof(OI_KEY, t, MAX_AGE["hourly"]), p.asof(BN_FUNDING, t, 9 * HOUR)
+        out.append({"t": iso(t), "label": "PRE-EVENT" if t <= b else ("CONTEMPORANEOUS" if t <= e else "POST-EVENT"),
+                    "oi_btc": None if o is None else o["value"], "oi_obs": None if o is None else iso(o["timestamp"]),
+                    "binance_funding": None if f is None else f["value"]})
+    return out
+
+
+def tail_summary(p: PIT, v1: "V1", measures: Sequence[str], groups: Dict[str, Sequence[int]]) -> Dict:
+    """Per measure and group: median percentile rank, low/high tail counts and the distinct UTC days behind them."""
+    out = {}
+    for m in measures:
+        out[m] = {}
+        for g, ts in groups.items():
+            ranks = [(t, assess(p, v1, m, t)["pct_rank"]) for t in ts]
+            ranks = [(t, r) for t, r in ranks if r is not None]
+            lo = [t for t, r in ranks if r < LO_PCT]
+            hi = [t for t, r in ranks if r > HI_PCT]
+            rs = sorted(r for _, r in ranks)
+            out[m][g] = {"n": len(ranks), "days": len({t // DAY for t, _ in ranks}), "median_pct_rank": rs[len(rs) // 2] if rs else None,
+                         "low_tail": len(lo), "low_tail_days": len({t // DAY for t in lo}),
+                         "high_tail": len(hi), "high_tail_days": len({t // DAY for t in hi})}
+    return out
+
+
+def exploratory_oi_7d(p: PIT, ts_groups: Dict[str, Sequence[int]], boundaries: Dict[str, int]) -> Dict:
+    """POST-HOC, EXPLORATORY ONLY (chosen after seeing Event #15's OI path; not part of the declared rule set):
+    the 7-day change in coin OI, ranked against its own trailing 90 days of hourly 7-day changes."""
+    cache: Dict[int, Optional[float]] = {}
+
+    def c7(t: int) -> Optional[float]:
+        k = t // HOUR
+        if k not in cache:
+            a, b = p.asof(OI_KEY, t, MAX_AGE["hourly"]), p.asof(OI_KEY, t - 7 * DAY, MAX_AGE["hourly"])
+            cache[k] = None if a is None or b is None else 100.0 * (a["value"] / b["value"] - 1)
+        return cache[k]
+
+    def rank(t: int) -> Optional[float]:
+        x = c7(t)
+        hist = [h for h in (c7(t - k * HOUR) for k in range(1, 90 * 24)) if h is not None]
+        return None if x is None or len(hist) < MIN_HISTORY else percentile_rank(x, hist)
+
+    out = {"label": "POST-HOC EXPLORATORY: not evidence, hypothesis-generating only",
+           "boundaries": {k: {"oi_7d_change_pct": None if c7(t) is None else round(c7(t), 3), "pct_rank_vs_90d": rank(t)} for k, t in boundaries.items()},
+           "groups": {}}
+    for g, ts in ts_groups.items():
+        rk = [(t, rank(t)) for t in ts]
+        rk = [(t, r) for t, r in rk if r is not None]
+        lo, hi = [t for t, r in rk if r < LO_PCT], [t for t, r in rk if r > HI_PCT]
+        rs = sorted(r for _, r in rk)
+        out["groups"][g] = {"n": len(rk), "days": len({t // DAY for t, _ in rk}), "median_pct_rank": rs[len(rs) // 2] if rs else None,
+                            "low_tail": len(lo), "low_tail_days": len({t // DAY for t in lo}),
+                            "high_tail": len(hi), "high_tail_days": len({t // DAY for t in hi})}
+    return out
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--results", required=True)
     ap.add_argument("--out", required=True)
+    ap.add_argument("--oi-observations", help="optional: risk_regime_oi/observations.jsonl.gz (adds dimensions 25-27)")
     args = ap.parse_args(argv)
     R = Path(args.results)
     with gzip.open(R / "risk_regime_raw" / "observations.jsonl.gz", "rt") as f:
-        p = PIT([json.loads(line) for line in f])
+        rows = [json.loads(line) for line in f]
+    if args.oi_observations:
+        enable_oi()
+        with gzip.open(args.oi_observations, "rt") as f:
+            rows += [json.loads(line) for line in f]
+    p = PIT(rows)
     with gzip.open(R / "risk_regime_raw" / "gdelt_doc_articles.jsonl.gz", "rt") as f:
         arts = [json.loads(line) for line in f]
     hist = json.load(open(R / "risk_regime_history.json"))
@@ -394,6 +489,9 @@ def main(argv=None) -> int:
                 first_abn[m] = {"t": iso(b + k * HOUR), "value": a["value"], "pct_rank": a["pct_rank"]}
                 break
     ev15["CONTEMPORANEOUS_first_abnormal_hour"] = first_abn
+    if args.oi_observations:
+        ev15["oi_path"] = oi_path(p, b, e)
+        ev15["oi_sensitivity_0901"] = {m: assess(p, v1, m, EVENT15["sensitivity_boundary_ms"]) for m in OI_MEASURES}
 
     # --- base rates at every V1 observation (same rule) and V1 failure vs correct ---
     base_rows, base_t, per_obs = [], [], []
@@ -463,6 +561,14 @@ def main(argv=None) -> int:
            "top_combinations_unique_episodes": [{"dims": list(c), "episodes": n, "base_obs": base_combo.get(c, 0)}
                                                 for c, n in combos.most_common(25)],
            "per_v1_obs_flags": per_obs}
+    if args.oi_observations:
+        out["oi_tails_v1_groups"] = tail_summary(p, v1, OI_MEASURES, {g: x["t"] for g, x in groups.items() if g.startswith("v1_UP") or g.startswith("v1_DOWN")})
+        out["oi_exploratory_7d_vs_90d"] = exploratory_oi_7d(
+            p, {"all_v1_obs": base_t, **{g: x["t"] for g, x in groups.items() if g.startswith("v1_UP") or g.startswith("v1_DOWN")}},
+            {"PRED-1125 (12:01)": EVENT15["boundary_ms"], "PRED-1124 (09:01)": EVENT15["sensitivity_boundary_ms"]})
+        out["oi_tails_unique_episodes"] = tail_summary(p, v1, OI_MEASURES, {
+            "UP_call_failed": [x["boundary_ms"] for x in uniq_rows if x["type"] == "PRED_UP_BTC_DOWN"],
+            "DOWN_call_failed": [x["boundary_ms"] for x in uniq_rows if x["type"] == "PRED_DOWN_BTC_UP"]})
     Path(args.out).write_text(json.dumps(out, indent=1, default=str) + "\n")
     print("OK", len(ep_rows), "episodes", len(uniq_rows), "unique boundaries")
     return 0

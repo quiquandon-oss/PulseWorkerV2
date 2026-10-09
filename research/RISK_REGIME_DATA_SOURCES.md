@@ -18,6 +18,8 @@ Full per-source report, Event #15 pre-boundary table and coverage matrix: `RISK_
 | 2 | Binance BTC open interest | **BLOCKED_BY_PROVIDER_GEO_RESTRICTION** | `fapi.binance.com` answers HTTP 451 "Service unavailable from a restricted location". Binance keeps only **30 days**: Event #15 leaves that window on about **27 Oct 2026** |
 | 3 | Bybit BTC funding | **BLOCKED_BY_PROVIDER_GEO_RESTRICTION** | as 1 |
 | 4 | Binance BTC funding | **BLOCKED_BY_PROVIDER_GEO_RESTRICTION** | as 2 (full history available once reachable) |
+| 2b | Binance BTC open interest, public data archive (`binance_oi_archive`) | **OK** (2026-10-09) | `data.binance.vision` daily 5-minute metrics, 2026-01-01 → 2026-10-07, 280/280 files SHA-256-verified, 80,640 obs per metric; collected on a GitHub-hosted runner verified to be in the US (`loc=US`); same provider, see `RISK_REGIME_OI_RESEARCH.md` |
+| 4b | Binance BTC funding, public data archive (`binance_funding_archive`) | **OK** (2026-10-09) | monthly files 2026-01 → 2026-09, 819 settlements |
 | 5 | Liquidations (Xoomar) | **RESEARCH_REQUIRED** | no public "Xoomar" endpoint could be identified (not in any CryptoPulse repository, not found by web search). Exact URL needed. Not substituted |
 | 5b | Liquidations (exchange REST) | **NOT_AVAILABLE** | Bybit/Binance publish liquidations only on live WebSockets; no free REST history |
 | 6a | Deribit DVOL (history) | **OK** | 4,700 hourly OHLC observations, 2026-08-18 → 2026-10-06 |

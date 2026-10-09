@@ -52,3 +52,28 @@ def test_event15_boundary_is_locked():
 
 def test_no_score_or_weights_in_output_contract():
     assert not any(w in er.DIMENSIONS[d][0].lower() for d in er.DIMENSIONS for w in ("score ", "weight"))
+
+
+def test_oi_extension_is_opt_in_and_point_in_time():
+    import copy
+    dims, ev = copy.deepcopy(er.DIMENSIONS), list(er.EVIDENCE_DIMS)
+    assert 25 not in er.DIMENSIONS and 25 not in er.EVIDENCE_DIMS            # default run unchanged
+    try:
+        er.enable_oi()
+        assert {25, 26, 27} <= set(er.EVIDENCE_DIMS)
+        n = 9 * 24 * 12
+        rows = [obs("binance_oi_archive", "BTCUSDT", "open_interest", k * 300_000, 100_000.0 + (k % 2), k * 300_000 + 300_000)
+                for k in range(n)]
+        rows.append(obs("binance_oi_archive", "BTCUSDT", "open_interest", n * 300_000, 90_000.0, n * 300_000 + 300_000))
+        p = er.PIT(rows)
+        t = n * 300_000
+        assert er.assess(p, er.V1([]), "oi.chg1", t)["abnormal"] is False                   # drop not yet published
+        later = er.assess(p, er.V1([]), "oi.chg1", t + 300_000)
+        assert later["abnormal"] is True and later["value"] < -9
+    finally:
+        er.DIMENSIONS.clear(); er.DIMENSIONS.update(dims); er.EVIDENCE_DIMS[:] = ev
+
+
+def test_oi_units_kept_apart():
+    assert er.OI_KEY.endswith("|open_interest") and er.OI_USD_KEY.endswith("|open_interest_usd")
+    assert set(er.OI_DIMENSIONS[25][1]).isdisjoint(er.OI_DIMENSIONS[26][1])

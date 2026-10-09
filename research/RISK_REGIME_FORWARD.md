@@ -223,4 +223,27 @@ on `main`. That is one file, with no code, Worker or package change. After that 
 **Evaluation input.** Point `--forward` at a checkout of the data branch (`<checkout>/risk_regime_forward`). The
 pre-registration is unchanged (sha256 `46c0d52b…`).
 
+## 6b. Scheduler installed on main (2026-10-09, approved)
+
+- **`main` commit `d59cc2d`** adds exactly one file, `.github/workflows/research-forward-schedule.yml`, on top of
+  `a916855`. No research code, Worker, wrangler or package file went to `main`, and the research branch was not
+  merged.
+- **Schedule:** `40 10 * * *` (daily 10:40 UTC). GitHub registered workflow id 379718524 as `active`. The first
+  scheduled run is due 2026-10-10 10:40 UTC; GitHub may start scheduled runs some minutes late.
+- **Code pinned to the reviewed research commit `b5bcff8f924dcbd255b73ca94cb5bb743e461c40`.** It is checked out
+  with no credentials. Changing the collector for scheduled runs requires a new reviewed pin on `main`.
+- **Credentials:**
+  - Neither checkout keeps a token, so the collector runs with no credentials on disk.
+  - The job token (`github.token`, `contents: write` only, no `actions` permission) reaches only the final step.
+  - That step has exactly one `git push`, to `HEAD:refs/heads/research-data/risk-regime-forward`, after refusing
+    any path outside `risk_regime_forward/`.
+  - The hardened path was proven by run `37946431300`, whose run record landed on the data branch only.
+- **Pre-commit checks:**
+  - `verify_installed_scheduler()` passed on the exact file.
+  - Its non-comment body equals the reviewed stub except the pinned ref.
+  - `deploy.yml`'s path filter does not match it.
+  - `test.yml` was the only push-triggered workflow, and on push it runs only its `test` job.
+  - No `workflow_run` listeners exist on `main`.
+- **Push outcome:** the push to `main` started only `Test` (run 37946632720) and no `Deploy Worker` run.
+
 ## 7. Verification runs

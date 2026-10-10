@@ -130,6 +130,33 @@ def verify_tree(dest, expected_sums=None):
     return res
 
 
+def compare_remote_listing(src, listing):
+    """The package against Google Drive's own server-side record of the uploaded files.
+
+    listing = {relative path: [(md5Checksum, size), ...]} for every file under the Drive folder, as returned by
+    the Drive API (more than one entry for a path means Drive holds duplicates with the same name).
+    """
+    src = Path(src)
+    sums = read_sums(src / "SHA256SUMS")
+    expected = {rel: (hashlib.md5((src / rel).read_bytes()).hexdigest(), (src / rel).stat().st_size) for rel in [*sums, "SHA256SUMS"]}
+    res = {"ok": False, "files_expected": len(expected), "files_matching": 0, "bytes_matching": 0,
+           "missing": [], "mismatched": [], "duplicates": [], "unexpected": []}
+    for rel, (md5, size) in sorted(expected.items()):
+        entries = listing.get(rel, [])
+        if not entries:
+            res["missing"].append(rel)
+        elif len(entries) > 1:
+            res["duplicates"].append(rel)
+        elif (entries[0][0], int(entries[0][1])) != (md5, size):
+            res["mismatched"].append(rel)
+        else:
+            res["files_matching"] += 1
+            res["bytes_matching"] += size
+    res["unexpected"] = sorted(p for p in listing if p not in expected and not p.startswith(REPORT_DIR + "/"))
+    res["ok"] = res["files_matching"] == len(expected) and not (res["duplicates"] or res["unexpected"])
+    return res
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)

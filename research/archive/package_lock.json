@@ -1,4 +1,5 @@
 {
+ "bundle_archive_commit": "b1ed06000077faa126908570945cec2d7c9c76d0",
  "note": "commits the manual Drive package is built from (package.py assemble), so it can be rebuilt identically; datasets on the archive branch itself are pinned by their content hashes",
  "refs": {
   "origin/claude/epic-planck-uyapsw": "916bb7df3062cb8ad582b74dbae7377ce11063e4",

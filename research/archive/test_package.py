@@ -147,3 +147,19 @@ def test_compare_against_reference_build(tmp_path, monkeypatch):
     archive.write_sums(root)
     r = package.compare(root, tmp_path / "exp.json")
     assert r["different"] == ["10_raw/frozen/a.json"] and r["parquet_different"] == ["20_parquet/t/x.parquet"] and not r["ok"]
+
+
+def test_server_side_listing_check_catches_mismatch_duplicates_and_extras(tmp_path):
+    import hashlib
+    src = make_pkg(tmp_path)
+    md5 = lambda p: hashlib.md5((src / p).read_bytes()).hexdigest()   # noqa: E731
+    listing = {p: [(md5(p), (src / p).stat().st_size)] for p in [*drive_copy.read_sums(src / "SHA256SUMS"), "SHA256SUMS"]}
+    listing["_verification/r.json"] = [("x", 1)]
+    assert drive_copy.compare_remote_listing(src, listing)["ok"]
+    listing["README.txt"] = listing["README.txt"] * 2                    # Drive "keep both"
+    listing["20_parquet/t/x.parquet"] = [("0" * 32, 2)]
+    listing["stray.txt"] = [("y", 1)]
+    del listing["SHA256SUMS"]
+    r = drive_copy.compare_remote_listing(src, listing)
+    assert not r["ok"] and r["duplicates"] == ["README.txt"] and r["mismatched"] == ["20_parquet/t/x.parquet"]
+    assert r["missing"] == ["SHA256SUMS"] and r["unexpected"] == ["stray.txt"]

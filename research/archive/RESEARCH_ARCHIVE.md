@@ -329,7 +329,7 @@ Candidate #1, production code, workflows or secrets. Nothing merged or deployed.
 ## Phase C: manual Drive package (ready, not uploaded)
 
 See `MANUAL_DRIVE_ARCHIVE.md`.
-- **Size:** 4,676 files, 396,618,468 bytes, 16 datasets.
+- **Size:** 4,676 files, about 397 MB (397,137,278 bytes in the final session build), 16 datasets.
 - **Built from** git commits pinned in `package_lock.json`, plus the GDELT exports, re-downloadable and checked
   byte for byte.
 - **Checks passed:** `package.py verify`, `offline-check` and `sha256sum -c`.

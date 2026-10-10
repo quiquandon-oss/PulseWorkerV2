@@ -24,8 +24,9 @@ python3 research/archive/package.py summary  --pkg ../cp-package > ../cp-package
 - `fetch-gdelt` never overwrites a file that is already there. A file with different bytes is listed under
   `conflicts` and left alone. A download whose bytes differ from the record is listed under `failed` and not
   saved.
-- Expected result (built in the session on 2026-10-10): **4,676 files, 396,618,468 bytes**, 16 datasets. A
-  rebuild from the same lock gives the same raw files. Parquet bytes may differ with another pyarrow version;
+- Expected result (built in the session on 2026-10-10): **4,676 files, about 397 MB**, 16 datasets. A rebuild
+  from the same lock gives the same raw files. Only `05_code/` (the git bundle, about 27 MB) changes size as the
+  branch gains commits. Parquet bytes may differ with another pyarrow version;
   `verify` checks Parquet by exact row round trip, not by bytes.
 
 ## 1. Create the Drive folder
@@ -44,7 +45,7 @@ subfolders. Drive web (**New → Folder upload**) or Google Drive for desktop bo
 | Batch | Upload these folders/files | Files | Size |
 |---|---|---|---|
 | 1 | `00_preregistrations/`, `30_run_records/`, `90_manifests/`, `README.txt` | 37 | 1.7 MB |
-| 2 | `05_code/` (git bundle) | 1 | 26.7 MB |
+| 2 | `05_code/` (git bundle) | 1 | ≈27 MB |
 | 3 | `10_raw/frozen/`, `10_raw/exports/`, `10_raw/prospective/` | 72 | 53.5 MB |
 | 4 | `10_raw/session_extracts/` (GDELT cache) | 4,541 | 297.5 MB |
 | 5 | `20_parquet/` | 24 | 16.3 MB |
@@ -80,10 +81,11 @@ Drive's web UI shows no checksums, so verify a downloaded copy:
 ## 4. Confirm the counts and total size
 
 Run `package.py summary --pkg restore` and compare it with `cp-package-summary.json` from step 0:
-- Totals must be equal: **4,675** files in `SHA256SUMS` plus `SHA256SUMS` itself, **396,618,468** bytes in all.
+- Totals must be equal: **4,675** files in `SHA256SUMS` plus `SHA256SUMS` itself, and the same byte total as your
+  own build (about 397 MB).
 - Each dataset must match: the 16 dataset rows, snapshot ids, file counts and bytes.
 
-In Drive, the folder's **File information → Size** should show about 396.6 MB.
+In Drive, the folder's **File information → Size** should show about 397 MB.
 
 ## 5. Restore and run the offline check
 

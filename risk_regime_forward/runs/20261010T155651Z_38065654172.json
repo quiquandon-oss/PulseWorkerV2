@@ -1,0 +1,80 @@
+{
+ "artifact": "risk-regime-forward-run",
+ "attempts": [
+  {
+   "completeness": "COMPLETE",
+   "duplicates_dropped": 0,
+   "expected_slots": 576,
+   "files": {
+    "checksum_ok": 1
+   },
+   "fingerprint": "d3e55b126614e2ed565619dd5a1c1e5aebf7d006c4f4f2061eabf3eea590941c",
+   "internal_conflicts": {},
+   "missing_ranges": {},
+   "missing_slots": 0,
+   "observations": 576,
+   "partition": "2026-10-09",
+   "source": "binance_oi_archive",
+   "status": "WRITTEN"
+  },
+  {
+   "completeness": "COMPLETE",
+   "duplicates_dropped": 0,
+   "expected_slots": 432,
+   "fingerprint": "6f56bdb711d7c3cf0fab5dbc842eea394b3ade019e81b4be565bd630d1821bce",
+   "internal_conflicts": {},
+   "missing_ranges": {},
+   "missing_slots": 0,
+   "observations": 432,
+   "partition": "2026-10-09",
+   "source": "hyperliquid_hip3",
+   "status": "WRITTEN"
+  },
+  {
+   "completeness": "COMPLETE",
+   "duplicates_dropped": 0,
+   "expected_slots": 48,
+   "fingerprint": "3fe85c959639a216eba3df7d50899b960e4cb68540c8335d912f57ed564a265b",
+   "internal_conflicts": {},
+   "missing_ranges": {},
+   "missing_slots": 0,
+   "observations": 48,
+   "partition": "2026-10-09",
+   "source": "hyperliquid_btc_funding",
+   "status": "WRITTEN"
+  },
+  {
+   "partition": null,
+   "requests": {
+    "candleSnapshot_FETCHED": 9,
+    "fundingHistory_FETCHED": 2,
+    "fundingHistory_page_max_rows": 24
+   },
+   "source": "hyperliquid",
+   "status": "REQUEST_LOG"
+  }
+ ],
+ "errors": [],
+ "finished_at": "2026-10-10T15:57:08.090000+00:00",
+ "location": {
+  "checked_at": "2026-10-10T15:56:53.518000+00:00",
+  "colo": "IAD",
+  "ip_sha256_prefix": "6dfc2632a6d7",
+  "loc": "US",
+  "source": "https://www.cloudflare.com/cdn-cgi/trace",
+  "status": 200
+ },
+ "run_id": "38065654172",
+ "sources": [
+  "binance_oi_archive",
+  "binance_funding_archive",
+  "hyperliquid_hip3",
+  "hyperliquid_btc_funding"
+ ],
+ "stale_sources": [],
+ "started_at": "2026-10-10T15:56:51.837000+00:00",
+ "summary": {
+  "REQUEST_LOG": 1,
+  "WRITTEN": 3
+ }
+}

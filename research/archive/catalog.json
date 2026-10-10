@@ -1,0 +1,378 @@
+{
+  "catalog_version": "1.0.0",
+  "note": "Registry of research datasets for the offline archive. Locations are git refs of quiquandon-oss/PulseWorkerV2 or paths in a local working directory. Status values: PREREGISTRATION (frozen rules, byte-exact), FROZEN_SNAPSHOT (study input or output that must never change), PROSPECTIVE_APPEND_ONLY (keeps growing; past partitions never rewritten), MUTABLE_EXPORT (overwritten in place; history only in git), RUN_RECORD (one file per run), EPHEMERAL_LOCAL (exists only in a session container).",
+  "datasets": [
+    {
+      "id": "prereg_v1_candidates",
+      "title": "T-A1/T-A2/T-A3 V1 candidate pre-registration, addendum 1 and erratum 1",
+      "status": "PREREGISTRATION",
+      "source": {
+        "kind": "git",
+        "ref": "origin/claude/epic-planck-uyapsw",
+        "paths": [
+          "research/v1_candidate_registration.json",
+          "research/v1_candidate_registration_addendum_1.json",
+          "research/v1_candidate_registration_addendum_1_erratum_1.json"
+        ]
+      },
+      "format": "json",
+      "provenance": "authored research rules; registered 2026-10-09 16:00 UTC (registration), addendum and erratum committed on the same branch",
+      "pinned_sha256": {
+        "research/v1_candidate_registration.json": {
+          "rule": "json_sort_keys",
+          "sha256": "66067b324743bad052f4404d7ecbaaac76e6678116026ddd22dc8d73b22a266d"
+        },
+        "research/v1_candidate_registration_addendum_1.json": {
+          "rule": "file_bytes",
+          "sha256": "c2ebdfcb75a1690b25f3a327bf7537f8ee6853e16a0dc6295bebd18b8ac7ae9c"
+        },
+        "research/v1_candidate_registration_addendum_1_erratum_1.json": {
+          "rule": "file_bytes",
+          "sha256": "5397fe70cf1415aa239beb944350340a48d711244e4d16b1f18edc8c313cb15d"
+        }
+      }
+    },
+    {
+      "id": "prereg_oi_forward",
+      "title": "OI / funding forward-evaluation pre-registration (embedded constant PREREGISTRATION)",
+      "status": "PREREGISTRATION",
+      "source": {
+        "kind": "git",
+        "ref": "origin/claude/sweet-meitner-66ntx8",
+        "paths": [
+          "research/risk_regime_forward_eval.py",
+          "research/RISK_REGIME_FORWARD.md"
+        ]
+      },
+      "format": "python",
+      "provenance": "registered 2026-10-09 before any evaluated call existed; evaluation_start_utc 2026-10-10T00:00:00Z",
+      "pinned_sha256": {
+        "research/risk_regime_forward_eval.py": {
+          "rule": "python_constant_json_sort_keys:PREREGISTRATION",
+          "sha256": "46c0d52b47350a7c7e83841e83ff646d8e5d0f5b9146d98908dab32411ff3e93"
+        }
+      }
+    },
+    {
+      "id": "prereg_market_moves",
+      "title": "Market-move definition v1.0.0 and evaluation plan v1.0.0 (sealed evaluation period 2026-07-22 to 2026-10-09 21:00 UTC)",
+      "status": "PREREGISTRATION",
+      "source": {
+        "kind": "git",
+        "ref": "origin/claude/epic-planck-uyapsw-market-moves",
+        "paths": [
+          "research/market_moves/definition.json",
+          "research/market_moves/definition.sha256",
+          "research/market_moves/evaluation_plan.json",
+          "research/market_moves/evaluation_plan.sha256"
+        ]
+      },
+      "format": "json",
+      "provenance": "frozen before any detector ran on the collected candles",
+      "pinned_sha256": {
+        "research/market_moves/definition.json": {
+          "rule": "json_canonical_compact",
+          "sha256": "c3ef65830c3bf729354749a94c2038c072fa72f99b5977608f41aa6bd19c0b92"
+        },
+        "research/market_moves/evaluation_plan.json": {
+          "rule": "json_canonical_compact",
+          "sha256": "51d94913b6011a966ffd7b881e3f47509e20dc176b1c6ba4c821dfd084d2e41d"
+        }
+      }
+    },
+    {
+      "id": "mm_candles_1h",
+      "title": "Hyperliquid 1h candles BTC/ETH/LINK (market-move study snapshot)",
+      "status": "FROZEN_SNAPSHOT",
+      "source": {
+        "kind": "git",
+        "ref": "origin/research-data/market-moves",
+        "paths": [
+          "market_moves/hourly/*/observations.jsonl"
+        ]
+      },
+      "format": "jsonl",
+      "table": "candles_1h",
+      "time_field": "open_ts",
+      "available_field": "available_at",
+      "series_key": [
+        "asset"
+      ],
+      "expected_step_ms": 3600000,
+      "provenance": "POST https://api.hyperliquid.xyz/info candleSnapshot, public, no credentials; retrieval time, request and raw response kept per row; pinned by evaluation_plan.json data_snapshot (commit 0eb5be0)",
+      "sealed_after_available_at_ms": 1784678400000,
+      "known_gaps": "none at collection; single same-hour re-fetch only (weak revision check); evaluation period sealed: no returns may be computed on rows with available_at >= 2026-07-22T00:00Z outside an authorised evaluation run"
+    },
+    {
+      "id": "mm_collection_records",
+      "title": "Market-move collection run manifests and quality report",
+      "status": "RUN_RECORD",
+      "source": {
+        "kind": "git",
+        "ref": "origin/research-data/market-moves",
+        "paths": [
+          "market_moves/runs/*.json",
+          "market_moves/quality_report.json",
+          "MARKET_MOVES_DATA.md"
+        ]
+      },
+      "format": "json",
+      "provenance": "written by research/market_moves/collect.py"
+    },
+    {
+      "id": "rr_raw_observations",
+      "title": "Risk-regime research series (66 series: Hyperliquid HIP-3, BTC funding, Deribit DVOL/options, DeFiLlama, GDELT events and DOC counts)",
+      "status": "FROZEN_SNAPSHOT",
+      "source": {
+        "kind": "git",
+        "ref": "origin/claude/sweet-meitner-66ntx8",
+        "paths": [
+          "research/results/risk_regime_raw/observations.jsonl.gz"
+        ]
+      },
+      "format": "jsonl.gz",
+      "table": "observations",
+      "time_field": "timestamp",
+      "available_field": "available_at",
+      "series_key": [
+        "source",
+        "instrument",
+        "metric",
+        "interval"
+      ],
+      "step_by_interval_ms": {
+        "1h": 3600000,
+        "15m": 900000,
+        "1d": 86400000
+      },
+      "provenance": "public provider APIs (no credentials), live run of 2026-10-08; each row keeps timestamp, available_at, retrieved_at, source_url and raw provider fields",
+      "known_gaps": "Bybit/Binance live APIs geo-restricted (not attached); Deribit options snapshot is live-only; GDELT event counts start 2026-08-24, Hyperliquid 2026-08-18"
+    },
+    {
+      "id": "rr_gdelt_doc_articles",
+      "title": "GDELT DOC article list behind the DOC count series",
+      "status": "FROZEN_SNAPSHOT",
+      "source": {
+        "kind": "git",
+        "ref": "origin/claude/sweet-meitner-66ntx8",
+        "paths": [
+          "research/results/risk_regime_raw/gdelt_doc_articles.jsonl.gz"
+        ]
+      },
+      "format": "jsonl.gz",
+      "table": "articles",
+      "time_field": "first_seen",
+      "available_field": "available_at",
+      "provenance": "api.gdeltproject.org DOC 2.0, public; first_seen, available_at (+15 min) and retrieved_at kept"
+    },
+    {
+      "id": "rr_oi_collection",
+      "title": "Binance public-archive BTCUSDT open interest (5m) and funding (8h), with every HTTP response",
+      "status": "FROZEN_SNAPSHOT",
+      "source": {
+        "kind": "git",
+        "ref": "origin/claude/sweet-meitner-66ntx8",
+        "paths": [
+          "research/results/risk_regime_oi/observations.jsonl.gz",
+          "research/results/risk_regime_oi/raw_responses.jsonl.gz",
+          "research/results/risk_regime_oi/manifest.json"
+        ]
+      },
+      "format": "jsonl.gz",
+      "table": "observations",
+      "parquet_paths": [
+        "research/results/risk_regime_oi/observations.jsonl.gz"
+      ],
+      "time_field": "timestamp",
+      "available_field": "available_at",
+      "series_key": [
+        "source",
+        "instrument",
+        "metric",
+        "interval"
+      ],
+      "step_by_interval_ms": {
+        "5m": 300000,
+        "8h": 28800000
+      },
+      "provenance": "data.binance.vision daily archives (CHECKSUM-verified), collected 2026-10-09T04:24Z; fapi.binance.com and api.bybit.com refused (451/403) and recorded",
+      "known_gaps": "funding archive ends 2026-09-30 16:00; OI ends 2026-10-07 23:55 (archive publication lag)"
+    },
+    {
+      "id": "rr_forward_store",
+      "title": "Risk-regime forward collection store (daily partitions, normalized + raw, run records, index)",
+      "status": "PROSPECTIVE_APPEND_ONLY",
+      "source": {
+        "kind": "git",
+        "ref": "origin/research-data/risk-regime-forward",
+        "paths": [
+          "risk_regime_forward/*/2026/*.jsonl.gz",
+          "risk_regime_forward/*/2026/*.meta.json",
+          "risk_regime_forward/raw/*/2026/*.jsonl.gz",
+          "risk_regime_forward/runs/*.json",
+          "risk_regime_forward/index.json"
+        ]
+      },
+      "format": "jsonl.gz",
+      "table": "observations",
+      "parquet_paths": [
+        "risk_regime_forward/binance_oi_archive/2026/*.jsonl.gz",
+        "risk_regime_forward/hyperliquid_btc_funding/2026/*.jsonl.gz",
+        "risk_regime_forward/hyperliquid_hip3/2026/*.jsonl.gz"
+      ],
+      "time_field": "timestamp",
+      "available_field": "available_at",
+      "series_key": [
+        "source",
+        "instrument",
+        "metric",
+        "interval"
+      ],
+      "step_by_interval_ms": {
+        "1h": 3600000,
+        "5m": 300000
+      },
+      "provenance": "research-forward-schedule.yml (daily 10:40 UTC, pinned research commit) writes only to research-data/risk-regime-forward; public APIs",
+      "known_gaps": "store begins 2026-10-06 08:00; the OI pre-registration counts only data from 2026-10-10T00:00Z",
+      "mutable_paths": [
+        "risk_regime_forward/index.json"
+      ]
+    },
+    {
+      "id": "rr_study_outputs",
+      "title": "Risk-regime, GDELT, Hyperliquid and V1 failure study outputs",
+      "status": "FROZEN_SNAPSHOT",
+      "source": {
+        "kind": "git",
+        "ref": "origin/claude/sweet-meitner-66ntx8",
+        "paths": [
+          "research/results/risk_regime_history.json",
+          "research/results/risk_regime_episodes.json",
+          "research/results/risk_regime_event15.json",
+          "research/results/risk_regime_event_research.json",
+          "research/results/risk_regime_event_research_oi.json",
+          "research/results/risk_regime_event_research.html",
+          "research/results/risk_regime_shock.json",
+          "research/results/risk_regime_shock_v1_rows.json",
+          "research/results/risk_regime_source_inventory.json",
+          "research/results/v1_failure_analysis.json",
+          "research/results/gdelt_risk_regime_shock*.json",
+          "research/results/hyperliquid_*.json"
+        ]
+      },
+      "format": "json",
+      "provenance": "derived by the study scripts on that branch from the datasets above plus read-only D1 extracts (input sha256 recorded inside risk_regime_history.json)"
+    },
+    {
+      "id": "v1_prospective_runs",
+      "title": "T-A1/T-A2 prospective progress run records",
+      "status": "RUN_RECORD",
+      "source": {
+        "kind": "git",
+        "ref": "origin/claude/epic-planck-uyapsw",
+        "paths": [
+          "research/results/v1_prospective/**"
+        ]
+      },
+      "format": "json",
+      "provenance": "research/v1_prospective_eval.py progress mode over read-only extracts; extract sha256 recorded in each run"
+    },
+    {
+      "id": "learning_exports",
+      "title": "Learning-audit CSV exports of production prediction tables",
+      "status": "MUTABLE_EXPORT",
+      "source": {
+        "kind": "git",
+        "ref": "origin/main",
+        "paths": [
+          "data-exports/*.csv",
+          "data-exports/STATUS.md",
+          "data-exports/README.md"
+        ]
+      },
+      "format": "csv",
+      "table": "d1_export",
+      "parquet_paths": [
+        "data-exports/*.csv"
+      ],
+      "time_field": "ts",
+      "provenance": "export-learning-data.yml (daily 08:00 UTC) runs full-table SELECTs on production D1 and overwrites the CSVs on main; earlier versions survive only in git history (about one per day since 2026-09-20)",
+      "known_gaps": "overwritten in place, so an archive must snapshot each version; realized_* fields change after resolution"
+    },
+    {
+      "id": "d1_extracts_2026_10_08",
+      "title": "Read-only production D1 extracts used by the risk-regime and V1 failure studies",
+      "status": "FROZEN_SNAPSHOT",
+      "source": {
+        "kind": "git",
+        "ref": "origin/claude/epic-planck-uyapsw-archive",
+        "paths": [
+          "research/archive/session_extracts/inputs/*.json",
+          "research/archive/session_extracts/v1_archive_full.json",
+          "research/archive/session_extracts/MANIFEST.json"
+        ]
+      },
+      "format": "json",
+      "table": "d1_extract",
+      "time_field": "ts",
+      "provenance": "read-only SELECT extracts from production D1 sentiment-history, 2026-10-08/09 (SQL per file in MANIFEST.json); the four inputs/ files match the sha256 recorded in risk_regime_history.json inputs_sha256",
+      "pinned_sha256": {
+        "research/archive/session_extracts/inputs/btc_data.json": {
+          "rule": "json_sort_keys",
+          "sha256": "13276a68530a55bcce12698a24092071834de99b8cf126e3161237e0b3202636"
+        },
+        "research/archive/session_extracts/inputs/predictions.json": {
+          "rule": "json_sort_keys",
+          "sha256": "057993a0043936f0535fcde4fcf355b47f13088e64e538267ac0fd3231cf643d"
+        },
+        "research/archive/session_extracts/inputs/research_events.json": {
+          "rule": "json_sort_keys",
+          "sha256": "308c67130c371295f532d36338176fd053055edb8f17ace7590db02b041c0d66"
+        },
+        "research/archive/session_extracts/inputs/v1_full.json": {
+          "rule": "json_sort_keys",
+          "sha256": "6f2b0f5e23de5107d5245a670ecd4c7fb126a6c8764d1b1677a77f56652a7513"
+        },
+        "research/archive/session_extracts/v1_archive_full.json": {
+          "rule": "json_sort_keys",
+          "sha256": "af92f74636a1015b92eff45c7cb2716677aedbd8107844877196d14aa4325d64"
+        }
+      },
+      "known_gaps": "btc_data covers 2026-08-26 to 2026-10-06 only; the 260-row btc_data extract needed for the market-move B0 replay (2026-05-05 to 2026-07-22) is not among them",
+      "parquet_paths": [
+        "research/archive/session_extracts/inputs/*.json",
+        "research/archive/session_extracts/v1_archive_full.json"
+      ]
+    },
+    {
+      "id": "hyperliquid_page_caches",
+      "title": "Raw Hyperliquid candle and funding pages used by the risk-regime and leverage studies",
+      "status": "FROZEN_SNAPSHOT",
+      "source": {
+        "kind": "git",
+        "ref": "origin/claude/epic-planck-uyapsw-archive",
+        "paths": [
+          "research/archive/session_extracts/hyperliquid_page_caches.tar.gz"
+        ]
+      },
+      "format": "binary",
+      "provenance": "POST https://api.hyperliquid.xyz/info candleSnapshot / fundingHistory responses, 2026-10-06/08; member sha256 in session_extracts/MANIFEST.json",
+      "known_gaps": "candleSnapshot serves only recent history, so these pages may not be re-fetchable later"
+    },
+    {
+      "id": "gdelt_raw_cache_session",
+      "title": "Raw GDELT 2.0 15-minute event export zips used by the GDELT studies",
+      "status": "EPHEMERAL_LOCAL",
+      "source": {
+        "kind": "local",
+        "root_env": "ARCHIVE_SCRATCH",
+        "paths": [
+          "cache/gdelt/*"
+        ]
+      },
+      "format": "binary",
+      "provenance": "http://data.gdeltproject.org/gdeltv2/ (public, MD5-listed by the provider, re-downloadable)",
+      "known_gaps": "NOT in git (293 MB); lost when the session container is reclaimed; the provider still serves the same files"
+    }
+  ]
+}

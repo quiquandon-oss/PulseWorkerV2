@@ -1,0 +1,87 @@
+{
+ "files": {
+  "hyperliquid_page_caches.tar.gz": {
+   "bytes": 295363,
+   "content": "raw POST https://api.hyperliquid.xyz/info responses (candleSnapshot 1h for BTC, para:10Y and xyz:* HIP-3 instruments; fundingHistory BTC) cached by the risk-regime and leverage studies; file name = request body",
+   "members": {
+    "cache/hl/{\"req\":{\"coin\":\"BTC\",\"endTime\":1788845121144,\"interval\":\"1h\",\"startTime\":1787045121144},\"type\":\"candleSnapshot\"}.json": "f680f3f5afa1e72f95b2c11b3eae50aec642645ff90a68ca6163c5195ad64c5b",
+    "cache/hl/{\"req\":{\"coin\":\"BTC\",\"endTime\":1790645121144,\"interval\":\"1h\",\"startTime\":1788845121144},\"type\":\"candleSnapshot\"}.json": "9d3ce515b3e60d00d7094992ccf56a8b5269fba2b85161f94b7270352151ac36",
+    "cache/hl/{\"req\":{\"coin\":\"BTC\",\"endTime\":1791272505708,\"interval\":\"1h\",\"startTime\":1790645121144},\"type\":\"candleSnapshot\"}.json": "de9df221249efc45f39ff21397a47b36cac4c96eb89a67d4988998be684c1a51",
+    "cache/hl/{\"req\":{\"coin\":\"para:10Y\",\"endTime\":1788845121144,\"interval\":\"1h\",\"startTime\":1787045121144},\"type\":\"candleSnapshot\"}.json": "dd8240f35843a8e707cf26859374641a12a32ec2ab80be55dad4a517b580f468",
+    "cache/hl/{\"req\":{\"coin\":\"para:10Y\",\"endTime\":1790645121144,\"interval\":\"1h\",\"startTime\":1788845121144},\"type\":\"candleSnapshot\"}.json": "6c336de56b25f733929962e709dcc1079c1332badaf93fb224d7cf3699ea38cd",
+    "cache/hl/{\"req\":{\"coin\":\"para:10Y\",\"endTime\":1791272505708,\"interval\":\"1h\",\"startTime\":1790645121144},\"type\":\"candleSnapshot\"}.json": "adfda0fcc146719ce3782a640ca5e56b6a7743f9489be736dff533ec46ab7123",
+    "cache/hl/{\"req\":{\"coin\":\"xyz:BRENTOIL\",\"endTime\":1788845121144,\"interval\":\"1h\",\"startTime\":1787045121144},\"type\":\"candleSnapshot\"}.json": "6f63d18dc86057e37c6c393a7b43c4aba970f8b0b2103a9fd1cd7bb516908684",
+    "cache/hl/{\"req\":{\"coin\":\"xyz:BRENTOIL\",\"endTime\":1790645121144,\"interval\":\"1h\",\"startTime\":1788845121144},\"type\":\"candleSnapshot\"}.json": "eff9aabd33221cf5c7e6ec6a38300cc099d0c12ccbcab19521d8e6795d1a9582",
+    "cache/hl/{\"req\":{\"coin\":\"xyz:BRENTOIL\",\"endTime\":1791272505708,\"interval\":\"1h\",\"startTime\":1790645121144},\"type\":\"candleSnapshot\"}.json": "1e57baf1e0f9b6a80656ce6742a67d42e947101adaae476ae1017f737dfa4d2e",
+    "cache/hl/{\"req\":{\"coin\":\"xyz:COPPER\",\"endTime\":1788845121144,\"interval\":\"1h\",\"startTime\":1787045121144},\"type\":\"candleSnapshot\"}.json": "28191d69c138f8874e40322646750bacdfbbd9f018e66a0644e1aad5d1e750c6",
+    "cache/hl/{\"req\":{\"coin\":\"xyz:COPPER\",\"endTime\":1790645121144,\"interval\":\"1h\",\"startTime\":1788845121144},\"type\":\"candleSnapshot\"}.json": "d7b3d576dc61c9221f4b06fff5d9349c22ea95f11d366e95791650691d8c0bcf",
+    "cache/hl/{\"req\":{\"coin\":\"xyz:COPPER\",\"endTime\":1791272505708,\"interval\":\"1h\",\"startTime\":1790645121144},\"type\":\"candleSnapshot\"}.json": "51d7239a0b6552214a73fd7f4ca5568e72bffc434f22e43312f1c38dbe1f6a00",
+    "cache/hl/{\"req\":{\"coin\":\"xyz:EUR\",\"endTime\":1788845121144,\"interval\":\"1h\",\"startTime\":1787045121144},\"type\":\"candleSnapshot\"}.json": "5215e87b3bd857285340fdadbfb6be0241ecd41acea8e9be4a30104ea30cd322",
+    "cache/hl/{\"req\":{\"coin\":\"xyz:EUR\",\"endTime\":1790645121144,\"interval\":\"1h\",\"startTime\":1788845121144},\"type\":\"candleSnapshot\"}.json": "db5458635dda01447d994051f1634735f3ddf1691d6a53a344a918e656582926",
+    "cache/hl/{\"req\":{\"coin\":\"xyz:EUR\",\"endTime\":1791272505708,\"interval\":\"1h\",\"startTime\":1790645121144},\"type\":\"candleSnapshot\"}.json": "076fbe3832516a5d4f69571480a4102610f62a79c8477873bede86fbc272654e",
+    "cache/hl/{\"req\":{\"coin\":\"xyz:GOLD\",\"endTime\":1788845121144,\"interval\":\"1h\",\"startTime\":1787045121144},\"type\":\"candleSnapshot\"}.json": "fe608ac346592748e67e280638b56ebc534b6e8b87eea9ea802be7d63d42e311",
+    "cache/hl/{\"req\":{\"coin\":\"xyz:GOLD\",\"endTime\":1790645121144,\"interval\":\"1h\",\"startTime\":1788845121144},\"type\":\"candleSnapshot\"}.json": "59c364910415dee2d973e960f686f46a122671be52beb92efaa52c53c6d3f12a",
+    "cache/hl/{\"req\":{\"coin\":\"xyz:GOLD\",\"endTime\":1791272505708,\"interval\":\"1h\",\"startTime\":1790645121144},\"type\":\"candleSnapshot\"}.json": "c71b445248065bb86bc05f10ac3010170675b991c0074455524c1247c055b647",
+    "cache/hl/{\"req\":{\"coin\":\"xyz:SILVER\",\"endTime\":1788845121144,\"interval\":\"1h\",\"startTime\":1787045121144},\"type\":\"candleSnapshot\"}.json": "33266c1a22dd08cd616104dff001f621fc7547ca910c32ab27148139c7289bb1",
+    "cache/hl/{\"req\":{\"coin\":\"xyz:SILVER\",\"endTime\":1790645121144,\"interval\":\"1h\",\"startTime\":1788845121144},\"type\":\"candleSnapshot\"}.json": "9a6211b7659d5936d244fcfb69c8cb184c49105a3347b9f34e70f4cdee591a87",
+    "cache/hl/{\"req\":{\"coin\":\"xyz:SILVER\",\"endTime\":1791272505708,\"interval\":\"1h\",\"startTime\":1790645121144},\"type\":\"candleSnapshot\"}.json": "100a4ef1eb9d4a4a2cd86ee80850d2f499c7dfc69148e9ef8f797125f31caa14",
+    "cache/hl/{\"req\":{\"coin\":\"xyz:SP500\",\"endTime\":1788845121144,\"interval\":\"1h\",\"startTime\":1787045121144},\"type\":\"candleSnapshot\"}.json": "282b698256d2a7efd5d0db303f5e5ec19e041ed1044e3d0ba063b08ac559d882",
+    "cache/hl/{\"req\":{\"coin\":\"xyz:SP500\",\"endTime\":1790645121144,\"interval\":\"1h\",\"startTime\":1788845121144},\"type\":\"candleSnapshot\"}.json": "d87ade70d17ad9a101aef4c85fc64e14456dea57d8ae2b2880260e7846f190de",
+    "cache/hl/{\"req\":{\"coin\":\"xyz:SP500\",\"endTime\":1791272505708,\"interval\":\"1h\",\"startTime\":1790645121144},\"type\":\"candleSnapshot\"}.json": "e53f59b21fa70f75bbc41c06c92c7a234c9d666b5ab496d0ffe371ddfa595db7",
+    "cache/hl/{\"req\":{\"coin\":\"xyz:XYZ100\",\"endTime\":1788845121144,\"interval\":\"1h\",\"startTime\":1787045121144},\"type\":\"candleSnapshot\"}.json": "3c77425dd4d830ad666c6c1bb16c0391d6d4bfed811ad373c5280e7b7e06497f",
+    "cache/hl/{\"req\":{\"coin\":\"xyz:XYZ100\",\"endTime\":1790645121144,\"interval\":\"1h\",\"startTime\":1788845121144},\"type\":\"candleSnapshot\"}.json": "7c1bd32c9301b83a3c2a7ddd3d3cdd9f69bfa5348fdeabdb208c10f7429220b3",
+    "cache/hl/{\"req\":{\"coin\":\"xyz:XYZ100\",\"endTime\":1791272505708,\"interval\":\"1h\",\"startTime\":1790645121144},\"type\":\"candleSnapshot\"}.json": "cdfdf2c8436907246b3afc81121aa6aa52560b83bdad4ae7ec6f1bfcf918697b",
+    "cache/hlf/{\"coin\":\"BTC\",\"endTime\":1791272505708,\"startTime\":1787045121144,\"type\":\"fundingHistory\"}.json": "8c6bf393a33e7b8fd810a2cab58b70dbc8dc039fd96cdfa4101bd7f77c3287ae",
+    "cache/hlf/{\"coin\":\"BTC\",\"endTime\":1791272505708,\"startTime\":1788843600012,\"type\":\"fundingHistory\"}.json": "8214052afe480bb8d09e31d412bfcca6fc319f46e1939ce8bcffcb09f041c2dd",
+    "cache/hlf/{\"coin\":\"BTC\",\"endTime\":1791272505708,\"startTime\":1790643600021,\"type\":\"fundingHistory\"}.json": "d4d2ccd4a4a3341b1e5aa327266ff82f9e52d627038904fcae6f5a5c527c23d9",
+    "cache/hlf/{\"coin\":\"BTC\",\"endTime\":1791272505708,\"startTime\":1791270000033,\"type\":\"fundingHistory\"}.json": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+   },
+   "sha256_file_bytes": "75f53d7bd3e812546c100f8a7c626114357ff3d22379d59c82c0bdfa446a330f"
+  },
+  "inputs/btc_data.json": {
+   "bytes": 34155,
+   "extracted_utc": "2026-10-08T13:07:56Z",
+   "note": "group_concat result parsed into [{ts, btc_price}] rows",
+   "rows": 759,
+   "sha256_file_bytes": "f5afd49be6614a08248c1a40a60c426bff4237d4767f13ca7293b98f24a7110d",
+   "sha256_json_sort_keys": "13276a68530a55bcce12698a24092071834de99b8cf126e3161237e0b3202636",
+   "sql": "SELECT group_concat(ts || ':' || btc_price, ',') AS s FROM (SELECT ts, btc_price FROM btc_data WHERE ts >= 1787822721144 - 86400000 AND ts <= 1791313558090 ORDER BY ts, btc_price)"
+  },
+  "inputs/predictions.json": {
+   "bytes": 24943,
+   "extracted_utc": "2026-10-08T13:07:37Z",
+   "rows": 190,
+   "sha256_file_bytes": "5ccc627192e670ed382fa2486b6dc8040df4b9e3bd60b7ff0db39a9c0d54532d",
+   "sha256_json_sort_keys": "057993a0043936f0535fcde4fcf355b47f13088e64e538267ac0fd3231cf643d",
+   "sql": "SELECT id, ts, horizon_hours AS horizon_h, p_up, realized_up, realized_return FROM predictions WHERE ts BETWEEN 1787822721144 AND 1791272505708 ORDER BY ts"
+  },
+  "inputs/research_events.json": {
+   "bytes": 5693,
+   "extracted_utc": "2026-10-08T13:07:37Z",
+   "rows": 15,
+   "sha256_file_bytes": "0b01dd9eb51c950540925426f5d4411670be24c2948f2bac5264ef3b0204b755",
+   "sha256_json_sort_keys": "308c67130c371295f532d36338176fd053055edb8f17ace7590db02b041c0d66",
+   "sql": "SELECT * FROM research_events ORDER BY event_id"
+  },
+  "inputs/v1_full.json": {
+   "bytes": 75032,
+   "extracted_utc": "2026-10-08 (file time 13:07 UTC)",
+   "rows": 575,
+   "sha256_file_bytes": "60ac2a6cab8bb16d0fa2845e00ebba2ea63e0e33586ecf1c2f9c572f4099075c",
+   "sha256_json_sort_keys": "6f2b0f5e23de5107d5245a670ecd4c7fb126a6c8764d1b1677a77f56652a7513",
+   "sql": "not recorded in this session's log; content identical (json sort_keys sha256) to the v1 input recorded by risk_regime_history.json"
+  },
+  "v1_archive_full.json": {
+   "bytes": 227848,
+   "extracted_utc": "2026-10-09T14:52:43Z",
+   "note": "stored with keys ts, score, swv, sources (input of research/v1_failure_analysis.py)",
+   "rows": 605,
+   "sha256_file_bytes": "51e8d9e532109740e81ec21c11510e27b81564642959b2d836c84e1fec3bd5a9",
+   "sha256_json_sort_keys": "af92f74636a1015b92eff45c7cb2716677aedbd8107844877196d14aa4325d64",
+   "sql": "SELECT observation_ts AS ts, score, source_weights_version AS swv, sources_json AS s FROM research_sentiment_archive ORDER BY observation_ts"
+  }
+ },
+ "preserved_utc": "2026-10-10",
+ "source": "production D1 sentiment-history (f91ca980-b886-423a-bd6f-f3baea46d181), read-only",
+ "why": "these extracts existed only in a session container; copied byte for byte so offline research never needs to re-query D1 for them"
+}

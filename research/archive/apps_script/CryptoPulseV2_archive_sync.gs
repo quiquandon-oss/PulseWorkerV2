@@ -351,6 +351,7 @@ function fullVerifyStep(ctx, start) {
  *
  * Functions you run by hand, in this order (research/archive/APPS_SCRIPT_SETUP.md):
  *   1. configureArchive()      records the archive folder and the feed URL; installs NOTHING
+ *      configureArchive('stage') switches to the staged one-file increment test feed (manual test only)
  *   2. runArchiveSync()        one manual sync: first run adopts the verified baseline (manifest 0)
  *   3. verifyArchiveNow()      independent SHA-256 check of every archived file; re-run until it says done
  *   4. enableDailySchedule()   ONLY when approved: installs one daily trigger
@@ -364,6 +365,7 @@ var ARCHIVE_FOLDER_NAME = 'CryptoPulseV2_Research_Archive';
 // (branch archive-feed) is switched in by configureArchive('daily') only once that feed is approved and published.
 var FEED_URLS = {
   baseline: 'https://raw.githubusercontent.com/quiquandon-oss/PulseWorkerV2/405cd8a514e5a8f8b38bec3ba7f36951affb562c/research/archive/baseline/feed-000000.json',
+  stage: 'https://raw.githubusercontent.com/quiquandon-oss/PulseWorkerV2/518c0fc6ac3740b3340ccf72dae5d326d4d395c7/research/archive/feed_stage/feed.json',
   daily: 'https://raw.githubusercontent.com/quiquandon-oss/PulseWorkerV2/refs/heads/archive-feed/feed.json'
 };
 var BUDGET_MS = 3.5 * 60 * 1000;          // leaves room under the 6-minute limit for the report and email
@@ -425,7 +427,7 @@ function context_() {
 /** Step 1. Finds the archive folder (exactly one, in My Drive) and selects the feed. Installs no trigger. */
 function configureArchive(feed) {
   var which = feed || 'baseline';
-  if (!FEED_URLS[which]) throw new Error('feed must be "baseline" or "daily"');
+  if (!FEED_URLS[which]) throw new Error('feed must be "baseline", "stage" or "daily"');
   var folders = DriveApp.getRootFolder().getFoldersByName(ARCHIVE_FOLDER_NAME);
   if (!folders.hasNext()) throw new Error('folder ' + ARCHIVE_FOLDER_NAME + ' not found in My Drive');
   var folder = folders.next();
@@ -434,6 +436,10 @@ function configureArchive(feed) {
   PROPS.setProperty('FEED_URL', FEED_URLS[which]);
   Logger.log('configured: folder ' + folder.getId() + ', feed ' + which + ' (' + FEED_URLS[which] + '); no trigger installed');
 }
+
+/** Editor-friendly wrappers (the Apps Script editor cannot pass arguments). */
+function configureBaseline() { configureArchive('baseline'); }
+function configureStageTest() { configureArchive('stage'); }
 
 /** Step 2 (and the scheduled entry point later). Safe to run by hand at any time. */
 function runArchiveSync() {

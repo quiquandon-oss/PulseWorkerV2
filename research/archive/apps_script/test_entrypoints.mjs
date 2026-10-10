@@ -98,6 +98,15 @@ test('a failure is reported in Drive and by email; enable/disable touch only thi
   assert.deepEqual(g.triggers, [other]);
 });
 
+test('the editor wrappers select the pinned baseline and staged feeds', () => {
+  const { g, ctx } = setup();
+  vm.runInContext('configureStageTest()', ctx);
+  assert.match(g.props.get('FEED_URL'), /\/[0-9a-f]{40}\/research\/archive\/feed_stage\/feed\.json$/);
+  vm.runInContext('configureBaseline()', ctx);
+  assert.match(g.props.get('FEED_URL'), /\/405cd8a5[0-9a-f]{32}\/research\/archive\/baseline\/feed-000000\.json$/);
+  assert.equal(g.triggers.length, 0);
+});
+
 test('without configureArchive nothing runs', () => {
   const { ctx } = setup();
   assert.throws(() => vm.runInContext('runArchiveSync()', ctx), /configureArchive/);

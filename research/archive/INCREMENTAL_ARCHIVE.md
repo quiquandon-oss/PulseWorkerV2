@@ -117,15 +117,18 @@ Each entry has:
 
 | Suite | Result | Covers |
 |---|---|---|
-| `apps_script/test_mirror.mjs` (node, in-memory Drive) | **13/13 pass** | adoption + no-op re-run; adoption refusing changed bytes, stray file or duplicate; incremental upload with the manifest strictly last; interrupted upload, safe restart without re-upload; time-budget PARTIAL then completion; source checksum mismatch never uploaded; MISSING / MISMATCH / DUPLICATE / UNEXPECTED stop before any upload; name conflict left untouched; feed rewriting or dropping history refused; feed digest; manifest-chain tampering; deep SHA-256 verification catching corruption hidden from MD5 metadata; error reports carry no credentials; Python/JS canonical JSON identical |
-| `test_increment.py` (pytest, real git) | **8/8 pass** | unchanged repo adds nothing (identical feed); new partition + index snapshot, strictly appended, commit-pinned URLs; changed frozen dataset gives a new snapshot with old kept, plus schema and cutoff; rewritten partition is a PlanConflict; incremental code bundle applies on the previous heads, and no new commits means no bundle; **end to end:** planner → mirror (same `mirror_core.gs`, run by node on a local folder) → adopt → PARTIAL → resume → NOOP → restore manifest 0 and latest → corruption caught by restore and by the mirror; broken chain refused while an older state still restores; committed baseline equals the Drive report |
+| `apps_script/test_entrypoints.mjs` (node, fakes of every Google service `Code.gs` calls) | **4/4 pass** | configure installs no trigger; manual adopt → NOOP retry → full verify OK; failure written to Drive and emailed; enable/disable touch only this script's trigger; editor wrappers select the pinned feeds; nothing runs unconfigured |
+| `apps_script/test_mirror.mjs` (node, in-memory Drive) | **15/15 pass** | as below, plus resumable read-only full verification and Python-identical escaping (DEL, Latin-1, astral) |
+| (13 original mirror cases) | pass | adoption + no-op re-run; adoption refusing changed bytes, stray file or duplicate; incremental upload with the manifest strictly last; interrupted upload, safe restart without re-upload; time-budget PARTIAL then completion; source checksum mismatch never uploaded; MISSING / MISMATCH / DUPLICATE / UNEXPECTED stop before any upload; name conflict left untouched; feed rewriting or dropping history refused; feed digest; manifest-chain tampering; deep SHA-256 verification catching corruption hidden from MD5 metadata; error reports carry no credentials; Python/JS canonical JSON identical |
+| `test_increment.py` (pytest, real git) | **10/10 pass** | as below, plus the single paste file equals the tested sources (ASCII) and the staged feed extends the baseline by checksum-verified blobs |
+| (8 original planner cases) | pass | unchanged repo adds nothing (identical feed); new partition + index snapshot, strictly appended, commit-pinned URLs; changed frozen dataset gives a new snapshot with old kept, plus schema and cutoff; rewritten partition is a PlanConflict; incremental code bundle applies on the previous heads, and no new commits means no bundle; **end to end:** planner → mirror (same `mirror_core.gs`, run by node on a local folder) → adopt → PARTIAL → resume → NOOP → restore manifest 0 and latest → corruption caught by restore and by the mirror; broken chain refused while an older state still restores; committed baseline equals the Drive report |
 | Dry run on the real 4,676-file package (local folder) | pass | ADOPTED (1.4 s) → NOOP → the real code increment (219,854 B bundle) OK → NOOP → restore manifest 0: 4,676 files; latest: 4,677 files; all SHA-256 checked |
 | Existing suites | `pytest research/`: 1,084 passed, 4 skipped | unchanged behaviour |
 
-**Not tested** (it can't be tested here): the Apps Script adapters in `Code.gs` (Drive v3 Advanced Service, UrlFetchApp,
-MailApp, triggers) inside real Apps Script. Their logic is thin. `mirror_core.gs` is the tested code, and runs
-unchanged in Apps Script. The first real run should be started by hand and its report read before the daily trigger
-is enabled.
+**Not tested** (it can't be tested here): real Google services. `Code.gs` is tested against fakes that follow the
+documented APIs (Drive v3 Advanced Service, DriveApp, UrlFetchApp, Utilities, MailApp, ScriptApp, LockService,
+PropertiesService). The real behaviour, quotas and timing are confirmed only by the manual first run in
+`APPS_SCRIPT_SETUP.md`.
 
 ## Authentication and scheduling (recommendation, not installed)
 
@@ -145,16 +148,12 @@ is enabled.
 - **Other scopes:** `script.external_request` (fetch public GitHub URLs), `script.scriptapp` (its own trigger),
   `script.send_mail` (email to you), `userinfo.email`.
 
-**One-time setup** (about 10 min, by you, only once you approve):
-1. On script.google.com, create a new project named `CryptoPulseV2 archive sync`.
-2. Paste `mirror_core.gs`, `Code.gs` and `appsscript.json` (Project Settings → show the manifest).
-3. Run `runArchiveSync` once by hand and approve the consent screen. Google warns that the app is unverified,
-   because it is your own script.
-4. Check `_verification/sync-…-ADOPTED.json`.
-5. Run `setupArchiveSync`, which installs one daily trigger.
-
-**Before step 3:** the feed branch must exist. Seed `archive-feed` with `baseline/feed-000000.json`, and install
-`scheduler/archive-feed.yml` (each a separate approval).
+**One-time setup:** see `APPS_SCRIPT_SETUP.md` (phone steps, first manual run, evidence checklist).
+- `configureBaseline()` records the folder and installs no trigger.
+- First runs read the committed baseline feed at pinned commit 405cd8a.
+- A staged one-file increment (`feed_stage/`, pinned at 518c0fc) lets the real upload path be tested by hand.
+- Only `enableDailySchedule()` installs the trigger, and only after approval. It also needs `archive-feed` seeded
+  and the feed workflow installed (separate approvals).
 
 **Persistence:** the authorization and trigger survive indefinitely, independent of Claude Code, this container or
 your browser. Google may ask for re-consent if the script's scopes change.

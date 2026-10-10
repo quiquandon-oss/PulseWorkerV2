@@ -3,6 +3,28 @@
 Who: the owner, on their own computer. Nothing here uses the Drive API, D1 or any credential.
 Time: about 30–45 min, most of it the one-off GDELT download (293 MB from GDELT's public server).
 
+## Fastest route: phone or any browser (Google Colab, no local setup)
+
+1. Open https://colab.research.google.com/github/quiquandon-oss/PulseWorkerV2/blob/claude/epic-planck-uyapsw-archive/research/archive/drive_backup_colab.ipynb
+   and sign in with the Google account that owns the Drive folder.
+2. **Runtime → Run all.** Answer **Run anyway** (the notebook is not authored by Google). Then:
+   - **Connect to Google Drive → Allow**;
+   - later, **Allow** for account access, which reads Drive's checksums.
+3. Keep the tab open until the last cell prints three lines: Package integrity, Upload, Remote verification. It
+   takes about 30–45 min. If the tab disconnects, run all again: finished work is skipped and nothing is
+   overwritten.
+
+The notebook runs steps 0–4 below by itself:
+- **Build:** rebuild from the pinned commits and compare with the reference build.
+- **Offline check:** re-run the research checks with no network.
+- **Copy:** batches, `SHA256SUMS` last, stopping on any conflict.
+- **Verify:** every file against Google Drive's own server-side MD5 and size.
+- **Report:** saved under `_verification/` in the folder.
+
+The folder name it expects is `CryptoPulseV2_Research_Archive`, in My Drive.
+
+## Computer route
+
 ## 0. Build the package locally (once)
 
 The session container that collected the GDELT files is temporary, so the package is rebuilt on your machine.

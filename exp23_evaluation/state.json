@@ -1,0 +1,16 @@
+{
+ "history": [
+  {
+   "at": "2026-10-10T20:37:32Z",
+   "evaluation_status": "INSUFFICIENT_SAMPLE",
+   "fingerprint": "bc0469a30bd28f1e18a9b32e1128b10bfaccb2b724f9eacf34c7d3c5d8191a56",
+   "run_id": "38084461655",
+   "status": "EVALUATED"
+  }
+ ],
+ "last_evaluated_fingerprint": "bc0469a30bd28f1e18a9b32e1128b10bfaccb2b724f9eacf34c7d3c5d8191a56",
+ "last_report": "reports/bc0469a30bd28f1e",
+ "last_run": "38084461655",
+ "last_run_at": "2026-10-10T20:37:32Z",
+ "last_status": "EVALUATED"
+}

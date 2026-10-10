@@ -1,0 +1,44 @@
+{
+ "blockers": [
+  "F3: no eligible decision hour has all F3 features; F3 vs F1 not evaluable yet",
+  "F4: no eligible decision hour has all F4 features; F4 vs F1 not evaluable yet",
+  "funding: last settlement available_at 1790784000002; stale (> 8h15m) at 3 of 3 eligible hours (Binance monthly archive not yet published)"
+ ],
+ "burn_in_complete": false,
+ "checkpoint": {
+  "down": 0,
+  "evaluable_events": 0,
+  "met": false,
+  "up": 0
+ },
+ "code_sha256": {
+  "early_warning_12h.py": "232d431e593f06f26c24b162dd959bbe46150a92b16a55bcf20878c51ed886ad",
+  "exp23_forward_eval.py": "03c4eba97e4e86b43da7ddc576330549095ad7c49bae92de68521c9184dbd261"
+ },
+ "coverage": {
+  "F1": 3,
+  "F2": 3,
+  "F3": 0,
+  "F4": 0
+ },
+ "dataset_fingerprint": "bc0469a30bd28f1e18a9b32e1128b10bfaccb2b724f9eacf34c7d3c5d8191a56",
+ "eligible_hours": 3,
+ "episodes": 0,
+ "evaluated_at": "2026-10-10T20:37:32Z",
+ "evaluation_status": "INSUFFICIENT_SAMPLE",
+ "inputs": {
+  "binance_oi_archive/2026/2026-10-08.jsonl.gz": "43e220f6400fefd897939ff9eddaefaa04383ae9f90ae61b539ffdcb30eb4c63",
+  "binance_oi_archive/2026/2026-10-09.jsonl.gz": "e72681a67d992f975d340fda4929b01736e40e177d4e8eaa24327c58dfe90dc3",
+  "hyperliquid_hip3/2026/2026-10-06.jsonl.gz": "6f077d57361d432cd8918dad8196cab5327bb15fddaf2c274cc682ae2f438832",
+  "hyperliquid_hip3/2026/2026-10-07.jsonl.gz": "a9c86721256001199a4c24cc4297284d3b7f8ac6bbd8d112feadcb30f7125d52",
+  "hyperliquid_hip3/2026/2026-10-08.jsonl.gz": "15f05006ab733bd20bdd6296ed239605e79694380bff0a2e71eb21a0b3965fef",
+  "hyperliquid_hip3/2026/2026-10-09.jsonl.gz": "4d781b1baad6933aab1ed4698d430e990ebeec2e24b1719aa899e68e541ea42a",
+  "pinned/oi_funding": "0cadd101115773a828412dee0b142a6614b39b4b92ada6403ef119d637451d01",
+  "pinned/prices": "e0141555ced46de20e130e184f995aa506f122fb2302cc8b52ffe3ef38a6501d"
+ },
+ "labelled_hours": 0,
+ "problems": [],
+ "report": "reports/bc0469a30bd28f1e",
+ "run_id": "38084461655",
+ "status": "EVALUATED"
+}

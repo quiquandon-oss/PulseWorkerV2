@@ -1,0 +1,7 @@
+{
+ "bytes": 12000000,
+ "http_status": 206,
+ "range": "bytes=-12000000",
+ "retrieved_at": "2026-10-10T07:10:18.709Z",
+ "sha256": "e1e4c616984699d7f09a7724d0b4fd5274b2f777a66cecd50de34d9afbbd13b0"
+}

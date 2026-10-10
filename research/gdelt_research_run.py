@@ -15,6 +15,7 @@ If GDELT cannot be reached the artifact says so (status LIVE_FETCH_FAILED) and c
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sys
 import time
@@ -34,7 +35,68 @@ MASTER_TAIL_BYTES = (3_000_000, 12_000_000, 24_000_000)
 USER_AGENT = "CryptoPulse-research/1.0 (read-only; GDELT open data)"
 
 
+# ---- offline mode: an archived subset of masterfilelist.txt replaces the live index, and nothing is downloaded ----
+INDEX_FORMAT = "gdelt-master-index-subset-v1"
+OFFLINE: Dict[str, object] = {"index": None}      # set by use_offline_index(); None = online (original behaviour)
+# NOT_LISTED is not a problem: inside the index's coverage it means what it means online (GDELT never published it)
+OFFLINE_PROBLEMS = ("MISSING_OFFLINE", "CORRUPT_OFFLINE", "OUTSIDE_INDEX")
+
+
+class OfflineError(RuntimeError):
+    """Raised when an offline run would need the network or meets a missing / corrupt archived input."""
+
+
+def archive_master_index(master_text: str, lo: datetime, fetched: Dict) -> Dict:
+    """The verbatim export lines of masterfilelist.txt from batch `lo` to the end of the list, with the fetch's
+    provenance. The index covers [lo, covered_until]: a batch in that span that is absent was never published
+    (NOT_LISTED, as online); a batch outside it is OUTSIDE_INDEX.
+
+    `fetched` = {"retrieved_at": ISO, "bytes": n, "sha256": hex, "range": "bytes=-n", "http_status": n}.
+    """
+    lines = []
+    for line in master_text.splitlines():
+        parts = line.split()
+        if len(parts) == 3 and parts[2].endswith(".export.CSV.zip") and g.batch_ts_from_name(parts[2]) >= lo:
+            lines.append(line.strip())
+    lines.sort(key=lambda ln: ln.split()[2])
+    if not lines:
+        raise OfflineError("no export lines of the requested range in the master list")
+    last = g.batch_ts_from_name(lines[-1].split()[2])
+    until = datetime.fromisoformat(fetched["retrieved_at"].replace("Z", "+00:00")) if fetched.get("retrieved_at") else last
+    return {"format": INDEX_FORMAT, "source_url": g.GDELT_SOURCE["master_file_list"], "fetched": fetched,
+            "first_batch": g.stamp(g.batch_ts_from_name(lines[0].split()[2])), "last_batch": g.stamp(last),
+            "covered_until": until.astimezone(timezone.utc).isoformat().replace("+00:00", "Z"), "lines": lines}
+
+
+def load_offline_index(path: Path) -> Tuple[Dict[str, Tuple[int, str]], Dict]:
+    doc = json.loads(Path(path).read_text())
+    if doc.get("format") != INDEX_FORMAT:
+        raise OfflineError(f"{path}: not a {INDEX_FORMAT} file")
+    idx = g.parse_master_list("\n".join(doc["lines"]))
+    if len(idx) != len(doc["lines"]):
+        raise OfflineError(f"{path}: {len(doc['lines']) - len(idx)} unparseable index lines")
+    return idx, doc
+
+
+def use_offline_index(path: Optional[Path]) -> None:
+    """Switch this module to offline mode (path) or back to online mode (None)."""
+    if path is None:
+        OFFLINE["index"] = None
+        return
+    idx, doc = load_offline_index(path)
+    OFFLINE["index"] = {"idx": idx, "doc": doc, "path": str(path),
+                        "lo": g.batch_ts_from_name(doc["lines"][0].split()[2]),
+                        "hi": datetime.fromisoformat(doc["covered_until"].replace("Z", "+00:00"))}
+
+
+def offline_problems(fetch_log: Dict) -> List[Dict]:
+    """Batches an offline run could not read from the archive (empty list = complete)."""
+    return [f for f in fetch_log.get("files", []) if f["status"] in OFFLINE_PROBLEMS]
+
+
 def http_get(url: str, headers: Optional[Dict[str, str]] = None, retries: int = 3, timeout: int = 60, max_bytes: Optional[int] = None) -> Tuple[int, bytes]:
+    if OFFLINE["index"] is not None:
+        raise OfflineError(f"offline mode: refusing network access to {url}")
     last: Optional[Exception] = None
     for attempt in range(retries):
         try:
@@ -52,7 +114,13 @@ def http_get(url: str, headers: Optional[Dict[str, str]] = None, retries: int = 
 
 
 def master_index(earliest: datetime) -> Dict[str, Tuple[int, str]]:
-    """Tail of masterfilelist.txt (HTTP Range) reaching back to `earliest`; grows only if needed."""
+    """Tail of masterfilelist.txt (HTTP Range) reaching back to `earliest`; grows only if needed.
+    Offline: the archived index, which must reach back to `earliest`."""
+    off = OFFLINE["index"]
+    if off is not None:
+        if off["lo"] > earliest:
+            raise OfflineError(f"archived index starts {g.stamp(off['lo'])}, after the required {g.stamp(earliest)}")
+        return off["idx"]
     for n in MASTER_TAIL_BYTES:
         status, body = http_get(g.GDELT_SOURCE["master_file_list"], {"Range": f"bytes=-{n}"}, max_bytes=n + 1)
         text = body.decode("utf-8", "replace")
@@ -71,10 +139,20 @@ def fetch_batch(b: datetime, idx: Dict[str, Tuple[int, str]], cache: Path) -> Tu
     """(status, bytes, md5). Cached by deterministic name; size + MD5 checked against the master list."""
     url = g.export_url(b)
     name = url.rsplit("/", 1)[-1]
+    off = OFFLINE["index"]
+    if off is not None and not off["lo"] <= b <= off["hi"]:
+        return "OUTSIDE_INDEX", None, None
     meta = idx.get(url)
     if meta is None:
         return "NOT_LISTED", None, None
     path = cache / name
+    if off is not None:                               # offline: read only, never delete, never download
+        if not path.exists():
+            return "MISSING_OFFLINE", None, None
+        data = path.read_bytes()
+        if len(data) != meta[0] or g.md5_hex(data) != meta[1]:
+            return "CORRUPT_OFFLINE", None, None
+        return "CACHED", data, meta[1]
     if path.exists():
         data = path.read_bytes()
         if len(data) == meta[0] and g.md5_hex(data) == meta[1]:
@@ -232,8 +310,9 @@ def main(argv=None) -> int:
     ap.add_argument("--scope", choices=("event", "history"), default="event",
                     help="event: Event #15 window only; history: also score every stored V1 observation")
     ap.add_argument("--max-files", type=int, default=MAX_FILES_PER_RUN, help="hard cap on export files for this run")
+    ap.add_argument("--offline-index", help="archived master-list subset (archive_gdelt_index.py); no network access")
     args = ap.parse_args(argv)
-    import json
+    use_offline_index(Path(args.offline_index) if args.offline_index else None)
     v1 = json.load(open(args.v1))
     v1_ts = sorted(r["ts"] for r in v1)
     event_ts = datetime.fromtimestamp(EVENT15["event_ts_ms"] / 1000, tz=timezone.utc)
@@ -262,6 +341,9 @@ def main(argv=None) -> int:
             listed = [g.batch_ts_from_name(u) for u in idx]
             artifact["download_bytes_listed"] = sum(idx[g.export_url(b)][0] for b in batches if g.export_url(b) in idx)
             series, top, log = build_series(batches, idx, cache, event_ts)
+            if OFFLINE["index"] is not None and offline_problems(log):
+                bad = offline_problems(log)
+                raise OfflineError(f"{len(bad)} archived batches unusable, first {bad[0]}")
             ev = analyse(series, top, v1, event_ts)
             win = (event_ts - timedelta(hours=24), event_ts + timedelta(hours=24))
             if args.scope == "history":
@@ -277,8 +359,11 @@ def main(argv=None) -> int:
             artifact.update(status="OK", fetch=log, event15=ev,
                             v1_coverage=g.v1_coverage(v1_ts, listed),
                             coverage_basis="file availability from the official masterfilelist.txt (size + MD5 per 15-minute export)")
+            if OFFLINE["index"] is not None:   # recorded only for offline runs, so online artifacts are unchanged
+                artifact["offline_index"] = {"path": Path(OFFLINE["index"]["path"]).name,
+                                             "fetched": OFFLINE["index"]["doc"]["fetched"]}
         except Exception as e:  # do not fake success
-            artifact.update(status="LIVE_FETCH_FAILED", error=str(e)[:500],
+            artifact.update(status="OFFLINE_INPUT_FAILED" if OFFLINE["index"] is not None else "LIVE_FETCH_FAILED", error=str(e)[:500],
                             v1_coverage={"v1_observations": len(v1_ts), "measured": False,
                                          "reason": "GDELT file availability could not be read"})
     Path(args.out).parent.mkdir(parents=True, exist_ok=True)

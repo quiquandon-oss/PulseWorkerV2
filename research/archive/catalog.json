@@ -360,6 +360,21 @@
       "known_gaps": "candleSnapshot serves only recent history, so these pages may not be re-fetchable later"
     },
     {
+      "id": "gdelt_master_index",
+      "title": "Archived GDELT 2.0 master-list subset (size, MD5, URL per 15-minute export) for offline GDELT runs",
+      "status": "FROZEN_SNAPSHOT",
+      "source": {
+        "kind": "git",
+        "ref": "origin/claude/epic-planck-uyapsw-archive",
+        "paths": [
+          "research/archive/gdelt/*.json"
+        ]
+      },
+      "format": "json",
+      "provenance": "one HTTP Range request (bytes=-12000000) for http://data.gdeltproject.org/gdeltv2/masterfilelist.txt at 2026-10-10T07:10:18.709Z; verbatim export lines 2026-08-15 22:00 to 2026-10-10 07:15; the full fetched tail (sha256 e1e4c616\u2026) is kept in the Drive package",
+      "known_gaps": "covers batches up to 2026-10-10 07:10 UTC only"
+    },
+    {
       "id": "gdelt_raw_cache_session",
       "title": "Raw GDELT 2.0 15-minute event export zips used by the GDELT studies",
       "status": "EPHEMERAL_LOCAL",

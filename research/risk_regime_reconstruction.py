@@ -173,6 +173,8 @@ def gdelt_raw_events(windows: Dict[str, Tuple[int, int]], cache: Path, idx, retr
         end = datetime.fromtimestamp(hi / 1000, UTC)
         while b <= end:
             status, data, _ = gr.fetch_batch(b, idx, cache)
+            if gr.OFFLINE["index"] is not None and status in gr.OFFLINE_PROBLEMS:
+                raise gr.OfflineError(f"archived GDELT batch {g.stamp(b)} unusable: {status}")
             if data is not None:
                 for e in g.parse_export_zip(data, g.export_url(b)):
                     if e.event_id in seen:
@@ -195,7 +197,21 @@ def embed_page(template: str, data: Dict) -> str:
     return template.replace("/*__EMBEDDED_DATA__*/null", json.dumps(data, default=str).replace("</", "<\\/"))
 
 
+def _gz_text(path: Path):
+    """gzip text writer with a zero header timestamp, so identical content gives identical bytes."""
+    import io
+    return io.TextIOWrapper(gzip.GzipFile(filename=str(path), mode="wb", mtime=0), encoding="utf-8")
+
+
+RETRIEVED_AT_FILE = ".retrieved_at.json"     # archived caches record their original retrieval time here
+
+
 def _mtime(path: Path) -> int:
+    """Retrieval time of a cache: the recorded one when archived (copies and downloads change file mtimes),
+    otherwise the oldest file mtime."""
+    rec = path / RETRIEVED_AT_FILE
+    if rec.exists():
+        return int(json.loads(rec.read_text())["retrieved_at_ms"])
     files = [p for p in path.iterdir() if p.is_file()] if path.exists() else []
     return int(min(p.stat().st_mtime for p in files) * 1000) if files else int(time.time() * 1000)
 
@@ -205,7 +221,12 @@ def main(argv=None) -> int:
     for a in ("--v1", "--predictions", "--events", "--btc", "--hl-cache", "--hl-funding-cache", "--gdelt-cache", "--out-dir"):
         ap.add_argument(a, required=True)
     ap.add_argument("--live", action="store_true", help="also call the live third-party APIs (Bybit, Binance, Deribit, DeFiLlama, GDELT DOC)")
+    ap.add_argument("--gdelt-index", help="archived GDELT master-list subset: offline run, no GDELT network access")
     args = ap.parse_args(argv)
+    import gdelt_research_run as gr
+    if args.gdelt_index and args.live:
+        ap.error("--gdelt-index (offline) cannot be combined with --live")
+    gr.use_offline_index(Path(args.gdelt_index) if args.gdelt_index else None)
     v1 = sorted(json.load(open(args.v1)), key=lambda r: r["ts"])
     preds = sorted(json.load(open(args.predictions)), key=lambda r: r["ts"])
     events = sorted(json.load(open(args.events)), key=lambda r: r["event_id"])
@@ -213,6 +234,9 @@ def main(argv=None) -> int:
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     now = int(time.time() * 1000)
+    if gr.OFFLINE["index"] is not None:
+        # offline: the run is "as of" its newest archived input, so repeated runs produce identical artifacts
+        now = max(_mtime(Path(args.hl_cache)), _mtime(Path(args.hl_funding_cache)), _mtime(Path(args.gdelt_cache)))
     win_lo, win_hi = v1[0]["ts"] - 9 * DAY, max(v1[-1]["ts"], EVENT15["event_ms"] + 24 * HOUR) + HOUR
     store = d.ObservationStore()
     runs: Dict[str, Dict] = {}
@@ -243,6 +267,9 @@ def main(argv=None) -> int:
     batches = g.required_batches(times)
     idx = gr.master_index(min(batches[0], lo_dt - timedelta(hours=g.BASELINE_HOURS + 2)))
     series, _, glog = gr.build_series(batches, idx, gcache, datetime.fromtimestamp(EVENT15["event_ms"] / 1000, UTC))
+    if gr.OFFLINE["index"] is not None and gr.offline_problems(glog):
+        bad = gr.offline_problems(glog)
+        raise gr.OfflineError(f"{len(bad)} archived GDELT batches unusable, first {bad[0]}")
     obs = s.gdelt_batch_obs(series, g_ret)
     grid_file = next(iter(sorted(gcache.glob("_geo_grid_*.json"))), None)
     if grid_file:
@@ -364,12 +391,12 @@ def main(argv=None) -> int:
     write("risk_regime_episodes.json", ep_out)
     raw_dir = out_dir / "risk_regime_raw"
     raw_dir.mkdir(exist_ok=True)
-    with gzip.open(raw_dir / "observations.jsonl.gz", "wt") as f:
+    with _gz_text(raw_dir / "observations.jsonl.gz") as f:
         for k in keys:
             for o in store.series(k):
                 f.write(json.dumps(o, sort_keys=True) + "\n")
     if doc_articles:
-        with gzip.open(raw_dir / "gdelt_doc_articles.jsonl.gz", "wt") as f:
+        with _gz_text(raw_dir / "gdelt_doc_articles.jsonl.gz") as f:
             for a in doc_articles:
                 f.write(json.dumps(a, sort_keys=True) + "\n")
     page = Path(__file__).resolve().parent / "event_research.html"

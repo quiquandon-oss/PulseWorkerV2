@@ -49,6 +49,9 @@ def gdelt_grid(v1_ts: List[int], cache: Path) -> Dict:
     batches = g.required_batches(times)
     idx = gr.master_index(min(batches[0], lo - timedelta(hours=g.BASELINE_HOURS + 2)))
     series, _, log = gr.build_series(batches, idx, cache, datetime.fromtimestamp(EVENT15["event_ts_ms"] / 1000, UTC))
+    if gr.OFFLINE["index"] is not None and gr.offline_problems(log):
+        bad = gr.offline_problems(log)
+        raise gr.OfflineError(f"{len(bad)} archived GDELT batches unusable, first {bad[0]}")
     rows = []
     for t in times:
         s = g.score_at(series, t)
@@ -99,7 +102,9 @@ def main(argv=None) -> int:
     ap.add_argument("--gdelt-cache", required=True)
     ap.add_argument("--hl-cache", required=True)
     ap.add_argument("--out", required=True)
+    ap.add_argument("--gdelt-index", help="archived GDELT master-list subset: offline run, no GDELT network access")
     args = ap.parse_args(argv)
+    gr.use_offline_index(Path(args.gdelt_index) if args.gdelt_index else None)
     v1 = sorted(json.load(open(args.v1)), key=lambda x: x["ts"])
     preds = sorted(json.load(open(args.predictions)), key=lambda x: x["ts"])
     v1_ts = [x["ts"] for x in v1]

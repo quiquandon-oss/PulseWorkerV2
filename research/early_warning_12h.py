@@ -427,11 +427,21 @@ BACKEND = "numpy" if _np is not None else "stdlib"
 _FIT_CACHE = {}
 
 
+def set_backend(name):
+    """Force the fit backend ('stdlib' or 'numpy'); the automated evaluator pins 'stdlib' so that reports are
+    byte-identical whether or not numpy is installed."""
+    global BACKEND
+    if name not in ("stdlib", "numpy") or (name == "numpy" and _np is None):
+        raise ValueError(f"backend {name!r} unavailable")
+    BACKEND = name
+    _FIT_CACHE.clear()
+
+
 def fit_logistic(X, y, l2=1.0, iters=25):
     """L2 logistic regression by Newton/IRLS on standardised features. Memoised on the exact training data."""
     key = hashlib.sha256(json.dumps([X, y, l2, iters]).encode()).hexdigest()
     if key not in _FIT_CACHE:
-        _FIT_CACHE[key] = (_fit_numpy if _np is not None else _fit_stdlib)(X, y, l2, iters)
+        _FIT_CACHE[key] = (_fit_numpy if BACKEND == "numpy" else _fit_stdlib)(X, y, l2, iters)
     return _FIT_CACHE[key]
 
 

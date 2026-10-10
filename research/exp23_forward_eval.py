@@ -182,6 +182,7 @@ def evaluate(forward_store, prices, oi_funding, results, run_id, now_iso, defini
         record["status"] = "NO_NEW_DATA"
         return "NO_NEW_DATA", record                      # nothing written: no duplicate processing
     try:
+        ew.set_backend("stdlib")                         # identical reports with or without numpy
         merged, pconf = ew.merge_prices(ew.load_market_moves(prices), ew.load_forward_price_files(accepted["hyperliquid_hip3"]))
         venue = [oi_funding] + accepted["binance_oi_archive"] + accepted["binance_funding_archive"]
         oi, funding, vconf = ew.load_venue_series(venue)

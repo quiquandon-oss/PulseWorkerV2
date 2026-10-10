@@ -101,6 +101,12 @@ def test_new_data_then_no_new_data_then_new_partition(env):
     assert [h["status"] for h in state["history"]] == ["EVALUATED", "EVALUATED"]           # NO_NEW_DATA not recorded
 
 
+def test_evaluator_pins_the_stdlib_backend(env):
+    status, rec = run(env)
+    rep = json.loads((env["results"] / rec["report"] / "report.json").read_text())
+    assert rep["fit_backend"] == "stdlib"
+
+
 def test_report_is_deterministic_and_timestamp_only_in_run_record(env):
     s1, r1 = run(env, results=env["tmp"] / "a", now="2026-10-11T12:10:00Z")
     s2, r2 = run(env, results=env["tmp"] / "b", now="2026-10-11T18:00:00Z")

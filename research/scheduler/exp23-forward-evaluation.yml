@@ -1,0 +1,117 @@
+# RESEARCH ONLY -- EXP-23 BTC 12-hour early warning: DAILY FORWARD EVALUATION. INERT STUB: not installed.
+#
+# GitHub runs `schedule` only from a workflow on the default branch. This file sits in research/scheduler/ and does
+# nothing until a human, after review, copies it to .github/workflows/ on main and replaces EXP23_EVAL_CODE_SHA with
+# the reviewed 40-hex research commit. Data access and the push permission were verified by the push-triggered
+# twin .github/workflows/exp23-forward-evaluation-verify.yml on branch claude/epic-planck-uyapsw-exp23-eval.
+#
+# Daily at 12:10 UTC: 90 min after the forward collection (10:40) and clear of the 11:40 V1 progress stub. If the
+# collection is late, the run is a NO_NEW_DATA no-op and the next day picks the data up.
+# Reads (read-only, persist-credentials: false): forward store, pinned price snapshot, frozen OI/funding, frozen
+# definition. Writes: only refs/heads/research-data/exp23-evaluation, only exp23_evaluation/. No secrets, no
+# Cloudflare, no D1, no deploy path (deploy.yml runs only on pushes to main).
+name: exp23-forward-evaluation
+
+on:
+  schedule:
+    - cron: '10 12 * * *'
+
+permissions:
+  contents: write          # only to push to research-data/exp23-evaluation; no actions/deployments/id-token/packages
+
+concurrency:
+  group: exp23-forward-evaluation      # one evaluation at a time (shared by both triggers)
+  cancel-in-progress: false
+
+jobs:
+  evaluate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: "Check out the reviewed evaluator (read-only: no credentials kept)"
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683   # v4.2.2
+        with:
+          ref: EXP23_EVAL_CODE_SHA
+          path: code
+          persist-credentials: false
+
+      - name: "Check out the forward store (read-only)"
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683   # v4.2.2
+        with:
+          ref: research-data/risk-regime-forward
+          path: fwd
+          persist-credentials: false
+
+      - name: "Check out the pinned price snapshot (read-only)"
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683   # v4.2.2
+        with:
+          ref: 0eb5be03764aede986d6b696fbc2c619e27971f1   # research-data/market-moves, plan v1.0.0 snapshot
+          path: mm
+          persist-credentials: false
+
+      - name: "Check out the frozen OI / funding history (read-only)"
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683   # v4.2.2
+        with:
+          ref: b5bcff8f924dcbd255b73ca94cb5bb743e461c40   # research/results/risk_regime_oi
+          path: frozen
+          sparse-checkout: research/results/risk_regime_oi
+          persist-credentials: false
+
+      - name: "Check out the frozen market-moves definition (read-only)"
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683   # v4.2.2
+        with:
+          ref: 196b87e4d9b95a0136d0c7249251b0934a8eab42   # research/market_moves/definition.json v1.0.0
+          path: def
+          sparse-checkout: research/market_moves
+          persist-credentials: false
+
+      - name: "Check out the evaluation-results branch (the only write target)"
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683   # v4.2.2
+        with:
+          ref: research-data/exp23-evaluation
+          path: data
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: "Evaluate (no credentials; deterministic; NO_NEW_DATA writes nothing)"
+        id: evaluate
+        run: |
+          set -uo pipefail
+          python3 code/research/exp23_forward_eval.py \
+            --forward-store fwd/risk_regime_forward \
+            --prices mm/market_moves/hourly/BTC/observations.jsonl \
+            --oi-funding frozen/research/results/risk_regime_oi/observations.jsonl.gz \
+            --definition def/research/market_moves/definition.json \
+            --results data/exp23_evaluation \
+            --run-id "${GITHUB_RUN_ID}" --now "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            --summary "$GITHUB_STEP_SUMMARY"
+          echo "code=$?" >> "$GITHUB_OUTPUT"
+
+      - name: "Commit results to the evaluation branch only (also failure records)"
+        if: always()
+        working-directory: data
+        env:
+          TARGET: research-data/exp23-evaluation
+          PUSH_TOKEN: ${{ github.token }}   # only this step sees the token; it can push only the fixed refspec below
+        run: |
+          set -euo pipefail
+          [ "$(git rev-parse --abbrev-ref HEAD)" = "$TARGET" ] || { echo "::error::data checkout is not $TARGET"; exit 1; }
+          git config user.name "exp23-forward-evaluation[bot]"
+          git config user.email "exp23-forward-evaluation@users.noreply.github.com"
+          git add -A exp23_evaluation
+          if git diff --cached --quiet; then echo "nothing to commit (NO_NEW_DATA)"; exit 0; fi
+          outside=$(git diff --cached --name-only | grep -v '^exp23_evaluation/' || true)
+          if [ -n "$outside" ]; then echo "::error::refusing to commit outside exp23_evaluation/: $outside"; exit 1; fi
+          git commit -m "Research data: EXP-23 forward evaluation run ${GITHUB_RUN_ID} (${GITHUB_EVENT_NAME})"
+          remote="https://x-access-token:${PUSH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          for i in 1 2 3 4; do
+            git push "$remote" "HEAD:refs/heads/${TARGET}" && exit 0
+            sleep $((2**i)); git pull --rebase "$remote" "$TARGET"
+          done
+          exit 1
+
+      - name: "Fail the job visibly when the evaluation did not complete"
+        if: steps.evaluate.outputs.code != '0'
+        run: |
+          echo "::error::EXP-23 evaluation exit code ${{ steps.evaluate.outputs.code }} (2 input unavailable, 3 integrity failure, 4 evaluation failed); see the step summary and exp23_evaluation/runs/"
+          exit 1

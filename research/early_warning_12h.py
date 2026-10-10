@@ -99,9 +99,14 @@ def load_market_moves(path):
 
 def load_forward_prices(store_dir):
     """Forward store, file hyperliquid_hip3, instrument BTC (the Hyperliquid main perpetual)."""
+    return load_forward_price_files(sorted(glob.glob(os.path.join(store_dir, "hyperliquid_hip3", "*", "*.jsonl.gz"))))
+
+
+def load_forward_price_files(paths):
+    """Same as load_forward_prices, for an explicit (already verified) list of partition files."""
     import ast
     out = {}
-    for p in sorted(glob.glob(os.path.join(store_dir, "hyperliquid_hip3", "*", "*.jsonl.gz"))):
+    for p in sorted(paths):
         for line in _open(p):
             r = json.loads(line)
             if r["instrument"] != "BTC" or r["metric"] != "close":

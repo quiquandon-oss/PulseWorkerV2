@@ -1,0 +1,2361 @@
+{
+ "artifact": "exp23-btc-12h-early-warning-report",
+ "blockers": [
+  "F3: no eligible decision hour has all F3 features; F3 vs F1 not evaluable yet",
+  "F4: no eligible decision hour has all F4 features; F4 vs F1 not evaluable yet",
+  "funding: last settlement available_at 1790784000002; stale (> 8h15m) at 3 of 3 eligible hours (Binance monthly archive not yet published)"
+ ],
+ "boundary": {
+  "DEV_END": 1784678400000,
+  "SEAL_END_inclusive": 1791579600000,
+  "first_decision_T1": 1791583200000
+ },
+ "checkpoint": {
+  "down": 0,
+  "evaluable_events": 0,
+  "met": false,
+  "up": 0
+ },
+ "code_sha256": {
+  "early_warning_12h.py": "614226b532b55d249024b97af168a91d684dfdeb3d9591ec1b43013860ca0a42",
+  "exp23_forward_eval.py": "f568edd45116c419dd4d415db7cb1077a54e31e1d8adca1a84b3ae2d94eaaae9"
+ },
+ "data": {
+  "conflicts_dropped": [],
+  "funding_settlements": 819,
+  "last_funding_available_at": 1790784000002,
+  "last_oi_available_at": 1791590400000,
+  "last_price_available_at": 1791590400000,
+  "oi_snapshots": 81216,
+  "price_hours_post_seal": 3,
+  "price_hours_total": 4802
+ },
+ "dataset_fingerprint": "0edb67c77a3e96c366c1710c9af066b4f1f4e43e1492b3ed269c3d39cdbea8e8",
+ "decision_hours": {
+  "common_F1_F4": 0,
+  "coverage": {
+   "F1": {
+    "evaluable_hours": 3,
+    "first_evaluable": 1791583200000,
+    "last_evaluable": 1791590400000
+   },
+   "F2": {
+    "evaluable_hours": 3,
+    "first_evaluable": 1791583200000,
+    "last_evaluable": 1791590400000
+   },
+   "F3": {
+    "evaluable_hours": 0,
+    "first_evaluable": null,
+    "last_evaluable": null
+   },
+   "F4": {
+    "evaluable_hours": 0,
+    "first_evaluable": null,
+    "last_evaluable": null
+   }
+  },
+  "eligible": 3,
+  "not_evaluable_by_group": {
+   "O": 0,
+   "P": 0,
+   "U": 3
+  }
+ },
+ "definition_sha256": "c3ef65830c3bf729354749a94c2038c072fa72f99b5977608f41aa6bd19c0b92",
+ "excluded_inputs": [],
+ "fit_backend": "stdlib",
+ "inputs": {
+  "binance_oi_archive/2026/2026-10-08.jsonl.gz": "43e220f6400fefd897939ff9eddaefaa04383ae9f90ae61b539ffdcb30eb4c63",
+  "binance_oi_archive/2026/2026-10-09.jsonl.gz": "e72681a67d992f975d340fda4929b01736e40e177d4e8eaa24327c58dfe90dc3",
+  "hyperliquid_hip3/2026/2026-10-06.jsonl.gz": "6f077d57361d432cd8918dad8196cab5327bb15fddaf2c274cc682ae2f438832",
+  "hyperliquid_hip3/2026/2026-10-07.jsonl.gz": "a9c86721256001199a4c24cc4297284d3b7f8ac6bbd8d112feadcb30f7125d52",
+  "hyperliquid_hip3/2026/2026-10-08.jsonl.gz": "15f05006ab733bd20bdd6296ed239605e79694380bff0a2e71eb21a0b3965fef",
+  "hyperliquid_hip3/2026/2026-10-09.jsonl.gz": "4d781b1baad6933aab1ed4698d430e990ebeec2e24b1719aa899e68e541ea42a",
+  "pinned/oi_funding": "0cadd101115773a828412dee0b142a6614b39b4b92ada6403ef119d637451d01",
+  "pinned/prices": "e0141555ced46de20e130e184f995aa506f122fb2302cc8b52ffe3ef38a6501d"
+ },
+ "labels": {
+  "burn_in_complete": false,
+  "burn_in_crossings": 0,
+  "burn_in_end": null,
+  "episodes": 0,
+  "episodes_down": 0,
+  "episodes_up": 0,
+  "first_labelable": 1791673200000,
+  "labelled_hours": 0,
+  "last_labelled": null,
+  "valid_hours": 0
+ },
+ "metrics": null,
+ "parameters": {
+  "checkpoint": {
+   "per_direction": 25,
+   "total": 60
+  },
+  "funding_staleness_ms": 29700000,
+  "lead_window_hours": [
+   12,
+   36
+  ],
+  "oi_staleness_ms": 900000,
+  "q": 0.05,
+  "q_sensitivity": [
+   0.025,
+   0.1
+  ]
+ },
+ "plan_sha256": "51d94913b6011a966ffd7b881e3f47509e20dc176b1c6ba4c821dfd084d2e41d",
+ "results_counts": {
+  "F1_own_hours": {
+   "ANY": {
+    "0.025": {
+     "F0_chance_reference": {
+      "evaluation": "identical scorer, episodes, T_on window [T_on-36h, T_on-12h] and censoring",
+      "generation": "the set's own warning flags circularly shifted over its evaluable scored hours (same warning-hour count and run lengths); deterministic shifts 1 + (i*7919) mod (n-1)",
+      "n_shifts": 2,
+      "null_hits_median": 0,
+      "null_hits_p95": 0,
+      "type": "chance reference, NOT a predictive model"
+     },
+     "primary_T_on": {
+      "censored_runs": 0,
+      "duplicates": 0,
+      "evaluable_episodes": 0,
+      "false_warnings": 0,
+      "hits": 0,
+      "inside_move": 0,
+      "misses": 0
+     },
+     "runs": 0,
+     "secondary_T_x": {
+      "censored_runs": 0,
+      "duplicates": 0,
+      "evaluable_episodes": 0,
+      "false_warnings": 0,
+      "hits": 0,
+      "inside_move": 0,
+      "misses": 0
+     },
+     "statistics": {
+      "reason": "below the D5 checkpoint (counts only)",
+      "status": "NOT_COMPUTED"
+     },
+     "warning_hours": 0
+    },
+    "0.05": {
+     "F0_chance_reference": {
+      "evaluation": "identical scorer, episodes, T_on window [T_on-36h, T_on-12h] and censoring",
+      "generation": "the set's own warning flags circularly shifted over its evaluable scored hours (same warning-hour count and run lengths); deterministic shifts 1 + (i*7919) mod (n-1)",
+      "n_shifts": 2,
+      "null_hits_median": 0,
+      "null_hits_p95": 0,
+      "type": "chance reference, NOT a predictive model"
+     },
+     "primary_T_on": {
+      "censored_runs": 0,
+      "duplicates": 0,
+      "evaluable_episodes": 0,
+      "false_warnings": 0,
+      "hits": 0,
+      "inside_move": 0,
+      "misses": 0
+     },
+     "runs": 0,
+     "secondary_T_x": {
+      "censored_runs": 0,
+      "duplicates": 0,
+      "evaluable_episodes": 0,
+      "false_warnings": 0,
+      "hits": 0,
+      "inside_move": 0,
+      "misses": 0
+     },
+     "statistics": {
+      "reason": "below the D5 checkpoint (counts only)",
+      "status": "NOT_COMPUTED"
+     },
+     "warning_hours": 0
+    },
+    "0.1": {
+     "F0_chance_reference": {
+      "evaluation": "identical scorer, episodes, T_on window [T_on-36h, T_on-12h] and censoring",
+      "generation": "the set's own warning flags circularly shifted over its evaluable scored hours (same warning-hour count and run lengths); deterministic shifts 1 + (i*7919) mod (n-1)",
+      "n_shifts": 2,
+      "null_hits_median": 0,
+      "null_hits_p95": 0,
+      "type": "chance reference, NOT a predictive model"
+     },
+     "primary_T_on": {
+      "censored_runs": 0,
+      "duplicates": 0,
+      "evaluable_episodes": 0,
+      "false_warnings": 0,
+      "hits": 0,
+      "inside_move": 0,
+      "misses": 0
+     },
+     "runs": 0,
+     "secondary_T_x": {
+      "censored_runs": 0,
+      "duplicates": 0,
+      "evaluable_episodes": 0,
+      "false_warnings": 0,
+      "hits": 0,
+      "inside_move": 0,
+      "misses": 0
+     },
+     "statistics": {
+      "reason": "below the D5 checkpoint (counts only)",
+      "status": "NOT_COMPUTED"
+     },
+     "warning_hours": 0
+    }
+   },
+   "DOWN": {
+    "0.025": {
+     "F0_chance_reference": {
+      "evaluation": "identical scorer, episodes, T_on window [T_on-36h, T_on-12h] and censoring",
+      "generation": "the set's own warning flags circularly shifted over its evaluable scored hours (same warning-hour count and run lengths); deterministic shifts 1 + (i*7919) mod (n-1)",
+      "n_shifts": 2,
+      "null_hits_median": 0,
+      "null_hits_p95": 0,
+      "type": "chance reference, NOT a predictive model"
+     },
+     "primary_T_on": {
+      "censored_runs": 0,
+      "duplicates": 0,
+      "evaluable_episodes": 0,
+      "false_warnings": 0,
+      "hits": 0,
+      "inside_move": 0,
+      "misses": 0
+     },
+     "runs": 0,
+     "secondary_T_x": {
+      "censored_runs": 0,
+      "duplicates": 0,
+      "evaluable_episodes": 0,
+      "false_warnings": 0,
+      "hits": 0,
+      "inside_move": 0,
+      "misses": 0
+     },
+     "statistics": {
+      "reason": "below the D5 checkpoint (counts only)",
+      "status": "NOT_COMPUTED"
+     },
+     "warning_hours": 0
+    },
+    "0.05": {
+     "F0_chance_reference": {
+      "evaluation": "identical scorer, episodes, T_on window [T_on-36h, T_on-12h] and censoring",
+      "generation": "the set's own warning flags circularly shifted over its evaluable scored hours (same warning-hour count and run lengths); deterministic shifts 1 + (i*7919) mod (n-1)",
+      "n_shifts": 2,
+      "null_hits_median": 0,
+      "null_hits_p95": 0,
+      "type": "chance reference, NOT a predictive model"
+     },
+     "primary_T_on": {
+      "censored_runs": 0,
+      "duplicates": 0,
+      "evaluable_episodes": 0,
+      "false_warnings": 0,
+      "hits": 0,
+      "inside_move": 0,
+      "misses": 0
+     },
+     "runs": 0,
+     "secondary_T_x": {
+      "censored_runs": 0,
+      "duplicates": 0,
+      "evaluable_episodes": 0,
+      "false_warnings": 0,
+      "hits": 0,
+      "inside_move": 0,
+      "misses": 0
+     },
+     "statistics": {
+      "reason": "below the D5 checkpoint (counts only)",
+      "status": "NOT_COMPUTED"
+     },
+     "warning_hours": 0
+    },
+    "0.1": {
+     "F0_chance_reference": {
+      "evaluation": "identical scorer, episodes, T_on window [T_on-36h, T_on-12h] and censoring",
+      "generation": "the set's own warning flags circularly shifted over its evaluable scored hours (same warning-hour count and run lengths); deterministic shifts 1 + (i*7919) mod (n-1)",
+      "n_shifts": 2,
+      "null_hits_median": 0,
+      "null_hits_p95": 0,
+      "type": "chance reference, NOT a predictive model"
+     },
+     "primary_T_on": {
+      "censored_runs": 0,
+      "duplicates": 0,
+      "evaluable_episodes": 0,
+      "false_warnings": 0,
+      "hits": 0,
+      "inside_move": 0,
+      "misses": 0
+     },
+     "runs": 0,
+     "secondary_T_x": {
+      "censored_runs": 0,
+      "duplicates": 0,
+      "evaluable_episodes": 0,
+      "false_warnings": 0,
+      "hits": 0,
+      "inside_move": 0,
+      "misses": 0
+     },
+     "statistics": {
+      "reason": "below the D5 checkpoint (counts only)",
+      "status": "NOT_COMPUTED"
+     },
+     "warning_hours": 0
+    }
+   },
+   "UP": {
+    "0.025": {
+     "F0_chance_reference": {
+      "evaluation": "identical scorer, episodes, T_on window [T_on-36h, T_on-12h] and censoring",
+      "generation": "the set's own warning flags circularly shifted over its evaluable scored hours (same warning-hour count and run lengths); deterministic shifts 1 + (i*7919) mod (n-1)",
+      "n_shifts": 2,
+      "null_hits_median": 0,
+      "null_hits_p95": 0,
+      "type": "chance reference, NOT a predictive model"
+     },
+     "primary_T_on": {
+      "censored_runs": 0,
+      "duplicates": 0,
+      "evaluable_episodes": 0,
+      "false_warnings": 0,
+      "hits": 0,
+      "inside_move": 0,
+      "misses": 0
+     },
+     "runs": 0,
+     "secondary_T_x": {
+      "censored_runs": 0,
+      "duplicates": 0,
+      "evaluable_episodes": 0,
+      "false_warnings": 0,
+      "hits": 0,
+      "inside_move": 0,
+      "misses": 0
+     },
+     "statistics": {
+      "reason": "below the D5 checkpoint (counts only)",
+      "status": "NOT_COMPUTED"
+     },
+     "warning_hours": 0
+    },
+    "0.05": {
+     "F0_chance_reference": {
+      "evaluation": "identical scorer, episodes, T_on window [T_on-36h, T_on-12h] and censoring",
+      "generation": "the set's own warning flags circularly shifted over its evaluable scored hours (same warning-hour count and run lengths); deterministic shifts 1 + (i*7919) mod (n-1)",
+      "n_shifts": 2,
+      "null_hits_median": 0,
+      "null_hits_p95": 0,
+      "type": "chance reference, NOT a predictive model"
+     },
+     "primary_T_on": {
+      "censored_runs": 0,
+      "duplicates": 0,
+      "evaluable_episodes": 0,
+      "false_warnings": 0,
+      "hits": 0,
+      "inside_move": 0,
+      "misses": 0
+     },
+     "runs": 0,
+     "secondary_T_x": {
+      "censored_runs": 0,
+      "duplicates": 0,
+      "evaluable_episodes": 0,
+      "false_warnings": 0,
+      "hits": 0,
+      "inside_move": 0,
+      "misses": 0
+     },
+     "statistics": {
+      "reason": "below the D5 checkpoint (counts only)",
+      "status": "NOT_COMPUTED"
+     },
+     "warning_hours": 0
+    },
+    "0.1": {
+     "F0_chance_reference": {
+      "evaluation": "identical scorer, episodes, T_on window [T_on-36h, T_on-12h] and censoring",
+      "generation": "the set's own warning flags circularly shifted over its evaluable scored hours (same warning-hour count and run lengths); deterministic shifts 1 + (i*7919) mod (n-1)",
+      "n_shifts": 2,
+      "null_hits_median": 0,
+      "null_hits_p95": 0,
+      "type": "chance reference, NOT a predictive model"
+     },
+     "primary_T_on": {
+      "censored_runs": 0,
+      "duplicates": 0,
+      "evaluable_episodes": 0,
+      "false_warnings": 0,
+      "hits": 0,
+      "inside_move": 0,
+      "misses": 0
+     },
+     "runs": 0,
+     "secondary_T_x": {
+      "censored_runs": 0,
+      "duplicates": 0,
+      "evaluable_episodes": 0,
+      "false_warnings": 0,
+      "hits": 0,
+      "inside_move": 0,
+      "misses": 0
+     },
+     "statistics": {
+      "reason": "below the D5 checkpoint (counts only)",
+      "status": "NOT_COMPUTED"
+     },
+     "warning_hours": 0
+    }
+   }
+  },
+  "comparisons": {
+   "F2_vs_F1": {
+    "F1": {
+     "ANY": {
+      "0.025": {
+       "F0_chance_reference": {
+        "evaluation": "identical scorer, episodes, T_on window [T_on-36h, T_on-12h] and censoring",
+        "generation": "the set's own warning flags circularly shifted over its evaluable scored hours (same warning-hour count and run lengths); deterministic shifts 1 + (i*7919) mod (n-1)",
+        "n_shifts": 2,
+        "null_hits_median": 0,
+        "null_hits_p95": 0,
+        "type": "chance reference, NOT a predictive model"
+       },
+       "primary_T_on": {
+        "censored_runs": 0,
+        "duplicates": 0,
+        "evaluable_episodes": 0,
+        "false_warnings": 0,
+        "hits": 0,
+        "inside_move": 0,
+        "misses": 0
+       },
+       "runs": 0,
+       "secondary_T_x": {
+        "censored_runs": 0,
+        "duplicates": 0,
+        "evaluable_episodes": 0,
+        "false_warnings": 0,
+        "hits": 0,
+        "inside_move": 0,
+        "misses": 0
+       },
+       "statistics": {
+        "reason": "below the D5 checkpoint (counts only)",
+        "status": "NOT_COMPUTED"
+       },
+       "warning_hours": 0
+      },
+      "0.05": {
+       "F0_chance_reference": {
+        "evaluation": "identical scorer, episodes, T_on window [T_on-36h, T_on-12h] and censoring",
+        "generation": "the set's own warning flags circularly shifted over its evaluable scored hours (same warning-hour count and run lengths); deterministic shifts 1 + (i*7919) mod (n-1)",
+        "n_shifts": 2,
+        "null_hits_median": 0,
+        "null_hits_p95": 0,
+        "type": "chance reference, NOT a predictive model"
+       },
+       "primary_T_on": {
+        "censored_runs": 0,
+        "duplicates": 0,
+        "evaluable_episodes": 0,
+        "false_warnings": 0,
+        "hits": 0,
+        "inside_move": 0,
+        "misses": 0
+       },
+       "runs": 0,
+       "secondary_T_x": {
+        "censored_runs": 0,
+        "duplicates": 0,
+        "evaluable_episodes": 0,
+        "false_warnings": 0,
+        "hits": 0,
+        "inside_move": 0,
+        "misses": 0
+       },
+       "statistics": {
+        "reason": "below the D5 checkpoint (counts only)",
+        "status": "NOT_COMPUTED"
+       },
+       "warning_hours": 0
+      },
+      "0.1": {
+       "F0_chance_reference": {
+        "evaluation": "identical scorer, episodes, T_on window [T_on-36h, T_on-12h] and censoring",
+        "generation": "the set's own warning flags circularly shifted over its evaluable scored hours (same warning-hour count and run lengths); deterministic shifts 1 + (i*7919) mod (n-1)",
+        "n_shifts": 2,
+        "null_hits_median": 0,
+        "null_hits_p95": 0,
+        "type": "chance reference, NOT a predictive model"
+       },
+       "primary_T_on": {
+        "censored_runs": 0,
+        "duplicates": 0,
+        "evaluable_episodes": 0,
+        "false_warnings": 0,
+        "hits": 0,
+        "inside_move": 0,
+        "misses": 0
+       },
+       "runs": 0,
+       "secondary_T_x": {
+        "censored_runs": 0,
+        "duplicates": 0,
+        "evaluable_episodes": 0,
+        "false_warnings": 0,
+        "hits": 0,
+        "inside_move": 0,
+        "misses": 0
+       },
+       "statistics": {
+        "reason": "below the D5 checkpoint (counts only)",
+        "status": "NOT_COMPUTED"
+       },
+       "warning_hours": 0
+      }
+     },
+     "DOWN": {
+      "0.025": {
+       "F0_chance_reference": {
+        "evaluation": "identical scorer, episodes, T_on window [T_on-36h, T_on-12h] and censoring",
+        "generation": "the set's own warning flags circularly shifted over its evaluable scored hours (same warning-hour count and run lengths); deterministic shifts 1 + (i*7919) mod (n-1)",
+        "n_shifts": 2,
+        "null_hits_median": 0,
+        "null_hits_p95": 0,
+        "type": "chance reference, NOT a predictive model"
+       },
+       "primary_T_on": {
+        "censored_runs": 0,
+        "duplicates": 0,
+        "evaluable_episodes": 0,
+        "false_warnings": 0,
+        "hits": 0,
+        "inside_move": 0,
+        "misses": 0
+       },
+       "runs": 0,
+       "secondary_T_x": {
+        "censored_runs": 0,
+        "duplicates": 0,
+        "evaluable_episodes": 0,
+        "false_warnings": 0,
+        "hits": 0,
+        "inside_move": 0,
+        "misses": 0
+       },
+       "statistics": {
+        "reason": "below the D5 checkpoint (counts only)",
+        "status": "NOT_COMPUTED"
+       },
+       "warning_hours": 0
+      },
+      "0.05": {
+       "F0_chance_reference": {
+        "evaluation": "identical scorer, episodes, T_on window [T_on-36h, T_on-12h] and censoring",
+        "generation": "the set's own warning flags circularly shifted over its evaluable scored hours (same warning-hour count and run lengths); deterministic shifts 1 + (i*7919) mod (n-1)",
+        "n_shifts": 2,
+        "null_hits_median": 0,
+        "null_hits_p95": 0,
+        "type": "chance reference, NOT a predictive model"
+       },
+       "primary_T_on": {
+        "censored_runs": 0,
+        "duplicates": 0,
+        "evaluable_episodes": 0,
+        "false_warnings": 0,
+        "hits": 0,
+        "inside_move": 0,
+        "misses": 0
+       },
+       "runs": 0,
+       "secondary_T_x": {
+        "censored_runs": 0,
+        "duplicates": 0,
+        "evaluable_episodes": 0,
+        "false_warnings": 0,
+        "hits": 0,
+        "inside_move": 0,
+        "misses": 0
+       },
+       "statistics": {
+        "reason": "below the D5 checkpoint (counts only)",
+        "status": "NOT_COMPUTED"
+       },
+       "warning_hours": 0
+      },
+      "0.1": {
+       "F0_chance_reference": {
+        "evaluation": "identical scorer, episodes, T_on window [T_on-36h, T_on-12h] and censoring",
+        "generation": "the set's own warning flags circularly shifted over its evaluable scored hours (same warning-hour count and run lengths); deterministic shifts 1 + (i*7919) mod (n-1)",
+        "n_shifts": 2,
+        "null_hits_median": 0,
+        "null_hits_p95": 0,
+        "type": "chance reference, NOT a predictive model"
+       },
+       "primary_T_on": {
+        "censored_runs": 0,
+        "duplicates": 0,
+        "evaluable_episodes": 0,
+        "false_warnings": 0,
+        "hits": 0,
+        "inside_move": 0,
+        "misses": 0
+       },
+       "runs": 0,
+       "secondary_T_x": {
+        "censored_runs": 0,
+        "duplicates": 0,
+        "evaluable_episodes": 0,
+        "false_warnings": 0,
+        "hits": 0,
+        "inside_move": 0,
+        "misses": 0
+       },
+       "statistics": {
+        "reason": "below the D5 checkpoint (counts only)",
+        "status": "NOT_COMPUTED"
+       },
+       "warning_hours": 0
+      }
+     },
+     "UP": {
+      "0.025": {
+       "F0_chance_reference": {
+        "evaluation": "identical scorer, episodes, T_on window [T_on-36h, T_on-12h] and censoring",
+        "generation": "the set's own warning flags circularly shifted over its evaluable scored hours (same warning-hour count and run lengths); deterministic shifts 1 + (i*7919) mod (n-1)",
+        "n_shifts": 2,
+        "null_hits_median": 0,
+        "null_hits_p95": 0,
+        "type": "chance reference, NOT a predictive model"
+       },
+       "primary_T_on": {
+        "censored_runs": 0,
+        "duplicates": 0,
+        "evaluable_episodes": 0,
+        "false_warnings": 0,
+        "hits": 0,
+        "inside_move": 0,
+        "misses": 0
+       },
+       "runs": 0,
+       "secondary_T_x": {
+        "censored_runs": 0,
+        "duplicates": 0,
+        "evaluable_episodes": 0,
+        "false_warnings": 0,
+        "hits": 0,
+        "inside_move": 0,
+        "misses": 0
+       },
+       "statistics": {
+        "reason": "below the D5 checkpoint (counts only)",
+        "status": "NOT_COMPUTED"
+       },
+       "warning_hours": 0
+      },
+      "0.05": {
+       "F0_chance_reference": {
+        "evaluation": "identical scorer, episodes, T_on window [T_on-36h, T_on-12h] and censoring",
+        "generation": "the set's own warning flags circularly shifted over its evaluable scored hours (same warning-hour count and run lengths); deterministic shifts 1 + (i*7919) mod (n-1)",
+        "n_shifts": 2,
+        "null_hits_median": 0,
+        "null_hits_p95": 0,
+        "type": "chance reference, NOT a predictive model"
+       },
+       "primary_T_on": {
+        "censored_runs": 0,
+        "duplicates": 0,
+        "evaluable_episodes": 0,
+        "false_warnings": 0,
+        "hits": 0,
+        "inside_move": 0,
+        "misses": 0
+       },
+       "runs": 0,
+       "secondary_T_x": {
+        "censored_runs": 0,
+        "duplicates": 0,
+        "evaluable_episodes": 0,
+        "false_warnings": 0,
+        "hits": 0,
+        "inside_move": 0,
+        "misses": 0
+       },
+       "statistics": {
+        "reason": "below the D5 checkpoint (counts only)",
+        "status": "NOT_COMPUTED"
+       },
+       "warning_hours": 0
+      },
+      "0.1": {
+       "F0_chance_reference": {
+        "evaluation": "identical scorer, episodes, T_on window [T_on-36h, T_on-12h] and censoring",
+        "generation": "the set's own warning flags circularly shifted over its evaluable scored hours (same warning-hour count and run lengths); deterministic shifts 1 + (i*7919) mod (n-1)",
+        "n_shifts": 2,
+        "null_hits_median": 0,
+        "null_hits_p95": 0,
+        "type": "chance reference, NOT a predictive model"
+       },
+       "primary_T_on": {
+        "censored_runs": 0,
+        "duplicates": 0,
+        "evaluable_episodes": 0,
+        "false_warnings": 0,
+        "hits": 0,
+        "inside_move": 0,
+        "misses": 0
+       },
+       "runs": 0,
+       "secondary_T_x": {
+        "censored_runs": 0,
+        "duplicates": 0,
+        "evaluable_episodes": 0,
+        "false_warnings": 0,
+        "hits": 0,
+        "inside_move": 0,
+        "misses": 0
+       },
+       "statistics": {
+        "reason": "below the D5 checkpoint (counts only)",
+        "status": "NOT_COMPUTED"
+       },
+       "warning_hours": 0
+      }
+     }
+    },
+    "F2": {
+     "ANY": {
+      "0.025": {
+       "F0_chance_reference": {
+        "evaluation": "identical scorer, episodes, T_on window [T_on-36h, T_on-12h] and censoring",
+        "generation": "the set's own warning flags circularly shifted over its evaluable scored hours (same warning-hour count and run lengths); deterministic shifts 1 + (i*7919) mod (n-1)",
+        "n_shifts": 2,
+        "null_hits_median": 0,
+        "null_hits_p95": 0,
+        "type": "chance reference, NOT a predictive model"
+       },
+       "primary_T_on": {
+        "censored_runs": 0,
+        "duplicates": 0,
+        "evaluable_episodes": 0,
+        "false_warnings": 0,
+        "hits": 0,
+        "inside_move": 0,
+        "misses": 0
+       },
+       "runs": 0,
+       "secondary_T_x": {
+        "censored_runs": 0,
+        "duplicates": 0,
+        "evaluable_episodes": 0,
+        "false_warnings": 0,
+        "hits": 0,
+        "inside_move": 0,
+        "misses": 0
+       },
+       "statistics": {
+        "reason": "below the D5 checkpoint (counts only)",
+        "status": "NOT_COMPUTED"
+       },
+       "warning_hours": 0
+      },
+      "0.05": {
+       "F0_chance_reference": {
+        "evaluation": "identical scorer, episodes, T_on window [T_on-36h, T_on-12h] and censoring",
+        "generation": "the set's own warning flags circularly shifted over its evaluable scored hours (same warning-hour count and run lengths); deterministic shifts 1 + (i*7919) mod (n-1)",
+        "n_shifts": 2,
+        "null_hits_median": 0,
+        "null_hits_p95": 0,
+        "type": "chance reference, NOT a predictive model"
+       },
+       "primary_T_on": {
+        "censored_runs": 0,
+        "duplicates": 0,
+        "evaluable_episodes": 0,
+        "false_warnings": 0,
+        "hits": 0,
+        "inside_move": 0,
+        "misses": 0
+       },
+       "runs": 0,
+       "secondary_T_x": {
+        "censored_runs": 0,
+        "duplicates": 0,
+        "evaluable_episodes": 0,
+        "false_warnings": 0,
+        "hits": 0,
+        "inside_move": 0,
+        "misses": 0
+       },
+       "statistics": {
+        "reason": "below the D5 checkpoint (counts only)",
+        "status": "NOT_COMPUTED"
+       },
+       "warning_hours": 0
+      },
+      "0.1": {
+       "F0_chance_reference": {
+        "evaluation": "identical scorer, episodes, T_on window [T_on-36h, T_on-12h] and censoring",
+        "generation": "the set's own warning flags circularly shifted over its evaluable scored hours (same warning-hour count and run lengths); deterministic shifts 1 + (i*7919) mod (n-1)",
+        "n_shifts": 2,
+        "null_hits_median": 0,
+        "null_hits_p95": 0,
+        "type": "chance reference, NOT a predictive model"
+       },
+       "primary_T_on": {
+        "censored_runs": 0,
+        "duplicates": 0,
+        "evaluable_episodes": 0,
+        "false_warnings": 0,
+        "hits": 0,
+        "inside_move": 0,
+        "misses": 0
+       },
+       "runs": 0,
+       "secondary_T_x": {
+        "censored_runs": 0,
+        "duplicates": 0,
+        "evaluable_episodes": 0,
+        "false_warnings": 0,
+        "hits": 0,
+        "inside_move": 0,
+        "misses": 0
+       },
+       "statistics": {
+        "reason": "below the D5 checkpoint (counts only)",
+        "status": "NOT_COMPUTED"
+       },
+       "warning_hours": 0
+      }
+     },
+     "DOWN": {
+      "0.025": {
+       "F0_chance_reference": {
+        "evaluation": "identical scorer, episodes, T_on window [T_on-36h, T_on-12h] and censoring",
+        "generation": "the set's own warning flags circularly shifted over its evaluable scored hours (same warning-hour count and run lengths); deterministic shifts 1 + (i*7919) mod (n-1)",
+        "n_shifts": 2,
+        "null_hits_median": 0,
+        "null_hits_p95": 0,
+        "type": "chance reference, NOT a predictive model"
+       },
+       "primary_T_on": {
+        "censored_runs": 0,
+        "duplicates": 0,
+        "evaluable_episodes": 0,
+        "false_warnings": 0,
+        "hits": 0,
+        "inside_move": 0,
+        "misses": 0
+       },
+       "runs": 0,
+       "secondary_T_x": {
+        "censored_runs": 0,
+        "duplicates": 0,
+        "evaluable_episodes": 0,
+        "false_warnings": 0,
+        "hits": 0,
+        "inside_move": 0,
+        "misses": 0
+       },
+       "statistics": {
+        "reason": "below the D5 checkpoint (counts only)",
+        "status": "NOT_COMPUTED"
+       },
+       "warning_hours": 0
+      },
+      "0.05": {
+       "F0_chance_reference": {
+        "evaluation": "identical scorer, episodes, T_on window [T_on-36h, T_on-12h] and censoring",
+        "generation": "the set's own warning flags circularly shifted over its evaluable scored hours (same warning-hour count and run lengths); deterministic shifts 1 + (i*7919) mod (n-1)",
+        "n_shifts": 2,
+        "null_hits_median": 0,
+        "null_hits_p95": 0,
+        "type": "chance reference, NOT a predictive model"
+       },
+       "primary_T_on": {
+        "censored_runs": 0,
+        "duplicates": 0,
+        "evaluable_episodes": 0,
+        "false_warnings": 0,
+        "hits": 0,
+        "inside_move": 0,
+        "misses": 0
+       },
+       "runs": 0,
+       "secondary_T_x": {
+        "censored_runs": 0,
+        "duplicates": 0,
+        "evaluable_episodes": 0,
+        "false_warnings": 0,
+        "hits": 0,
+        "inside_move": 0,
+        "misses": 0
+       },
+       "statistics": {
+        "reason": "below the D5 checkpoint (counts only)",
+        "status": "NOT_COMPUTED"
+       },
+       "warning_hours": 0
+      },
+      "0.1": {
+       "F0_chance_reference": {
+        "evaluation": "identical scorer, episodes, T_on window [T_on-36h, T_on-12h] and censoring",
+        "generation": "the set's own warning flags circularly shifted over its evaluable scored hours (same warning-hour count and run lengths); deterministic shifts 1 + (i*7919) mod (n-1)",
+        "n_shifts": 2,
+        "null_hits_median": 0,
+        "null_hits_p95": 0,
+        "type": "chance reference, NOT a predictive model"
+       },
+       "primary_T_on": {
+        "censored_runs": 0,
+        "duplicates": 0,
+        "evaluable_episodes": 0,
+        "false_warnings": 0,
+        "hits": 0,
+        "inside_move": 0,
+        "misses": 0
+       },
+       "runs": 0,
+       "secondary_T_x": {
+        "censored_runs": 0,
+        "duplicates": 0,
+        "evaluable_episodes": 0,
+        "false_warnings": 0,
+        "hits": 0,
+        "inside_move": 0,
+        "misses": 0
+       },
+       "statistics": {
+        "reason": "below the D5 checkpoint (counts only)",
+        "status": "NOT_COMPUTED"
+       },
+       "warning_hours": 0
+      }
+     },
+     "UP": {
+      "0.025": {
+       "F0_chance_reference": {
+        "evaluation": "identical scorer, episodes, T_on window [T_on-36h, T_on-12h] and censoring",
+        "generation": "the set's own warning flags circularly shifted over its evaluable scored hours (same warning-hour count and run lengths); deterministic shifts 1 + (i*7919) mod (n-1)",
+        "n_shifts": 2,
+        "null_hits_median": 0,
+        "null_hits_p95": 0,
+        "type": "chance reference, NOT a predictive model"
+       },
+       "primary_T_on": {
+        "censored_runs": 0,
+        "duplicates": 0,
+        "evaluable_episodes": 0,
+        "false_warnings": 0,
+        "hits": 0,
+        "inside_move": 0,
+        "misses": 0
+       },
+       "runs": 0,
+       "secondary_T_x": {
+        "censored_runs": 0,
+        "duplicates": 0,
+        "evaluable_episodes": 0,
+        "false_warnings": 0,
+        "hits": 0,
+        "inside_move": 0,
+        "misses": 0
+       },
+       "statistics": {
+        "reason": "below the D5 checkpoint (counts only)",
+        "status": "NOT_COMPUTED"
+       },
+       "warning_hours": 0
+      },
+      "0.05": {
+       "F0_chance_reference": {
+        "evaluation": "identical scorer, episodes, T_on window [T_on-36h, T_on-12h] and censoring",
+        "generation": "the set's own warning flags circularly shifted over its evaluable scored hours (same warning-hour count and run lengths); deterministic shifts 1 + (i*7919) mod (n-1)",
+        "n_shifts": 2,
+        "null_hits_median": 0,
+        "null_hits_p95": 0,
+        "type": "chance reference, NOT a predictive model"
+       },
+       "primary_T_on": {
+        "censored_runs": 0,
+        "duplicates": 0,
+        "evaluable_episodes": 0,
+        "false_warnings": 0,
+        "hits": 0,
+        "inside_move": 0,
+        "misses": 0
+       },
+       "runs": 0,
+       "secondary_T_x": {
+        "censored_runs": 0,
+        "duplicates": 0,
+        "evaluable_episodes": 0,
+        "false_warnings": 0,
+        "hits": 0,
+        "inside_move": 0,
+        "misses": 0
+       },
+       "statistics": {
+        "reason": "below the D5 checkpoint (counts only)",
+        "status": "NOT_COMPUTED"
+       },
+       "warning_hours": 0
+      },
+      "0.1": {
+       "F0_chance_reference": {
+        "evaluation": "identical scorer, episodes, T_on window [T_on-36h, T_on-12h] and censoring",
+        "generation": "the set's own warning flags circularly shifted over its evaluable scored hours (same warning-hour count and run lengths); deterministic shifts 1 + (i*7919) mod (n-1)",
+        "n_shifts": 2,
+        "null_hits_median": 0,
+        "null_hits_p95": 0,
+        "type": "chance reference, NOT a predictive model"
+       },
+       "primary_T_on": {
+        "censored_runs": 0,
+        "duplicates": 0,
+        "evaluable_episodes": 0,
+        "false_warnings": 0,
+        "hits": 0,
+        "inside_move": 0,
+        "misses": 0
+       },
+       "runs": 0,
+       "secondary_T_x": {
+        "censored_runs": 0,
+        "duplicates": 0,
+        "evaluable_episodes": 0,
+        "false_warnings": 0,
+        "hits": 0,
+        "inside_move": 0,
+        "misses": 0
+       },
+       "statistics": {
+        "reason": "below the D5 checkpoint (counts only)",
+        "status": "NOT_COMPUTED"
+       },
+       "warning_hours": 0
+      }
+     }
+    },
+    "checkpoint": {
+     "down": 0,
+     "evaluable_events": 0,
+     "met": false,
+     "up": 0
+    },
+    "incremental_vs_F1": {
+     "reason": "below the D5 checkpoint",
+     "status": "NOT_COMPUTED"
+    },
+    "scored_hours": 3
+   },
+   "F3_vs_F1": {
+    "F1": {
+     "ANY": {
+      "0.025": {
+       "F0_chance_reference": {
+        "evaluation": "identical scorer, episodes, T_on window [T_on-36h, T_on-12h] and censoring",
+        "generation": "the set's own warning flags circularly shifted over its evaluable scored hours (same warning-hour count and run lengths); deterministic shifts 1 + (i*7919) mod (n-1)",
+        "n_shifts": 0,
+        "null_hits_median": null,
+        "null_hits_p95": null,
+        "type": "chance reference, NOT a predictive model"
+       },
+       "primary_T_on": {
+        "censored_runs": 0,
+        "duplicates": 0,
+        "evaluable_episodes": 0,
+        "false_warnings": 0,
+        "hits": 0,
+        "inside_move": 0,
+        "misses": 0
+       },
+       "runs": 0,
+       "secondary_T_x": {
+        "censored_runs": 0,
+        "duplicates": 0,
+        "evaluable_episodes": 0,
+        "false_warnings": 0,
+        "hits": 0,
+        "inside_move": 0,
+        "misses": 0
+       },
+       "statistics": {
+        "reason": "below the D5 checkpoint (counts only)",
+        "status": "NOT_COMPUTED"
+       },
+       "warning_hours": 0
+      },
+      "0.05": {
+       "F0_chance_reference": {
+        "evaluation": "identical scorer, episodes, T_on window [T_on-36h, T_on-12h] and censoring",
+        "generation": "the set's own warning flags circularly shifted over its evaluable scored hours (same warning-hour count and run lengths); deterministic shifts 1 + (i*7919) mod (n-1)",
+        "n_shifts": 0,
+        "null_hits_median": null,
+        "null_hits_p95": null,
+        "type": "chance reference, NOT a predictive model"
+       },
+       "primary_T_on": {
+        "censored_runs": 0,
+        "duplicates": 0,
+        "evaluable_episodes": 0,
+        "false_warnings": 0,
+        "hits": 0,
+        "inside_move": 0,
+        "misses": 0
+       },
+       "runs": 0,
+       "secondary_T_x": {
+        "censored_runs": 0,
+        "duplicates": 0,
+        "evaluable_episodes": 0,
+        "false_warnings": 0,
+        "hits": 0,
+        "inside_move": 0,
+        "misses": 0
+       },
+       "statistics": {
+        "reason": "below the D5 checkpoint (counts only)",
+        "status": "NOT_COMPUTED"
+       },
+       "warning_hours": 0
+      },
+      "0.1": {
+       "F0_chance_reference": {
+        "evaluation": "identical scorer, episodes, T_on window [T_on-36h, T_on-12h] and censoring",
+        "generation": "the set's own warning flags circularly shifted over its evaluable scored hours (same warning-hour count and run lengths); deterministic shifts 1 + (i*7919) mod (n-1)",
+        "n_shifts": 0,
+        "null_hits_median": null,
+        "null_hits_p95": null,
+        "type": "chance reference, NOT a predictive model"
+       },
+       "primary_T_on": {
+        "censored_runs": 0,
+        "duplicates": 0,
+        "evaluable_episodes": 0,
+        "false_warnings": 0,
+        "hits": 0,
+        "inside_move": 0,
+        "misses": 0
+       },
+       "runs": 0,
+       "secondary_T_x": {
+        "censored_runs": 0,
+        "duplicates": 0,
+        "evaluable_episodes": 0,
+        "false_warnings": 0,
+        "hits": 0,
+        "inside_move": 0,
+        "misses": 0
+       },
+       "statistics": {
+        "reason": "below the D5 checkpoint (counts only)",
+        "status": "NOT_COMPUTED"
+       },
+       "warning_hours": 0
+      }
+     },
+     "DOWN": {
+      "0.025": {
+       "F0_chance_reference": {
+        "evaluation": "identical scorer, episodes, T_on window [T_on-36h, T_on-12h] and censoring",
+        "generation": "the set's own warning flags circularly shifted over its evaluable scored hours (same warning-hour count and run lengths); deterministic shifts 1 + (i*7919) mod (n-1)",
+        "n_shifts": 0,
+        "null_hits_median": null,
+        "null_hits_p95": null,
+        "type": "chance reference, NOT a predictive model"
+       },
+       "primary_T_on": {
+        "censored_runs": 0,
+        "duplicates": 0,
+        "evaluable_episodes": 0,
+        "false_warnings": 0,
+        "hits": 0,
+        "inside_move": 0,
+        "misses": 0
+       },
+       "runs": 0,
+       "secondary_T_x": {
+        "censored_runs": 0,
+        "duplicates": 0,
+        "evaluable_episodes": 0,
+        "false_warnings": 0,
+        "hits": 0,
+        "inside_move": 0,
+        "misses": 0
+       },
+       "statistics": {
+        "reason": "below the D5 checkpoint (counts only)",
+        "status": "NOT_COMPUTED"
+       },
+       "warning_hours": 0
+      },
+      "0.05": {
+       "F0_chance_reference": {
+        "evaluation": "identical scorer, episodes, T_on window [T_on-36h, T_on-12h] and censoring",
+        "generation": "the set's own warning flags circularly shifted over its evaluable scored hours (same warning-hour count and run lengths); deterministic shifts 1 + (i*7919) mod (n-1)",
+        "n_shifts": 0,
+        "null_hits_median": null,
+        "null_hits_p95": null,
+        "type": "chance reference, NOT a predictive model"
+       },
+       "primary_T_on": {
+        "censored_runs": 0,
+        "duplicates": 0,
+        "evaluable_episodes": 0,
+        "false_warnings": 0,
+        "hits": 0,
+        "inside_move": 0,
+        "misses": 0
+       },
+       "runs": 0,
+       "secondary_T_x": {
+        "censored_runs": 0,
+        "duplicates": 0,
+        "evaluable_episodes": 0,
+        "false_warnings": 0,
+        "hits": 0,
+        "inside_move": 0,
+        "misses": 0
+       },
+       "statistics": {
+        "reason": "below the D5 checkpoint (counts only)",
+        "status": "NOT_COMPUTED"
+       },
+       "warning_hours": 0
+      },
+      "0.1": {
+       "F0_chance_reference": {
+        "evaluation": "identical scorer, episodes, T_on window [T_on-36h, T_on-12h] and censoring",
+        "generation": "the set's own warning flags circularly shifted over its evaluable scored hours (same warning-hour count and run lengths); deterministic shifts 1 + (i*7919) mod (n-1)",
+        "n_shifts": 0,
+        "null_hits_median": null,
+        "null_hits_p95": null,
+        "type": "chance reference, NOT a predictive model"
+       },
+       "primary_T_on": {
+        "censored_runs": 0,
+        "duplicates": 0,
+        "evaluable_episodes": 0,
+        "false_warnings": 0,
+        "hits": 0,
+        "inside_move": 0,
+        "misses": 0
+       },
+       "runs": 0,
+       "secondary_T_x": {
+        "censored_runs": 0,
+        "duplicates": 0,
+        "evaluable_episodes": 0,
+        "false_warnings": 0,
+        "hits": 0,
+        "inside_move": 0,
+        "misses": 0
+       },
+       "statistics": {
+        "reason": "below the D5 checkpoint (counts only)",
+        "status": "NOT_COMPUTED"
+       },
+       "warning_hours": 0
+      }
+     },
+     "UP": {
+      "0.025": {
+       "F0_chance_reference": {
+        "evaluation": "identical scorer, episodes, T_on window [T_on-36h, T_on-12h] and censoring",
+        "generation": "the set's own warning flags circularly shifted over its evaluable scored hours (same warning-hour count and run lengths); deterministic shifts 1 + (i*7919) mod (n-1)",
+        "n_shifts": 0,
+        "null_hits_median": null,
+        "null_hits_p95": null,
+        "type": "chance reference, NOT a predictive model"
+       },
+       "primary_T_on": {
+        "censored_runs": 0,
+        "duplicates": 0,
+        "evaluable_episodes": 0,
+        "false_warnings": 0,
+        "hits": 0,
+        "inside_move": 0,
+        "misses": 0
+       },
+       "runs": 0,
+       "secondary_T_x": {
+        "censored_runs": 0,
+        "duplicates": 0,
+        "evaluable_episodes": 0,
+        "false_warnings": 0,
+        "hits": 0,
+        "inside_move": 0,
+        "misses": 0
+       },
+       "statistics": {
+        "reason": "below the D5 checkpoint (counts only)",
+        "status": "NOT_COMPUTED"
+       },
+       "warning_hours": 0
+      },
+      "0.05": {
+       "F0_chance_reference": {
+        "evaluation": "identical scorer, episodes, T_on window [T_on-36h, T_on-12h] and censoring",
+        "generation": "the set's own warning flags circularly shifted over its evaluable scored hours (same warning-hour count and run lengths); deterministic shifts 1 + (i*7919) mod (n-1)",
+        "n_shifts": 0,
+        "null_hits_median": null,
+        "null_hits_p95": null,
+        "type": "chance reference, NOT a predictive model"
+       },
+       "primary_T_on": {
+        "censored_runs": 0,
+        "duplicates": 0,
+        "evaluable_episodes": 0,
+        "false_warnings": 0,
+        "hits": 0,
+        "inside_move": 0,
+        "misses": 0
+       },
+       "runs": 0,
+       "secondary_T_x": {
+        "censored_runs": 0,
+        "duplicates": 0,
+        "evaluable_episodes": 0,
+        "false_warnings": 0,
+        "hits": 0,
+        "inside_move": 0,
+        "misses": 0
+       },
+       "statistics": {
+        "reason": "below the D5 checkpoint (counts only)",
+        "status": "NOT_COMPUTED"
+       },
+       "warning_hours": 0
+      },
+      "0.1": {
+       "F0_chance_reference": {
+        "evaluation": "identical scorer, episodes, T_on window [T_on-36h, T_on-12h] and censoring",
+        "generation": "the set's own warning flags circularly shifted over its evaluable scored hours (same warning-hour count and run lengths); deterministic shifts 1 + (i*7919) mod (n-1)",
+        "n_shifts": 0,
+        "null_hits_median": null,
+        "null_hits_p95": null,
+        "type": "chance reference, NOT a predictive model"
+       },
+       "primary_T_on": {
+        "censored_runs": 0,
+        "duplicates": 0,
+        "evaluable_episodes": 0,
+        "false_warnings": 0,
+        "hits": 0,
+        "inside_move": 0,
+        "misses": 0
+       },
+       "runs": 0,
+       "secondary_T_x": {
+        "censored_runs": 0,
+        "duplicates": 0,
+        "evaluable_episodes": 0,
+        "false_warnings": 0,
+        "hits": 0,
+        "inside_move": 0,
+        "misses": 0
+       },
+       "statistics": {
+        "reason": "below the D5 checkpoint (counts only)",
+        "status": "NOT_COMPUTED"
+       },
+       "warning_hours": 0
+      }
+     }
+    },
+    "F3": {
+     "ANY": {
+      "0.025": {
+       "F0_chance_reference": {
+        "evaluation": "identical scorer, episodes, T_on window [T_on-36h, T_on-12h] and censoring",
+        "generation": "the set's own warning flags circularly shifted over its evaluable scored hours (same warning-hour count and run lengths); deterministic shifts 1 + (i*7919) mod (n-1)",
+        "n_shifts": 0,
+        "null_hits_median": null,
+        "null_hits_p95": null,
+        "type": "chance reference, NOT a predictive model"
+       },
+       "primary_T_on": {
+        "censored_runs": 0,
+        "duplicates": 0,
+        "evaluable_episodes": 0,
+        "false_warnings": 0,
+        "hits": 0,
+        "inside_move": 0,
+        "misses": 0
+       },
+       "runs": 0,
+       "secondary_T_x": {
+        "censored_runs": 0,
+        "duplicates": 0,
+        "evaluable_episodes": 0,
+        "false_warnings": 0,
+        "hits": 0,
+        "inside_move": 0,
+        "misses": 0
+       },
+       "statistics": {
+        "reason": "below the D5 checkpoint (counts only)",
+        "status": "NOT_COMPUTED"
+       },
+       "warning_hours": 0
+      },
+      "0.05": {
+       "F0_chance_reference": {
+        "evaluation": "identical scorer, episodes, T_on window [T_on-36h, T_on-12h] and censoring",
+        "generation": "the set's own warning flags circularly shifted over its evaluable scored hours (same warning-hour count and run lengths); deterministic shifts 1 + (i*7919) mod (n-1)",
+        "n_shifts": 0,
+        "null_hits_median": null,
+        "null_hits_p95": null,
+        "type": "chance reference, NOT a predictive model"
+       },
+       "primary_T_on": {
+        "censored_runs": 0,
+        "duplicates": 0,
+        "evaluable_episodes": 0,
+        "false_warnings": 0,
+        "hits": 0,
+        "inside_move": 0,
+        "misses": 0
+       },
+       "runs": 0,
+       "secondary_T_x": {
+        "censored_runs": 0,
+        "duplicates": 0,
+        "evaluable_episodes": 0,
+        "false_warnings": 0,
+        "hits": 0,
+        "inside_move": 0,
+        "misses": 0
+       },
+       "statistics": {
+        "reason": "below the D5 checkpoint (counts only)",
+        "status": "NOT_COMPUTED"
+       },
+       "warning_hours": 0
+      },
+      "0.1": {
+       "F0_chance_reference": {
+        "evaluation": "identical scorer, episodes, T_on window [T_on-36h, T_on-12h] and censoring",
+        "generation": "the set's own warning flags circularly shifted over its evaluable scored hours (same warning-hour count and run lengths); deterministic shifts 1 + (i*7919) mod (n-1)",
+        "n_shifts": 0,
+        "null_hits_median": null,
+        "null_hits_p95": null,
+        "type": "chance reference, NOT a predictive model"
+       },
+       "primary_T_on": {
+        "censored_runs": 0,
+        "duplicates": 0,
+        "evaluable_episodes": 0,
+        "false_warnings": 0,
+        "hits": 0,
+        "inside_move": 0,
+        "misses": 0
+       },
+       "runs": 0,
+       "secondary_T_x": {
+        "censored_runs": 0,
+        "duplicates": 0,
+        "evaluable_episodes": 0,
+        "false_warnings": 0,
+        "hits": 0,
+        "inside_move": 0,
+        "misses": 0
+       },
+       "statistics": {
+        "reason": "below the D5 checkpoint (counts only)",
+        "status": "NOT_COMPUTED"
+       },
+       "warning_hours": 0
+      }
+     },
+     "DOWN": {
+      "0.025": {
+       "F0_chance_reference": {
+        "evaluation": "identical scorer, episodes, T_on window [T_on-36h, T_on-12h] and censoring",
+        "generation": "the set's own warning flags circularly shifted over its evaluable scored hours (same warning-hour count and run lengths); deterministic shifts 1 + (i*7919) mod (n-1)",
+        "n_shifts": 0,
+        "null_hits_median": null,
+        "null_hits_p95": null,
+        "type": "chance reference, NOT a predictive model"
+       },
+       "primary_T_on": {
+        "censored_runs": 0,
+        "duplicates": 0,
+        "evaluable_episodes": 0,
+        "false_warnings": 0,
+        "hits": 0,
+        "inside_move": 0,
+        "misses": 0
+       },
+       "runs": 0,
+       "secondary_T_x": {
+        "censored_runs": 0,
+        "duplicates": 0,
+        "evaluable_episodes": 0,
+        "false_warnings": 0,
+        "hits": 0,
+        "inside_move": 0,
+        "misses": 0
+       },
+       "statistics": {
+        "reason": "below the D5 checkpoint (counts only)",
+        "status": "NOT_COMPUTED"
+       },
+       "warning_hours": 0
+      },
+      "0.05": {
+       "F0_chance_reference": {
+        "evaluation": "identical scorer, episodes, T_on window [T_on-36h, T_on-12h] and censoring",
+        "generation": "the set's own warning flags circularly shifted over its evaluable scored hours (same warning-hour count and run lengths); deterministic shifts 1 + (i*7919) mod (n-1)",
+        "n_shifts": 0,
+        "null_hits_median": null,
+        "null_hits_p95": null,
+        "type": "chance reference, NOT a predictive model"
+       },
+       "primary_T_on": {
+        "censored_runs": 0,
+        "duplicates": 0,
+        "evaluable_episodes": 0,
+        "false_warnings": 0,
+        "hits": 0,
+        "inside_move": 0,
+        "misses": 0
+       },
+       "runs": 0,
+       "secondary_T_x": {
+        "censored_runs": 0,
+        "duplicates": 0,
+        "evaluable_episodes": 0,
+        "false_warnings": 0,
+        "hits": 0,
+        "inside_move": 0,
+        "misses": 0
+       },
+       "statistics": {
+        "reason": "below the D5 checkpoint (counts only)",
+        "status": "NOT_COMPUTED"
+       },
+       "warning_hours": 0
+      },
+      "0.1": {
+       "F0_chance_reference": {
+        "evaluation": "identical scorer, episodes, T_on window [T_on-36h, T_on-12h] and censoring",
+        "generation": "the set's own warning flags circularly shifted over its evaluable scored hours (same warning-hour count and run lengths); deterministic shifts 1 + (i*7919) mod (n-1)",
+        "n_shifts": 0,
+        "null_hits_median": null,
+        "null_hits_p95": null,
+        "type": "chance reference, NOT a predictive model"
+       },
+       "primary_T_on": {
+        "censored_runs": 0,
+        "duplicates": 0,
+        "evaluable_episodes": 0,
+        "false_warnings": 0,
+        "hits": 0,
+        "inside_move": 0,
+        "misses": 0
+       },
+       "runs": 0,
+       "secondary_T_x": {
+        "censored_runs": 0,
+        "duplicates": 0,
+        "evaluable_episodes": 0,
+        "false_warnings": 0,
+        "hits": 0,
+        "inside_move": 0,
+        "misses": 0
+       },
+       "statistics": {
+        "reason": "below the D5 checkpoint (counts only)",
+        "status": "NOT_COMPUTED"
+       },
+       "warning_hours": 0
+      }
+     },
+     "UP": {
+      "0.025": {
+       "F0_chance_reference": {
+        "evaluation": "identical scorer, episodes, T_on window [T_on-36h, T_on-12h] and censoring",
+        "generation": "the set's own warning flags circularly shifted over its evaluable scored hours (same warning-hour count and run lengths); deterministic shifts 1 + (i*7919) mod (n-1)",
+        "n_shifts": 0,
+        "null_hits_median": null,
+        "null_hits_p95": null,
+        "type": "chance reference, NOT a predictive model"
+       },
+       "primary_T_on": {
+        "censored_runs": 0,
+        "duplicates": 0,
+        "evaluable_episodes": 0,
+        "false_warnings": 0,
+        "hits": 0,
+        "inside_move": 0,
+        "misses": 0
+       },
+       "runs": 0,
+       "secondary_T_x": {
+        "censored_runs": 0,
+        "duplicates": 0,
+        "evaluable_episodes": 0,
+        "false_warnings": 0,
+        "hits": 0,
+        "inside_move": 0,
+        "misses": 0
+       },
+       "statistics": {
+        "reason": "below the D5 checkpoint (counts only)",
+        "status": "NOT_COMPUTED"
+       },
+       "warning_hours": 0
+      },
+      "0.05": {
+       "F0_chance_reference": {
+        "evaluation": "identical scorer, episodes, T_on window [T_on-36h, T_on-12h] and censoring",
+        "generation": "the set's own warning flags circularly shifted over its evaluable scored hours (same warning-hour count and run lengths); deterministic shifts 1 + (i*7919) mod (n-1)",
+        "n_shifts": 0,
+        "null_hits_median": null,
+        "null_hits_p95": null,
+        "type": "chance reference, NOT a predictive model"
+       },
+       "primary_T_on": {
+        "censored_runs": 0,
+        "duplicates": 0,
+        "evaluable_episodes": 0,
+        "false_warnings": 0,
+        "hits": 0,
+        "inside_move": 0,
+        "misses": 0
+       },
+       "runs": 0,
+       "secondary_T_x": {
+        "censored_runs": 0,
+        "duplicates": 0,
+        "evaluable_episodes": 0,
+        "false_warnings": 0,
+        "hits": 0,
+        "inside_move": 0,
+        "misses": 0
+       },
+       "statistics": {
+        "reason": "below the D5 checkpoint (counts only)",
+        "status": "NOT_COMPUTED"
+       },
+       "warning_hours": 0
+      },
+      "0.1": {
+       "F0_chance_reference": {
+        "evaluation": "identical scorer, episodes, T_on window [T_on-36h, T_on-12h] and censoring",
+        "generation": "the set's own warning flags circularly shifted over its evaluable scored hours (same warning-hour count and run lengths); deterministic shifts 1 + (i*7919) mod (n-1)",
+        "n_shifts": 0,
+        "null_hits_median": null,
+        "null_hits_p95": null,
+        "type": "chance reference, NOT a predictive model"
+       },
+       "primary_T_on": {
+        "censored_runs": 0,
+        "duplicates": 0,
+        "evaluable_episodes": 0,
+        "false_warnings": 0,
+        "hits": 0,
+        "inside_move": 0,
+        "misses": 0
+       },
+       "runs": 0,
+       "secondary_T_x": {
+        "censored_runs": 0,
+        "duplicates": 0,
+        "evaluable_episodes": 0,
+        "false_warnings": 0,
+        "hits": 0,
+        "inside_move": 0,
+        "misses": 0
+       },
+       "statistics": {
+        "reason": "below the D5 checkpoint (counts only)",
+        "status": "NOT_COMPUTED"
+       },
+       "warning_hours": 0
+      }
+     }
+    },
+    "checkpoint": {
+     "down": 0,
+     "evaluable_events": 0,
+     "met": false,
+     "up": 0
+    },
+    "incremental_vs_F1": {
+     "reason": "below the D5 checkpoint",
+     "status": "NOT_COMPUTED"
+    },
+    "scored_hours": 0
+   },
+   "F4_vs_F1": {
+    "F1": {
+     "ANY": {
+      "0.025": {
+       "F0_chance_reference": {
+        "evaluation": "identical scorer, episodes, T_on window [T_on-36h, T_on-12h] and censoring",
+        "generation": "the set's own warning flags circularly shifted over its evaluable scored hours (same warning-hour count and run lengths); deterministic shifts 1 + (i*7919) mod (n-1)",
+        "n_shifts": 0,
+        "null_hits_median": null,
+        "null_hits_p95": null,
+        "type": "chance reference, NOT a predictive model"
+       },
+       "primary_T_on": {
+        "censored_runs": 0,
+        "duplicates": 0,
+        "evaluable_episodes": 0,
+        "false_warnings": 0,
+        "hits": 0,
+        "inside_move": 0,
+        "misses": 0
+       },
+       "runs": 0,
+       "secondary_T_x": {
+        "censored_runs": 0,
+        "duplicates": 0,
+        "evaluable_episodes": 0,
+        "false_warnings": 0,
+        "hits": 0,
+        "inside_move": 0,
+        "misses": 0
+       },
+       "statistics": {
+        "reason": "below the D5 checkpoint (counts only)",
+        "status": "NOT_COMPUTED"
+       },
+       "warning_hours": 0
+      },
+      "0.05": {
+       "F0_chance_reference": {
+        "evaluation": "identical scorer, episodes, T_on window [T_on-36h, T_on-12h] and censoring",
+        "generation": "the set's own warning flags circularly shifted over its evaluable scored hours (same warning-hour count and run lengths); deterministic shifts 1 + (i*7919) mod (n-1)",
+        "n_shifts": 0,
+        "null_hits_median": null,
+        "null_hits_p95": null,
+        "type": "chance reference, NOT a predictive model"
+       },
+       "primary_T_on": {
+        "censored_runs": 0,
+        "duplicates": 0,
+        "evaluable_episodes": 0,
+        "false_warnings": 0,
+        "hits": 0,
+        "inside_move": 0,
+        "misses": 0
+       },
+       "runs": 0,
+       "secondary_T_x": {
+        "censored_runs": 0,
+        "duplicates": 0,
+        "evaluable_episodes": 0,
+        "false_warnings": 0,
+        "hits": 0,
+        "inside_move": 0,
+        "misses": 0
+       },
+       "statistics": {
+        "reason": "below the D5 checkpoint (counts only)",
+        "status": "NOT_COMPUTED"
+       },
+       "warning_hours": 0
+      },
+      "0.1": {
+       "F0_chance_reference": {
+        "evaluation": "identical scorer, episodes, T_on window [T_on-36h, T_on-12h] and censoring",
+        "generation": "the set's own warning flags circularly shifted over its evaluable scored hours (same warning-hour count and run lengths); deterministic shifts 1 + (i*7919) mod (n-1)",
+        "n_shifts": 0,
+        "null_hits_median": null,
+        "null_hits_p95": null,
+        "type": "chance reference, NOT a predictive model"
+       },
+       "primary_T_on": {
+        "censored_runs": 0,
+        "duplicates": 0,
+        "evaluable_episodes": 0,
+        "false_warnings": 0,
+        "hits": 0,
+        "inside_move": 0,
+        "misses": 0
+       },
+       "runs": 0,
+       "secondary_T_x": {
+        "censored_runs": 0,
+        "duplicates": 0,
+        "evaluable_episodes": 0,
+        "false_warnings": 0,
+        "hits": 0,
+        "inside_move": 0,
+        "misses": 0
+       },
+       "statistics": {
+        "reason": "below the D5 checkpoint (counts only)",
+        "status": "NOT_COMPUTED"
+       },
+       "warning_hours": 0
+      }
+     },
+     "DOWN": {
+      "0.025": {
+       "F0_chance_reference": {
+        "evaluation": "identical scorer, episodes, T_on window [T_on-36h, T_on-12h] and censoring",
+        "generation": "the set's own warning flags circularly shifted over its evaluable scored hours (same warning-hour count and run lengths); deterministic shifts 1 + (i*7919) mod (n-1)",
+        "n_shifts": 0,
+        "null_hits_median": null,
+        "null_hits_p95": null,
+        "type": "chance reference, NOT a predictive model"
+       },
+       "primary_T_on": {
+        "censored_runs": 0,
+        "duplicates": 0,
+        "evaluable_episodes": 0,
+        "false_warnings": 0,
+        "hits": 0,
+        "inside_move": 0,
+        "misses": 0
+       },
+       "runs": 0,
+       "secondary_T_x": {
+        "censored_runs": 0,
+        "duplicates": 0,
+        "evaluable_episodes": 0,
+        "false_warnings": 0,
+        "hits": 0,
+        "inside_move": 0,
+        "misses": 0
+       },
+       "statistics": {
+        "reason": "below the D5 checkpoint (counts only)",
+        "status": "NOT_COMPUTED"
+       },
+       "warning_hours": 0
+      },
+      "0.05": {
+       "F0_chance_reference": {
+        "evaluation": "identical scorer, episodes, T_on window [T_on-36h, T_on-12h] and censoring",
+        "generation": "the set's own warning flags circularly shifted over its evaluable scored hours (same warning-hour count and run lengths); deterministic shifts 1 + (i*7919) mod (n-1)",
+        "n_shifts": 0,
+        "null_hits_median": null,
+        "null_hits_p95": null,
+        "type": "chance reference, NOT a predictive model"
+       },
+       "primary_T_on": {
+        "censored_runs": 0,
+        "duplicates": 0,
+        "evaluable_episodes": 0,
+        "false_warnings": 0,
+        "hits": 0,
+        "inside_move": 0,
+        "misses": 0
+       },
+       "runs": 0,
+       "secondary_T_x": {
+        "censored_runs": 0,
+        "duplicates": 0,
+        "evaluable_episodes": 0,
+        "false_warnings": 0,
+        "hits": 0,
+        "inside_move": 0,
+        "misses": 0
+       },
+       "statistics": {
+        "reason": "below the D5 checkpoint (counts only)",
+        "status": "NOT_COMPUTED"
+       },
+       "warning_hours": 0
+      },
+      "0.1": {
+       "F0_chance_reference": {
+        "evaluation": "identical scorer, episodes, T_on window [T_on-36h, T_on-12h] and censoring",
+        "generation": "the set's own warning flags circularly shifted over its evaluable scored hours (same warning-hour count and run lengths); deterministic shifts 1 + (i*7919) mod (n-1)",
+        "n_shifts": 0,
+        "null_hits_median": null,
+        "null_hits_p95": null,
+        "type": "chance reference, NOT a predictive model"
+       },
+       "primary_T_on": {
+        "censored_runs": 0,
+        "duplicates": 0,
+        "evaluable_episodes": 0,
+        "false_warnings": 0,
+        "hits": 0,
+        "inside_move": 0,
+        "misses": 0
+       },
+       "runs": 0,
+       "secondary_T_x": {
+        "censored_runs": 0,
+        "duplicates": 0,
+        "evaluable_episodes": 0,
+        "false_warnings": 0,
+        "hits": 0,
+        "inside_move": 0,
+        "misses": 0
+       },
+       "statistics": {
+        "reason": "below the D5 checkpoint (counts only)",
+        "status": "NOT_COMPUTED"
+       },
+       "warning_hours": 0
+      }
+     },
+     "UP": {
+      "0.025": {
+       "F0_chance_reference": {
+        "evaluation": "identical scorer, episodes, T_on window [T_on-36h, T_on-12h] and censoring",
+        "generation": "the set's own warning flags circularly shifted over its evaluable scored hours (same warning-hour count and run lengths); deterministic shifts 1 + (i*7919) mod (n-1)",
+        "n_shifts": 0,
+        "null_hits_median": null,
+        "null_hits_p95": null,
+        "type": "chance reference, NOT a predictive model"
+       },
+       "primary_T_on": {
+        "censored_runs": 0,
+        "duplicates": 0,
+        "evaluable_episodes": 0,
+        "false_warnings": 0,
+        "hits": 0,
+        "inside_move": 0,
+        "misses": 0
+       },
+       "runs": 0,
+       "secondary_T_x": {
+        "censored_runs": 0,
+        "duplicates": 0,
+        "evaluable_episodes": 0,
+        "false_warnings": 0,
+        "hits": 0,
+        "inside_move": 0,
+        "misses": 0
+       },
+       "statistics": {
+        "reason": "below the D5 checkpoint (counts only)",
+        "status": "NOT_COMPUTED"
+       },
+       "warning_hours": 0
+      },
+      "0.05": {
+       "F0_chance_reference": {
+        "evaluation": "identical scorer, episodes, T_on window [T_on-36h, T_on-12h] and censoring",
+        "generation": "the set's own warning flags circularly shifted over its evaluable scored hours (same warning-hour count and run lengths); deterministic shifts 1 + (i*7919) mod (n-1)",
+        "n_shifts": 0,
+        "null_hits_median": null,
+        "null_hits_p95": null,
+        "type": "chance reference, NOT a predictive model"
+       },
+       "primary_T_on": {
+        "censored_runs": 0,
+        "duplicates": 0,
+        "evaluable_episodes": 0,
+        "false_warnings": 0,
+        "hits": 0,
+        "inside_move": 0,
+        "misses": 0
+       },
+       "runs": 0,
+       "secondary_T_x": {
+        "censored_runs": 0,
+        "duplicates": 0,
+        "evaluable_episodes": 0,
+        "false_warnings": 0,
+        "hits": 0,
+        "inside_move": 0,
+        "misses": 0
+       },
+       "statistics": {
+        "reason": "below the D5 checkpoint (counts only)",
+        "status": "NOT_COMPUTED"
+       },
+       "warning_hours": 0
+      },
+      "0.1": {
+       "F0_chance_reference": {
+        "evaluation": "identical scorer, episodes, T_on window [T_on-36h, T_on-12h] and censoring",
+        "generation": "the set's own warning flags circularly shifted over its evaluable scored hours (same warning-hour count and run lengths); deterministic shifts 1 + (i*7919) mod (n-1)",
+        "n_shifts": 0,
+        "null_hits_median": null,
+        "null_hits_p95": null,
+        "type": "chance reference, NOT a predictive model"
+       },
+       "primary_T_on": {
+        "censored_runs": 0,
+        "duplicates": 0,
+        "evaluable_episodes": 0,
+        "false_warnings": 0,
+        "hits": 0,
+        "inside_move": 0,
+        "misses": 0
+       },
+       "runs": 0,
+       "secondary_T_x": {
+        "censored_runs": 0,
+        "duplicates": 0,
+        "evaluable_episodes": 0,
+        "false_warnings": 0,
+        "hits": 0,
+        "inside_move": 0,
+        "misses": 0
+       },
+       "statistics": {
+        "reason": "below the D5 checkpoint (counts only)",
+        "status": "NOT_COMPUTED"
+       },
+       "warning_hours": 0
+      }
+     }
+    },
+    "F4": {
+     "ANY": {
+      "0.025": {
+       "F0_chance_reference": {
+        "evaluation": "identical scorer, episodes, T_on window [T_on-36h, T_on-12h] and censoring",
+        "generation": "the set's own warning flags circularly shifted over its evaluable scored hours (same warning-hour count and run lengths); deterministic shifts 1 + (i*7919) mod (n-1)",
+        "n_shifts": 0,
+        "null_hits_median": null,
+        "null_hits_p95": null,
+        "type": "chance reference, NOT a predictive model"
+       },
+       "primary_T_on": {
+        "censored_runs": 0,
+        "duplicates": 0,
+        "evaluable_episodes": 0,
+        "false_warnings": 0,
+        "hits": 0,
+        "inside_move": 0,
+        "misses": 0
+       },
+       "runs": 0,
+       "secondary_T_x": {
+        "censored_runs": 0,
+        "duplicates": 0,
+        "evaluable_episodes": 0,
+        "false_warnings": 0,
+        "hits": 0,
+        "inside_move": 0,
+        "misses": 0
+       },
+       "statistics": {
+        "reason": "below the D5 checkpoint (counts only)",
+        "status": "NOT_COMPUTED"
+       },
+       "warning_hours": 0
+      },
+      "0.05": {
+       "F0_chance_reference": {
+        "evaluation": "identical scorer, episodes, T_on window [T_on-36h, T_on-12h] and censoring",
+        "generation": "the set's own warning flags circularly shifted over its evaluable scored hours (same warning-hour count and run lengths); deterministic shifts 1 + (i*7919) mod (n-1)",
+        "n_shifts": 0,
+        "null_hits_median": null,
+        "null_hits_p95": null,
+        "type": "chance reference, NOT a predictive model"
+       },
+       "primary_T_on": {
+        "censored_runs": 0,
+        "duplicates": 0,
+        "evaluable_episodes": 0,
+        "false_warnings": 0,
+        "hits": 0,
+        "inside_move": 0,
+        "misses": 0
+       },
+       "runs": 0,
+       "secondary_T_x": {
+        "censored_runs": 0,
+        "duplicates": 0,
+        "evaluable_episodes": 0,
+        "false_warnings": 0,
+        "hits": 0,
+        "inside_move": 0,
+        "misses": 0
+       },
+       "statistics": {
+        "reason": "below the D5 checkpoint (counts only)",
+        "status": "NOT_COMPUTED"
+       },
+       "warning_hours": 0
+      },
+      "0.1": {
+       "F0_chance_reference": {
+        "evaluation": "identical scorer, episodes, T_on window [T_on-36h, T_on-12h] and censoring",
+        "generation": "the set's own warning flags circularly shifted over its evaluable scored hours (same warning-hour count and run lengths); deterministic shifts 1 + (i*7919) mod (n-1)",
+        "n_shifts": 0,
+        "null_hits_median": null,
+        "null_hits_p95": null,
+        "type": "chance reference, NOT a predictive model"
+       },
+       "primary_T_on": {
+        "censored_runs": 0,
+        "duplicates": 0,
+        "evaluable_episodes": 0,
+        "false_warnings": 0,
+        "hits": 0,
+        "inside_move": 0,
+        "misses": 0
+       },
+       "runs": 0,
+       "secondary_T_x": {
+        "censored_runs": 0,
+        "duplicates": 0,
+        "evaluable_episodes": 0,
+        "false_warnings": 0,
+        "hits": 0,
+        "inside_move": 0,
+        "misses": 0
+       },
+       "statistics": {
+        "reason": "below the D5 checkpoint (counts only)",
+        "status": "NOT_COMPUTED"
+       },
+       "warning_hours": 0
+      }
+     },
+     "DOWN": {
+      "0.025": {
+       "F0_chance_reference": {
+        "evaluation": "identical scorer, episodes, T_on window [T_on-36h, T_on-12h] and censoring",
+        "generation": "the set's own warning flags circularly shifted over its evaluable scored hours (same warning-hour count and run lengths); deterministic shifts 1 + (i*7919) mod (n-1)",
+        "n_shifts": 0,
+        "null_hits_median": null,
+        "null_hits_p95": null,
+        "type": "chance reference, NOT a predictive model"
+       },
+       "primary_T_on": {
+        "censored_runs": 0,
+        "duplicates": 0,
+        "evaluable_episodes": 0,
+        "false_warnings": 0,
+        "hits": 0,
+        "inside_move": 0,
+        "misses": 0
+       },
+       "runs": 0,
+       "secondary_T_x": {
+        "censored_runs": 0,
+        "duplicates": 0,
+        "evaluable_episodes": 0,
+        "false_warnings": 0,
+        "hits": 0,
+        "inside_move": 0,
+        "misses": 0
+       },
+       "statistics": {
+        "reason": "below the D5 checkpoint (counts only)",
+        "status": "NOT_COMPUTED"
+       },
+       "warning_hours": 0
+      },
+      "0.05": {
+       "F0_chance_reference": {
+        "evaluation": "identical scorer, episodes, T_on window [T_on-36h, T_on-12h] and censoring",
+        "generation": "the set's own warning flags circularly shifted over its evaluable scored hours (same warning-hour count and run lengths); deterministic shifts 1 + (i*7919) mod (n-1)",
+        "n_shifts": 0,
+        "null_hits_median": null,
+        "null_hits_p95": null,
+        "type": "chance reference, NOT a predictive model"
+       },
+       "primary_T_on": {
+        "censored_runs": 0,
+        "duplicates": 0,
+        "evaluable_episodes": 0,
+        "false_warnings": 0,
+        "hits": 0,
+        "inside_move": 0,
+        "misses": 0
+       },
+       "runs": 0,
+       "secondary_T_x": {
+        "censored_runs": 0,
+        "duplicates": 0,
+        "evaluable_episodes": 0,
+        "false_warnings": 0,
+        "hits": 0,
+        "inside_move": 0,
+        "misses": 0
+       },
+       "statistics": {
+        "reason": "below the D5 checkpoint (counts only)",
+        "status": "NOT_COMPUTED"
+       },
+       "warning_hours": 0
+      },
+      "0.1": {
+       "F0_chance_reference": {
+        "evaluation": "identical scorer, episodes, T_on window [T_on-36h, T_on-12h] and censoring",
+        "generation": "the set's own warning flags circularly shifted over its evaluable scored hours (same warning-hour count and run lengths); deterministic shifts 1 + (i*7919) mod (n-1)",
+        "n_shifts": 0,
+        "null_hits_median": null,
+        "null_hits_p95": null,
+        "type": "chance reference, NOT a predictive model"
+       },
+       "primary_T_on": {
+        "censored_runs": 0,
+        "duplicates": 0,
+        "evaluable_episodes": 0,
+        "false_warnings": 0,
+        "hits": 0,
+        "inside_move": 0,
+        "misses": 0
+       },
+       "runs": 0,
+       "secondary_T_x": {
+        "censored_runs": 0,
+        "duplicates": 0,
+        "evaluable_episodes": 0,
+        "false_warnings": 0,
+        "hits": 0,
+        "inside_move": 0,
+        "misses": 0
+       },
+       "statistics": {
+        "reason": "below the D5 checkpoint (counts only)",
+        "status": "NOT_COMPUTED"
+       },
+       "warning_hours": 0
+      }
+     },
+     "UP": {
+      "0.025": {
+       "F0_chance_reference": {
+        "evaluation": "identical scorer, episodes, T_on window [T_on-36h, T_on-12h] and censoring",
+        "generation": "the set's own warning flags circularly shifted over its evaluable scored hours (same warning-hour count and run lengths); deterministic shifts 1 + (i*7919) mod (n-1)",
+        "n_shifts": 0,
+        "null_hits_median": null,
+        "null_hits_p95": null,
+        "type": "chance reference, NOT a predictive model"
+       },
+       "primary_T_on": {
+        "censored_runs": 0,
+        "duplicates": 0,
+        "evaluable_episodes": 0,
+        "false_warnings": 0,
+        "hits": 0,
+        "inside_move": 0,
+        "misses": 0
+       },
+       "runs": 0,
+       "secondary_T_x": {
+        "censored_runs": 0,
+        "duplicates": 0,
+        "evaluable_episodes": 0,
+        "false_warnings": 0,
+        "hits": 0,
+        "inside_move": 0,
+        "misses": 0
+       },
+       "statistics": {
+        "reason": "below the D5 checkpoint (counts only)",
+        "status": "NOT_COMPUTED"
+       },
+       "warning_hours": 0
+      },
+      "0.05": {
+       "F0_chance_reference": {
+        "evaluation": "identical scorer, episodes, T_on window [T_on-36h, T_on-12h] and censoring",
+        "generation": "the set's own warning flags circularly shifted over its evaluable scored hours (same warning-hour count and run lengths); deterministic shifts 1 + (i*7919) mod (n-1)",
+        "n_shifts": 0,
+        "null_hits_median": null,
+        "null_hits_p95": null,
+        "type": "chance reference, NOT a predictive model"
+       },
+       "primary_T_on": {
+        "censored_runs": 0,
+        "duplicates": 0,
+        "evaluable_episodes": 0,
+        "false_warnings": 0,
+        "hits": 0,
+        "inside_move": 0,
+        "misses": 0
+       },
+       "runs": 0,
+       "secondary_T_x": {
+        "censored_runs": 0,
+        "duplicates": 0,
+        "evaluable_episodes": 0,
+        "false_warnings": 0,
+        "hits": 0,
+        "inside_move": 0,
+        "misses": 0
+       },
+       "statistics": {
+        "reason": "below the D5 checkpoint (counts only)",
+        "status": "NOT_COMPUTED"
+       },
+       "warning_hours": 0
+      },
+      "0.1": {
+       "F0_chance_reference": {
+        "evaluation": "identical scorer, episodes, T_on window [T_on-36h, T_on-12h] and censoring",
+        "generation": "the set's own warning flags circularly shifted over its evaluable scored hours (same warning-hour count and run lengths); deterministic shifts 1 + (i*7919) mod (n-1)",
+        "n_shifts": 0,
+        "null_hits_median": null,
+        "null_hits_p95": null,
+        "type": "chance reference, NOT a predictive model"
+       },
+       "primary_T_on": {
+        "censored_runs": 0,
+        "duplicates": 0,
+        "evaluable_episodes": 0,
+        "false_warnings": 0,
+        "hits": 0,
+        "inside_move": 0,
+        "misses": 0
+       },
+       "runs": 0,
+       "secondary_T_x": {
+        "censored_runs": 0,
+        "duplicates": 0,
+        "evaluable_episodes": 0,
+        "false_warnings": 0,
+        "hits": 0,
+        "inside_move": 0,
+        "misses": 0
+       },
+       "statistics": {
+        "reason": "below the D5 checkpoint (counts only)",
+        "status": "NOT_COMPUTED"
+       },
+       "warning_hours": 0
+      }
+     }
+    },
+    "checkpoint": {
+     "down": 0,
+     "evaluable_events": 0,
+     "met": false,
+     "up": 0
+    },
+    "incremental_vs_F1": {
+     "reason": "below the D5 checkpoint",
+     "status": "NOT_COMPUTED"
+    },
+    "scored_hours": 0
+   }
+  }
+ },
+ "spec_sha256": "8231568780906804663e6ba8687cc1a7bb6d867f9fbaed133a0876c5e9851ba4",
+ "statistics_method": {
+  "delta_false_warnings_vs_F1": "UTC-day block bootstrap, 2000 resamples, seed 23012",
+  "false_warnings_per_30d": "exact Poisson (Garwood) 95% on the count, scaled by scored UTC days",
+  "gating": "nothing computed below the checkpoint (60 events, 25/direction) or in cells with < 20 episodes",
+  "incremental_hits_vs_F1": "exact McNemar on discordant episodes, Holm over F2/F3/F4",
+  "precision": "Wilson 95%, unit = warning run",
+  "recall": "Wilson 95%, unit = evaluable episode (episodes are separated by v1.0.0 resolution)",
+  "vs_F0": "one-sided empirical p over 1000 deterministic circular shifts"
+ },
+ "status": "INSUFFICIENT_SAMPLE"
+}

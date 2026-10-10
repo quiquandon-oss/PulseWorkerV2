@@ -1,0 +1,92 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Event Research</title>
+<style>
+:root{--bg:#f7f8fa;--panel:#fff;--ink:#1d2330;--muted:#5d6577;--line:#dfe3ea;--accent:#2f5bd3;--warn:#a5620a;--bad:#b3261e;--ok:#1d7a46;--chip:#eef1f6}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#11141a;--panel:#191d25;--ink:#e6e9ef;--muted:#9aa3b5;--line:#2a303c;--accent:#7fa2ff;--warn:#e0a24a;--bad:#ff8a80;--ok:#6fd39b;--chip:#232936}}
+:root[data-theme="dark"]{--bg:#11141a;--panel:#191d25;--ink:#e6e9ef;--muted:#9aa3b5;--line:#2a303c;--accent:#7fa2ff;--warn:#e0a24a;--bad:#ff8a80;--ok:#6fd39b;--chip:#232936}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.45 system-ui,-apple-system,Segoe UI,Roboto,sans-serif}
+header,main{max-width:1200px;margin:0 auto;padding:16px}
+h1{font-size:20px;margin:0 0 4px}
+.note{color:var(--muted);font-size:13px}
+.banner{border:1px solid var(--line);border-left:4px solid var(--warn);background:var(--panel);padding:10px 12px;border-radius:8px;margin:12px 0}
+.panel{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:12px;margin:12px 0}
+select{max-width:100%;padding:6px;border-radius:6px;border:1px solid var(--line);background:var(--panel);color:var(--ink)}
+.chips span{display:inline-block;background:var(--chip);border-radius:999px;padding:2px 8px;margin:2px;font-size:12px}
+.s-OK{color:var(--ok)}.s-BLOCKED_BY_NETWORK_POLICY,.s-NOT_AVAILABLE,.s-RESEARCH_REQUIRED,.s-NOT_RUN{color:var(--bad)}
+.scroll{overflow-x:auto}
+table{border-collapse:collapse;font-size:12px;min-width:100%}
+th,td{border-bottom:1px solid var(--line);padding:4px 6px;text-align:right;white-space:nowrap}
+th:first-child,td:first-child{text-align:left;position:sticky;left:0;background:var(--panel)}
+thead th{position:sticky;top:0;background:var(--panel)}
+.stale{color:var(--warn)}.na{color:var(--muted)}
+.pre{background:var(--chip)}
+.ev{font-size:12px;border-bottom:1px solid var(--line);padding:4px 0}
+</style>
+</head>
+<body>
+<header>
+  <h1>Event Research</h1>
+  <div class="note">What was happening around this failure? Raw, point-in-time evidence from the Risk Regime research data layer.</div>
+  <div class="banner">Raw evidence only. This page has no Risk Regime Shock score, no weights and no ranking of sources. Each cell is the latest value that was <b>available</b> at that time, with its age; nothing is interpolated or filled.</div>
+</header>
+<main>
+  <div class="panel">
+    <label for="ep">Episode</label><br>
+    <select id="ep"></select>
+    <div id="epmeta" class="note" style="margin-top:6px"></div>
+  </div>
+  <div class="panel"><b>Source status</b><div id="status" class="chips"></div></div>
+  <div class="panel"><b>Synchronized raw timeline</b> <span class="note">value (age in minutes). Shaded rows are at or before the prediction time.</span>
+    <div class="scroll"><table id="tl"></table></div></div>
+  <div class="panel"><b>GDELT conflict events around this episode</b> <span class="note">highest mention counts; first-seen = GDELT batch; Goldstein shown as sign only (not severity)</span><div id="gd"></div></div>
+</main>
+<script>
+const EMBEDDED = /*__EMBEDDED_DATA__*/null;
+(async function(){
+  let data = EMBEDDED;
+  if(!data){ try{ data = await (await fetch('risk_regime_episodes.json')).json(); }catch(e){ document.querySelector('main').innerHTML='<div class="panel">No data. Run research/risk_regime_reconstruction.py.</div>'; return; } }
+  const sel = document.getElementById('ep');
+  const e15 = data.event15;
+  const opts = [{id:'EVENT-15', label:'Event #15 (prediction boundary 2026-09-27 12:01 UTC)'}].concat(
+    data.episodes.map(x=>({id:x.id, label:`${x.id} · ${x.type}${x.subtype?' '+x.subtype:''} · ${new Date(x.anchor_ts).toISOString().slice(0,16).replace('T',' ')} UTC`})));
+  sel.innerHTML = opts.map(o=>`<option value="${o.id}">${esc(o.label)}</option>`).join('');
+  document.getElementById('status').innerHTML = Object.entries(e15.source_status).map(([k,v])=>`<span>${esc(k)}: <b class="s-${v}">${esc(v)}</b></span>`).join('');
+  sel.onchange = render; render();
+
+  function render(){
+    const id = sel.value, tbl = document.getElementById('tl'), gd = document.getElementById('gd'), meta = document.getElementById('epmeta');
+    if(id==='EVENT-15'){
+      meta.textContent = e15.event.label;
+      const cols = Object.keys(e15.timeline[0].values);
+      tbl.innerHTML = '<thead><tr><th>series</th>'+e15.timeline.map(r=>`<th>${esc(r.label)}<br><span class="note">${r.t.slice(5,16).replace('T',' ')}</span></th>`).join('')+'</tr></thead><tbody>'+
+        cols.map(c=>'<tr><td>'+esc(c)+'</td>'+e15.timeline.map(r=>cell(r.values[c], r.before_prediction)).join('')+'</tr>').join('')+'</tbody>';
+      gd.innerHTML = `<div class="note">${e15.gdelt_relevant_events_available_before_boundary} relevant events available before the boundary (of ${e15.gdelt_relevant_events_in_window} in the window).</div>` +
+        list(e15.gdelt_events_before_boundary_top.slice(0,25), 'Before the prediction boundary') + list(e15.gdelt_events_boundary_to_event_top.slice(0,25), 'Between boundary and event');
+      return;
+    }
+    const ep = data.episodes.find(x=>x.id===id), t = data.timelines[id];
+    meta.textContent = `${ep.type} · ${ep.definition}` + (ep.p_up!=null?` · p_up ${ep.p_up}`:'') + (ep.run_length?` · ${ep.run_length} consecutive`:'');
+    tbl.innerHTML = '<thead><tr><th>series</th>'+t.rows.map(r=>`<th>${esc(r.label)}<br><span class="note">${r.t.slice(5,16).replace('T',' ')}</span></th>`).join('')+'</tr></thead><tbody>'+
+      t.columns.map((c,i)=>'<tr><td>'+esc(c)+'</td>'+t.rows.map(r=>{const v=r.values[i];return cell({value:v[0],age_min:v[1],status:v[2]}, r.label.startsWith('-')||r.label==='anchor');}).join('')+'</tr>').join('')+'</tbody>';
+    const g = data.gdelt_top_events[id];
+    gd.innerHTML = g ? `<div class="note">${g.relevant_events} relevant events in ${g.window.join(' → ')}; ${g.stored} stored (cap ${g.storage_cap}).</div>`+list(g.events.slice(0,25),'Top events') : '<div class="note">Raw GDELT event rows are stored for research_events episodes and Event #15. For other episodes, see the per-batch GDELT counts in the timeline.</div>';
+  }
+  function cell(v, pre){
+    const cls = pre?'pre':'';
+    if(!v||v.status==='NOT_AVAILABLE_AT_T') return `<td class="${cls} na">n/a</td>`;
+    const val = typeof v.value==='number' ? fmt(v.value) : esc(String(v.value));
+    return `<td class="${cls} ${v.status==='STALE'?'stale':''}" title="obs ${esc(v.timestamp||'')}">${val} <span class="note">(${v.age_min})</span></td>`;
+  }
+  function list(rows,title){ return `<div style="margin-top:8px"><b>${title}</b></div>`+(rows.length?rows.map(r=>`<div class="ev">${new Date(r.first_seen).toISOString().slice(5,16).replace('T',' ')} · CAMEO ${esc(r.cameo_code)} (${esc(r.category||'')}) · ${esc(r.actor1_country||'?')}→${esc(r.actor2_country||'?')} @ ${esc(r.action_location||'')} · mentions ${r.num_mentions}, sources ${r.num_sources} · Goldstein sign ${r.goldstein_sign} · <a href="${esc(r.source_url)}" rel="noopener noreferrer" target="_blank">${esc(host(r.source_url))}</a></div>`).join(''):'<div class="note">none</div>'); }
+  function fmt(x){ const a=Math.abs(x); return a>=1000?x.toLocaleString(undefined,{maximumFractionDigits:0}):a>=1?x.toFixed(3):x.toPrecision(3); }
+  function host(u){ try{return new URL(u).hostname}catch(e){return u||''} }
+  function esc(s){ return String(s==null?'':s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+})();
+</script>
+</body>
+</html>

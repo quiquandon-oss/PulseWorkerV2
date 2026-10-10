@@ -94,3 +94,61 @@ exhausted the quota read 8,184,077 rows.
 
 After that, re-extract only incrementally (`WHERE id > :max` / `ts > :max`), roughly weekly, so every later
 extraction reads only new rows.
+
+---
+
+## Step 1, refined (2026-10-10): proposed for approval, NOT executed
+
+**Goal:**
+- Recover the 260 pre-2026-07-22 `btc_data` rows needed by the market-move B0 replay.
+- Recover every other `btc_data` reading not yet archived.
+- Secure the V1 history that `history`'s 500-row cap keeps deleting.
+
+**Reuse:** the preserved extracts (btc_data 759 rows, 2026-08-26 10:23 → 10-06 18:00; V1 archive 605 rows to
+2026-10-09 12:19) are not re-downloaded for their own sake. Their overlap with the new extract serves only as a
+revision check.
+
+**Database:** production D1 `sentiment-history`. Read-only `SELECT`/`EXPLAIN` only. Run after a midnight-UTC
+reset, one statement at a time, checking `meta.rows_read` after each. **Stop** if any statement reads more than
+2× its estimate or the step exceeds **5,000 rows read**.
+
+| # | SQL (exact) | Index / expected plan | Rows returned (expected) | Rows read (est.) |
+|---|---|---|---|---|
+| 1.0 | `EXPLAIN QUERY PLAN SELECT id, ts, btc_price, technical_score FROM btc_data WHERE id <= 1000000000 ORDER BY id` (and the same for 1.3–1.4) | n/a: plans only, reads no table rows | plan rows | ~0 |
+| 1.1 | `SELECT type, name, tbl_name, sql FROM sqlite_master WHERE tbl_name IN ('btc_data','history','research_sentiment_archive') ORDER BY name` | `SCAN sqlite_master` | ~8 (3 tables + their indexes) | ~80 (whole schema table) |
+| 1.2 | `SELECT MAX(id) AS max_id, MAX(ts) AS max_ts FROM btc_data` | `SEARCH btc_data USING INTEGER PRIMARY KEY` for `MAX(id)`; `MAX(ts)` via `idx_btc_data_ts` (last entry) | 1 | ~2 |
+| 1.3 | `SELECT id, ts, btc_price, technical_score FROM btc_data WHERE id <= :max_id ORDER BY id` (`:max_id` from 1.2) | `SEARCH btc_data USING INTEGER PRIMARY KEY (rowid<?)`, no sort | ≈ 2,560 (2,506 counted 2026-10-09 14:51 + ≤ 16/day) | ≈ 2,560 |
+| 1.4 | `SELECT * FROM history ORDER BY ts` (columns confirmed by 1.1 first) | `SCAN history USING INDEX idx_ts` | 500 (cap) | ~500 |
+| 1.5 | `SELECT * FROM research_sentiment_archive WHERE observation_ts > 1791548387600 ORDER BY observation_ts` | `SEARCH research_sentiment_archive USING INDEX idx_research_sentiment_archive_observation_ts (observation_ts>?)` | ≤ ~30 (rows archived since 2026-10-09 12:19) | ≈ rows returned |
+| **Total** | | | | **≈ 3,150 rows read: 0.06% of the 5,000,000/day free allowance** |
+
+**Why the whole of `btc_data`, not just 260 rows:**
+- The table is about 2,560 rows.
+- One PK-ordered read gets the 260 B0 rows (ts < 1784678400000), the unarchived 2026-07-22 → 08-26 and
+  post-10-06 readings, and the 759 overlap rows.
+- The overlap is compared with the preserved extract to detect upstream revisions or backfills.
+- Reading only the 260 rows (`WHERE ts < 1784678400000`, `SEARCH USING INDEX idx_btc_data_ts`) would cost about
+  260 rows read. It remains an option if you prefer the minimum.
+
+**Output schema and checks** (offline, before anything is stored):
+- **Format:** each statement's `results` saved as a JSON list of row objects, exactly as returned, in
+  `research/archive/session_extracts/d1_<date>/`: `btc_data.json`, `history.json`, `research_sentiment_archive_new.json`.
+- **MANIFEST.json** records per file: the SQL, the database ID, extraction UTC, `meta.rows_read`, `meta.served_by`,
+  row count, SHA-256 of the file bytes and SHA-256 of `json.dumps(rows, sort_keys=True)`.
+- **B0 rows** (`ts < 1784678400000`) must reproduce the aggregates measured before: count **260**,
+  sum(ts) **463687966800000**, sum(btc_price) **17075341**, min ts **1777939200000**, max ts **1784674800000**.
+- **Overlap:** the 759 rows in 2026-08-26 10:23 → 10-06 18:00 must equal `inputs/btc_data.json` (same ts and
+  price). Any difference is reported as an upstream revision and kept, never "fixed".
+- **History:** `history` rows that also exist in the archive (same ts) must carry the same score and sources.
+- **T-A1/T-A2:** V1 rows after 2026-10-09 16:00 are prospective data. They are archived only, and nothing is
+  computed from them outside the approved progress evaluation.
+
+**Archiving and verification in Drive:**
+- **Catalog:** the files get a new catalog entry `d1_extracts_<date>` (FROZEN_SNAPSHOT, `snapshot_by: content`).
+- **Upload:** the planner adds them as a new snapshot, and the mirror uploads them with SHA-256 checks and records
+  them in the next state manifest. Restore verifies them like any other file.
+- **Public route:** by default they pass through the public repository, as the existing extracts did.
+- **Private route:** the files are small (about 0.3 MB), so they can instead be uploaded to Drive by hand and
+  added to the feed as `baseline_adopt`.
+
+Nothing in this step is run until you approve it explicitly, as written or amended.

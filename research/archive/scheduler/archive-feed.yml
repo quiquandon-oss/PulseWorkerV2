@@ -1,0 +1,50 @@
+# INERT PROPOSAL - not installed. To activate (only with the owner's approval), copy to .github/workflows/ on main.
+#
+# Builds the incremental archive feed once a day from git only and publishes it on the `archive-feed` branch.
+# The Google Apps Script mirror in the owner's account reads that feed and does the Drive writes.
+#
+# - Needs NO secret: no Cloudflare, no D1, no Google credential. GITHUB_TOKEN is used only to push `archive-feed`.
+# - Writes ONLY to refs/heads/archive-feed (feed.json + content-addressed blobs/<sha256>); never to main or research branches.
+# - Append-only: increment.py refuses to drop or change any entry of the previous feed (PlanConflict -> job fails).
+name: archive-feed
+on:
+  schedule:
+    - cron: '20 13 * * *'      # daily 13:20 UTC; the Apps Script mirror runs at 14:00 UTC
+  workflow_dispatch: {}
+permissions:
+  contents: write
+concurrency:
+  group: archive-feed
+  cancel-in-progress: false
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: "Check out the archive tooling (pinned, reviewed commit)"
+        uses: actions/checkout@v4
+        with:
+          ref: REPLACE_WITH_REVIEWED_COMMIT     # the reviewed claude/epic-planck-uyapsw-archive commit
+          fetch-depth: 0                        # full history: code increments are git bundles
+      - name: "Fetch every research branch as origin/*"
+        run: git fetch --no-tags origin '+refs/heads/*:refs/remotes/origin/*'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: "Previous feed (or the committed baseline on first run)"
+        run: |
+          if git show origin/archive-feed:feed.json > /tmp/previous.json 2>/dev/null; then echo "previous feed found";
+          else cp research/archive/baseline/feed-000000.json /tmp/previous.json; echo "first run: baseline"; fi
+      - name: "Plan (append-only, offline: git objects only)"
+        run: python3 research/archive/increment.py plan --repo . --previous /tmp/previous.json --out /tmp/feed-out
+      - name: "Publish to the archive-feed branch only"
+        run: |
+          git config user.name "archive-feed[bot]"
+          git config user.email "archive-feed@users.noreply.github.com"
+          git worktree add -f /tmp/feed-branch origin/archive-feed 2>/dev/null || { git worktree add --detach /tmp/feed-branch && git -C /tmp/feed-branch checkout --orphan archive-feed && git -C /tmp/feed-branch rm -rfq . ; }
+          mkdir -p /tmp/feed-branch/blobs
+          for b in /tmp/feed-out/blobs/*; do [ -e "$b" ] || continue; n=$(basename "$b"); [ -e "/tmp/feed-branch/blobs/$n" ] && cmp -s "$b" "/tmp/feed-branch/blobs/$n" || cp "$b" /tmp/feed-branch/blobs/; done
+          cp /tmp/feed-out/feed.json /tmp/feed-branch/feed.json
+          cd /tmp/feed-branch && git add -A && { git diff --cached --quiet && echo "no change" && exit 0; }
+          git commit -qm "archive feed $(python3 -c 'import json;print(json.load(open("feed.json"))["feed_seq"])')"
+          git push origin HEAD:refs/heads/archive-feed

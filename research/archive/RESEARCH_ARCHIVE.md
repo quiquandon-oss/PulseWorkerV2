@@ -38,7 +38,7 @@ front-end repositories hold no datasets; their only data files are web `manifest
 
 ## 3. What can be reused without querying D1
 
-- **Fully offline:** all three pre-registrations; market-move candles (development period only until an
+- **Fully offline** (in archive form; see the GDELT index gap in section 9): all three pre-registrations; market-move candles (development period only until an
   authorised evaluation run); all risk-regime series, OI and forward partitions; study outputs; the learning
   exports at their latest daily commit; and the preserved D1 extracts (btc_data 08-26 to 10-06, predictions,
   research_events 1–15, V1 scores 08-27 to 10-09).
@@ -241,11 +241,22 @@ objects only, and, for the query step, Python sockets disabled (any connection a
 - Full `pytest research/`: 924 passed, 3 skipped. The 3 skips are the Parquet tests when pyarrow is absent, as
   in CI.
 
+**Gap found: one existing study is not yet fully offline.** The network block stopped
+`research/risk_regime_reconstruction.py` (branch `claude/sweet-meitner-66ntx8`), run without `--live` on the
+preserved extracts and the GDELT cache. It had tried to fetch `http://data.gdeltproject.org/gdeltv2/masterfilelist.txt`.
+- **Why:** the GDELT step (`gdelt_research_run.py`) downloads that index to check the size and MD5 of each cached
+  zip, even when every zip is already cached.
+- **Fix** (step F2a): archive the index tail once, alongside the zips, and add an `--offline` switch that reads it
+  from the archive.
+- **Study code:** not changed here. It belongs to that study's branch and needs your go-ahead.
+- **Not affected:** the archive-based analyses above and the production detectors run fully offline today.
+
 ## F. Minimal implementation plan with tests
 
 | Step | What | Needs approval | Tests |
 |---|---|---|---|
 | F1 (done, this branch) | catalog, inventory, Parquet build, verify (checksums, pins, round trip, credential scan), sync plan, DuckDB queries, preserved session extracts | no | 13 in `test_archive.py`: pins and tamper detection; `ast`-only constant hashing; write-once; append-only partitions stored once and rewrite refused; exact round trip (strings, mixed numbers, nested, missing, Unicode); corrupt file reported not crashed; sync never deletes or overwrites; network refused; sealed rows excluded; credential scan |
+| F2a | make the risk-regime/GDELT study offline-capable: archive `masterfilelist.txt` (one public GDELT fetch) with the zips; `--offline` reads it from the archive | yes (touches study code on its branch) | the study re-run with sockets disabled reproduces `risk_regime_history.json` V1 rows, outcomes and failure index |
 | F2 | first **manual** sync (D steps 1–6) by the owner; record the remote checksum listing in `90_manifests/remote_listing_<date>.json` | owner does it | `sync-plan` against the listing → 0 uploads, 0 conflicts; `verify` on a download |
 | F3 | one-time approved D1 dump: estimate rows from known counts first, after the daily reset, read-only, then archive the dump as `d1_snapshot_<date>` | **yes** (D1 quota) | row counts match the dump; preserved extracts are a subset (hash-checked); no write statements in the dump job |
 | F4 | `drive_sync.py` (Drive API v3 over HTTPS, `drive.file`, resumable upload, lookup by parent and name, compare `sha256Checksum`, never delete, conflicts reported) plus a `workflow_dispatch`-only workflow | **yes** (new credentials, external integration) | against a fake Drive HTTP server: idempotent re-run, conflict refusal, no delete call ever issued, resumable upload after interruption, quota error stops cleanly, token never logged |

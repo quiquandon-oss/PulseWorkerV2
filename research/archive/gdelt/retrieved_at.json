@@ -1,0 +1,12 @@
+{
+ "basis": "oldest file mtime of each cache at original collection (2026-10-08); equals retrieved_at in the committed risk_regime_source_inventory.json",
+ "gdelt": {
+  "retrieved_at_ms": 1791464943118
+ },
+ "hl": {
+  "retrieved_at_ms": 1791465918992
+ },
+ "hlf": {
+  "retrieved_at_ms": 1791465962744
+ }
+}

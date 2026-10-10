@@ -342,7 +342,8 @@
       "parquet_paths": [
         "research/archive/session_extracts/inputs/*.json",
         "research/archive/session_extracts/v1_archive_full.json"
-      ]
+      ],
+      "snapshot_by": "content"
     },
     {
       "id": "hyperliquid_page_caches",
@@ -357,37 +358,43 @@
       },
       "format": "binary",
       "provenance": "POST https://api.hyperliquid.xyz/info candleSnapshot / fundingHistory responses, 2026-10-06/08; member sha256 in session_extracts/MANIFEST.json",
-      "known_gaps": "candleSnapshot serves only recent history, so these pages may not be re-fetchable later"
+      "known_gaps": "candleSnapshot serves only recent history, so these pages may not be re-fetchable later",
+      "snapshot_by": "content"
     },
     {
       "id": "gdelt_master_index",
-      "title": "Archived GDELT 2.0 master-list subset (size, MD5, URL per 15-minute export) for offline GDELT runs",
+      "title": "Archived GDELT 2.0 master-list subset, the fetched list tail, cache checksums and retrieval times (offline GDELT runs)",
       "status": "FROZEN_SNAPSHOT",
       "source": {
         "kind": "git",
         "ref": "origin/claude/epic-planck-uyapsw-archive",
         "paths": [
-          "research/archive/gdelt/*.json"
+          "research/archive/gdelt/*.json",
+          "research/archive/gdelt/masterfilelist_tail.txt.gz"
         ]
       },
       "format": "json",
       "provenance": "one HTTP Range request (bytes=-12000000) for http://data.gdeltproject.org/gdeltv2/masterfilelist.txt at 2026-10-10T07:10:18.709Z; verbatim export lines 2026-08-15 22:00 to 2026-10-10 07:15; the full fetched tail (sha256 e1e4c616\u2026) is kept in the Drive package",
-      "known_gaps": "covers batches up to 2026-10-10 07:10 UTC only"
+      "known_gaps": "covers batches up to 2026-10-10 07:10 UTC only",
+      "snapshot_by": "content"
     },
     {
       "id": "gdelt_raw_cache_session",
-      "title": "Raw GDELT 2.0 15-minute event export zips used by the GDELT studies",
+      "title": "GDELT 2.0 15-minute event export zips, cached GDELT DOC API responses and the derived geo grid, as the studies used them",
       "status": "EPHEMERAL_LOCAL",
       "source": {
         "kind": "local",
         "root_env": "ARCHIVE_SCRATCH",
         "paths": [
-          "cache/gdelt/*"
+          "cache/gdelt/*.export.CSV.zip",
+          "cache/gdelt/_geo_grid_*.json",
+          "cache/gdelt/_doc_api/*",
+          "cache/gdelt/.retrieved_at.json"
         ]
       },
       "format": "binary",
       "provenance": "http://data.gdeltproject.org/gdeltv2/ (public, MD5-listed by the provider, re-downloadable)",
-      "known_gaps": "NOT in git (293 MB); lost when the session container is reclaimed; the provider still serves the same files"
+      "known_gaps": "export zips are re-downloadable (package.py fetch-gdelt, verified against cache_sha256.json); the DOC API responses and derived grid are preserved in research/archive/gdelt/gdelt_doc_api_and_grid.tar.gz"
     }
   ]
 }

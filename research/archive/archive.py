@@ -379,7 +379,9 @@ def build(repo, scratch, stage, catalog=None):
             continue
         ds = by_id[entry["id"]]
         src = GitSource(repo, ds["source"]["ref"]) if ds["source"]["kind"] == "git" else LocalSource(scratch)
-        sid = snapshot_id(entry["location"], sha256_bytes("".join(f["sha256"] for f in entry["files"]).encode()))
+        content = sha256_bytes("".join(f["sha256"] for f in entry["files"]).encode())
+        # datasets kept on a branch that keeps moving are named by content, so a rebuild names them identically
+        sid = f"content-{content[:12]}" if ds.get("snapshot_by") == "content" else snapshot_id(entry["location"], content)
         base = root / STATUS_FOLDER[ds["status"]] / ds["id"]
         raw_dir = base / f"snapshot={sid}"
         man = {"dataset_id": ds["id"], "snapshot_id": sid, "status": ds["status"], "location": entry["location"],
@@ -451,8 +453,20 @@ SECRET_PATTERNS = [
 ]
 
 
-def secret_findings(root):
-    """Credential-looking strings in staged text files (gzip members included). Archives must hold none."""
+ALLOWLIST = Path(__file__).resolve().parent / "secret_scan_allowlist.json"
+
+
+def _allowed():
+    """Exact strings a human reviewed and found not to be credentials (each with its reason)."""
+    if not ALLOWLIST.exists():
+        return set()
+    return {e["match"].encode() for e in json.loads(ALLOWLIST.read_text())["reviewed"]}
+
+
+def secret_findings(root, allowed=None):
+    """Credential-looking strings in staged text files (gzip members included). Archives must hold none,
+    apart from exact strings listed in the reviewed allowlist."""
+    allowed = _allowed() if allowed is None else allowed
     found = []
     for p in sorted(Path(root).rglob("*")):
         if not p.is_file() or p.suffix in (".zip", ".parquet"):
@@ -464,7 +478,8 @@ def secret_findings(root):
             except OSError:
                 continue
         for pat in SECRET_PATTERNS:
-            if pat.search(data):
+            hits = [m.group(0) for m in pat.finditer(data) if m.group(0) not in allowed]
+            if hits:
                 found.append(f"{p.relative_to(root)}: matches {pat.pattern[:40]!r}")
     return found
 

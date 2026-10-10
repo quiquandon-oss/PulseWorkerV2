@@ -1,0 +1,11 @@
+{
+ "note": "commits the manual Drive package is built from (package.py assemble), so it can be rebuilt identically; datasets on the archive branch itself are pinned by their content hashes",
+ "refs": {
+  "origin/claude/epic-planck-uyapsw": "916bb7df3062cb8ad582b74dbae7377ce11063e4",
+  "origin/claude/epic-planck-uyapsw-market-moves": "196b87e4d9b95a0136d0c7249251b0934a8eab42",
+  "origin/claude/sweet-meitner-66ntx8": "720f6fb891866d430be850314ee16d8e7f2df0aa",
+  "origin/main": "b48fa3340b361290f1a36edf2f63a5b9b390d6ec",
+  "origin/research-data/market-moves": "0eb5be03764aede986d6b696fbc2c619e27971f1",
+  "origin/research-data/risk-regime-forward": "072a64a174d207bf43d083c8658cb7ce3c81376e"
+ }
+}

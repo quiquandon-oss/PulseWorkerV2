@@ -215,9 +215,9 @@ Recommendation: do the first sync manually. Add automation only once the prospec
 |---|---|
 | Accidental deletion or overwrite in Drive | Never-delete, never-overwrite uploader. Git research-data branches stay as the second independent copy. Manifests + `SHA256SUMS` exist in both copies. |
 | Silent corruption | `SHA256SUMS`, per-file `sha256Checksum` comparison, `verify` after any download |
-| Credentials leaking into the archive | `verify` scans every text and gzip file for token patterns (Bearer, Google `ya29.`/`1//`, GitHub, AWS, private keys, `api_key=`). Current archive: 0 findings. |
+| Credentials leaking into the archive | `verify` scans every text and gzip file for token patterns (Bearer, Google `ya29.`/`1//`, GitHub, AWS, private keys, `api_key=`). Current archive: 0 unreviewed findings. 5 reviewed public image-URL parameters in GDELT DOC responses are listed in `secret_scan_allowlist.json`. |
 | Drive token misuse | `drive.file` scope only; dedicated workflow; revocable; no D1 or Cloudflare secrets in that job |
-| Exposure of private production rows (predictions, V1 scores) | folder private, link sharing off; no public links; same visibility as the private repo |
+| Exposure of private production rows (predictions, V1 scores) | Drive folder private, link sharing off, no public links. **Correction (2026-10-10):** the GitHub repository is **public**, not private; see the Phase A findings below. |
 | Account loss | Git copy remains. For 3-2-1, optionally an occasional offline download kept by the owner. |
 | Quota surprise | `sync-plan` reports upload bytes; stop at a budget the owner sets |
 
@@ -264,3 +264,97 @@ preserved extracts and the GDELT cache. It had tried to fetch `http://data.gdelt
 
 Not done here: no Drive connection, no upload or delete, no D1 query, no change to V1 scoring, experiment rules,
 Candidate #1, production code, workflows or secrets. Nothing merged or deployed.
+
+
+---
+
+# Update 2026-10-10: preparation phases A–E
+
+## Phase A: protecting existing research data
+
+- **D1 extracts:** all 5 preserved extracts match their recorded hashes. The 4 study inputs also match the hashes
+  recorded in `risk_regime_history.json`.
+- **Registrations unchanged:** T-A1–T-A3 registration, addendum 1 and erratum 1 (on `claude/epic-planck-uyapsw`
+  916bb7d), the OI pre-registration (`claude/sweet-meitner-66ntx8` 720f6fb) and the market-move definition and
+  plan (196b87e) all recompute to their pinned hashes. None of those branches has moved since 2026-10-09.
+- **Main:** no raw research data was merged into `main`. `main` does already carry
+  `data-exports/*.csv`. These are D1-derived prediction tables, written daily by the existing
+  `export-learning-data.yml`, not by this work.
+- **Repository visibility: `quiquandon-oss/PulseWorkerV2` is PUBLIC.**
+  - Collaborators: only the owner (admin).
+  - Everything pushed to any branch is world-readable, including the D1 extracts on this branch since
+    2026-10-09/10.
+  - Exposure added by those extracts, measured: small.
+    - All 575 V1 rows are already in the public `risk_regime_history.json`.
+    - All 190 predictions are already in the public `data-exports/btc_predictions.csv`.
+    - `btc_data` holds public market prices, and the 15 research_events are shown by the public Worker.
+    - New: 30 V1 archive rows (2026-10-06 to 10-09 12:19, with source values) and the Hyperliquid and GDELT
+      provider responses (public market and news data).
+  - No credential is present (scan clean).
+- **Options (your decision):**
+  1. **Keep as is:** public data, little new exposure.
+  2. **Make the repository private.** On a free GitHub plan, Actions minutes for private repositories are
+     capped; this repo runs several daily and 6-hourly workflows. Check the plan before switching.
+  3. **Move the extracts:** after the Drive copy passes verification, move them out of git. Removing them later
+     does not remove them from git history or from any clone already made.
+  - Nothing was deleted.
+
+## Phase B: GDELT offline support (done)
+
+- **Fix:** `--offline-index` / `--gdelt-index` run the GDELT studies from an archived master-list subset (5,318
+  provider lines, 2026-08-15 22:00 to 2026-10-10 07:15).
+  - The index comes from one HTTP Range request (`bytes=-12000000`, sha256 `e1e4c616…`); the tail is kept.
+  - Offline: no request is made, cached files are checked by size and MD5 and never deleted, and missing,
+    corrupt or out-of-range batches stop the run (`OFFLINE_INPUT_FAILED`).
+  - Online behaviour is unchanged.
+- **Verified with sockets disabled, on copies whose file mtimes changed:**
+  - **Cache:** all 4,435 cached zips match the provider's size and MD5.
+  - **Risk-regime reconstruction:** two runs are byte-identical. Against the committed results it reproduces
+    exactly the inputs, the V1 rows and outcomes, the failure index, the 123 episodes and all 52,060
+    GDELT-event, Hyperliquid and funding observations, retrieval times included. The live-only sources
+    (DeFiLlama, Deribit, GDELT DOC) are not re-fetched; their committed values are archived.
+  - **GDELT study runner** (`--scope history`): every analytic field equals the committed artifact, and both
+    sidecars are byte-identical.
+  - **Shock study:** its GDELT grid, recomputed from the raw zips, reproduces all 575 committed GDELT V1 scores
+    (0 mismatches). Its predictions part differs only because the committed run used an older
+    rounded-precision predictions extract (sha `37b07…`) that was not preserved.
+- **Preserved on this branch** (container-only before):
+  - the 104 GDELT DOC API responses and the derived grid (`gdelt/gdelt_doc_api_and_grid.tar.gz`);
+  - the fetched master-list tail;
+  - SHA-256/MD5 of every cached GDELT file;
+  - the caches' original retrieval times.
+- **Tests:** `test_gdelt_offline.py` (9) and `test_package.py` (6), plus the existing suites. Full
+  `pytest research/`: 1,071 passed, 4 skipped (the Parquet tests skip without pyarrow, as in CI).
+
+## Phase C: manual Drive package (ready, not uploaded)
+
+See `MANUAL_DRIVE_ARCHIVE.md`.
+- **Size:** 4,676 files, 396,618,468 bytes, 16 datasets.
+- **Built from** git commits pinned in `package_lock.json`, plus the GDELT exports, re-downloadable and checked
+  byte for byte.
+- **Checks passed:** `package.py verify`, `offline-check` and `sha256sum -c`.
+- **Tamper drill:** a corrupted GDELT zip, a deleted Parquet file and a stray file were all reported.
+
+## Phase D: missing production data (plan only)
+
+`D1_EXTRACTION_PLAN.md` gives, per table: columns, range, needed versus archived rows, exact single-table SQL, the
+index it uses, estimated rows read, incremental form, whether the data can be recovered without D1, and
+priority.
+- **Size:** about 21,000 rows read in total (about 0.4% of one day's free allowance). Step 0 + P1 is under
+  5,500 rows.
+- **Scope:** a full-database export is not proposed. It is not necessary, its read cost cannot be estimated, and
+  it may block the database while it runs.
+- **Status:** no query was run; each step needs explicit approval.
+
+## Phase E: offline reproducibility (verified)
+
+- **No production credentials:** every check ran with an empty environment (`env -i`) and Python sockets
+  disabled.
+- **Parquet:** exact round trip, 24 files and 263,983 rows.
+- **Checksums:** corruption, deletion and extra files were all detected.
+- **GDELT studies** run with no network from the archived index and cache, as shown above.
+- **Frozen hashes and boundaries:** pre-registration hashes are unchanged, and the prospective boundaries
+  (T-A1/T-A2 from 2026-10-09 16:00, OI from 2026-10-10 00:00, market-move evaluation sealed from 2026-07-22) are
+  untouched.
+- **No production change:** no scoring, candidate or production state was changed. Only read-only code paths and
+  local files were used.

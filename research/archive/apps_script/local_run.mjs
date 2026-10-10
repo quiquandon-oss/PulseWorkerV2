@@ -32,7 +32,7 @@ function fetchLocal(url) {
   if (url === 'FEED') return { status: 200, bytes: fs.readFileSync(args.feed) };
   const m = RAW.exec(url);
   try {
-    if (m && m[1] === 'archive-feed' && m[2].startsWith('blobs/')) return { status: 200, bytes: fs.readFileSync(path.join(args.blobs, m[2].slice(6))) };
+    if (m && /(^|\/)blobs\/[0-9a-f]{64}$/.test(m[2])) return { status: 200, bytes: fs.readFileSync(path.join(args.blobs, m[2].split('/').pop())) };
     if (m) return { status: 200, bytes: execFileSync('git', ['-C', args.repo, 'show', `${m[1]}:${m[2]}`], { maxBuffer: 1 << 30 }) };
   } catch { /* fall through */ }
   return { status: 404, bytes: Buffer.alloc(0) };

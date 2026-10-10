@@ -7,7 +7,7 @@ import vm from 'node:vm';
 import { execFileSync } from 'node:child_process';
 
 const core = {};
-vm.runInNewContext(fs.readFileSync(new URL('./mirror_core.gs', import.meta.url), 'utf8') + '\nthis.exports = {runMirror, canonicalJson, parseSums, STATE_DIR, listTree};', core);
+vm.runInNewContext(fs.readFileSync(new URL('./mirror_core.gs', import.meta.url), 'utf8') + '\nthis.exports = {runMirror, fullVerifyStep, canonicalJson, parseSums, STATE_DIR, listTree};', core);
 const { canonicalJson, STATE_DIR } = core.exports;
 const runMirror = (ctx) => JSON.parse(JSON.stringify(core.exports.runMirror(ctx)));   // plain objects (the core runs in its own realm)
 
@@ -237,4 +237,30 @@ test('canonical JSON is byte-identical to Python json.dumps(sort_keys, compact, 
   const py = execFileSync('python3', ['-c', 'import json,sys; print(json.dumps(json.loads(sys.stdin.read()), sort_keys=True, separators=(",", ":"), ensure_ascii=True), end="")'],
     { input: JSON.stringify(v) }).toString();
   assert.equal(canonicalJson(v), py);
+});
+
+test('full verification is resumable, read-only, and catches a changed byte', () => {
+  const { drive, files, web } = adopted();
+  const fv = (start, extra = {}) => JSON.parse(JSON.stringify(core.exports.fullVerifyStep(makeCtx(drive, web, feedOf(files), extra), start)));
+  const before = drive.n;
+  let t = 0;
+  const r1 = fv(0, { budgetMs: 30, clock: () => (t += 20) });
+  assert.equal(r1.status, 'PARTIAL');
+  const r2 = fv(r1.next);
+  assert.equal(r2.status, 'OK');
+  assert.equal(r1.checked + r2.checked, 3);
+  assert.equal(drive.n, before);                                          // wrote nothing
+  const node = drive.nodes.get(drive.find('05_code/x.bundle')[0][0]);
+  node.md5 = h(node.bytes, 'md5'); node.bytes = Buffer.from('bundle bytez');
+  const r3 = fv(0);
+  assert.equal(r3.status, 'FAIL');
+  assert.deepEqual(r3.mismatched, ['05_code/x.bundle']);
+});
+
+test('canonical JSON escapes like Python for DEL, Latin-1 and astral characters', () => {
+  for (const s of ['\u007f', '\u0080', 'ÿ', '😀', 'tab\tnl\n']) {
+    const py = execFileSync('python3', ['-c', 'import json,sys; print(json.dumps(json.loads(sys.stdin.read()), ensure_ascii=True), end="")'],
+      { input: JSON.stringify(s) }).toString();
+    assert.equal(canonicalJson(s), py, JSON.stringify(s));
+  }
 });

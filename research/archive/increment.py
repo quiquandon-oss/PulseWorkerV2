@@ -151,8 +151,12 @@ def _records_meta(ds, path, data):
     return meta
 
 
-def plan(repo, previous, catalog=None, code_refs=None, today=None):
-    """Return (feed, blobs, new_entries). `previous` is the last feed (or the baseline feed)."""
+def plan(repo, previous, catalog=None, code_refs=None, today=None, blob_base=None):
+    """Return (feed, blobs, new_entries). `previous` is the last feed (or the baseline feed).
+
+    blob_base: where generated blobs will be served (default: the archive-feed branch). Blobs are named by their
+    SHA-256 and checked by it, so a branch URL is safe."""
+    blob_url = lambda h: (blob_base or f"{RAW_BASE}/refs/heads/{FEED_BRANCH}/blobs/") + h   # noqa: E731
     catalog = catalog or json.loads(archive.CATALOG.read_text())
     files = list(previous["files"])
     known = {f["path"]: f for f in files}
@@ -204,7 +208,7 @@ def plan(repo, previous, catalog=None, code_refs=None, today=None):
             man["files"].append(fm)
         mb = (json.dumps(man, indent=1, sort_keys=True) + "\n").encode()
         blobs[sha256(mb)] = mb
-        add(entry(f"90_manifests/{ds['id']}__{sid}.json", mb, "feed_blob", f"{RAW_BASE}/{FEED_BRANCH}/blobs/{sha256(mb)}"))
+        add(entry(f"90_manifests/{ds['id']}__{sid}.json", mb, "feed_blob", blob_url(sha256(mb))))
         sigs.setdefault(ds["id"], set()).add(sig)
 
     heads = previous.get("code_heads") or {}
@@ -215,7 +219,7 @@ def plan(repo, previous, catalog=None, code_refs=None, today=None):
             day = (today or dt.date.today()).isoformat()
             name = f"05_code/increments/PulseWorkerV2-{day}-{sha256(canonical(cur).encode())[:12]}.bundle"
             blobs[sha256(b)] = b
-            add(entry(name, b, "feed_blob", f"{RAW_BASE}/{FEED_BRANCH}/blobs/{sha256(b)}"))
+            add(entry(name, b, "feed_blob", blob_url(sha256(b))))
     seq = previous.get("feed_seq", 0) + (1 if new or cur != heads else 0)
     return make_feed(files, seq, cur), blobs, new
 
@@ -274,6 +278,7 @@ def main(argv=None):
     p.add_argument("--repo", default=".")
     p.add_argument("--previous", required=True)
     p.add_argument("--out", required=True)
+    p.add_argument("--blob-url-base", help="URL prefix the blobs will be served from (default: the archive-feed branch)")
     a = ap.parse_args(argv)
     if a.cmd == "baseline":
         heads = json.loads(Path(a.code_heads).read_text())["bundle_heads"]
@@ -282,7 +287,7 @@ def main(argv=None):
         Path(a.out).write_text(json.dumps(feed, indent=1, sort_keys=True) + "\n")
         print(json.dumps({"files": len(feed["files"]), "feed_seq": 0}))
     else:
-        feed, blobs, new = plan(a.repo, json.loads(Path(a.previous).read_text()))
+        feed, blobs, new = plan(a.repo, json.loads(Path(a.previous).read_text()), blob_base=a.blob_url_base)
         write_out(a.out, feed, blobs)
         print(json.dumps({"feed_seq": feed["feed_seq"], "files": len(feed["files"]), "new": len(new),
                           "new_bytes": sum(e["size"] for e in new)}))

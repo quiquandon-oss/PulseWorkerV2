@@ -201,3 +201,22 @@ def test_committed_baseline_feed_matches_the_verified_upload():
     assert {e["origin"] for e in f["files"]} == {"baseline", "baseline_adopt"}
     adopt = sorted(e["path"] for e in f["files"] if e["origin"] == "baseline_adopt")
     assert adopt == ["05_code/PulseWorkerV2-research.bundle", "SHA256SUMS"]
+
+
+def test_single_paste_file_is_exactly_the_tested_sources():
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("bsf", HERE / "apps_script" / "build_single_file.py")
+    m = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(m)
+    assert (HERE / "apps_script" / "CryptoPulseV2_archive_sync.gs").read_text() == m.build()
+    assert all(ord(c) < 128 for c in m.build())                                    # plain ASCII: safe to copy on a phone
+
+
+def test_staged_increment_feed_extends_the_baseline_by_exactly_its_new_files():
+    base = json.loads((HERE / "baseline" / "feed-000000.json").read_text())
+    stage = json.loads((HERE / "feed_stage" / "feed.json").read_text())
+    assert stage["files"][: len(base["files"])] == base["files"]
+    assert stage["files_sha256"] == hashlib.sha256(increment.canonical(stage["files"]).encode()).hexdigest()
+    for e in stage["files"][len(base["files"]):]:
+        blob = (HERE / "feed_stage" / "blobs" / e["sha256"]).read_bytes()
+        assert hashlib.sha256(blob).hexdigest() == e["sha256"] and len(blob) == e["size"] and e["url"].endswith(e["sha256"])

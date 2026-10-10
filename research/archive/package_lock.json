@@ -1,8 +1,9 @@
 {
  "bundle_archive_commit": "b1ed06000077faa126908570945cec2d7c9c76d0",
- "note": "commits the manual Drive package is built from (package.py assemble), so it can be rebuilt identically; datasets on the archive branch itself are pinned by their content hashes",
+ "note": "commits the manual Drive package is built from (package.py assemble), so any rebuild matches the reference build in package_expected_sha256.json; the archive branch's own datasets are read at the commit the reference build used",
  "refs": {
   "origin/claude/epic-planck-uyapsw": "916bb7df3062cb8ad582b74dbae7377ce11063e4",
+  "origin/claude/epic-planck-uyapsw-archive": "b1ed06000077faa126908570945cec2d7c9c76d0",
   "origin/claude/epic-planck-uyapsw-market-moves": "196b87e4d9b95a0136d0c7249251b0934a8eab42",
   "origin/claude/sweet-meitner-66ntx8": "720f6fb891866d430be850314ee16d8e7f2df0aa",
   "origin/main": "b48fa3340b361290f1a36edf2f63a5b9b390d6ec",

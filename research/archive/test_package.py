@@ -78,3 +78,72 @@ def test_gdelt_records_are_consistent():
     assert hashlib.sha256(gzip.decompress(tail)).hexdigest() == idx["fetched"]["sha256"]
     ra = json.loads((package.GDELT_DIR / "retrieved_at.json").read_text())
     assert ra["gdelt"]["retrieved_at_ms"] == 1791464943118
+
+
+# ------------------------------------------------------------ copying into a (mounted) Drive folder
+
+import drive_copy  # noqa: E402
+
+
+def make_pkg(tmp_path):
+    root = tmp_path / "pkg" / archive.ARCHIVE_ROOT
+    for rel, data in {"README.txt": b"r", "05_code/b.bundle": b"bundle", "10_raw/frozen/a.json": b"{}",
+                      "10_raw/session_extracts/g/z.zip": b"zip", "20_parquet/t/x.parquet": b"pq"}.items():
+        (root / rel).parent.mkdir(parents=True, exist_ok=True)
+        (root / rel).write_bytes(data)
+    archive.write_sums(root)
+    return root
+
+
+def test_copy_is_batched_with_sums_last_idempotent_and_verifiable(tmp_path):
+    src, dest = make_pkg(tmp_path), tmp_path / "drive"
+    dest.mkdir()
+    order = []
+    real = drive_copy.shutil.copyfile
+    drive_copy.shutil.copyfile = lambda s, d: (order.append(str(d)), real(s, d))[1]
+    try:
+        res = drive_copy.copy_package(src, dest, log=lambda m: None)
+    finally:
+        drive_copy.shutil.copyfile = real
+    assert res["copied"] == 6 and not res["conflicts"]
+    assert order[-1].endswith("SHA256SUMS.partial") and "README.txt" in order[0]
+    assert drive_copy.copy_package(src, dest, log=lambda m: None)["skipped_identical"] == 6   # re-run copies nothing
+    v = drive_copy.verify_tree(dest, src / "SHA256SUMS")
+    assert v["ok"] and v["files_checked"] == 5 and not list(dest.rglob("*.partial"))
+
+
+def test_copy_stops_on_conflict_and_never_overwrites(tmp_path):
+    src, dest = make_pkg(tmp_path), tmp_path / "drive"
+    (dest / "10_raw/frozen").mkdir(parents=True)
+    (dest / "10_raw/frozen/a.json").write_bytes(b"someone else's file")
+    res = drive_copy.copy_package(src, dest, log=lambda m: None)
+    assert res["conflicts"] == ["10_raw/frozen/a.json"]
+    assert (dest / "10_raw/frozen/a.json").read_bytes() == b"someone else's file"
+    assert not (dest / "SHA256SUMS").exists()                    # manifest only after a complete copy
+
+
+def test_remote_verify_reports_corruption_missing_and_duplicates(tmp_path):
+    src, dest = make_pkg(tmp_path), tmp_path / "drive"
+    dest.mkdir()
+    drive_copy.copy_package(src, dest, log=lambda m: None)
+    (dest / "20_parquet/t/x.parquet").write_bytes(b"PQ")
+    (dest / "10_raw/session_extracts/g/z.zip").unlink()
+    (dest / "10_raw/frozen/a (1).json").write_bytes(b"{}")      # what a Drive "keep both" looks like
+    (dest / drive_copy.REPORT_DIR).mkdir()
+    (dest / drive_copy.REPORT_DIR / "r.json").write_text("{}")   # reports are not package files
+    v = drive_copy.verify_tree(dest)
+    assert not v["ok"] and v["mismatched"] == ["20_parquet/t/x.parquet"]
+    assert v["missing"] == ["10_raw/session_extracts/g/z.zip"] and v["unexpected"] == ["10_raw/frozen/a (1).json"]
+
+
+def test_compare_against_reference_build(tmp_path, monkeypatch):
+    root = make_pkg(tmp_path)
+    sums = drive_copy.read_sums(root / "SHA256SUMS")
+    exp = {"bundle_heads": {}, "files": {p: h for p, h in sums.items() if not p.startswith("05_code/")}}
+    (tmp_path / "exp.json").write_text(json.dumps(exp))
+    assert package.compare(root, tmp_path / "exp.json")["missing"] == []
+    (root / "10_raw/frozen/a.json").write_bytes(b"[]")
+    (root / "20_parquet/t/x.parquet").write_bytes(b"other pyarrow")
+    archive.write_sums(root)
+    r = package.compare(root, tmp_path / "exp.json")
+    assert r["different"] == ["10_raw/frozen/a.json"] and r["parquet_different"] == ["20_parquet/t/x.parquet"] and not r["ok"]

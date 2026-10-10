@@ -99,7 +99,7 @@ def _locked_catalog(repo):
     return cat
 
 
-def assemble(repo, gdelt, out, bundle=True):
+def assemble(repo, gdelt, out, bundle=True, bundle_archive_commit=None):
     """Stage the package: archive.build over git + a scratch tree holding the GDELT cache exactly as used."""
     gdelt = Path(gdelt)
     exp = expected_gdelt()
@@ -126,27 +126,88 @@ def assemble(repo, gdelt, out, bundle=True):
         b = root / "05_code" / "PulseWorkerV2-research.bundle"
         if not b.exists():
             b.parent.mkdir(parents=True, exist_ok=True)
-            write_bundle(repo, b)
+            write_bundle(repo, b, bundle_archive_commit)
     (root / "README.txt").write_text(readme(root))
     archive.write_sums(root)
     res["summary"] = summary(out)
     return res
 
 
-def write_bundle(repo, dest):
-    """git bundle whose refs are branch heads (refs/heads/<name>), so `git clone <bundle>` restores them.
-    Built in a temporary bare repository; the source repository is only read."""
+def bundle_heads(repo, archive_commit=None):
+    """{branch: commit} for the bundle: commits pinned in package_lock.json, the archive branch at
+    `archive_commit` (or the lock's bundle_archive_commit), anything else at its current origin ref."""
+    lock = json.loads(LOCK.read_text()) if LOCK.exists() else {}
+    archive_commit = archive_commit or lock.get("bundle_archive_commit")
+    heads = {}
+    for name in BUNDLE_REFS:
+        pinned = lock.get("refs", {}).get(f"origin/{name}")
+        if name == "claude/epic-planck-uyapsw-archive" and archive_commit:
+            pinned = archive_commit
+        ref = pinned or f"refs/remotes/origin/{name}"
+        r = subprocess.run(["git", "-C", str(repo), "rev-parse", "-q", "--verify", ref + "^{commit}"], capture_output=True, text=True)
+        if r.returncode == 0:
+            heads[name] = r.stdout.strip()
+    return heads
+
+
+def write_bundle(repo, dest, archive_commit=None):
+    """git bundle whose refs are branch heads (refs/heads/<name>) at pinned commits, so `git clone <bundle>`
+    restores them. Built in a temporary bare repository; the source repository is only read."""
+    heads = bundle_heads(repo, archive_commit)
     with tempfile.TemporaryDirectory() as bare:
         subprocess.run(["git", "init", "-q", "--bare", bare], check=True)
-        specs = []
-        for name in BUNDLE_REFS:
-            for ref in (f"refs/remotes/origin/{name}", f"refs/heads/{name}"):
-                if subprocess.run(["git", "-C", str(repo), "rev-parse", "-q", "--verify", ref], capture_output=True).returncode == 0:
-                    specs.append(f"{ref}:refs/heads/{name}")
-                    break
+        specs = [f"refs/remotes/origin/{n}:refs/tmp/{n}" for n in heads
+                 if subprocess.run(["git", "-C", str(repo), "rev-parse", "-q", "--verify", f"refs/remotes/origin/{n}"], capture_output=True).returncode == 0]
         subprocess.run(["git", "-C", bare, "fetch", "-q", str(Path(repo).resolve()), *specs], check=True)
+        for n, c in heads.items():
+            subprocess.run(["git", "-C", bare, "update-ref", f"refs/heads/{n}", c], check=True)
+        for n in heads:
+            subprocess.run(["git", "-C", bare, "update-ref", "-d", f"refs/tmp/{n}"], check=True)
         subprocess.run(["git", "-C", bare, "symbolic-ref", "HEAD", "refs/heads/claude/epic-planck-uyapsw-archive"], check=True)
-        subprocess.run(["git", "-C", bare, "bundle", "create", str(Path(dest).resolve()), "--all"], check=True, capture_output=True)
+        subprocess.run(["git", "-C", bare, "bundle", "create", str(Path(dest).resolve()), "--branches"], check=True, capture_output=True)
+    return heads
+
+
+def compare(pkg, expected_path):
+    """A rebuilt package against the expected checksums of the reference build. The git bundle is compared by
+    its branch heads (pack bytes differ between git versions); Parquet differences are reported separately
+    (pyarrow versions); every other file must be byte-identical."""
+    root = _root(pkg)
+    exp = json.loads(Path(expected_path).read_text())
+    got = {}
+    for line in (root / "SHA256SUMS").read_text().splitlines():
+        h, p = line.split("  ", 1)
+        got[p] = h
+    res = {"files_expected": len(exp["files"]), "identical": 0, "missing": [], "different": [], "extra": [],
+           "parquet_different": [], "bundle_heads_match": None}
+    for p, h in exp["files"].items():
+        if p not in got:
+            res["missing"].append(p)
+        elif got[p] == h:
+            res["identical"] += 1
+        elif p.endswith(".parquet"):
+            res["parquet_different"].append(p)
+        else:
+            res["different"].append(p)
+    res["extra"] = sorted(p for p in got if p not in exp["files"] and not p.startswith("05_code/"))
+    b = root / "05_code" / "PulseWorkerV2-research.bundle"
+    if b.exists():
+        out = subprocess.run(["git", "bundle", "list-heads", str(b)], capture_output=True, text=True).stdout.split()
+        heads = {out[i + 1].removeprefix("refs/heads/"): out[i] for i in range(0, len(out), 2)}
+        res["bundle_heads_match"] = heads == exp["bundle_heads"]
+    res["ok"] = not (res["missing"] or res["different"] or res["extra"]) and res["bundle_heads_match"] is not False
+    return res
+
+
+def expected_record(pkg, heads):
+    root = _root(pkg)
+    files = {}
+    for line in (root / "SHA256SUMS").read_text().splitlines():
+        h, p = line.split("  ", 1)
+        if not p.startswith("05_code/"):
+            files[p] = h
+    return {"note": "checksums of the reference package built and verified in the session; package.py compare checks a rebuild against them",
+            "bundle_heads": heads, "files": files}
 
 
 # ------------------------------------------------------------------ 3. verify / summary
@@ -281,6 +342,10 @@ def main(argv=None):
     p.add_argument("--gdelt", required=True)
     p.add_argument("--out", required=True)
     p.add_argument("--no-bundle", action="store_true")
+    p.add_argument("--bundle-archive-commit", help="archive-branch commit for the git bundle (default: package_lock.json)")
+    p = sub.add_parser("compare")
+    p.add_argument("--pkg", required=True)
+    p.add_argument("--expected", default=str(HERE / "package_expected_sha256.json"))
     for name in ("verify", "summary"):
         sub.add_parser(name).add_argument("--pkg", required=True)
     p = sub.add_parser("offline-check")
@@ -290,7 +355,9 @@ def main(argv=None):
     if a.cmd == "fetch-gdelt":
         res = fetch_gdelt(a.out)
     elif a.cmd == "assemble":
-        res = assemble(a.repo, a.gdelt, a.out, bundle=not a.no_bundle)
+        res = assemble(a.repo, a.gdelt, a.out, bundle=not a.no_bundle, bundle_archive_commit=a.bundle_archive_commit)
+    elif a.cmd == "compare":
+        res = compare(a.pkg, a.expected)
     elif a.cmd == "verify":
         res = verify(a.pkg)
     elif a.cmd == "summary":

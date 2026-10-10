@@ -122,7 +122,8 @@ class LocalSource:
         return (self.root / path).read_bytes()
 
     def describe(self):
-        return {"kind": "local", "root": str(self.root)}
+        # no machine-specific path: the same files must give the same manifest on any machine
+        return {"kind": "local"}
 
 
 def open_source(ds, repo, scratch):

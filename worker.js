@@ -7383,6 +7383,23 @@ async function computeExperiment5RegistryLiveFields(env) {
     oos_result: 'NOT_AVAILABLE', confidence_evidence_maturity: 'ACCUMULATING', last_updated: o.archive ? o.archive.latest_archived_ts : null };
 }
 
+// Tables created by the Pulse Worker (V1) in the shared D1; until its first
+// cron run they do not exist, which is reported as NOT_STARTED, not an error.
+async function computeSnapshotTableLiveFields(env, sql, note) {
+  let row;
+  try { row = await env.DB.prepare(sql).first(); }
+  catch (err) {
+    if (/no such table/i.test(String(err))) {
+      return { current_sample_size: 'NOT_STARTED', current_measured_result: 'NOT_AVAILABLE', oos_result: 'NOT_AVAILABLE',
+        confidence_evidence_maturity: 'UNKNOWN', last_updated: null };
+    }
+    throw err;
+  }
+  const n = row ? row.n : 0;
+  return { current_sample_size: n, current_measured_result: n ? { snapshots: n, first_ts: row.first_ts, latest_ts: row.last_ts, note } : 'NOT_AVAILABLE',
+    oos_result: 'NOT_AVAILABLE', confidence_evidence_maturity: n ? 'COLLECTING' : 'UNKNOWN', last_updated: row ? row.last_ts : null };
+}
+
 const CODE_LIVE_METRIC_PROVIDERS = {
   selection_decisions_anomaly: (env, req) => computeLoggedTableLiveFields(env, 'selection_decisions_anomaly', req,
     'Logged-only BTC comparison against production selection; never changes chosen_variant.'),
@@ -7391,6 +7408,10 @@ const CODE_LIVE_METRIC_PROVIDERS = {
   github_exp23_evaluation: computeExp023LiveFields,
   github_risk_regime_forward: computeRiskRegimeForwardLiveFields,
   research_hypotheses_experiment5: computeExperiment5RegistryLiveFields,
+  hl_oi_snapshots: (env) => computeSnapshotTableLiveFields(env, 'SELECT COUNT(*) AS n, MIN(ts) AS first_ts, MAX(ts) AS last_ts FROM hl_oi_snapshots',
+    'Hourly Hyperliquid BTC OI snapshots stored by the Pulse Worker; the source scores once 24h of history exists.'),
+  research_source_snapshots: (env) => computeSnapshotTableLiveFields(env, 'SELECT COUNT(*) AS n, MIN(ts) AS first_ts, MAX(ts) AS last_ts FROM research_source_snapshots',
+    'Hourly research-only snapshots (Deribit DVOL, DeFiLlama USDT supply); not weighted in V1.'),
 };
 
 const CODE_REGISTRY_ENTRIES = [
@@ -7444,6 +7465,36 @@ const CODE_REGISTRY_ENTRIES = [
     start_date: '2026-10-06', target_date: null, status: 'COLLECTING', baseline: null, required_sample: null, conclusion: null,
     next_action: 'Daily 10:40 UTC collection.', github_refs: '.github/workflows/research-forward-schedule.yml; branch research-data/risk-regime-forward',
     data_source_table: 'github_risk_regime_forward' },
+  { experiment_id: 'EXP-025', title: 'V1 source: Hyperliquid BTC OI (hloi)',
+    research_question: 'Does adding 24h Hyperliquid BTC OI (price-confirmed) improve the V1 composite versus the composite without it?',
+    purpose: 'Production V1 source since 2026-10-11 at the lowest weight tier (4 x 0.3, ~1% effective); evaluated against the composite recomputed without hloi.',
+    experiment_type: 'PRODUCTION_SOURCE_EVALUATION', expected_result: null,
+    success_criterion: 'Incremental association with forward BTC returns beyond the existing composite, out of sample, before any weight increase.',
+    start_date: '2026-10-11', target_date: null, status: 'ACCUMULATING', baseline: 'V1 composite without hloi (recomputed from sources_json)',
+    required_sample: null, conclusion: null,
+    next_action: 'Accumulate hourly OI snapshots and V1 readings carrying hloi; review in EXP-005 and V1 /analysis before changing its weight.',
+    github_refs: 'PulseWorker 32bd859 (/hl-oi); CryptoPulse 79dfc80 (hloi source)', data_source_table: 'hl_oi_snapshots' },
+  { experiment_id: 'EXP-026', title: 'Candidate source: Binance BTC OI and positioning ratios',
+    research_question: 'Do Binance OI and account/top-trader/taker ratios carry forward information for BTC beyond the V1 composite?',
+    purpose: 'Roadmap candidate; collected daily via EXP-024. Exploratory OI rho -0.17 [-0.47, 0.17].', experiment_type: 'CANDIDATE_SOURCE',
+    expected_result: null, success_criterion: 'Preregistered OI test (46c0d52b) on forward data.', start_date: '2026-10-08', target_date: null,
+    status: 'COLLECTING', baseline: 'V1 composite', required_sample: null, conclusion: null,
+    next_action: 'Keep collecting (EXP-024); evaluate at the preregistered horizon. Not weighted in V1.',
+    github_refs: 'branch research-data/risk-regime-forward', data_source_table: 'github_risk_regime_forward' },
+  { experiment_id: 'EXP-027', title: 'Candidate signal: Risk Regime Shock (GDELT + Hyperliquid stress)',
+    research_question: 'Does a combined geopolitical-shock and market-stress signal anticipate risk-off regimes?',
+    purpose: 'Roadmap candidate (Learning Candidate #1). Research so far: INSUFFICIENT DATA; components do not converge beyond chance.',
+    experiment_type: 'CANDIDATE_SIGNAL', expected_result: null, success_criterion: 'A defined score that beats chance on forward data.',
+    start_date: null, target_date: null, status: 'PROPOSED', baseline: 'V1 regime scorecard', required_sample: null, conclusion: null,
+    next_action: 'Define the score and a forward collector; no production use.', github_refs: 'RISK_REGIME_SHOCK_RESEARCH.md (research branches)',
+    data_source_table: null },
+  { experiment_id: 'EXP-028', title: 'Candidate sources: Deribit DVOL and DeFiLlama USDT supply',
+    research_question: 'Do BTC implied volatility (DVOL) and USDT supply growth carry forward information beyond the V1 composite?',
+    purpose: 'Roadmap candidates from V1 improvement research Track B (DVOL rho -0.26, USDT supply rho -0.28, CIs include 0).',
+    experiment_type: 'CANDIDATE_SOURCE', expected_result: null, success_criterion: 'Out-of-sample incremental association before any weighting.',
+    start_date: null, target_date: null, status: 'COLLECTING', baseline: 'V1 composite', required_sample: null, conclusion: null,
+    next_action: 'Hourly snapshots collected by the Pulse Worker (research_source_snapshots); evaluate once history exists. Not weighted in V1.',
+    github_refs: 'PulseWorker research_source_snapshots', data_source_table: 'research_source_snapshots' },
 ];
 
 const REGISTRY_DISPLAY_LABELS = {
@@ -7781,10 +7832,10 @@ const EXPERIMENT5_KNOWN_V1_SOURCE_IDS = new Set([
   'fng', 'funding', 'longshort', 'global', 'cryptonews', 'macrogeo',
   'geopolitics', 'regulatory', 'sosovalue', 'onchain', 'oil', 'yield10y',
   'usd', 'nasdaq', 'sp500', 'ninemag', 'foufi', 'etfflows', 'hypefunding',
-  'gold', 'strc',
+  'gold', 'strc', 'hloi',
 ]);
 // Mirrors research/source_intelligence.py's KNOWN_V1_SOURCE_IDS exactly
-// (same 21 ids). Used only to flag an unrecognized key as a candidate
+// (same 22 ids; hloi added 2026-10-11). Used only to flag an unrecognized key as a candidate
 // for future human consideration -- never auto-added anywhere.
 const EXPERIMENT5_STALE_AFTER_N_OBSERVATIONS = 10;
 // Mirrors research/source_intelligence.py's STALE_AFTER_N_OBSERVATIONS

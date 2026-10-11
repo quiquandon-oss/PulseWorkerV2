@@ -526,9 +526,9 @@ def test_no_direct_affinity_keys_match_source_topic_affinity_dict_exactly():
     assert no_direct_keys == {
         "fng", "funding", "longshort", "global", "gold", "hypefunding", "nasdaq",
         "ninemag", "oil", "onchain", "sosovalue", "sp500", "strc", "usd", "yield10y",
-        "etfflows", "foufi",
+        "etfflows", "foufi", "hloi",
     }
-    assert len(direct_keys) + len(no_direct_keys) == len(si.KNOWN_V1_SOURCE_IDS) == 21
+    assert len(direct_keys) + len(no_direct_keys) == len(si.KNOWN_V1_SOURCE_IDS) == 22
 
     # Every one of the 21 known ids resolves to exactly one of the two
     # real affinity statuses -- never a third, invented status.

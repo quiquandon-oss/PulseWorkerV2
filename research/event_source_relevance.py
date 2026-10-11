@@ -98,7 +98,7 @@ exact matching, never NLP, never invented labels) finds:
                                      a source gets at most one topic)
 
   NO DIRECT topical/textual match to any PR4 evidence category (17 of 21):
-    fng, funding, longshort, global, gold, hypefunding, nasdaq,
+    fng, funding, longshort, global, gold, hypefunding, hloi, nasdaq,
     ninemag, oil, onchain, sosovalue, sp500, strc, usd, yield10y,
     etfflows, foufi.
   (This list previously omitted etfflows/foufi by a documentation error

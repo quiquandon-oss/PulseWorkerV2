@@ -10,7 +10,7 @@ const DAY = 86400000;
 
 function load(fetchImpl) {
   return evalInScope(
-    extractFunctions('getUnifiedResearchRegistry', 'getResearchLabRegistry', 'fetchResearchDataJson', 'computeLoggedTableLiveFields', 'computeExp023LiveFields',
+    extractFunctions('getUnifiedResearchRegistry', 'getResearchLabRegistry', 'computeSnapshotTableLiveFields', 'fetchResearchDataJson', 'computeLoggedTableLiveFields', 'computeExp023LiveFields',
       'computeRiskRegimeForwardLiveFields', 'computeExperiment5RegistryLiveFields', 'registryProgressCount', 'registryEta',
       'decorateRegistryEntry') + '\n' +
     extractConstants('RESEARCH_DATA_RAW_BASE', 'CODE_LIVE_METRIC_PROVIDERS', 'CODE_REGISTRY_ENTRIES', 'REGISTRY_DISPLAY_LABELS', 'DAY_MS'),
@@ -55,7 +55,7 @@ describe('getResearchLabRegistry -- unified list', () => {
     const { getUnifiedResearchRegistry: getResearchLabRegistry } = load(okFetch);
     const out = await getResearchLabRegistry({ DB: db([d1Row('EXP-005'), d1Row('EXP-003', { title: 'from d1' })]) }, NOW);
     const ids = out.experiments.map(e => e.experiment_id);
-    expect(ids).toEqual(['EXP-001', 'EXP-002', 'EXP-003', 'EXP-005', 'EXP-011', 'EXP-012', 'EXP-023', 'EXP-024']);
+    expect(ids).toEqual(['EXP-001', 'EXP-002', 'EXP-003', 'EXP-005', 'EXP-011', 'EXP-012', 'EXP-023', 'EXP-024', 'EXP-025', 'EXP-026', 'EXP-027', 'EXP-028']);
     expect(out.experiments.find(e => e.experiment_id === 'EXP-003')).toMatchObject({ title: 'from d1', registry_source: 'd1' });
     expect(out.experiments.find(e => e.experiment_id === 'EXP-001').registry_source).toBe('code');
   });
@@ -113,6 +113,23 @@ describe('getResearchLabRegistry -- unified list', () => {
     expect(e3.current_sample_size).toBe(14);
     expect(e3.eta).toMatchObject({ estimable: true, reached: false, progress: 14, required: 50 });
     expect(e3.eta.eta_date).toBe(new Date(NOW + (36 / (14 / 15)) * DAY).toISOString().slice(0, 10));
+  });
+});
+
+describe('snapshot-table providers (tables created by the Pulse Worker)', () => {
+  it('a not-yet-created table is NOT_STARTED, an existing one reports its snapshot count', async () => {
+    const { getUnifiedResearchRegistry } = load(okFetch);
+    const dbWith = (hl) => ({ prepare(sql) { const q = { bind() { return q; }, async all() { return { results: [] }; },
+      async first() {
+        if (/FROM hl_oi_snapshots/.test(sql)) { if (!hl) throw new Error('D1_ERROR: no such table: hl_oi_snapshots'); return hl; }
+        if (/FROM research_source_snapshots/.test(sql)) throw new Error('D1_ERROR: no such table: research_source_snapshots');
+        return { n: 0, first_ts: null, last_ts: null }; } }; return q; } });
+    let out = await getUnifiedResearchRegistry({ DB: dbWith(null) }, NOW);
+    expect(out.experiments.find(e => e.experiment_id === 'EXP-025').current_sample_size).toBe('NOT_STARTED');
+    expect(out.experiments.find(e => e.experiment_id === 'EXP-028').current_sample_size).toBe('NOT_STARTED');
+    out = await getUnifiedResearchRegistry({ DB: dbWith({ n: 5, first_ts: NOW - 5 * 3600000, last_ts: NOW }) }, NOW);
+    const e25 = out.experiments.find(e => e.experiment_id === 'EXP-025');
+    expect(e25).toMatchObject({ current_sample_size: 5, data_last_updated: NOW, status: 'ACCUMULATING' });
   });
 });
 

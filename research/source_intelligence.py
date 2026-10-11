@@ -17,14 +17,14 @@ Builds on, and deliberately does not duplicate:
 
 This module answers the questions those three do not:
   - is a key present in a source's own sources_json but NOT one of the
-    21 known V1 ids (a genuine new-source CANDIDATE, never auto-added)?
+    22 known V1 ids (a genuine new-source CANDIDATE, never auto-added)?
   - how long since a source's value last changed at all (STALE)?
   - what fraction of the observation window actually carries each
     source at all (RECURRENCE / coverage)?
 """
 from source_analysis import pairwise_source_redundancy
 
-# The 21 known V1 source ids, copied verbatim from CryptoPulse/index.html's
+# The 22 known V1 source ids, copied verbatim from CryptoPulse/index.html's
 # COMPOSITE_SOURCES_DEFAULTS (read directly from source during the
 # forensic phase, not memorized). Used ONLY as a comparison set to flag
 # an unrecognized key as a candidate -- this module never imports,
@@ -34,6 +34,8 @@ KNOWN_V1_SOURCE_IDS = frozenset([
     "geopolitics", "regulatory", "sosovalue", "onchain", "oil", "yield10y",
     "usd", "nasdaq", "sp500", "ninemag", "foufi", "etfflows", "hypefunding",
     "gold", "strc",
+    # Added to V1 on 2026-10-11 (Hyperliquid BTC OI, weight 4 / confidence 0.3).
+    "hloi",
 ])
 
 STALE_AFTER_N_OBSERVATIONS = 10

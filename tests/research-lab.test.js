@@ -389,15 +389,15 @@ describe('Research Lab — read-only research API helpers', () => {
       expect(result.activated).toBe(false);
     });
 
-    it('all 21 known source keys appear exactly once, regardless of report contents', async () => {
+    it('all 22 known source keys appear exactly once, regardless of report contents', async () => {
       const report = buildReport();
       const db = makeDb([{ first: makeAnalysisRow(report) }]);
       const result = await scope.getResearchLabSourceEffectiveness({ DB: db });
       expect(result.activated).toBe(true);
       const keys = result.sources.map((s) => s.source_key);
-      expect(keys.length).toBe(21);
-      expect(new Set(keys).size).toBe(21);
-      for (const k of ALL_21) expect(keys).toContain(k);
+      expect(keys.length).toBe(22);
+      expect(new Set(keys).size).toBe(22);
+      for (const k of [...ALL_21, 'hloi']) expect(keys).toContain(k);
     });
 
     it('a source missing from this window entirely: NOT_DISCOVERED_IN_WINDOW, still listed, never fabricated', async () => {

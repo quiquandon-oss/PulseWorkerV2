@@ -33,7 +33,7 @@ describe('LINK core-prediction timing checkpoints', () => {
   it('all 8 checkpoints fire, in the documented order, on a successful run with real-shaped data', async () => {
     const source = extractFunctions(
       'runLinkPrediction', 'nearestRow', 'meanStd', 'trendStrength', 'percentileRank',
-      'getLatestCalibrationCurve', 'applyCalibratedProbability', 'trailingVolatility', 'weightedQuantile', 'currentGitSha'
+      'getLatestCalibrationCurve', 'applyCalibratedProbability', 'trailingVolatility', 'weightedQuantile', 'currentGitSha', 'historicalClosestDistances'
     ) + '\n\n' + extractConstants('LINK_FEATURE_KEYS', 'LINK_MIN_COMPLETE_ROWS', 'LINK_MIN_RESOLVED_ANALOGS', 'MODEL_VERSIONS', 'LAG_MS', 'TOL_MS');
     const scope = evalInScope(source);
 
@@ -85,7 +85,7 @@ describe('LINK core-prediction timing checkpoints', () => {
   });
 
   it('an early return (insufficient_data on link_data) fires LINK_CORE_START only, proving checkpoints correctly mark HOW FAR execution got, not just that the function was called', async () => {
-    const source = extractFunctions('runLinkPrediction', 'nearestRow', 'meanStd', 'trendStrength', 'percentileRank', 'getLatestCalibrationCurve', 'applyCalibratedProbability', 'trailingVolatility', 'weightedQuantile', 'currentGitSha')
+    const source = extractFunctions('runLinkPrediction', 'nearestRow', 'meanStd', 'trendStrength', 'percentileRank', 'getLatestCalibrationCurve', 'applyCalibratedProbability', 'trailingVolatility', 'weightedQuantile', 'currentGitSha', 'historicalClosestDistances')
       + '\n\n' + extractConstants('LINK_FEATURE_KEYS', 'LINK_MIN_COMPLETE_ROWS', 'LINK_MIN_RESOLVED_ANALOGS', 'MODEL_VERSIONS', 'LAG_MS', 'TOL_MS');
     const scope = evalInScope(source);
     const db = { prepare: () => { const stmt = { all: async () => ({ results: [] }), first: async () => null, run: async () => ({}) }; stmt.bind = () => stmt; return stmt; } };

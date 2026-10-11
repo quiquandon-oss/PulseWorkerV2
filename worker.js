@@ -93,6 +93,39 @@ function weightedQuantile(pairs, p) {
   return sorted[sorted.length - 1].value;
 }
 
+// Regime-anomaly reference distribution: for each candidate i, the distance
+// to its closest EARLIER candidate (null for i = 0), in the same z-scored
+// feature space as the k-NN distance. Same arithmetic, in the same order, as
+// the inline loop it replaces in runPrediction / runEthPrediction /
+// runLinkPrediction, so every value is bit-identical -- only each candidate's
+// z-scores are computed once instead of once per pair. The pair loop is
+// O(n^2) in btc_data/eth_data/link_data rows and was recomputing two
+// divisions per feature per pair; at production table sizes that alone was
+// most of a cron tick's CPU (BTC 24h + 12h run concurrently in one
+// invocation) -- the most likely reason the 3h cron has been terminated
+// before its prediction insert (see tests/cron-cpu-anomaly-distances.test.js).
+function historicalClosestDistances(candidates, keys, stats) {
+  const n = candidates.length, m = keys.length;
+  const z = new Float64Array(n * m);
+  for (let i = 0; i < n; i++) {
+    for (let f = 0; f < m; f++) {
+      const k = keys[f];
+      z[i * m + f] = (candidates[i][k] - stats[k].mean) / stats[k].std;
+    }
+  }
+  return candidates.map((_, i) => {
+    if (i === 0) return null;
+    let best = Infinity;
+    for (let j = 0; j < i; j++) {
+      let d = 0;
+      for (let f = 0; f < m; f++) d += (z[i * m + f] - z[j * m + f]) ** 2;
+      d = Math.sqrt(d);
+      if (d < best) best = d;
+    }
+    return Number.isFinite(best) ? best : null;
+  });
+}
+
 // Nearest row to targetTs within tolMs (defaults to the 24h-derived TOL_MS
 // for every call site that isn't horizon-specific — enrichment joins, etc.).
 // Horizon-specific forward-return lookups pass their own tolerance now that
@@ -595,21 +628,7 @@ async function runPrediction(env, horizonHours = 24, { persist = true, claimToke
   // flagged rather than silently reported with the same confidence as any
   // other day.
   const closestDist = distances[0].dist;
-  const historicalClosestDists = candidates.map((_, i) => {
-    if (i === 0) return null;
-    let best = Infinity;
-    for (let j = 0; j < i; j++) {
-      let d = 0;
-      for (const k of FEATURE_KEYS) {
-        const z1 = (candidates[i][k] - stats[k].mean) / stats[k].std;
-        const z2 = (candidates[j][k] - stats[k].mean) / stats[k].std;
-        d += (z1 - z2) ** 2;
-      }
-      d = Math.sqrt(d);
-      if (d < best) best = d;
-    }
-    return Number.isFinite(best) ? best : null;
-  });
+  const historicalClosestDists = historicalClosestDistances(candidates, FEATURE_KEYS, stats);
   const closestDistPercentile = percentileRank(closestDist, historicalClosestDists);
   const isRegimeAnomaly = closestDistPercentile != null && closestDistPercentile >= 0.9;
 
@@ -818,21 +837,7 @@ async function runEthPrediction(env, horizonHours = 24, { persist = true, claimT
   }
 
   const closestDist = distances[0].dist;
-  const historicalClosestDists = candidates.map((_, i) => {
-    if (i === 0) return null;
-    let best = Infinity;
-    for (let j = 0; j < i; j++) {
-      let d = 0;
-      for (const k of ETH_FEATURE_KEYS) {
-        const z1 = (candidates[i][k] - stats[k].mean) / stats[k].std;
-        const z2 = (candidates[j][k] - stats[k].mean) / stats[k].std;
-        d += (z1 - z2) ** 2;
-      }
-      d = Math.sqrt(d);
-      if (d < best) best = d;
-    }
-    return Number.isFinite(best) ? best : null;
-  });
+  const historicalClosestDists = historicalClosestDistances(candidates, ETH_FEATURE_KEYS, stats);
   const closestDistPercentile = percentileRank(closestDist, historicalClosestDists);
   const isRegimeAnomaly = closestDistPercentile != null && closestDistPercentile >= 0.9;
 
@@ -5570,21 +5575,7 @@ async function runLinkPrediction(env, horizonHours = 24, { persist = true, claim
   // analog unusually far away compared to every closest-match distance
   // seen historically for LINK specifically.
   const closestDist = distances[0].dist;
-  const historicalClosestDists = candidates.map((_, i) => {
-    if (i === 0) return null;
-    let best = Infinity;
-    for (let j = 0; j < i; j++) {
-      let d = 0;
-      for (const k of LINK_FEATURE_KEYS) {
-        const z1 = (candidates[i][k] - stats[k].mean) / stats[k].std;
-        const z2 = (candidates[j][k] - stats[k].mean) / stats[k].std;
-        d += (z1 - z2) ** 2;
-      }
-      d = Math.sqrt(d);
-      if (d < best) best = d;
-    }
-    return Number.isFinite(best) ? best : null;
-  });
+  const historicalClosestDists = historicalClosestDistances(candidates, LINK_FEATURE_KEYS, stats);
   const closestDistPercentile = percentileRank(closestDist, historicalClosestDists);
   const isRegimeAnomaly = closestDistPercentile != null && closestDistPercentile >= 0.9;
   __checkpoint('LINK_ANOMALY_CHECK_DONE');

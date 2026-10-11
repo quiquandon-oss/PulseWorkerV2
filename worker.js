@@ -7301,7 +7301,199 @@ const LIVE_METRIC_PROVIDERS = {
   research_analyses_exp010_source_dialogue_validation: computeExp010LiveFields,
 };
 
-async function getResearchLabRegistry(env) {
+// ---- Unified registry additions (2026-10-11) ----
+// The D1 table research_experiment_registry stays the source for the rows it
+// already holds (EXP-004..EXP-010). Experiments that run outside it -- logged
+// selection experiments, Experiment 5, Stage 7, and the GitHub-scheduled
+// research on data branches -- are described here so the Research Lab shows
+// one complete list. A D1 row with the same experiment_id always wins. IDs
+// are new and permanent; existing record keys (e.g. research_hypotheses
+// subject 'experiment5:%') are untouched. Statuses below describe what
+// exists in code/production today; live fields come from real tables or
+// the public data branches, never from this file.
+const RESEARCH_DATA_RAW_BASE = 'https://raw.githubusercontent.com/quiquandon-oss/PulseWorkerV2';
+
+async function fetchResearchDataJson(path) {
+  const res = await fetch(`${RESEARCH_DATA_RAW_BASE}/${path}`, { cf: { cacheTtl: 1800, cacheEverything: true } });
+  if (!res.ok) throw new Error(`GitHub raw ${path}: HTTP ${res.status}`);
+  return res.json();
+}
+
+async function computeLoggedTableLiveFields(env, table, requiredSample, note) {
+  const row = await env.DB.prepare(`SELECT COUNT(*) AS n, MIN(ts) AS first_ts, MAX(ts) AS last_ts FROM ${table}`).first();
+  const n = row ? row.n : 0;
+  const insufficient = !Number.isFinite(requiredSample) || n < requiredSample;
+  return {
+    current_sample_size: n,
+    current_measured_result: n > 0 ? { logged_rows: n, first_row_ts: row.first_ts, latest_row_ts: row.last_ts, note } : 'NOT_AVAILABLE',
+    oos_result: 'NOT_AVAILABLE',
+    confidence_evidence_maturity: n === 0 ? 'UNKNOWN' : (insufficient ? 'INSUFFICIENT_SAMPLE' : 'ACCUMULATING'),
+    last_updated: row ? row.last_ts : null,
+    observed_start_ts: row ? row.first_ts : null,
+  };
+}
+
+async function computeExp023LiveFields(_env, requiredSample) {
+  const base = 'research-data/exp23-evaluation/exp23_evaluation';
+  const state = await fetchResearchDataJson(`${base}/state.json`);
+  const report = state.last_report ? await fetchResearchDataJson(`${base}/${state.last_report}/report.json`) : null;
+  const cp = report ? report.checkpoint : null;
+  const cov = report && report.decision_hours ? report.decision_hours.coverage : null;
+  return {
+    current_sample_size: cp ? cp.evaluable_events : 0,
+    current_measured_result: report ? {
+      evaluation_status: report.status,
+      labelled_hours: report.labels ? report.labels.labelled_hours : null,
+      burn_in_complete: report.labels ? report.labels.burn_in_complete : null,
+      checkpoint: cp,
+      evaluable_hours: cov ? Object.fromEntries(Object.entries(cov).map(([k, v]) => [k, v.evaluable_hours])) : null,
+      blockers: report.blockers || [],
+      last_run_status: state.last_status,
+      note: 'Preregistered checkpoint: 60 evaluable events, >= 25 per direction. No metric is computed before it is met.',
+    } : 'NOT_AVAILABLE',
+    oos_result: cp && cp.met ? 'SEE_REPORT' : 'INSUFFICIENT_SAMPLE',
+    confidence_evidence_maturity: cp && cp.met ? 'CHECKPOINT_MET' : 'INSUFFICIENT_SAMPLE',
+    last_updated: state.last_run_at ? Date.parse(state.last_run_at) : null,
+  };
+}
+
+async function computeRiskRegimeForwardLiveFields(_env) {
+  const index = await fetchResearchDataJson('research-data/risk-regime-forward/risk_regime_forward/index.json');
+  const sources = Object.fromEntries(Object.entries(index.sources || {}).map(([k, v]) => [k, {
+    complete_days: v.complete, observations: v.observations, first: v.first, last: v.last, stale: v.stale,
+  }]));
+  const oi = (index.sources || {}).binance_oi_archive || {};
+  const latest = Object.values(index.sources || {}).map(v => v.latest_complete).filter(Boolean).sort().pop() || null;
+  return {
+    current_sample_size: oi.complete || 0,
+    current_measured_result: { sources, note: 'Data collection only. The preregistered OI test needs forward data to about March 2027; no result is computed here.' },
+    oos_result: 'NOT_AVAILABLE',
+    confidence_evidence_maturity: 'COLLECTING',
+    last_updated: latest ? Date.parse(`${latest}T23:59:59Z`) : null,
+  };
+}
+
+async function computeExperiment5RegistryLiveFields(env) {
+  const o = await getResearchLabExperiment5Overview(env);
+  if (!o.activated) {
+    return { current_sample_size: 'NOT_STARTED', current_measured_result: { activated: false, reason: o.reason || null },
+      oos_result: 'NOT_AVAILABLE', confidence_evidence_maturity: 'UNKNOWN', last_updated: null };
+  }
+  return { current_sample_size: o.decisions ? o.decisions.proposed : 'NOT_AVAILABLE', current_measured_result: o,
+    oos_result: 'NOT_AVAILABLE', confidence_evidence_maturity: 'ACCUMULATING', last_updated: o.archive ? o.archive.latest_archived_ts : null };
+}
+
+const CODE_LIVE_METRIC_PROVIDERS = {
+  selection_decisions_anomaly: (env, req) => computeLoggedTableLiveFields(env, 'selection_decisions_anomaly', req,
+    'Logged-only BTC comparison against production selection; never changes chosen_variant.'),
+  selection_decisions_momentum: (env, req) => computeLoggedTableLiveFields(env, 'selection_decisions_momentum', req,
+    'A row exists only once momentum has 50+ resolved predictions; logged-only, never chosen in selection_decisions.'),
+  github_exp23_evaluation: computeExp023LiveFields,
+  github_risk_regime_forward: computeRiskRegimeForwardLiveFields,
+  research_hypotheses_experiment5: computeExperiment5RegistryLiveFields,
+};
+
+const CODE_REGISTRY_ENTRIES = [
+  { experiment_id: 'EXP-001', title: 'Anomaly-conditioned accuracy audit',
+    research_question: 'Is the k-NN core less accurate when today is flagged as a regime anomaly?',
+    purpose: 'Diagnostic audit behind EXP-002/EXP-003.', experiment_type: 'AUDIT',
+    expected_result: null, success_criterion: 'Descriptive audit; no hypothesis test.', start_date: null, target_date: null,
+    status: 'ON_DEMAND_AUDIT', baseline: 'k-NN core accuracy on non-anomaly days', required_sample: null, conclusion: null,
+    next_action: 'Read on demand at /research/anomaly-conditioned-audit.', github_refs: 'worker.js /research/anomaly-conditioned-audit',
+    data_source_table: null },
+  { experiment_id: 'EXP-002', title: 'Anomaly gate (softened selection bar on anomaly days)',
+    research_question: 'Would softening the selection significance bar on regime-anomaly days pick better variants?',
+    purpose: 'Logged-only BTC shadow of selectBestVariant.', experiment_type: 'SHADOW_SELECTION',
+    expected_result: null, success_criterion: 'Shadow choices outperform production choices on resolved outcomes.', start_date: null, target_date: null,
+    status: 'ACCUMULATING', baseline: 'Production selection_decisions', required_sample: null, conclusion: null,
+    next_action: 'Accumulate; compare at /research/anomaly-gate.', github_refs: 'worker.js logAnomalyGateExperiment',
+    data_source_table: 'selection_decisions_anomaly' },
+  { experiment_id: 'EXP-003', title: 'Momentum overlay variant (challenger_momentum)',
+    research_question: 'Does a momentum blend on anomalous trending days beat the six production variants?',
+    purpose: 'Logged-only BTC comparison.', experiment_type: 'SHADOW_SELECTION',
+    expected_result: null, success_criterion: 'Momentum LCA ranks above the production choice on resolved outcomes.', start_date: null, target_date: null,
+    status: 'ACCUMULATING', baseline: 'Production chosen variant', required_sample: 50, conclusion: null,
+    next_action: 'Accumulate; compare at /research/momentum.', github_refs: 'worker.js logMomentumSelectionExperiment',
+    data_source_table: 'selection_decisions_momentum' },
+  { experiment_id: 'EXP-011', title: 'Experiment 5 -- Agentic Market Evidence',
+    research_question: 'Can an agentic evidence pipeline propose hypotheses about V1 sentiment that survive holdout?',
+    purpose: 'Distinct from EXP-005 (V1 Source / Coefficient Research).', experiment_type: 'AGENTIC_RESEARCH',
+    expected_result: null, success_criterion: 'Hypotheses pass out-of-sample holdout.', start_date: null, target_date: null,
+    status: 'BUILT_NOT_ACTIVATED', baseline: 'V1 composite without the hypothesis', required_sample: null, conclusion: null,
+    next_action: 'Production migrations 0008/0015 not applied; staging completion in PRs #83/#84.', github_refs: 'PRs #83, #84; research/experiment5_pipeline.py',
+    data_source_table: 'research_hypotheses_experiment5', aliases: ['Experiment 5'] },
+  { experiment_id: 'EXP-012', title: 'Stage 7 -- human-controlled AI research workflow',
+    research_question: 'Can AI-assisted research responses be registered and recalculated safely under human control?',
+    purpose: 'Workflow infrastructure, staging only.', experiment_type: 'WORKFLOW',
+    expected_result: null, success_criterion: 'Staging acceptance record complete.', start_date: null, target_date: null,
+    status: 'STAGING_ONLY', baseline: null, required_sample: null, conclusion: null,
+    next_action: 'Staging only; production migration 0016 not applied. Open PRs #82/#85.', github_refs: 'PRs #82, #85; stage7-research-pipeline/',
+    data_source_table: null },
+  { experiment_id: 'EXP-023', title: 'BTC 12-hour early warning (spec v0.4.0)',
+    research_question: 'Can price, OI and funding warn of a >3% BTC move 12-36h before onset better than chance?',
+    purpose: 'Forward-only evaluation after the 2026-10-09 21:00 UTC seal.', experiment_type: 'FORWARD_EVALUATION',
+    expected_result: null, success_criterion: 'Preregistered checkpoint: 60 evaluable events, >= 25 per direction, then F1-F4 vs chance.',
+    start_date: '2026-10-09', target_date: null, status: 'ACCUMULATING', baseline: 'F0 circular-shift chance; F1 price-only',
+    required_sample: 60, conclusion: null, next_action: 'Daily 12:10 UTC evaluation; F3/F4 wait for Binance funding archive.',
+    github_refs: '.github/workflows/exp23-forward-evaluation.yml; branch research-data/exp23-evaluation',
+    data_source_table: 'github_exp23_evaluation' },
+  { experiment_id: 'EXP-024', title: 'Risk-regime forward data collection (OI / funding)',
+    research_question: 'Collect forward OI and funding to test the preregistered OI hypothesis (46c0d52b).',
+    purpose: 'Data collection feeding EXP-023 and the OI preregistration.', experiment_type: 'DATA_COLLECTION',
+    expected_result: null, success_criterion: 'Complete daily partitions without gaps until the preregistered horizon.',
+    start_date: '2026-10-06', target_date: null, status: 'COLLECTING', baseline: null, required_sample: null, conclusion: null,
+    next_action: 'Daily 10:40 UTC collection.', github_refs: '.github/workflows/research-forward-schedule.yml; branch research-data/risk-regime-forward',
+    data_source_table: 'github_risk_regime_forward' },
+];
+
+const REGISTRY_DISPLAY_LABELS = {
+  'EXP-005': 'EXP-005 · V1 Source / Coefficient Research (not Experiment 5)',
+  'EXP-011': 'EXP-011 · Experiment 5 — Agentic Market Evidence',
+};
+
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+// Single number to compare against required_sample: EXP-004 reports
+// per-horizon resolved counts (the bar is per horizon, so the minimum).
+function registryProgressCount(sample) {
+  if (Number.isFinite(sample)) return sample;
+  if (sample && Array.isArray(sample.by_horizon) && sample.by_horizon.length) {
+    return Math.min(...sample.by_horizon.map(h => h.resolved || 0));
+  }
+  return null;
+}
+
+// Linear projection from the observed rate since start; only when there is
+// a start, a defined requirement and at least one unit of progress.
+function registryEta(entry, progress, nowTs) {
+  const required = entry.required_sample;
+  if (!Number.isFinite(required)) return { estimable: false, reason: 'No required sample defined.' };
+  if (progress == null) return { estimable: false, reason: 'No measurable progress count yet.' };
+  if (progress >= required) return { estimable: true, reached: true, progress, required };
+  const startTs = entry.observed_start_ts || (entry.start_date ? Date.parse(`${entry.start_date}T00:00:00Z`) : NaN);
+  if (!Number.isFinite(startTs)) return { estimable: false, reason: 'No start date recorded.', progress, required };
+  if (progress <= 0) return { estimable: false, reason: 'No progress yet, so no observed rate.', progress, required };
+  const elapsedDays = (nowTs - startTs) / DAY_MS;
+  if (elapsedDays < 3) return { estimable: false, reason: 'Fewer than 3 days of history.', progress, required };
+  const ratePerDay = progress / elapsedDays;
+  const etaTs = nowTs + ((required - progress) / ratePerDay) * DAY_MS;
+  return { estimable: true, reached: false, progress, required, rate_per_day: Number(ratePerDay.toFixed(3)),
+    eta_date: new Date(etaTs).toISOString().slice(0, 10), basis: 'Linear projection of the observed rate; not a commitment.' };
+}
+
+function decorateRegistryEntry(entry, live, hasProvider, nowTs) {
+  const merged = { ...entry, ...live };
+  const progress = registryProgressCount(merged.current_sample_size);
+  merged.display_label = REGISTRY_DISPLAY_LABELS[entry.experiment_id] || `${entry.experiment_id} · ${entry.title}`;
+  merged.registry_updated_ts = entry.updated_ts ?? null;
+  merged.data_last_updated = hasProvider ? (live.last_updated ?? null) : null;
+  merged.progress_count = progress;
+  merged.eta = registryEta(merged, progress, nowTs);
+  merged.suggested_status = (merged.status === 'ACCUMULATING' && merged.eta.reached) ? 'READY_FOR_ANALYSIS' : null;
+  return merged;
+}
+
+async function getResearchLabRegistry(env, nowTs = Date.now()) {
   const rows = await env.DB.prepare(
     `SELECT experiment_id, title, research_question, purpose, experiment_type,
             expected_result, success_criterion, start_date, target_date, status,
@@ -7344,9 +7536,32 @@ async function getResearchLabRegistry(env) {
         };
       }
     }
-    experiments.push({ ...row, ...live });
+    experiments.push(decorateRegistryEntry({ ...row, registry_source: 'd1' }, live, !!provider, nowTs));
   }
   return { ok: true, experiments };
+}
+
+// /api/research-lab/registry: the D1 registry plus the code-defined entries
+// above (a D1 row with the same id wins), sorted by id.
+async function getUnifiedResearchRegistry(env, nowTs = Date.now()) {
+  const { experiments } = await getResearchLabRegistry(env, nowTs);
+  const d1Ids = new Set(experiments.map(e => e.experiment_id));
+  for (const entry of CODE_REGISTRY_ENTRIES) {
+    if (d1Ids.has(entry.experiment_id)) continue;
+    const provider = entry.data_source_table ? CODE_LIVE_METRIC_PROVIDERS[entry.data_source_table] : null;
+    let live = { current_sample_size: 'NOT_STARTED', current_measured_result: 'NOT_AVAILABLE', oos_result: 'NOT_AVAILABLE',
+      confidence_evidence_maturity: 'UNKNOWN', last_updated: null };
+    if (provider) {
+      try { live = await provider(env, entry.required_sample); }
+      catch (err) {
+        live = { current_sample_size: 'NOT_AVAILABLE', current_measured_result: 'NOT_AVAILABLE', oos_result: 'NOT_AVAILABLE',
+          confidence_evidence_maturity: 'UNKNOWN', last_updated: null, live_error: String(err).slice(0, 200) };
+      }
+    }
+    experiments.push(decorateRegistryEntry({ ...entry, registry_source: 'code', created_ts: null, updated_ts: null }, live, !!provider, nowTs));
+  }
+  experiments.sort((a, b) => a.experiment_id.localeCompare(b.experiment_id));
+  return { ok: true, generated_ts: nowTs, experiments };
 }
 
 // ---- EXPERIMENT 5: agentic market evidence (research-lab UI layer) ----
@@ -10277,7 +10492,7 @@ export default {
 
     if (url.pathname === '/api/research-lab/registry' && request.method === 'GET') {
       try {
-        const result = await getResearchLabRegistry(env);
+        const result = await getUnifiedResearchRegistry(env);
         return new Response(JSON.stringify(result), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
       } catch (err) {
         return new Response(JSON.stringify({ ok: false, error: String(err) }), { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });

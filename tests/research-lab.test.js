@@ -12,10 +12,10 @@ describe('Research Lab — read-only research API helpers', () => {
   let scope;
   beforeAll(() => {
     scope = evalInScope(
-      extractFunctions('computeExperiment4TimesFmLiveFields', 'computeExp005LiveFields', 'computeExp009LiveFields', 'computeExp010LiveFields', 'getResearchLabRegistry') + '\n' +
+      extractFunctions('computeExperiment4TimesFmLiveFields', 'computeExp005LiveFields', 'computeExp009LiveFields', 'computeExp010LiveFields', 'getResearchLabRegistry', 'decorateRegistryEntry', 'registryEta', 'registryProgressCount') + '\n' +
       extractConstants('SOURCE_TOPIC_AFFINITY_DISPLAY', 'REACTION_HORIZONS_MS',
         'REACTION_GOOD_QUALITY_FRACTION', 'REACTION_APPROXIMATE_QUALITY_FRACTION', 'BTC_SERIES_WINDOW_MS',
-        'REQUIRED_SAMPLE_FALLBACK', 'EXP005_SUBJECT', 'EXP009_SUBJECT', 'EXP010_SUBJECT', 'LIVE_METRIC_PROVIDERS',
+        'REQUIRED_SAMPLE_FALLBACK', 'REGISTRY_DISPLAY_LABELS', 'DAY_MS', 'EXP005_SUBJECT', 'EXP009_SUBJECT', 'EXP010_SUBJECT', 'LIVE_METRIC_PROVIDERS',
         'EXPERIMENT5_KNOWN_V1_SOURCE_IDS', 'SOURCE_EFFECTIVENESS_SUBJECT', 'SOURCE_EFFECTIVENESS_HORIZONS',
         'SOURCE_EFFECTIVENESS_MIN_SAMPLE_LEVEL2', 'SOURCE_EFFECTIVENESS_MIN_SAMPLE_LEVEL3',
         'SOURCE_EFFECTIVENESS_CONFIGURED_WINDOW_DAYS') + '\n' +

@@ -7379,8 +7379,10 @@ async function computeExperiment5RegistryLiveFields(env) {
     return { current_sample_size: 'NOT_STARTED', current_measured_result: { activated: false, reason: o.reason || null },
       oos_result: 'NOT_AVAILABLE', confidence_evidence_maturity: 'UNKNOWN', last_updated: null };
   }
-  return { current_sample_size: o.decisions ? o.decisions.proposed : 'NOT_AVAILABLE', current_measured_result: o,
-    oos_result: 'NOT_AVAILABLE', confidence_evidence_maturity: 'ACCUMULATING', last_updated: o.archive ? o.archive.latest_archived_ts : null };
+  // Activated in production: the stored entry's BUILT_NOT_ACTIVATED no longer applies.
+  return { status: 'ACCUMULATING', current_sample_size: o.decisions ? o.decisions.proposed : 'NOT_AVAILABLE', current_measured_result: o,
+    oos_result: 'NOT_AVAILABLE', confidence_evidence_maturity: 'ACCUMULATING', last_updated: o.archive ? o.archive.latest_archived_ts : null,
+    next_action: 'Production archive and hypothesis decisions accumulating; staging completion work remains in PRs #83/#84.' };
 }
 
 // Tables created by the Pulse Worker (V1) in the shared D1; until its first
@@ -7441,7 +7443,7 @@ const CODE_REGISTRY_ENTRIES = [
     purpose: 'Distinct from EXP-005 (V1 Source / Coefficient Research).', experiment_type: 'AGENTIC_RESEARCH',
     expected_result: null, success_criterion: 'Hypotheses pass out-of-sample holdout.', start_date: null, target_date: null,
     status: 'BUILT_NOT_ACTIVATED', baseline: 'V1 composite without the hypothesis', required_sample: null, conclusion: null,
-    next_action: 'Production migrations 0008/0015 not applied; staging completion in PRs #83/#84.', github_refs: 'PRs #83, #84; research/experiment5_pipeline.py',
+    next_action: 'Shown as BUILT_NOT_ACTIVATED only while its production tables are missing; staging completion in PRs #83/#84.', github_refs: 'PRs #83, #84; research/experiment5_pipeline.py',
     data_source_table: 'research_hypotheses_experiment5', aliases: ['Experiment 5'] },
   { experiment_id: 'EXP-012', title: 'Stage 7 -- human-controlled AI research workflow',
     research_question: 'Can AI-assisted research responses be registered and recalculated safely under human control?',

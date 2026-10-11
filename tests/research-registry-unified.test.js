@@ -116,6 +116,19 @@ describe('getResearchLabRegistry -- unified list', () => {
   });
 });
 
+describe('EXP-011 status follows the live activation check', () => {
+  it('ACCUMULATING once Experiment 5 is activated in production', async () => {
+    const scope = evalInScope(
+      extractFunctions('getUnifiedResearchRegistry', 'getResearchLabRegistry', 'computeSnapshotTableLiveFields', 'fetchResearchDataJson', 'computeLoggedTableLiveFields',
+        'computeExp023LiveFields', 'computeRiskRegimeForwardLiveFields', 'computeExperiment5RegistryLiveFields', 'registryProgressCount', 'registryEta', 'decorateRegistryEntry') + '\n' +
+      extractConstants('RESEARCH_DATA_RAW_BASE', 'CODE_LIVE_METRIC_PROVIDERS', 'CODE_REGISTRY_ENTRIES', 'REGISTRY_DISPLAY_LABELS', 'DAY_MS'),
+      { fetch: okFetch, LIVE_METRIC_PROVIDERS: {},
+        getResearchLabExperiment5Overview: async () => ({ ok: true, activated: true, archive: { latest_archived_ts: NOW - 3600000 }, decisions: { proposed: 4 } }) });
+    const out = await scope.getUnifiedResearchRegistry({ DB: db([]) }, NOW);
+    expect(out.experiments.find(e => e.experiment_id === 'EXP-011')).toMatchObject({ status: 'ACCUMULATING', current_sample_size: 4, data_last_updated: NOW - 3600000 });
+  });
+});
+
 describe('snapshot-table providers (tables created by the Pulse Worker)', () => {
   it('a not-yet-created table is NOT_STARTED, an existing one reports its snapshot count', async () => {
     const { getUnifiedResearchRegistry } = load(okFetch);

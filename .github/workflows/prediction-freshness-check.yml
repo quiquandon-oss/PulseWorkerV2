@@ -1,0 +1,38 @@
+name: Prediction Freshness Check
+
+# Read-only, on-demand check that the 3h cron is persisting predictions.
+# One GET to the public /prediction-freshness endpoint (aggregate queries,
+# no writes); the result goes to the job summary and the job log. No secrets,
+# no D1 credentials, no deploy, cannot start any other workflow.
+on:
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Read /prediction-freshness
+        run: |
+          set -euo pipefail
+          curl -sS --fail --max-time 60 https://pulseworker-v2.quiquandon.workers.dev/prediction-freshness -o fresh.json
+          python3 - <<'PY' | tee -a "$GITHUB_STEP_SUMMARY"
+          import json, datetime as d
+          j = json.load(open('fresh.json'))
+          f = lambda t: d.datetime.fromtimestamp(t / 1000, d.UTC).strftime('%Y-%m-%d %H:%M:%SZ') if t else '-'
+          print(f"generated {f(j['generated_ts'])}; expected cron ticks per 24h: {j['expected_cron_ticks_24h']}\n")
+          print('| coin | h | path | latest | status | rows 24h | cron rows 24h | latest cron row | commit |')
+          print('|---|---|---|---|---|---|---|---|---|')
+          for c, v in j['coins'].items():
+              for h, x in v['horizons'].items():
+                  for p in ('core', 'challenger'):
+                      y = x[p]
+                      print(f"| {c} | {h} | {p} | {f(y['latest_ts'])} | {y['status']} | {y['rows_24h']} | {y['cron_rows_24h']} | {f(y['latest_cron_ts'])} | {(y['latest_git_commit_sha'] or '-')[:7]} |")
+          print()
+          for c, v in j['coins'].items():
+              print(f"- {c} price table {v['price_data']['table']}: latest {f(v['price_data']['latest_ts'])}")
+          PY
+          echo '--- raw ---'; cat fresh.json

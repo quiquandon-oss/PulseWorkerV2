@@ -1,0 +1,88 @@
+# Deploys the isolated cryptopulse-research-dispatcher Worker (dispatcher/), never pulseworker-v2.
+# Triggers only on pushes to main that touch dispatcher/ or this file (deploy.yml's path filter does not match
+# them, so the prediction Worker is not redeployed). Secrets are piped to wrangler, never echoed.
+#
+# Live dispatch is enabled only when BOTH GitHub Actions secrets exist:
+#   RESEARCH_DISPATCH_GITHUB_TOKEN  fine-grained PAT: resource owner quiquandon-oss, repository PulseWorkerV2 only,
+#                                   permissions Actions: Read and write (Metadata: Read is implied); nothing else
+#   RESEARCH_DISPATCH_OWNER_KEY     random owner key (>= 32 chars); the Worker stores only its SHA-256
+# Without them the Worker is deployed with dispatch disabled (every POST /dispatch returns 503).
+name: Deploy research dispatcher
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'dispatcher/**'
+      - '.github/workflows/deploy-research-dispatcher.yml'
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-research-dispatcher
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      BASE: https://cryptopulse-research-dispatcher.quiquandon.workers.dev
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+      - run: npm ci
+      - name: Dispatcher tests
+        run: npx vitest run dispatcher
+      - name: Deploy dispatcher Worker
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: npx --yes wrangler@4 deploy -c dispatcher/wrangler.toml --var GIT_COMMIT_SHA:${{ github.sha }}
+      - name: Provision dispatcher secrets (only if both GitHub secrets exist)
+        id: secrets
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          GH_DISPATCH_TOKEN: ${{ secrets.RESEARCH_DISPATCH_GITHUB_TOKEN }}
+          OWNER_KEY: ${{ secrets.RESEARCH_DISPATCH_OWNER_KEY }}
+        run: |
+          if [ -n "$GH_DISPATCH_TOKEN" ] && [ -n "$OWNER_KEY" ]; then
+            [ ${#OWNER_KEY} -ge 32 ] || { echo "::error::RESEARCH_DISPATCH_OWNER_KEY must be at least 32 characters. Nothing was provisioned."; exit 1; }
+            printf '%s' "$GH_DISPATCH_TOKEN" | npx --yes wrangler@4 secret put GITHUB_DISPATCH_TOKEN -c dispatcher/wrangler.toml
+            printf '%s' "$OWNER_KEY" | sha256sum | cut -d' ' -f1 | tr -d '\n' | npx --yes wrangler@4 secret put OWNER_KEY_SHA256 -c dispatcher/wrangler.toml
+            echo "provisioned=true" >> "$GITHUB_OUTPUT"
+            echo "Dispatcher secrets provisioned."
+          else
+            # Overwrite with inert placeholders so a previously provisioned credential cannot stay active.
+            printf '%s' 'disabled' | npx --yes wrangler@4 secret put GITHUB_DISPATCH_TOKEN -c dispatcher/wrangler.toml
+            printf '%s' 'disabled' | npx --yes wrangler@4 secret put OWNER_KEY_SHA256 -c dispatcher/wrangler.toml
+            echo "provisioned=false" >> "$GITHUB_OUTPUT"
+            echo "Dispatcher secrets not provisioned: live dispatch is disabled."
+          fi
+      - name: Access-control checks (status codes only)
+        env:
+          EXPECT_ENABLED: ${{ steps.secrets.outputs.provisioned }}
+        run: |
+          set -u
+          sleep 15
+          fail=0
+          code() { curl -sS -o /dev/null -w '%{http_code}' --max-time 20 "$@"; }
+          h=$(curl -sS --max-time 20 "$BASE/health")
+          ver=$(printf '%s' "$h" | python3 -c 'import json,sys; j=json.load(sys.stdin); print(j["version"])')
+          en=$(printf '%s' "$h" | python3 -c 'import json,sys; j=json.load(sys.stdin); print(str(j["dispatch_enabled"]).lower())')
+          echo "health: version=$ver dispatch_enabled=$en"
+          [ "$ver" = "${{ github.sha }}" ] || { echo "::error::deployed version $ver != ${{ github.sha }}"; fail=1; }
+          [ "$en" = "$EXPECT_ENABLED" ] || { echo "::error::dispatch_enabled=$en, expected $EXPECT_ENABLED"; fail=1; }
+          body='{"job":"prediction-freshness-check","confirm":true}'
+          want=$([ "$EXPECT_ENABLED" = true ] && echo 401 || echo 503)
+          c=$(code -X POST "$BASE/dispatch" -H 'Content-Type: application/json' -d "$body"); echo "POST /dispatch without credentials: $c (want $want)"; [ "$c" = "$want" ] || fail=1
+          c=$(code -X POST "$BASE/dispatch" -H 'Authorization: Bearer not-the-owner-key-not-the-owner-key' -H 'Content-Type: application/json' -d "$body"); echo "POST /dispatch with a wrong key: $c (want $want)"; [ "$c" = "$want" ] || fail=1
+          c=$(code -X POST "$BASE/dispatch" -H 'Origin: https://evil.example' -H 'Content-Type: application/json' -d "$body"); echo "POST /dispatch from another origin: $c (want 403)"; [ "$c" = 403 ] || fail=1
+          c=$(code -X OPTIONS "$BASE/dispatch" -H 'Origin: https://evil.example'); echo "preflight from another origin: $c (want 403)"; [ "$c" = 403 ] || fail=1
+          c=$(code -X OPTIONS "$BASE/dispatch" -H 'Origin: https://quiquandon-oss.github.io'); echo "preflight from the V3 origin: $c (want 204)"; [ "$c" = 204 ] || fail=1
+          c=$(code "$BASE/audit"); echo "GET /audit without credentials: $c (want $want)"; [ "$c" = "$want" ] || fail=1
+          exit $fail

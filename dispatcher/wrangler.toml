@@ -1,0 +1,24 @@
+# cryptopulse-research-dispatcher -- dedicated Worker, isolated from pulseworker-v2.
+# No D1, KV or service bindings: its only storage is its own Durable Object (rate limits, locks,
+# append-only audit) and its only outbound calls go to api.github.com for quiquandon-oss/PulseWorkerV2.
+# Secrets (set by .github/workflows/deploy-research-dispatcher.yml from GitHub Actions secrets):
+#   GITHUB_DISPATCH_TOKEN  fine-grained PAT, repository PulseWorkerV2 only, Actions: read and write
+#   OWNER_KEY_SHA256       SHA-256 (hex) of the owner dispatch key; the key itself is never stored here
+name = "cryptopulse-research-dispatcher"
+main = "index.js"
+compatibility_date = "2025-01-01"
+workers_dev = true
+
+[vars]
+GIT_COMMIT_SHA = "unknown"
+
+[[durable_objects.bindings]]
+name = "GUARD"
+class_name = "DispatchGuard"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["DispatchGuard"]
+
+[observability.logs]
+enabled = true

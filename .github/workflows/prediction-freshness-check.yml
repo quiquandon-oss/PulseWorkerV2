@@ -55,3 +55,23 @@ jobs:
               eta_s = ('met' if eta.get('reached') else eta.get('eta_date')) if eta.get('estimable') else 'n/a'
               print(f"| {e['experiment_id']} | {e.get('status')} | {e.get('suggested_status') or ''} | {e.get('progress_count')}/{e.get('required_sample')} | {e.get('data_last_updated')} | {eta_s} | {(e.get('live_error') or '')[:60]} |")
           PY
+      - name: V4 public portfolio exposure (status, counts and field names only -- no values)
+        if: always()
+        run: |
+          set -uo pipefail
+          for p in portfolio portfolio/transactions portfolio/assets portfolio/history; do
+            code=$(curl -sS --max-time 60 -o v4.json -w '%{http_code}' "https://cryptopulse-v4.quiquandon.workers.dev/api/$p" || echo ERR)
+            python3 - "$p" "$code" <<'PY' | tee -a "$GITHUB_STEP_SUMMARY"
+          import json, sys
+          p, code = sys.argv[1], sys.argv[2]
+          try:
+              j = json.load(open('v4.json'))
+          except Exception:
+              print(f"- /api/{p}: HTTP {code}, non-JSON body"); sys.exit()
+          def shape(v):
+              if isinstance(v, list): return f"list[{len(v)}]" + (f" of {{{', '.join(sorted(v[0].keys()))}}}" if v and isinstance(v[0], dict) else '')
+              if isinstance(v, dict): return '{' + ', '.join(sorted(v.keys())) + '}'
+              return type(v).__name__
+          print(f"- /api/{p}: HTTP {code}; top-level: " + '; '.join(f"{k}: {shape(v)}" for k, v in j.items()))
+          PY
+          done

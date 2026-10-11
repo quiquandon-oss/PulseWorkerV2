@@ -7,6 +7,7 @@
 name = "cryptopulse-research-dispatcher"
 main = "index.js"
 compatibility_date = "2025-01-01"
+account_id = "f58e761fbc8e62dc404d8684290af264"   # same account as pulseworker-v2 (wrangler.toml); the CI token cannot list memberships
 workers_dev = true
 
 [vars]

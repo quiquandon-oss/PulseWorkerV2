@@ -4473,6 +4473,77 @@ async function getChallengerCalibrationHistory(env, coin, horizonHours) {
   return { ok: true, coin, horizon_hours: horizonHours, points };
 }
 
+// ---- Prediction persistence freshness (read-only monitoring) ----
+// Answers "is the 3h cron actually persisting predictions?" without reading
+// whole tables: per coin and horizon, the latest core and Challenger row,
+// how many rows landed in the last 24h, how many of those are on the 3h cron
+// grid (written by scheduled(), whose rows are stamped within a few minutes
+// of 00/03/.../21 UTC -- live stale-refresh rows land at arbitrary minutes),
+// and which deployed commit wrote the latest row. Plus each price table's
+// latest row, since the cron refreshes those before predicting. Small
+// aggregate queries over tables of a few thousand rows; no writes.
+const FRESHNESS_COINS = [
+  { coin: 'BTC', core: 'predictions', price: 'btc_data' },
+  { coin: 'ETH', core: 'eth_predictions', price: 'eth_data' },
+  { coin: 'LINK', core: 'link_predictions', price: 'link_data' },
+];
+const CRON_TICK_MS = 3 * 60 * 60 * 1000;
+const CRON_GRID_SLACK_MS = 5 * 60 * 1000;
+const FRESHNESS_STALE_MS = 6 * 60 * 60 * 1000; // same 6h bound isRecentDataStale uses
+
+function isCronGridTs(ts) {
+  return Number.isFinite(ts) && (ts % CRON_TICK_MS) < CRON_GRID_SLACK_MS;
+}
+
+function summarizeFreshness(rows, latestTs, nowTs) {
+  const recent = rows.filter(r => r.ts > nowTs - 24 * 60 * 60 * 1000);
+  const latestRow = rows.length ? rows.reduce((a, b) => (b.ts > a.ts ? b : a)) : null;
+  const cronTs = rows.filter(r => isCronGridTs(r.ts)).map(r => r.ts);
+  return {
+    latest_ts: latestTs ?? null,
+    latest_age_hours: latestTs != null ? Number(((nowTs - latestTs) / 3600000).toFixed(2)) : null,
+    rows_24h: recent.length,
+    cron_rows_24h: recent.filter(r => isCronGridTs(r.ts)).length,
+    latest_cron_ts: cronTs.length ? Math.max(...cronTs) : null,
+    latest_git_commit_sha: latestRow && latestRow.ts === latestTs ? (latestRow.git_commit_sha || null) : null,
+    status: latestTs == null ? 'NONE' : (nowTs - latestTs > FRESHNESS_STALE_MS ? 'STALE' : 'FRESH'),
+  };
+}
+
+async function getPredictionFreshness(env, nowTs = Date.now()) {
+  const since = nowTs - 48 * 60 * 60 * 1000;
+  const out = { ok: true, generated_ts: nowTs, expected_cron_ticks_24h: 8, cron_grid_slack_minutes: CRON_GRID_SLACK_MS / 60000, coins: {} };
+  const challengerRows = (await env.DB.prepare(
+    'SELECT coin, horizon_hours, ts, git_commit_sha FROM challenger_predictions WHERE ts >= ?'
+  ).bind(since).all()).results;
+  const challengerLatest = (await env.DB.prepare(
+    'SELECT coin, horizon_hours, MAX(ts) AS latest FROM challenger_predictions GROUP BY coin, horizon_hours'
+  ).all()).results;
+  for (const { coin, core, price } of FRESHNESS_COINS) {
+    const coreRows = (await env.DB.prepare(
+      `SELECT horizon_hours, ts, git_commit_sha FROM ${core} WHERE ts >= ?`
+    ).bind(since).all()).results;
+    const coreLatest = (await env.DB.prepare(
+      `SELECT horizon_hours, MAX(ts) AS latest FROM ${core} GROUP BY horizon_hours`
+    ).all()).results;
+    const priceRow = await env.DB.prepare(`SELECT MAX(ts) AS latest FROM ${price}`).first();
+    const coinOut = {
+      price_data: { table: price, latest_ts: priceRow ? priceRow.latest : null,
+        latest_age_hours: priceRow && priceRow.latest != null ? Number(((nowTs - priceRow.latest) / 3600000).toFixed(2)) : null },
+      horizons: {},
+    };
+    for (const h of [12, 24]) {
+      const cl = coreLatest.find(r => r.horizon_hours === h);
+      const ch = challengerLatest.find(r => r.coin === coin && r.horizon_hours === h);
+      const core24 = summarizeFreshness(coreRows.filter(r => r.horizon_hours === h), cl ? cl.latest : null, nowTs);
+      const chal24 = summarizeFreshness(challengerRows.filter(r => r.coin === coin && r.horizon_hours === h), ch ? ch.latest : null, nowTs);
+      coinOut.horizons[h] = { core: core24, challenger: chal24 };
+    }
+    out.coins[coin] = coinOut;
+  }
+  return out;
+}
+
 async function getChallengerRecent(env, limit = 20) {
   const { results } = await env.DB.prepare(
     'SELECT * FROM challenger_predictions ORDER BY ts DESC LIMIT ?'
@@ -9700,6 +9771,16 @@ export default {
     }
 
     // ---- GET /challenger-recent?limit=20 ----
+    // ---- GET /prediction-freshness -- read-only persistence monitor (see getPredictionFreshness)
+    if (url.pathname === '/prediction-freshness' && request.method === 'GET') {
+      try {
+        const result = await getPredictionFreshness(env);
+        return new Response(JSON.stringify(result), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+      } catch (err) {
+        return new Response(JSON.stringify({ ok: false, error: String(err) }), { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+      }
+    }
+
     if (url.pathname === '/challenger-recent' && request.method === 'GET') {
       try {
         const limit = Math.min(100, parseInt(url.searchParams.get('limit') || '20', 10));

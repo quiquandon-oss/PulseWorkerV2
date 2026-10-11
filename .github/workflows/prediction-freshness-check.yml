@@ -36,3 +36,22 @@ jobs:
               print(f"- {c} price table {v['price_data']['table']}: latest {f(v['price_data']['latest_ts'])}")
           PY
           echo '--- raw ---'; cat fresh.json
+      - name: Read V1 /hl-oi and the Research Lab registry (read-only)
+        if: always()
+        run: |
+          set -uo pipefail
+          echo '## V1 /hl-oi' >> "$GITHUB_STEP_SUMMARY"
+          curl -sS --max-time 60 https://sentiment-ff75.quiquandon.workers.dev/hl-oi | tee hloi.json | tee -a "$GITHUB_STEP_SUMMARY"; echo
+          echo >> "$GITHUB_STEP_SUMMARY"
+          curl -sS --max-time 90 https://pulseworker-v2.quiquandon.workers.dev/api/research-lab/registry -o registry.json
+          python3 - <<'PY' | tee -a "$GITHUB_STEP_SUMMARY"
+          import json
+          j = json.load(open('registry.json'))
+          print('\n## Research Lab registry\n')
+          print('| id | status | suggested | progress | data updated | eta | live error |')
+          print('|---|---|---|---|---|---|---|')
+          for e in j.get('experiments', []):
+              eta = e.get('eta') or {}
+              eta_s = ('met' if eta.get('reached') else eta.get('eta_date')) if eta.get('estimable') else 'n/a'
+              print(f"| {e['experiment_id']} | {e.get('status')} | {e.get('suggested_status') or ''} | {e.get('progress_count')}/{e.get('required_sample')} | {e.get('data_last_updated')} | {eta_s} | {(e.get('live_error') or '')[:60]} |")
+          PY

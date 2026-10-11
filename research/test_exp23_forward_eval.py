@@ -257,11 +257,45 @@ def _common_isolation(p):
     return wf, refs
 
 
+def _code_lines(p_or_text):
+    text = p_or_text if isinstance(p_or_text, str) else p_or_text.read_text()
+    text = text[text.index("name: exp23-forward-evaluation"):]                                    # header may differ
+    return [line.split("#", 1)[0].rstrip() for line in text.splitlines()]
+
+
+def assert_installed_copy_matches_template(installed):
+    wf, refs = _common_isolation(installed)
+    assert set(wf["on"]) == {"schedule"} and wf["on"]["schedule"] == [{"cron": "10 12 * * *"}]
+    assert re.fullmatch(r"[0-9a-f]{40}", refs["code"])                                            # immutable pin
+    pinned = STUB.read_text().replace("ref: EXP23_EVAL_CODE_SHA", f"ref: {refs['code']}", 1)
+    assert _code_lines(installed) == _code_lines(pinned)                                          # nothing else differs
+
+
+def test_installed_copy_check_accepts_a_pinned_copy_and_rejects_drift(tmp_path):
+    sha = "111eea180f897ecf5eff2df2316e45c842ef00d6"
+    body = STUB.read_text()
+    good = tmp_path / "good.yml"
+    good.write_text("# header\n" + body.replace("ref: EXP23_EVAL_CODE_SHA", f"ref: {sha}   # pinned", 1))
+    assert_installed_copy_matches_template(good)
+    for bad_body in (body,                                                                        # unpinned
+                     body.replace("ref: EXP23_EVAL_CODE_SHA", "ref: main", 1),                    # floating ref
+                     body.replace("ref: EXP23_EVAL_CODE_SHA", f"ref: {sha}", 1)
+                         .replace("cron: '10 12 * * *'", "cron: '10 * * * *'"),                  # other schedule
+                     body.replace("ref: EXP23_EVAL_CODE_SHA", f"ref: {sha}", 1)
+                         .replace("timeout-minutes: 20", "timeout-minutes: 30")):                 # any other drift
+        bad = tmp_path / "bad.yml"
+        bad.write_text(bad_body)
+        with pytest.raises(AssertionError):
+            assert_installed_copy_matches_template(bad)
+
+
 def test_schedule_stub_is_inert_and_isolated():
     wf, refs = _common_isolation(STUB)
     assert set(wf["on"]) == {"schedule"} and wf["on"]["schedule"] == [{"cron": "10 12 * * *"}]
-    assert not (ROOT / ".github" / "workflows" / "exp23-forward-evaluation.yml").exists()        # not installed
-    assert refs["code"] == "EXP23_EVAL_CODE_SHA"                                                  # needs a reviewed SHA
+    assert refs["code"] == "EXP23_EVAL_CODE_SHA"                                                  # template: no SHA
+    installed = ROOT / ".github" / "workflows" / "exp23-forward-evaluation.yml"                   # lives on main only
+    if installed.exists():
+        assert_installed_copy_matches_template(installed)
     fwd = ROOT / ".github" / "workflows" / "research-forward-schedule.yml"
     if fwd.exists():
         assert load(fwd)["on"]["schedule"] == [{"cron": "40 10 * * *"}]                           # runs 90 min later

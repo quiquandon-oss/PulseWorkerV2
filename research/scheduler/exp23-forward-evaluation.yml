@@ -1,9 +1,11 @@
-# RESEARCH ONLY -- EXP-23 BTC 12-hour early warning: DAILY FORWARD EVALUATION. INERT STUB: not installed.
+# RESEARCH ONLY -- EXP-23 BTC 12-hour early warning: DAILY FORWARD EVALUATION. REVIEWED TEMPLATE (inert here).
 #
-# GitHub runs `schedule` only from a workflow on the default branch. This file sits in research/scheduler/ and does
-# nothing until a human, after review, copies it to .github/workflows/ on main and replaces EXP23_EVAL_CODE_SHA with
-# the reviewed 40-hex research commit. Data access and the push permission were verified by the push-triggered
-# twin .github/workflows/exp23-forward-evaluation-verify.yml on branch claude/epic-planck-uyapsw-exp23-eval.
+# GitHub runs `schedule` only from a workflow on the default branch, so this file does nothing where it sits. It is the
+# reviewed template of the live copy installed on main (commit 3aff884, 2026-10-10) as
+# .github/workflows/exp23-forward-evaluation.yml, identical except for its header and EXP23_EVAL_CODE_SHA replaced by
+# the reviewed research commit 111eea180f897ecf5eff2df2316e45c842ef00d6. Changing this template changes nothing live:
+# the installed copy only changes through a reviewed commit to main. Data access and the push permission were
+# verified by the push-triggered twin .github/workflows/exp23-forward-evaluation-verify.yml on this branch.
 #
 # Daily at 12:10 UTC: 90 min after the forward collection (10:40) and clear of the 11:40 V1 progress stub. If the
 # collection is late, the run is a NO_NEW_DATA no-op and the next day picks the data up.

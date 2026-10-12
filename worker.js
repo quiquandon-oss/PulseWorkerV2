@@ -7594,6 +7594,156 @@ async function getResearchLabRegistry(env, nowTs = Date.now()) {
   return { ok: true, experiments };
 }
 
+// ---- Evaluation dimensions: standalone outcome vs pool contribution (2026-10-12) ----
+// Two independent questions per experiment, never derived from each other:
+//   standalone_evaluations -- did the experiment's own frozen hypothesis/plan show value?
+//   pool_component / pool_evaluations -- does its component add value to a defined pool?
+// Rows come from research_standalone_evaluations / research_pool_evaluations (migration 0022, append-only,
+// NOT applied as of this change) plus the code-defined records below, which state today's truthful position.
+// No pool protocol is approved, so no record here is conclusive; readers (CryptoPulseV3 api/pool.js) re-check
+// every conclusive claim against an approved protocol before showing it. Additive fields only: clients that
+// ignore them see exactly the previous payload.
+const EVAL_RECORDED_TS = 1791763200000; // 2026-10-12T00:00:00Z
+const EVAL_RECORDED_BY = 'Research audit 2026-10-12 (read-only; no production D1 access)';
+const CODE_EVALUATION_RECORDS = {
+  'EXP-004': {
+    standalone: [{
+      record_id: 'code:EXP-004:standalone:1', evaluation_version: 'exp004-standalone-v1',
+      spec_ref: '.ai/migrations/0010_research_experiment_registry.sql (EXP-004 success_criterion)',
+      spec_sha256: '902fe68e5523a8fd018033610f6969106b88a0ad8542d0f211d60a276acf9aa2', plan_sha256: null,
+      evaluation_status: 'BLOCKED', scientific_outcome: null,
+      reason: 'The frozen criterion requires a pre-registered, out-of-sample-validated improvement over both the always-UP and persistence baselines, replicated. No pre-registered out-of-sample test (split, test statistic, alpha) exists in the repository, and the resolved forecasts exist only in production D1 (experiment_4_timesfm), which this evaluation is not authorized to read. Meeting the 30-per-horizon floor is eligibility, not success.',
+      sample: { count: null, required: 30, meaning: 'progress_count = the minimum, across the 12h and 24h horizons, of resolved forecasts; required 30 is a heuristic floor, not a statistical threshold' },
+      window: null, out_of_sample: null, baseline: 'Always-UP and last-tick persistence on the identical resolved rows',
+      metrics: null, uncertainty: null,
+      checks: ['Frozen criterion read from migration 0010 (file sha256 above); production row not re-read.',
+        'Sample meaning verified in worker.js registryProgressCount (minimum resolved per horizon).'],
+      limitations: ['No pre-registered evaluation plan to execute; one must be frozen before any outcome can be recorded.'],
+      evaluator_version: null,
+      evidence_refs: ['.github/workflows/exp004-timesfm.yml', 'exp004-timesfm/run_experiment.py', 'https://github.com/quiquandon-oss/PulseWorkerV2/actions/runs/38146570056'],
+      recorded_ts: EVAL_RECORDED_TS, recorded_by: EVAL_RECORDED_BY,
+    }],
+    component: { component_id: 'timesfm_btc_direction', provenance: 'experiment_4_timesfm (TimesFM 2.5 BTC 12h/24h direction forecasts, exp004-timesfm.yml)',
+      description: 'TimesFM BTC direction forecast as a possible pool member' },
+    pool: [{
+      record_id: 'code:EXP-004:pool:1', pool_state: 'CANDIDATE',
+      reason: 'Designated as a candidate for a future pool test: a price-only forecast that may carry information the existing predictors lack. Not evidence of value; no approved pool protocol or pool definition exists yet.',
+      recorded_ts: EVAL_RECORDED_TS, recorded_by: EVAL_RECORDED_BY,
+    }],
+  },
+  'EXP-005': {
+    standalone: [{
+      record_id: 'code:EXP-005:standalone:1', evaluation_version: 'exp005-standalone-v1',
+      spec_ref: '.ai/migrations/0011_exp005_activation.sql (EXP-005 success_criterion)',
+      spec_sha256: '505a18cb296348d77a6790e8e16ad9cea6c2cc74995cfa3a6e7c1b122152ddbe', plan_sha256: null,
+      evaluation_status: 'BLOCKED', scientific_outcome: null,
+      reason: 'The frozen criterion needs, for one source/horizon pair, STATISTICALLY_SIGNIFICANT (multiple-testing corrected) AND IMPROVED out-of-sample in every one of at least 4 independent weekly runs. The per-pair results are stored only in production D1 (research_analyses); the job logs carry only a run-level flag (candidate_signal_observed = any pair in that run), not the per-pair conjunction. No authorized production read is available.',
+      sample: { count: null, required: 4, meaning: 'progress_count = stored weekly analysis runs (research_analyses subject EXP-005:source_effectiveness)' },
+      window: null, out_of_sample: null, baseline: 'V1 composite (OOS RMSE)',
+      metrics: null, uncertainty: null,
+      checks: ['Successful runs: 2026-09-20 (manual, 35518327769), 2026-09-21 (35618503269), 2026-09-28 (36455604682), 2026-10-05 (37348747944).',
+        'Runs of 2026-09-28 and 2026-10-05 each read 500 V1 history rows (V1 keeps only the latest 500).'],
+      limitations: ['Independence: the 2026-09-20 manual run and the 2026-09-21 run are one day apart and analyse almost the same rows, so at most 3 of the 4 counted runs are independent weekly windows.',
+        'Window: each run analyses the latest 500 history rows, narrower than the 90-day ceiling; consecutive weekly windows can overlap.',
+        'Research-only: no result may change V1 weights or coefficients.'],
+      evaluator_version: null,
+      evidence_refs: ['.github/workflows/exp005-source-effectiveness.yml', 'exp005-source-effectiveness/run_experiment.py', 'https://github.com/quiquandon-oss/PulseWorkerV2/actions/runs/37348747944'],
+      recorded_ts: EVAL_RECORDED_TS, recorded_by: EVAL_RECORDED_BY,
+    }],
+    component: { component_id: 'v1_source_signals', provenance: 'V1 history.sources_json per-source scores (read by exp005-source-effectiveness)',
+      description: 'Individual V1 sources as possible pool members beyond the V1 composite' },
+    pool: [{
+      record_id: 'code:EXP-005:pool:1', pool_state: 'CANDIDATE',
+      reason: 'Individual V1 sources are candidates for a future pool test whatever the standalone outcome. Not evidence of value; no approved pool protocol exists, and EXP-005 stays research-only.',
+      recorded_ts: EVAL_RECORDED_TS, recorded_by: EVAL_RECORDED_BY,
+    }],
+  },
+  'EXP-009': {
+    standalone: [{
+      record_id: 'code:EXP-009:standalone:1', evaluation_version: 'exp009-milestone-v1',
+      spec_ref: '.ai/migrations/0012_exp009_activation.sql (EXP-009 success_criterion)',
+      spec_sha256: 'c09fa284e1397c3ee9a80616c6109a720e2d4fa381db2a2e9208b6f0bf29c1eb', plan_sha256: null,
+      evaluation_status: 'BLOCKED', scientific_outcome: 'NOT_APPLICABLE',
+      reason: 'EXP-009 is an evidence-accumulation and schema-validation phase, not a hypothesis test, so it has no scientific outcome. Its milestone (4 batches with stable, well-formed output) can only be checked against the stored batches in production D1 (research_analyses), which this evaluation is not authorized to read.',
+      sample: { count: null, required: 4, meaning: 'progress_count = stored weekly/event batches (research_analyses subject for EXP-009)' },
+      window: null, out_of_sample: null, baseline: null, metrics: null, uncertainty: null,
+      checks: ['Successful runs: 2026-09-21 (35623472245), 2026-09-26 (manual, 36263164241), 2026-09-28 (36461372182), 2026-10-05 (37359971398).'],
+      limitations: ['One of the four batches came from a manual run between two weekly runs.'],
+      evaluator_version: null,
+      evidence_refs: ['.github/workflows/exp009-event-source-evidence.yml', 'exp009-event-source-evidence/run_experiment.py'],
+      recorded_ts: EVAL_RECORDED_TS, recorded_by: EVAL_RECORDED_BY,
+    }],
+    component: null,
+    pool: [{
+      record_id: 'code:EXP-009:pool:1', pool_state: 'NOT_TESTED',
+      reason: 'EXP-009 produces descriptive event/source evidence, not a predictive component, so it is not designated for a pool test.',
+      recorded_ts: EVAL_RECORDED_TS, recorded_by: EVAL_RECORDED_BY,
+    }],
+  },
+};
+
+function parseJsonColumn(v, fallback = null) {
+  if (v == null) return fallback;
+  try { return JSON.parse(v); } catch (_) { return fallback; }
+}
+
+// D1 rows of migration 0022, grouped by experiment. A missing table (migration not applied) is the expected
+// state today and yields no rows; any other error is reported, never turned into an outcome.
+async function loadEvaluationRows(env) {
+  const out = { standalone: {}, pool: {}, tables: 'PRESENT', error: null };
+  const read = async (sql) => { const r = await env.DB.prepare(sql).all(); return (r && r.results) || []; };
+  try {
+    for (const r of await read('SELECT * FROM research_standalone_evaluations ORDER BY recorded_ts ASC, record_id ASC')) {
+      (out.standalone[r.experiment_id] ||= []).push({
+        record_id: `d1:${r.record_id}`, evaluation_version: r.evaluation_version, spec_ref: r.spec_ref, spec_sha256: r.spec_sha256,
+        plan_sha256: r.plan_sha256, evaluation_status: r.evaluation_status, scientific_outcome: r.scientific_outcome, reason: r.reason,
+        sample: parseJsonColumn(r.sample_json), window: r.window_start_ts != null ? { start_ts: r.window_start_ts, end_ts: r.window_end_ts } : null,
+        out_of_sample: r.out_of_sample == null ? null : r.out_of_sample === 1, baseline: r.baseline,
+        metrics: parseJsonColumn(r.metrics_json), uncertainty: parseJsonColumn(r.uncertainty_json),
+        checks: parseJsonColumn(r.checks_json, []), limitations: parseJsonColumn(r.limitations_json, []),
+        evaluator_version: r.evaluator_version, evidence_refs: parseJsonColumn(r.evidence_refs_json, []), evidence_sha256: r.evidence_sha256,
+        recorded_ts: r.recorded_ts, recorded_by: r.recorded_by, supersedes_id: r.supersedes_id, record_source: 'd1',
+      });
+    }
+    for (const r of await read('SELECT * FROM research_pool_evaluations ORDER BY recorded_ts ASC, record_id ASC')) {
+      (out.pool[r.experiment_id] ||= []).push({
+        record_id: `d1:${r.record_id}`, component_id: r.component_id, component_provenance: r.component_provenance,
+        pool: r.pool_id ? { pool_id: r.pool_id, version: r.pool_version } : null, pool_state: r.pool_state, reason: r.reason,
+        protocol: r.protocol_id ? { protocol_id: r.protocol_id, sha256: r.protocol_sha256 } : null, evaluator_version: r.evaluator_version,
+        window: r.window_start_ts != null ? { start_ts: r.window_start_ts, end_ts: r.window_end_ts } : null,
+        out_of_sample: r.out_of_sample == null ? null : r.out_of_sample === 1,
+        eligible: { baseline_n: r.baseline_n, candidate_n: r.candidate_n, overlap_n: r.overlap_n, composition_change: r.composition_change },
+        baseline_metrics: parseJsonColumn(r.baseline_metrics_json), candidate_metrics: parseJsonColumn(r.candidate_metrics_json),
+        incremental: parseJsonColumn(r.incremental_json), uncertainty: parseJsonColumn(r.uncertainty_json),
+        evidence_refs: parseJsonColumn(r.evidence_refs_json, []), evidence_sha256: r.evidence_sha256,
+        recorded_ts: r.recorded_ts, recorded_by: r.recorded_by, supersedes_id: r.supersedes_id, record_source: 'd1',
+      });
+    }
+  } catch (err) {
+    const msg = String(err && err.message || err);
+    if (/no such table/i.test(msg)) return { standalone: {}, pool: {}, tables: 'NOT_PRESENT', error: null };
+    return { standalone: {}, pool: {}, tables: 'UNAVAILABLE', error: msg.slice(0, 200) };
+  }
+  return out;
+}
+
+// Adds the two dimensions to each entry in place. pool_evaluations is attached to every entry (no record means
+// no valid pool evaluation exists: NOT_TESTED); standalone_evaluations only where a record exists, so an
+// experiment without one stays "not reported" rather than gaining an invented status.
+function attachEvaluationDimensions(experiments, rows) {
+  for (const e of experiments) {
+    const code = CODE_EVALUATION_RECORDS[e.experiment_id] || null;
+    const standalone = [...((code && code.standalone) || []).map(r => ({ ...r, record_source: 'code' })), ...(rows.standalone[e.experiment_id] || [])];
+    if (standalone.length) e.standalone_evaluations = standalone;
+    const pool = [...((code && code.pool) || []).map(r => ({ ...r, record_source: 'code' })), ...(rows.pool[e.experiment_id] || [])];
+    e.pool_evaluations = pool;
+    const lastD1 = (rows.pool[e.experiment_id] || []).slice(-1)[0];
+    e.pool_component = lastD1 ? { component_id: lastD1.component_id, provenance: lastD1.component_provenance, description: null }
+      : (code && code.component) || null;
+  }
+  return experiments;
+}
+
 // /api/research-lab/registry: the D1 registry plus the code-defined entries
 // above (a D1 row with the same id wins), sorted by id.
 async function getUnifiedResearchRegistry(env, nowTs = Date.now()) {
@@ -7614,7 +7764,10 @@ async function getUnifiedResearchRegistry(env, nowTs = Date.now()) {
     experiments.push(decorateRegistryEntry({ ...entry, registry_source: 'code', created_ts: null, updated_ts: null }, live, !!provider, nowTs));
   }
   experiments.sort((a, b) => a.experiment_id.localeCompare(b.experiment_id));
-  return { ok: true, generated_ts: nowTs, experiments };
+  const evalRows = await loadEvaluationRows(env);
+  attachEvaluationDimensions(experiments, evalRows);
+  return { ok: true, generated_ts: nowTs, experiments,
+    evaluation_dimensions: { tables: evalRows.tables, error: evalRows.error, approved_pool_protocols: [] } };
 }
 
 // ---- EXPERIMENT 5: agentic market evidence (research-lab UI layer) ----

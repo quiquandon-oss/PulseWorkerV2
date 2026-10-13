@@ -60,6 +60,27 @@ FEATURE_SETS = {
 }
 
 
+# ---- v0.5.0 source variants (BTC_12H_EARLY_WARNING_SPEC_v0.5.0.md). The v0.4.0 sets above are unchanged. ----
+# Each funding source is its own feature group; no variant ever reads another source's funding (no substitution,
+# no blend). U_<SRC> has the same four features as v0.4.0's U (level, change vs previous settlement, 3-day mean,
+# 30-day percentile) with windows defined in time and minimum counts scaled to the source's nominal interval.
+SPEC_V050_SHA256 = "66a69c2889b5e01ba9cceafb6b2bfcff74e3e1253e36a2a5a328c646d8a412cd"   # spec v0.5.0 (addendum)
+SOURCE_FUNDING = {
+    "HL": {"source": "hyperliquid_btc_funding", "instrument": "BTC", "metric": "funding_rate", "nominal_interval_ms": H,
+           "stale_ms": H + 15 * 60_000},
+    "OKX": {"source": "okx_btc_funding", "instrument": "BTC-USDT-SWAP", "metric": "funding_rate",
+            "nominal_interval_ms": 8 * H, "stale_ms": 8 * H + 15 * 60_000},
+}
+SOURCE_VARIANT_SETS = {
+    "F3_HL": ("P", "U_HL"), "F4_HL": ("P", "O", "U_HL"),
+    "F3_OKX": ("P", "U_OKX"), "F4_OKX": ("P", "O", "U_OKX"),
+}
+# Rows without `first_observed_at` (collected before v0.5.0) are bounded by `retrieved_at` (the collection run's
+# start) plus the collection job's hard timeout (research-forward-schedule.yml timeout-minutes: 30): the record
+# was certainly in hand by then. Never earlier than the provider's own settlement time.
+LEGACY_OBSERVATION_MARGIN_MS = 30 * 60_000
+
+
 class SealedDataError(ValueError):
     """A sealed-period (or pre-seal) row reached the post-seal label builder."""
 
@@ -155,6 +176,54 @@ def load_venue_series(paths):
         (oi if kind == "oi" else fund).pop(ts, None)
     oi = {t: v for t, v in oi.items() if v[1] is not None and v[2] is not None}
     return oi, fund, sorted(set(conflicts))
+
+
+def causal_available_at(row):
+    """Defensible availability of a forward funding row: not before the provider's settlement (`available_at`) and
+    not before this collector first had it (`first_observed_at`, else `retrieved_at` + the job timeout). None if the
+    row carries no observation time at all (then it is non-causal and excluded)."""
+    if isinstance(row.get("first_observed_at"), int):
+        return max(row["available_at"], row["first_observed_at"])
+    if isinstance(row.get("retrieved_at"), int):
+        return max(row["available_at"], row["retrieved_at"] + LEGACY_OBSERVATION_MARGIN_MS)
+    return None
+
+
+def load_source_funding(paths, key):
+    """One funding source for the v0.5.0 variants, from forward-store partitions only (frozen/backfilled history is
+    never read here: its availability cannot be proven). Returns ({settlement_ts: (causal_available_at, rate)}, info)
+    where info counts rows, conflicts (dropped, never chosen), non-causal rows and the observation lag."""
+    spec = SOURCE_FUNDING[key]
+    out, conflicts, noncausal, lags = {}, set(), 0, []
+    for p in paths:
+        for line in _open(p):
+            r = json.loads(line)
+            if (r.get("source"), r.get("instrument"), r.get("metric")) != (spec["source"], spec["instrument"], spec["metric"]):
+                continue
+            ts, val = r["timestamp"], r["value"]
+            av = causal_available_at(r)
+            if av is None or not isinstance(val, (int, float)):
+                noncausal += 1
+                continue
+            if ts in out and out[ts][1] != val:
+                conflicts.add(ts)
+                continue
+            out[ts] = (min(av, out[ts][0]) if ts in out else av, val)
+            lags.append(av - ts)
+    for ts in conflicts:
+        out.pop(ts, None)
+    lags.sort()
+    info = {"source": spec["source"], "settlements": len(out), "conflicts_dropped": len(conflicts), "non_causal_rows": noncausal,
+            "first_settlement": min(out) if out else None, "last_settlement": max(out) if out else None,
+            "last_causal_available_at": max((v[0] for v in out.values()), default=None),
+            "observation_lag_ms_median": lags[len(lags) // 2] if lags else None,
+            "observation_lag_ms_min": lags[0] if lags else None}
+    return out, info
+
+
+def forward_source_funding_files(store_dir, key):
+    src = SOURCE_FUNDING[key]["source"]
+    return sorted(glob.glob(os.path.join(store_dir, src, "*", "*.jsonl.gz")))
 
 
 def forward_venue_files(store_dir):
@@ -388,6 +457,39 @@ class FeatureBuilder:
             return None
         return {"fund": cur[1], "dfund": cur[1] - self.f[self.f_ts[i - 1]][1], "fund_mean3d": sum(last9) / 9,
                 "fund_pct30d": sum(1 for v in win if v <= cur[1]) / len(win)}
+
+    def source_funding_features(self, key, series, t, used):
+        """U_<key> at t from one source only. Only settlements whose causal availability is <= t exist for this
+        lookup; the latest of them must be no older than the source's staleness limit. Windows: change vs the
+        previous available settlement; mean over the last 3 days (>= 90% of the nominal count); percentile within
+        the last 30 days (>= 80/90 of the nominal count). Missing data is never filled."""
+        spec = SOURCE_FUNDING[key]
+        avail = [u for u in sorted(series) if series[u][0] <= t]
+        if len(avail) < 2:
+            return None
+        cur_ts = avail[-1]
+        if t - cur_ts > spec["stale_ms"]:
+            return None
+        cur = series[cur_ts][1]
+        used.append(series[cur_ts][0])
+        n = spec["nominal_interval_ms"]
+        last3 = [series[u][1] for u in avail if cur_ts - u < 3 * 24 * H]
+        win30 = [series[u][1] for u in avail if cur_ts - u < 30 * 24 * H]
+        if len(last3) < math.ceil(0.9 * 3 * 24 * H / n) or len(win30) < math.ceil(80 / 90 * 30 * 24 * H / n):
+            return None
+        used += [series[u][0] for u in avail if cur_ts - u < 30 * 24 * H]
+        return {"fund": cur, "dfund": cur - series[avail[-2]][1], "fund_mean3d": sum(last3) / len(last3),
+                "fund_pct30d": sum(1 for v in win30 if v <= cur) / len(win30)}
+
+    def build_sources(self, t, source_funding):
+        """{'U_HL': dict|None, 'U_OKX': dict|None, 'max_available_at': int|None}; checked against t like build()."""
+        used, out = [], {}
+        for key in SOURCE_FUNDING:
+            series = (source_funding or {}).get(key) or {}
+            out[f"U_{key}"] = self.source_funding_features(key, series, t, used) if series else None
+        self._check(used, t)
+        out["max_available_at"] = max(used) if used else None
+        return out
 
     def build(self, t):
         """Returns {'P': dict|None, 'O': dict|None, 'U': dict|None, 'max_available_at': int}."""
@@ -725,6 +827,45 @@ def checkpoint(episodes_eval):
 
 
 # ----------------------------------------------------------------------------------------------------- pipeline
+def evaluate_set(groups, scored, met, feats, episodes, label_ok, period_end):
+    """Warnings, event-level counts and the F0 chance reference for one feature set on fixed scored hours."""
+    sset, evaluable = set(scored), {u: True for u in scored}
+    out, internal = {}, {}
+    for wtype in WARN_TYPES:
+        per_q = {}
+        warns = walk_forward_warnings(scored, feats, episodes, groups, wtype, (Q_MAIN,) + Q_SENS, label_ok)
+        for q, warn in warns.items():
+            runs = runs_from(warn, scored)
+            prim = score_runs(runs, episodes, wtype, "T_on", period_end, sset, evaluable)
+            sec = score_runs(runs, episodes, wtype, "T_x", period_end, sset, evaluable)
+            n_ev = sum(1 for u in scored if warn.get(u) is not None)
+            null = [score_runs(runs_from(shifted_warnings(warn, scored, s), scored), episodes, wtype, "T_on",
+                               period_end, sset, evaluable)["hits"] for s in f0_shifts(n_ev)]
+            internal[(wtype, q)] = {"hits": set(prim.pop("hit_episode_ids")),
+                                    "false_t0": prim.pop("false_warning_t0")}
+            sec.pop("hit_episode_ids")
+            sec.pop("false_warning_t0")
+            if not met:
+                prim.pop("hit_lead_hours")
+                sec.pop("hit_lead_hours")
+            ns = sorted(null)
+            per_q[str(q)] = {
+                "warning_hours": sum(1 for v in warn.values() if v), "runs": len(runs),
+                "primary_T_on": prim, "secondary_T_x": sec,
+                "F0_chance_reference": {
+                    "type": "chance reference, NOT a predictive model",
+                    "generation": "the set's own warning flags circularly shifted over its evaluable scored hours "
+                                  "(same warning-hour count and run lengths); deterministic shifts "
+                                  "1 + (i*7919) mod (n-1)",
+                    "evaluation": "identical scorer, episodes, T_on window [T_on-36h, T_on-12h] and censoring",
+                    "n_shifts": len(null),
+                    "null_hits_median": ns[len(ns) // 2] if ns else None,
+                    "null_hits_p95": ns[min(len(ns) - 1, math.ceil(0.95 * len(ns)) - 1)] if ns else None},
+                "statistics": cell_statistics(prim, null, scored, met)}
+        out[wtype] = per_q
+    return out, internal
+
+
 def run(prices, oi, funding, data_end=None, conflicts=None):
     """Full pipeline on loaded data. Deterministic; returns the report dict."""
     post = {t: v[3] for t, v in prices.items() if t > SEAL_END}            # labels: post-seal only
@@ -756,42 +897,7 @@ def run(prices, oi, funding, data_end=None, conflicts=None):
               "U": [t for t in hours if feats[t]["U"] is None]}
 
     def evaluate(groups, scored, met):
-        """Warnings, event-level counts and the F0 chance reference for one feature set on fixed scored hours."""
-        sset, evaluable = set(scored), {u: True for u in scored}
-        out, internal = {}, {}
-        for wtype in WARN_TYPES:
-            per_q = {}
-            warns = walk_forward_warnings(scored, feats, episodes, groups, wtype, (Q_MAIN,) + Q_SENS, label_ok)
-            for q, warn in warns.items():
-                runs = runs_from(warn, scored)
-                prim = score_runs(runs, episodes, wtype, "T_on", period_end, sset, evaluable)
-                sec = score_runs(runs, episodes, wtype, "T_x", period_end, sset, evaluable)
-                n_ev = sum(1 for u in scored if warn.get(u) is not None)
-                null = [score_runs(runs_from(shifted_warnings(warn, scored, s), scored), episodes, wtype, "T_on",
-                                   period_end, sset, evaluable)["hits"] for s in f0_shifts(n_ev)]
-                internal[(wtype, q)] = {"hits": set(prim.pop("hit_episode_ids")),
-                                        "false_t0": prim.pop("false_warning_t0")}
-                sec.pop("hit_episode_ids")
-                sec.pop("false_warning_t0")
-                if not met:
-                    prim.pop("hit_lead_hours")
-                    sec.pop("hit_lead_hours")
-                ns = sorted(null)
-                per_q[str(q)] = {
-                    "warning_hours": sum(1 for v in warn.values() if v), "runs": len(runs),
-                    "primary_T_on": prim, "secondary_T_x": sec,
-                    "F0_chance_reference": {
-                        "type": "chance reference, NOT a predictive model",
-                        "generation": "the set's own warning flags circularly shifted over its evaluable scored hours "
-                                      "(same warning-hour count and run lengths); deterministic shifts "
-                                      "1 + (i*7919) mod (n-1)",
-                        "evaluation": "identical scorer, episodes, T_on window [T_on-36h, T_on-12h] and censoring",
-                        "n_shifts": len(null),
-                        "null_hits_median": ns[len(ns) // 2] if ns else None,
-                        "null_hits_p95": ns[min(len(ns) - 1, math.ceil(0.95 * len(ns)) - 1)] if ns else None},
-                    "statistics": cell_statistics(prim, null, scored, met)}
-            out[wtype] = per_q
-        return out, internal
+        return evaluate_set(groups, scored, met, feats, episodes, label_ok, period_end)
 
     # Each comparison Fk vs F1 is scored on the hours where Fk is evaluable (F1 is then evaluable too), so a set
     # starts as soon as its own data genuinely exists; the all-sets intersection is reported as coverage only.
@@ -866,6 +972,103 @@ def run(prices, oi, funding, data_end=None, conflicts=None):
             "gating": f"nothing computed below the checkpoint ({CHECKPOINT_TOTAL} events, {CHECKPOINT_PER_DIR}/direction)"
                       f" or in cells with < {MIN_CELL_EPISODES} episodes"},
         "results_counts": results,
+        "blockers": blockers,
+    }
+
+
+def run_source_variants(prices, oi, source_funding, source_info=None, data_end=None):
+    """v0.5.0 source variants F3_HL / F4_HL / F3_OKX / F4_OKX (spec BTC_12H_EARLY_WARNING_SPEC_v0.5.0.md), on the same
+    labels, decision grid, walk-forward fitting, scorer and checkpoint as v0.4.0. Each Fk_<SRC> vs F1 pair is scored
+    on the hours where Fk_<SRC> is evaluable; Holm runs over these four comparisons only, so the v0.4.0 family and
+    report are untouched. Binance funding is not an input. Deterministic; returns a separate report."""
+    post = {t: v[3] for t, v in prices.items() if t > SEAL_END}
+    labels = build_labels(post)
+    episodes = labels["episodes"]
+    fb = FeatureBuilder(prices, oi, None)
+    hours = sorted(t for t in prices if t >= T1)
+    feats = {}
+    for t in hours:
+        row = fb.build(t)
+        src = fb.build_sources(t, source_funding)
+        for r in (row, src):
+            if r["max_available_at"] is not None and r["max_available_at"] > t:
+                raise LookAheadError(t)
+        row.update({k: v for k, v in src.items() if k != "max_available_at"})
+        feats[t] = row
+    period_end = data_end or (max(hours) if hours else T1)
+    burn_end = labels["burn_in_end"]
+
+    def label_ok(h):
+        return (burn_end is not None and h + LEAD_MIN >= burn_end and labels["last_labelled"] is not None
+                and h + LABEL_FINAL_LAG <= labels["last_labelled"])
+
+    coverage = {}
+    for name, groups in {"F1": FEATURE_SETS["F1"], **SOURCE_VARIANT_SETS}.items():
+        ok = [t for t in hours if vector(feats[t], groups) is not None]
+        coverage[name] = {"evaluable_hours": len(ok), "first_evaluable": ok[0] if ok else None,
+                          "last_evaluable": ok[-1] if ok else None}
+    comparisons, pending = {}, []
+    for name, groups in SOURCE_VARIANT_SETS.items():
+        scored = [t for t in hours if vector(feats[t], groups) is not None]
+        eps_eval = [e for e in episodes if episode_evaluable(e, "T_on", set(scored), {u: True for u in scored})]
+        cp_k = checkpoint(eps_eval)
+        res_k, int_k = evaluate_set(groups, scored, cp_k["met"], feats, episodes, label_ok, period_end)
+        res_1, int_1 = evaluate_set(FEATURE_SETS["F1"], scored, cp_k["met"], feats, episodes, label_ok, period_end)
+        entry = {"scored_hours": len(scored), "checkpoint": cp_k, name: res_k, "F1": res_1}
+        if cp_k["met"]:
+            inc = {}
+            for (w, q) in int_k:
+                b = len(int_k[(w, q)]["hits"] - int_1[(w, q)]["hits"])
+                c = len(int_1[(w, q)]["hits"] - int_k[(w, q)]["hits"])
+                inc[f"{w}@{q}"] = {"only_" + name: b, "only_F1": c, "mcnemar_p": mcnemar_exact(b, c),
+                                   "delta_false_warnings_per_30d": day_block_bootstrap_diff(
+                                       int_k[(w, q)]["false_t0"], int_1[(w, q)]["false_t0"], scored, BOOT_SEED)}
+                pending.append((name, f"{w}@{q}", inc[f"{w}@{q}"]))
+            entry["incremental_vs_F1"] = inc
+        else:
+            entry["incremental_vs_F1"] = {"status": "NOT_COMPUTED", "reason": "below the D5 checkpoint"}
+        comparisons[f"{name}_vs_F1"] = entry
+    for key in sorted({k for _, k, _ in pending}):
+        group = [r for _, k, r in pending if k == key]
+        for r, a in zip(group, holm([r["mcnemar_p"] for r in group])):
+            r["mcnemar_p_holm"] = a
+    sources, blockers = {}, []
+    for key, spec in SOURCE_FUNDING.items():
+        series = (source_funding or {}).get(key) or {}
+        info = dict((source_info or {}).get(key) or {})
+        missing = sum(1 for t in hours if feats[t][f"U_{key}"] is None)
+        sources[key] = dict(info, staleness_limit_ms=spec["stale_ms"], nominal_interval_ms=spec["nominal_interval_ms"],
+                            not_evaluable_hours=missing, eligible_hours=len(hours))
+        if not series:
+            blockers.append(f"U_{key}: no causally usable {spec['source']} settlement in the forward store; "
+                            f"F3_{key} and F4_{key} are not evaluable (no fallback to another source)")
+        elif missing:
+            lag = info.get("observation_lag_ms_median")
+            blockers.append(f"U_{key}: not evaluable at {missing} of {len(hours)} eligible hours (latest causally available "
+                            f"settlement older than {spec['stale_ms'] // 60_000} min, or windows incomplete)"
+                            + (f"; median first-observation lag {lag / H:.1f} h after settlement" if lag is not None else ""))
+    for name in SOURCE_VARIANT_SETS:
+        if comparisons[f"{name}_vs_F1"]["scored_hours"] == 0:
+            blockers.append(f"{name}: no eligible decision hour has all {name} features; {name} vs F1 not evaluable yet")
+    return {
+        "artifact": "exp23-source-variants-report", "protocol": "v0.5.0", "spec_sha256": SPEC_V050_SHA256,
+        "baseline_spec_sha256": SPEC_SHA256, "definition_sha256": DEFINITION_SHA256, "fit_backend": BACKEND,
+        "feature_sets": {k: list(v) for k, v in {"F1": FEATURE_SETS["F1"], **SOURCE_VARIANT_SETS}.items()},
+        "boundary": {"DEV_END": DEV_END, "SEAL_END_inclusive": SEAL_END, "first_decision_T1": T1},
+        "parameters": {"lead_window_hours": [LEAD_MIN // H, LEAD_MAX // H], "q": Q_MAIN, "q_sensitivity": list(Q_SENS),
+                       "checkpoint": {"total": CHECKPOINT_TOTAL, "per_direction": CHECKPOINT_PER_DIR},
+                       "oi_staleness_ms": OI_STALE, "legacy_observation_margin_ms": LEGACY_OBSERVATION_MARGIN_MS,
+                       "availability": "max(settlement available_at, first_observed_at | retrieved_at + margin)"},
+        "sources": sources,
+        "labels": {"episodes": len(episodes), "labelled_hours": labels["labelled_hours"],
+                   "burn_in_complete": labels["burn_in_complete"]},
+        "decision_hours": {"eligible": len(hours), "coverage": coverage},
+        "results_counts": {"comparisons": comparisons},
+        "statistics_method": {
+            "incremental_hits_vs_F1": "exact McNemar on discordant episodes, Holm over the four v0.5.0 comparisons only "
+                                      "(F3_HL, F4_HL, F3_OKX, F4_OKX); the v0.4.0 family (F2/F3/F4) is separate",
+            "gating": f"nothing computed below the checkpoint ({CHECKPOINT_TOTAL} events, {CHECKPOINT_PER_DIR}/direction)"
+                      f" or in cells with < {MIN_CELL_EPISODES} episodes"},
         "blockers": blockers,
     }
 

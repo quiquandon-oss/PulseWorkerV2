@@ -133,6 +133,17 @@ SOURCES: Dict[str, Dict] = {
         "history": "full", "availability_rule": "funding record time", "unit": "rate per hour; premium",
         "v1_overlap": "V1 funding/longshort read the same venue's current funding (HYPERLIQUID_LEVERAGE_STRESS.md)",
     },
+    "okx_btc_funding": {
+        "dimension": HIGHER_RES, "group": "derivatives", "provider": "OKX", "instrument": "BTC-USDT-SWAP (USDT-margined perpetual)",
+        "endpoint": "GET https://www.okx.com/api/v5/public/funding-rate-history?instId=BTC-USDT-SWAP",
+        "docs": "https://www.okx.com/docs-v5/en/ (Public Data: Get funding rate history); https://www.okx.com/en-us/historical-data",
+        "auth": "none", "cost_eur": 0, "resolution": "settlement (nominally 8h; the interval can change, actual spacing is recorded)",
+        "pagination": "newest first; `after`=<oldest fundingTime seen> returns older records; limit 100; the direction is checked on every page and a violation fails closed",
+        "rate_limit": "public endpoint, IP-limited: requests are spaced >= 0.25 s; HTTP 429 and OKX code 50011 are retried with backoff",
+        "history": "recent months only (provider-side limit); older history is not claimed",
+        "availability_rule": "available_at = fundingTime (settlement, provider-defined). For EXP-23 source variants the defensible availability is the collector's first observation (first_observed_at); see BTC_12H_EARLY_WARNING_SPEC_v0.5.0.md",
+        "unit": "rate per funding interval", "v1_overlap": "none: V1 reads Hyperliquid funding only",
+    },
     "gdelt_events": {
         "dimension": NEW, "group": "geopolitical", "provider": "GDELT Project", "instrument": "GDELT 2.0 Event exports",
         "endpoint": "GET http://data.gdeltproject.org/gdeltv2/{YYYYMMDDHHMMSS}.export.CSV.zip (masterfilelist.txt for MD5)",
@@ -689,6 +700,112 @@ def hyperliquid_funding_obs(funding: List[Dict], retrieved_at: int) -> List[Dict
         out.append(_mk("hyperliquid_btc_funding", "BTC", "funding_rate", r["t"], r["funding"], "rate/1h", "1h", retrieved_at, url, r["t"], dict(r)))
         out.append(_mk("hyperliquid_btc_funding", "BTC", "premium", r["t"], r["premium"], "fraction", "1h", retrieved_at, url, r["t"], dict(r)))
     return out
+
+
+# ---------------- OKX BTC-USDT perpetual funding ----------------
+OKX = "https://www.okx.com"
+OKX_FUNDING_PATH = "/api/v5/public/funding-rate-history"
+OKX_INST = "BTC-USDT-SWAP"
+OKX_NOMINAL_INTERVAL_MS = 8 * HOUR       # nominal only: the actual spacing of every settlement is recorded
+OKX_PAGE_LIMIT = 100
+OKX_RATE_LIMIT_CODES = ("50011", "50061")   # OKX "too many requests" codes, returned with HTTP 200 or 429
+
+
+def okx_funding_rows(payload) -> List[Dict]:
+    """Validates one funding-rate-history response and returns its records as given. Raises SourceError
+    (MALFORMED_RESPONSE / PROVIDER_ERROR) rather than guessing; never returns a partial page."""
+    if not isinstance(payload, dict) or "code" not in payload or "data" not in payload:
+        raise SourceError("MALFORMED_RESPONSE", "OKX funding-rate-history: expected {code, msg, data}")
+    if str(payload["code"]) != "0":
+        raise SourceError("PROVIDER_ERROR", f"OKX code {payload['code']}: {str(payload.get('msg'))[:160]}")
+    rows = payload["data"]
+    if not isinstance(rows, list):
+        raise SourceError("MALFORMED_RESPONSE", "OKX funding-rate-history: data is not a list")
+    for r in rows:
+        if not isinstance(r, dict) or r.get("instId") != OKX_INST:
+            raise SourceError("MALFORMED_RESPONSE", f"OKX record for another or no instrument: {str(r)[:120]}")
+        try:
+            ts = int(r["fundingTime"])
+            _num(r["fundingRate"])
+            if r.get("realizedRate") not in (None, ""):
+                _num(r["realizedRate"])
+        except (KeyError, TypeError, ValueError) as e:
+            raise SourceError("MALFORMED_RESPONSE", f"OKX record fields invalid ({type(e).__name__}): {str(r)[:120]}")
+        if str(r["fundingTime"]) != str(ts) or ts < 946684800000:
+            raise SourceError("MALFORMED_RESPONSE", f"OKX fundingTime is not UTC epoch ms: {r['fundingTime']!r}")
+    return rows
+
+
+def okx_funding_obs(rows: Sequence[Dict], retrieved_at: int, first_observed_at: int) -> List[Dict]:
+    """Normalises OKX settlements into the observation contract (metric funding_rate, plus realized_rate when the
+    provider gives it). Records are sorted by fundingTime; each keeps its raw fields, the provenance URL, the
+    actual spacing to the previous settlement in this batch and whether that spacing differs from the nominal
+    8h. Nothing is filled: a missing settlement stays missing."""
+    url = OKX + OKX_FUNDING_PATH + "?instId=" + OKX_INST
+    out: List[Dict] = []
+    prev = None
+    for r in sorted(rows, key=lambda x: int(x["fundingTime"])):
+        ts = int(r["fundingTime"])
+        spacing = None if prev is None else ts - prev
+        raw = {k: r.get(k) for k in ("instId", "instType", "fundingTime", "fundingRate", "realizedRate", "formulaType", "method")}
+        raw.update(spacing_ms=spacing, spacing_irregular=None if spacing is None else spacing != OKX_NOMINAL_INTERVAL_MS,
+                   nominal_interval_ms=OKX_NOMINAL_INTERVAL_MS)
+        metrics = [("funding_rate", r["fundingRate"])]
+        if r.get("realizedRate") not in (None, ""):
+            metrics.append(("realized_rate", r["realizedRate"]))
+        for metric, v in metrics:
+            o = _mk("okx_btc_funding", OKX_INST, metric, ts, _num(v), "rate per funding interval", "event", retrieved_at, url, ts, raw)
+            o["first_observed_at"] = first_observed_at
+            out.append(o)
+        prev = ts
+    return out
+
+
+def collect_okx_funding(http: Http, start_ms: int, end_ms: int, now_fn: Callable[[], int] = lambda: int(time.time() * 1000),
+                        max_pages: int = 60) -> Dict:
+    """Pages OKX funding-rate-history from the newest record backwards (`after` = oldest fundingTime seen) until a
+    page reaches start_ms, the API returns nothing, or max_pages. Every page must be strictly older than the
+    cursor; anything else (a provider semantics change) fails closed with PAGINATION_ERROR instead of looping.
+    Returns {"status", "rows", "pages", "irregular_spacing", ...}; only records with start_ms <= fundingTime < end_ms
+    are kept. `first_observed_at` is taken after the last page arrived (never before the data was in hand)."""
+    url = OKX + OKX_FUNDING_PATH
+    rows: Dict[int, Dict] = {}
+    pages, cursor = 0, None
+    while pages < max_pages:
+        params = {"instId": OKX_INST, "limit": OKX_PAGE_LIMIT}
+        if cursor is not None:
+            params["after"] = cursor
+        page = None
+        for attempt in range(4):                     # OKX may signal its rate limit inside an HTTP 200 body
+            payload = http.get_json(url, params)
+            if isinstance(payload, dict) and str(payload.get("code")) in OKX_RATE_LIMIT_CODES:
+                http.log["okx_rate_limited"] += 1
+                http.sleep(2 * (attempt + 1))
+                continue
+            page = okx_funding_rows(payload)
+            break
+        if page is None:
+            raise SourceError("PROVIDER_ERROR", "OKX rate limit persisted after 4 attempts")
+        pages += 1
+        if not page:
+            break
+        times = [int(r["fundingTime"]) for r in page]
+        if cursor is not None and max(times) >= cursor:
+            raise SourceError("PAGINATION_ERROR", f"OKX page not older than cursor {cursor} (max {max(times)})")
+        for r in page:
+            ts = int(r["fundingTime"])
+            if ts in rows and rows[ts] != r:
+                raise SourceError("MALFORMED_RESPONSE", f"OKX returned two different records for fundingTime {ts}")
+            rows[ts] = r
+        cursor = min(times)
+        if cursor <= start_ms:
+            break
+    kept = [rows[t] for t in sorted(rows) if start_ms <= t < end_ms]
+    spacing = [b - a for a, b in zip(sorted(rows), sorted(rows)[1:])]
+    irregular = sorted({x for x in spacing if x != OKX_NOMINAL_INTERVAL_MS})
+    return {"source": "okx_btc_funding", "status": "OK" if kept else "EMPTY", "rows": kept, "pages": pages,
+            "requests": pages, "first_observed_at": now_fn(), "irregular_spacing_ms": irregular,
+            "reached_start": cursor is not None and cursor <= start_ms}
 
 
 # ---------------- GDELT events (reuse) ----------------

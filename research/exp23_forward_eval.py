@@ -8,7 +8,9 @@ Inputs, all read-only and all from this repository (no Cloudflare, no D1, no sec
   --definition      196b87e : research/market_moves/definition.json (optional; canonical sha checked)
 Output (the only write target): --results  (research-data/exp23-evaluation : exp23_evaluation/)
   state.json                       last status, last evaluated dataset fingerprint, history
-  reports/<fingerprint16>/report.json + progress.md   deterministic (no wall-clock inside)
+  reports/<fingerprint16>/report.json + progress.md   deterministic (no wall-clock inside); report.json is the
+                                   v0.4.0 report (F1-F4, Binance OI/funding), unchanged in content
+  reports/<fingerprint16>/source_variants.json        v0.5.0 F3_HL/F4_HL/F3_OKX/F4_OKX (separate Holm family)
   runs/<evaluated_at>_<run_id>.json   one record per run that changed something (evaluated or failed)
   latest_progress.md               copy of the latest progress report
 
@@ -31,7 +33,9 @@ import early_warning_12h as ew  # noqa: E402
 
 PRICES_SHA256 = "e0141555ced46de20e130e184f995aa506f122fb2302cc8b52ffe3ef38a6501d"      # plan v1.0.0 pin
 FROZEN_OI_SHA256 = "0cadd101115773a828412dee0b142a6614b39b4b92ada6403ef119d637451d01"   # risk_regime_oi @b5bcff8
-FORWARD_SOURCES = ("hyperliquid_hip3", "binance_oi_archive", "binance_funding_archive")
+FORWARD_SOURCES = ("hyperliquid_hip3", "binance_oi_archive", "binance_funding_archive",
+                   "hyperliquid_btc_funding", "okx_btc_funding")      # the last two: v0.5.0 variants, optional
+SOURCE_PARTITIONS = {"HL": "hyperliquid_btc_funding", "OKX": "okx_btc_funding"}
 EXIT = {"EVALUATED": 0, "NO_NEW_DATA": 0, "INPUT_UNAVAILABLE": 2, "INTEGRITY_FAILURE": 3, "EVALUATION_FAILED": 4}
 REQUIRED_ROW_KEYS = ("timestamp", "available_at", "value", "metric")
 
@@ -145,6 +149,23 @@ def progress_markdown(rep, fp, problems):
     return "\n".join(lines) + "\n"
 
 
+def source_variants_markdown(sv):
+    lines = ["", "## v0.5.0 source variants (separate from the v0.4.0 table above)", "",
+             "| Feature set | Evaluable hours | First evaluable (ms) |", "|---|---|---|"]
+    lines += [f"| {k} | {v['evaluable_hours']} | {v['first_evaluable']} |" for k, v in sv["decision_hours"]["coverage"].items()]
+    lines += ["", "| Source | Settlements | Last settlement (ms) | Last causal availability (ms) | Median observation lag (h) "
+                  "| Non-causal rows | Not evaluable hours |", "|---|---|---|---|---|---|---|"]
+    for k, v in sv["sources"].items():
+        lag = v.get("observation_lag_ms_median")
+        lines.append(f"| {k} | {v.get('settlements', 0)} | {v.get('last_settlement')} | {v.get('last_causal_available_at')} "
+                     f"| {'—' if lag is None else round(lag / ew.H, 1)} | {v.get('non_causal_rows', 0)} | {v['not_evaluable_hours']} |")
+    lines += ["", "Availability: a forward funding row is used only from max(settlement time, first observation by the "
+                  "collector). Historical/backfilled funding is not read. No metric below the checkpoint."]
+    if sv["blockers"]:
+        lines += ["", "Source-variant blockers:"] + [f"- {b}" for b in sv["blockers"]]
+    return "\n".join(lines) + "\n"
+
+
 def evaluate(forward_store, prices, oi_funding, results, run_id, now_iso, definition=None):
     """One evaluation pass. Returns (status, record). Writes only under `results`."""
     state = _load_state(results)
@@ -176,7 +197,7 @@ def evaluate(forward_store, prices, oi_funding, results, run_id, now_iso, defini
         return fail("INTEGRITY_FAILURE", "no forward price partition passed integrity checks")
     versions = dict(versions, **{"pinned/prices": PRICES_SHA256, "pinned/oi_funding": FROZEN_OI_SHA256})
     code_sha = {os.path.basename(p): _sha(p) for p in (ew.__file__, os.path.abspath(__file__))}
-    fp = fingerprint(versions, code_sha, ew.SPEC_SHA256)
+    fp = fingerprint(versions, code_sha, {"v0.4.0": ew.SPEC_SHA256, "v0.5.0": ew.SPEC_V050_SHA256})
     record.update(dataset_fingerprint=fp, inputs=versions, code_sha256=code_sha)
     if state.get("last_evaluated_fingerprint") == fp:
         record["status"] = "NO_NEW_DATA"
@@ -193,11 +214,19 @@ def evaluate(forward_store, prices, oi_funding, results, run_id, now_iso, defini
         rep["dataset_fingerprint"] = fp
         if rep["boundary"]["SEAL_END_inclusive"] != ew.SEAL_END or rep["labels"]["first_labelable"] <= ew.SEAL_END:
             raise AssertionError("sealed boundary violated")
+        # v0.5.0: each funding source separately; an absent source only blocks its own variants
+        src_funding, src_info = {}, {}
+        for key, part in SOURCE_PARTITIONS.items():
+            src_funding[key], src_info[key] = ew.load_source_funding(accepted[part], key)
+            src_info[key]["accepted_partitions"] = len(accepted[part])
+        sv = ew.run_source_variants(merged, oi, src_funding, src_info)
+        sv["dataset_fingerprint"] = fp
     except Exception as e:  # noqa: BLE001
         return fail("EVALUATION_FAILED", f"{type(e).__name__}: {e}\n" + traceback.format_exc(limit=3))
     out_dir = os.path.join(results, "reports", fp[:16])
     _dump(os.path.join(out_dir, "report.json"), rep)
-    md = progress_markdown(rep, fp, problems)
+    _dump(os.path.join(out_dir, "source_variants.json"), sv)
+    md = progress_markdown(rep, fp, problems) + source_variants_markdown(sv)
     for p in (os.path.join(out_dir, "progress.md"), os.path.join(results, "latest_progress.md")):
         with open(p, "w") as f:
             f.write(md)
@@ -205,7 +234,9 @@ def evaluate(forward_store, prices, oi_funding, results, run_id, now_iso, defini
                   eligible_hours=rep["decision_hours"]["eligible"], labelled_hours=rep["labels"]["labelled_hours"],
                   episodes=rep["labels"]["episodes"], burn_in_complete=rep["labels"]["burn_in_complete"],
                   coverage={k: v["evaluable_hours"] for k, v in rep["decision_hours"]["coverage"].items()},
-                  checkpoint=rep["checkpoint"], blockers=rep["blockers"])
+                  checkpoint=rep["checkpoint"], blockers=rep["blockers"],
+                  source_variants={"coverage": {k: v["evaluable_hours"] for k, v in sv["decision_hours"]["coverage"].items()},
+                                   "blockers": sv["blockers"]})
     state.update(last_status="EVALUATED", last_evaluated_fingerprint=fp, last_report=record["report"],
                  last_run=run_id, last_run_at=now_iso)
     state["history"].append({"run_id": run_id, "at": now_iso, "status": "EVALUATED", "fingerprint": fp,

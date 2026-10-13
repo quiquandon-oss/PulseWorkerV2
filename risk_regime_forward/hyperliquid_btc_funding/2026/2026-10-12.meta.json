@@ -1,0 +1,20 @@
+{
+ "completeness": "COMPLETE",
+ "expected_slots": 48,
+ "file_sha256": "1d32a71ac4af7610035a4bf72b8da32fe27a965c3d3739217260bcdf477be54e",
+ "fingerprint": "fdef0eaf8a24435793659a998dee6ebb99af44f7206d44052849103afb290bb8",
+ "first_collected_at": "2026-10-13T17:46:56.773000+00:00",
+ "last_run_id": "38441402163",
+ "last_written_at": "2026-10-13T17:46:56.773000+00:00",
+ "missing_ranges": {},
+ "missing_slots": 0,
+ "observations": 48,
+ "partition": "2026-10-12",
+ "raw_sha256": "67c129c82ba20e2fa76c00bf9fa1145cb86b45a75d5da2c679c5f8be8faa0388",
+ "source": "hyperliquid_btc_funding",
+ "superseded": [],
+ "units": {
+  "funding_rate": "rate/1h",
+  "premium": "fraction"
+ }
+}

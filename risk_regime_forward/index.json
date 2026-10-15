@@ -17,20 +17,21 @@
    "with_gaps": []
   },
   "binance_oi_archive": {
-   "complete": 6,
+   "complete": 7,
    "files": {
     "2026-10-08": "43e220f6400fefd897939ff9eddaefaa04383ae9f90ae61b539ffdcb30eb4c63",
     "2026-10-09": "e72681a67d992f975d340fda4929b01736e40e177d4e8eaa24327c58dfe90dc3",
     "2026-10-10": "0a44014feef53b5dfb5b3dc4a2534aacfaeeea917725835827e9453f9f0db8c5",
     "2026-10-11": "962ada474ac3ccfc5831cfd77a48a8fb912932fbcb2249c054f4688907ccd2ed",
     "2026-10-12": "4dd2731477b16b3de145c6086b61faa1313e6e8e099ec3382ddedbfd1cf5a143",
-    "2026-10-13": "bcb9dcffdc40042967ca71b12c552045d2e253907b1442b568dfa2f5158fb37c"
+    "2026-10-13": "bcb9dcffdc40042967ca71b12c552045d2e253907b1442b568dfa2f5158fb37c",
+    "2026-10-14": "2387448caf2fd68ff276a48cfc886462535b6f068fe5478947a21e0c87b07a51"
    },
    "first": "2026-10-08",
-   "last": "2026-10-13",
-   "latest_complete": "2026-10-13",
-   "observations": 3456,
-   "partitions": 6,
+   "last": "2026-10-14",
+   "latest_complete": "2026-10-14",
+   "observations": 4032,
+   "partitions": 7,
    "retention": "archive keeps daily files back to 2021-12; no expiry is documented",
    "stale": false,
    "units": {
@@ -40,7 +41,7 @@
    "with_gaps": []
   },
   "hyperliquid_btc_funding": {
-   "complete": 8,
+   "complete": 9,
    "files": {
     "2026-10-06": "0d5d0f3af5b405a9a90ed45d30095f835bc08c3e2fcd902893e7ea50a6aa75c1",
     "2026-10-07": "ac854a9710ff0a8fa1e8b3df7cfa09c49191ba69b275713eca96ea1dee392f52",
@@ -49,13 +50,14 @@
     "2026-10-10": "343c135039330b50fbd43c5f721017c679994155d353551b9a517c8745a15169",
     "2026-10-11": "6e16af60c2f47a2d810cc46fa4ec3df6345d1ddd78b6653fcd1f2df15e8b2131",
     "2026-10-12": "1d32a71ac4af7610035a4bf72b8da32fe27a965c3d3739217260bcdf477be54e",
-    "2026-10-13": "5f0585e48691f15c8e18026381fd05c856f70ee6c54a35b139f89dca63d4cc5e"
+    "2026-10-13": "5f0585e48691f15c8e18026381fd05c856f70ee6c54a35b139f89dca63d4cc5e",
+    "2026-10-14": "c7c8d2a2e10e8eae8b10fe00e46d8d549fd30b880eeea60f059331ce88cfcee5"
    },
    "first": "2026-10-06",
-   "last": "2026-10-13",
-   "latest_complete": "2026-10-13",
-   "observations": 368,
-   "partitions": 8,
+   "last": "2026-10-14",
+   "latest_complete": "2026-10-14",
+   "observations": 416,
+   "partitions": 9,
    "retention": "fundingHistory: full history",
    "stale": false,
    "units": {
@@ -65,7 +67,7 @@
    "with_gaps": []
   },
   "hyperliquid_hip3": {
-   "complete": 8,
+   "complete": 9,
    "files": {
     "2026-10-06": "6f077d57361d432cd8918dad8196cab5327bb15fddaf2c274cc682ae2f438832",
     "2026-10-07": "a9c86721256001199a4c24cc4297284d3b7f8ac6bbd8d112feadcb30f7125d52",
@@ -74,13 +76,14 @@
     "2026-10-10": "38917ec058ddcaa94826322ece4bd86b56a6063673cf19193917af4c86a628fd",
     "2026-10-11": "558838ee4886cb2e867cad871c602c6648a4c34901aee48a87ed72b86caa28be",
     "2026-10-12": "f24dc621dcc2655d67857e1045ee9288116b44d91c069877df411fa51edea325",
-    "2026-10-13": "4a1f7d1d04dd2d44145790721fe0ce75ffa928efc0a410182dad0fe515a0f423"
+    "2026-10-13": "4a1f7d1d04dd2d44145790721fe0ce75ffa928efc0a410182dad0fe515a0f423",
+    "2026-10-14": "9a6dc08fa4e4bee443a01c3457141c200c7ee7c16ac857868e1d22d50fc10be4"
    },
    "first": "2026-10-06",
-   "last": "2026-10-13",
-   "latest_complete": "2026-10-13",
-   "observations": 3312,
-   "partitions": 8,
+   "last": "2026-10-14",
+   "latest_complete": "2026-10-14",
+   "observations": 3744,
+   "partitions": 9,
    "retention": "candleSnapshot serves only the latest 5,000 candles (1h ~ 208 days): collect well within that",
    "stale": false,
    "units": {

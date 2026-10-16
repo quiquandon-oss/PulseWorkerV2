@@ -64,7 +64,7 @@ FEATURE_SETS = {
 # Each funding source is its own feature group; no variant ever reads another source's funding (no substitution,
 # no blend). U_<SRC> has the same four features as v0.4.0's U (level, change vs previous settlement, 3-day mean,
 # 30-day percentile) with windows defined in time and minimum counts scaled to the source's nominal interval.
-SPEC_V050_SHA256 = "66a69c2889b5e01ba9cceafb6b2bfcff74e3e1253e36a2a5a328c646d8a412cd"   # spec v0.5.0 (addendum)
+SPEC_V050_SHA256 = "5a57dbab40ab82c8b23dc38ed3615fe1e0f1e432cb623d68b0c0393f17f5bac5"   # spec v0.5.0 (addendum)
 SOURCE_FUNDING = {
     "HL": {"source": "hyperliquid_btc_funding", "instrument": "BTC", "metric": "funding_rate", "nominal_interval_ms": H,
            "stale_ms": H + 15 * 60_000},

@@ -47,13 +47,11 @@ Windows are defined in time, and minimum counts scale with each source's nominal
 | HL | 1 h | 1 h 15 min | 65 (≥ 90% of 72) | 640 (≥ 80/90 of 720) |
 | OKX | 8 h | 8 h 15 min | 9 (≥ 90% of 9) | 80 (≥ 80/90 of 90) — identical to 0.4.0 |
 
-- **No filling.** Missing data is never filled, interpolated or carried backward. If anything is missing, U_SRC is NOT_EVALUABLE at that hour.
+- **No filling.** Missing observations are never filled, interpolated or carried backward. U_SRC is NOT_EVALUABLE when freshness or the specified minimum-count requirements fail.
 - **OKX interval:** OKX's interval is not assumed constant.
   - Every stored settlement records its actual spacing (`raw.spacing_ms`, `raw.spacing_irregular`).
   - Every collection run records any irregular spacing.
   - The minimum counts use the nominal interval. A shorter real interval can only add settlements; a longer one makes the window fail its count.
-
-[PROPOSED: the HL staleness limit and the scaled counts.]
 
 ## 3. Availability (causality) — the rule for v0.5.0
 
@@ -111,5 +109,5 @@ Per variant, it holds coverage (evaluable hours) and the pairwise comparison cou
 |---|---|---|
 | V1 | Intraday funding observation, needed for any v0.5.0 variant to become evaluable | BLOCKED: needs approval of a schedule change |
 | V2 | OKX API reachability from the collection runner, which may be geo-restricted; a refusal is recorded as `BLOCKED_BY_PROVIDER_GEO_RESTRICTION` | Unverified (no live call made) |
-| V3 | OKX pagination direction, taken from OKX v5 conventions and enforced at runtime | Verify against the official docs before relying on it |
+| V3 | OKX pagination direction, taken from OKX v5 conventions and enforced at runtime | Verified against the official OKX API documentation; runtime checks retained. |
 | V4 | Re-pinning the two scheduled workflows on `main` to a reviewed SHA containing this addendum | Separate, reviewable change |

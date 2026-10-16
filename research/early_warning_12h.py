@@ -64,7 +64,7 @@ FEATURE_SETS = {
 # Each funding source is its own feature group; no variant ever reads another source's funding (no substitution,
 # no blend). U_<SRC> has the same four features as v0.4.0's U (level, change vs previous settlement, 3-day mean,
 # 30-day percentile) with windows defined in time and minimum counts scaled to the source's nominal interval.
-SPEC_V050_SHA256 = "5a57dbab40ab82c8b23dc38ed3615fe1e0f1e432cb623d68b0c0393f17f5bac5"   # spec v0.5.0 (addendum)
+SPEC_V050_SHA256 = "bf24ef975a2718e1c1ede92e5ee9f4ea084e575c76fd5e08bc9d98e60c4d478a"   # spec v0.5.0 (addendum)
 SOURCE_FUNDING = {
     "HL": {"source": "hyperliquid_btc_funding", "instrument": "BTC", "metric": "funding_rate", "nominal_interval_ms": H,
            "stale_ms": H + 15 * 60_000},
@@ -175,7 +175,13 @@ def load_venue_series(paths):
     for kind, ts in conflicts:            # conflicting snapshots are removed, never chosen
         (oi if kind == "oi" else fund).pop(ts, None)
     oi = {t: v for t, v in oi.items() if v[1] is not None and v[2] is not None}
-    return oi, fund, sorted(set(conflicts))
+    # Open interest of the BTCUSDT perpetual is never zero or negative: such a value is a provider placeholder
+    # (the archive writes 0E-16 during an outage), not a measurement. The snapshot is missing: dropped, never
+    # replaced, and reported with the dropped conflicts. Positive values pass through unchanged.
+    bad = [t for t, v in oi.items() if not (v[1] > 0 and v[2] > 0)]
+    for t in bad:
+        del oi[t]
+    return oi, fund, sorted(set(conflicts) | {("oi_nonpositive", t) for t in bad})
 
 
 def causal_available_at(row):

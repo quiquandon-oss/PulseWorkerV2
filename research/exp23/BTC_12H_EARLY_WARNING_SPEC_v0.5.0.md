@@ -17,6 +17,8 @@
 - walk-forward fitting (D9), pairwise scoring (D10), F0, the intervals, the D5 checkpoint (60 events, ≥ 25 per direction) and the 20-episode cell rule;
 - F1 = P, F2 = P + O, F3 = P + U, F4 = P + O + U, with U = Binance funding. Their report (`report.json`) and their Holm family (F2/F3/F4 vs F1) are produced exactly as before.
 
+**Input validity (all sets, including F1–F4):** a Binance OI snapshot whose BTC or USD open interest is zero or negative is a provider placeholder (the archive writes `0E-16` during an outage), not a measurement. The snapshot is treated as missing: it is dropped, never replaced, and listed in `conflicts_dropped` as `oi_nonpositive`. 0.4.0 has no defined output for such a snapshot (its OI change features divide by it). On data without such snapshots every output is unchanged.
+
 **Added:** four source-specific variants, reported separately in `source_variants.json`.
 
 | Set | Features | Funding source |
@@ -86,6 +88,7 @@ Unlike 0.4.0, whose U14 accepted retrospective collection for Binance funding, 0
   - raw: `instId`, `instType`, `fundingTime`, `fundingRate`, `realizedRate`, `formulaType`, `method`, the spacing fields and the provenance URL.
 - **Store rules:** the forward store's rules are reused unchanged: closed day partitions, atomic writes, checksums, idempotency, strict-superset updates, conflicts kept and not overwritten, missing slots listed and never filled, and the index rebuilt each run.
   - `first_observed_at` is observation metadata, like `retrieved_at`: it is excluded from content fingerprints and conflict checks, so a superset update keeps the earlier row with its earlier observation time.
+  - **OPEN partitions (intraday).** With the opt-in `--open-day` mode, the current UTC day(s) of `hyperliquid_btc_funding` and `okx_btc_funding` may be written before the day ends. Such a partition is OPEN: its slots are expected only up to the run time and it is never COMPLETE. Later runs complete it under the same superset and conflict rules, and each row keeps its first `first_observed_at`. Feature definitions, staleness limits, minimum counts and the causality rule are unchanged.
 - **Provider history limit:** days older than anything the provider returned are recorded as `BEYOND_PROVIDER_HISTORY`.
 
 ## 5. Collection: Hyperliquid
@@ -107,7 +110,7 @@ Per variant, it holds coverage (evaluable hours) and the pairwise comparison cou
 
 | # | Item | Status |
 |---|---|---|
-| V1 | Intraday funding observation, needed for any v0.5.0 variant to become evaluable | BLOCKED: needs approval of a schedule change |
+| V1 | Intraday funding observation, needed for any v0.5.0 variant to become evaluable | Collector mode implemented (OPEN partitions, section 4); the hourly schedule needs separate approval |
 | V2 | OKX API reachability from the collection runner, which may be geo-restricted; a refusal is recorded as `BLOCKED_BY_PROVIDER_GEO_RESTRICTION` | Unverified (no live call made) |
 | V3 | OKX pagination direction, taken from OKX v5 conventions and enforced at runtime | Verified against the official OKX API documentation; runtime checks retained. |
 | V4 | Re-pinning the two scheduled workflows on `main` to a reviewed SHA containing this addendum | Separate, reviewable change |

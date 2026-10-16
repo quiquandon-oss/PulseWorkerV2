@@ -298,3 +298,79 @@ def test_hyperliquid_funding_rows_carry_first_observed_at_and_keep_their_identit
     rows = fw.read_partition(fw.ForwardStore(tmp_path, cut).paths("hyperliquid_btc_funding", "2026-10-08")[0])
     assert rows and all(o["source"] == "hyperliquid_btc_funding" and o["instrument"] == "BTC" for o in rows)
     assert all(o["first_observed_at"] >= now and o["available_at"] == o["timestamp"] for o in rows)
+
+
+# ---------------------------------------- opt-in intraday (open-day) funding collection; TEST data, mocked providers only
+def test_open_day_is_off_by_default_only_closed_days_are_collected(tmp_path):
+    r = okx_run(tmp_path, okx_day(T0), T0 + 9 * H)                     # 2026-10-08 has not ended
+    assert not any(a.get("partition") == "2026-10-08" for a in r["attempts"]) and r["open_day"] is False
+    assert fw.ForwardStore(tmp_path, {}).meta("okx_btc_funding", "2026-10-08") is None
+
+
+def okx_open(tmp, rows, now):
+    return fw.run_collection(tmp, ["okx_btc_funding"], now=now, max_days=2, cutoffs={}, fetch=fetcher({}),
+                             okx_http=okx_http(rows), open_day=True)
+
+
+def test_okx_open_day_partition_is_open_never_complete_and_closes_keeping_first_observation(tmp_path):
+    store = fw.ForwardStore(tmp_path, {})
+    now1 = T0 + 8 * H + 20 * 60_000                                     # after the 00:00 and 08:00 settlements
+    r1 = okx_open(tmp_path, okx_day(T0), now1)                          # the provider mock also holds 16:00 (future)
+    m1 = store.meta("okx_btc_funding", "2026-10-08")
+    assert ("2026-10-08", "WRITTEN") in statuses(r1) and m1["completeness"] == "OPEN"
+    assert m1["expected_slots"] == 2 and m1["missing_slots"] == 0 and m1["observations"] == 4   # slots only up to now
+    p = store.paths("okx_btc_funding", "2026-10-08")[0]
+    rows1 = fw.read_partition(p)
+    assert all(o["timestamp"] < now1 and o["first_observed_at"] >= now1 for o in rows1)           # nothing from the future
+    first = {(o["metric"], o["timestamp"]): o["first_observed_at"] for o in rows1}
+    b1 = p.read_bytes()
+    r2 = okx_open(tmp_path, okx_day(T0), now1 + 10 * 60_000)            # duplicate collection: no-op
+    assert ("2026-10-08", "UNCHANGED") in statuses(r2) and p.read_bytes() == b1
+    now3 = T0 + 16 * H + 20 * 60_000
+    r3 = okx_open(tmp_path, okx_day(T0), now3)
+    assert ("2026-10-08", "SUPERSEDED") in statuses(r3) and store.meta("okx_btc_funding", "2026-10-08")["completeness"] == "OPEN"
+    rows3 = fw.read_partition(p)
+    for o in rows3:
+        k = (o["metric"], o["timestamp"])
+        assert o["first_observed_at"] == first[k] if k in first else o["first_observed_at"] >= now3
+    b3 = p.read_bytes()
+    r4 = okx_run(tmp_path, okx_day(T0), T0 + D + 3 * H)                # the normal daily run closes it, same content
+    m4 = store.meta("okx_btc_funding", "2026-10-08")
+    assert ("2026-10-08", "CLOSED") in statuses(r4) and m4["completeness"] == "COMPLETE" and m4["expected_slots"] == 3
+    assert p.read_bytes() == b3
+    assert len(m4["superseded"]) == 1                                   # only the real content change is recorded
+    r5 = okx_run(tmp_path, okx_day(T0), T0 + D + 4 * H)
+    assert not any(a.get("partition") == "2026-10-08" for a in r5["attempts"])                   # COMPLETE: not retried
+
+
+def test_okx_open_day_revised_value_is_a_conflict_and_never_overwrites(tmp_path):
+    store = fw.ForwardStore(tmp_path, {})
+    okx_open(tmp_path, okx_day(T0), T0 + 8 * H + 20 * 60_000)
+    p = store.paths("okx_btc_funding", "2026-10-08")[0]
+    b1 = p.read_bytes()
+    r = okx_open(tmp_path, okx_day(T0, rates=("0.0009", "0.0002", "0.0003")), T0 + 16 * H + 20 * 60_000)
+    assert ("2026-10-08", "CONFLICT") in statuses(r) and p.read_bytes() == b1
+
+
+def test_okx_missing_intraday_settlement_is_listed_never_filled(tmp_path):
+    store = fw.ForwardStore(tmp_path, {})
+    okx_open(tmp_path, okx_day(T0, skip=(1,)), T0 + 9 * H)              # 08:00 not returned by the provider
+    m = store.meta("okx_btc_funding", "2026-10-08")
+    assert m["completeness"] == "OPEN" and m["missing_slots"] == 1 and m["observations"] == 2
+    assert m["missing_ranges"]["okx_btc_funding|BTC-USDT-SWAP|funding_rate"][0][0] == fw.iso(T0 + 8 * H)
+
+
+def test_hyperliquid_open_day_collects_funding_only_up_to_now(tmp_path):
+    cut = {f"hyperliquid_hip3|{s}|{m}": T0 - H for s in fw.HL_SYMBOLS for m in ("close", "volume")}
+    cut.update({f"hyperliquid_btc_funding|BTC|{m}": T0 - H + 31 for m in ("funding_rate", "premium")})
+    now = T0 + D + 2 * H + 20 * 60_000                                  # 2026-10-09 02:20: 10-08 closed, 10-09 open
+    r = fw.run_collection(tmp_path, ["hyperliquid_btc_funding"], now=now, cutoffs=cut, fetch=fetcher({}),
+                          candles_fn=candle_fn(), funding_fn=funding_fn, open_day=True)
+    store = fw.ForwardStore(tmp_path, cut)
+    assert not (tmp_path / "hyperliquid_hip3").exists()                 # candles (a v0.4.0-side input) untouched
+    assert store.meta("hyperliquid_btc_funding", "2026-10-08")["completeness"] == "COMPLETE"
+    m = store.meta("hyperliquid_btc_funding", "2026-10-09")
+    assert m["completeness"] == "OPEN" and m["expected_slots"] == 6 and m["missing_slots"] == 0     # 00,01,02 x 2 metrics
+    rows = fw.read_partition(store.paths("hyperliquid_btc_funding", "2026-10-09")[0])
+    assert all(o["timestamp"] < now and o["first_observed_at"] >= now for o in rows)
+    assert ("2026-10-09", "WRITTEN") in statuses(r)

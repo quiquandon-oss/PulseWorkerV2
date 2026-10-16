@@ -24,7 +24,10 @@ Rules:
   value is a CONFLICT: the stored partition is kept, nothing is overwritten, the run records the difference.
 - Missing slots are listed, never filled. A partition with no data is not written; the run records MISSING /
   NOT_YET_PUBLISHED. Partitions that are not COMPLETE are retried by the next run (safe: same rules apply).
-- Only closed periods are collected (a day after it ends; a month after it ends).
+- Only closed periods are collected (a day after it ends; a month after it ends). Exception, opt-in (`--open-day`):
+  the funding sources (Hyperliquid, OKX) may also collect the current UTC day(s) so that `first_observed_at` is close
+  to settlement. Such a partition is written as OPEN (slots counted only up to the run time, never COMPLETE) and is
+  completed later under the same superset/conflict rules; earlier rows keep their earlier observation time.
 - No proxy, no credentials, no paid source, no substitution. Bybit and liquidations are not collected (missing).
 - Funding rows (Hyperliquid, OKX) carry `first_observed_at`: when this collector first had the record in hand (taken
   after the response arrived). It is observation metadata, like `retrieved_at`: it is not part of the content
@@ -32,6 +35,7 @@ Rules:
   EXP-23 v0.5.0 uses it as the defensible availability of forward funding rows (settlement time alone is not).
 
 Usage: python3 research/risk_regime_forward.py --store research/results/risk_regime_forward [--sources ...] [--max-days 60]
+       [--open-day]
 """
 from __future__ import annotations
 
@@ -214,22 +218,26 @@ class ForwardStore:
         mp = self.paths(source, label)[1]
         return json.loads(mp.read_text()) if mp.exists() else None
 
-    def expected(self, source: str, label: str, series: Sequence[str]) -> Dict[str, List[int]]:
+    def expected(self, source: str, label: str, series: Sequence[str], until: Optional[int] = None) -> Dict[str, List[int]]:
         spec = SOURCE_SPECS[source]
         lo, hi = partition_bounds(spec["period"], label)
+        hi = hi if until is None else min(hi, until)
         return {k: expected_slots(lo, hi, spec["grid_ms"], self.cutoffs.get(k)) for k in series}
 
-    def write(self, source: str, label: str, obs: List[Dict], raw: List[Dict], series: Sequence[str], run: Dict) -> Dict:
-        """Applies the write rules to one partition. Returns the attempt record."""
+    def write(self, source: str, label: str, obs: List[Dict], raw: List[Dict], series: Sequence[str], run: Dict,
+              now: Optional[int] = None) -> Dict:
+        """Applies the write rules to one partition. Returns the attempt record. A partition that has not ended at
+        `now` is OPEN: its slots are expected only up to `now` and it is never COMPLETE (so it is retried)."""
         spec = SOURCE_SPECS[source]
         lo, hi = partition_bounds(spec["period"], label)
+        is_open = now is not None and hi > now
         # keep only this partition, only after the frozen cutoff, deterministic de-duplication
         kept = [o for o in obs if lo <= o["timestamp"] < hi and o["timestamp"] > self.cutoffs.get(series_key(o), -1)]
         store = d.ObservationStore()
         store.add(kept)
         rows = [o for k in sorted(store.keys(), key="|".join) for o in store.series(k)]
         internal_conflicts = {"|".join(k): v[:5] for k, v in store.conflicts.items()}
-        exp = self.expected(source, label, series)
+        exp = self.expected(source, label, series, until=now if is_open else None)
         present = defaultdict(set)
         for o in rows:
             present[series_key(o)].add(slot_of(o["timestamp"], spec["grid_ms"]))
@@ -242,11 +250,11 @@ class ForwardStore:
         if not rows:
             rec["status"] = "NO_DATA"
             return rec
-        completeness = "COMPLETE" if n_miss == 0 else "GAPS"
+        completeness = "OPEN" if is_open else ("COMPLETE" if n_miss == 0 else "GAPS")
         fp = content_fingerprint(rows)
         dp, mp, rp = self.paths(source, label)
         old = self.meta(source, label)
-        if old is not None and old["fingerprint"] == fp:
+        if old is not None and old["fingerprint"] == fp and (old["completeness"] != "OPEN" or completeness == "OPEN"):
             rec.update(status="UNCHANGED", completeness=old["completeness"])
             return rec
         if old is not None:
@@ -270,10 +278,11 @@ class ForwardStore:
                 "raw_sha256": hashlib.sha256(raw_bytes).hexdigest(), "observations": len(rows), "expected_slots": n_exp,
                 "missing_slots": n_miss, "missing_ranges": rec["missing_ranges"], "completeness": completeness,
                 "first_collected_at": old["first_collected_at"] if old else run["started_at"], "last_written_at": run["started_at"],
-                "last_run_id": run["run_id"], "superseded": (old.get("superseded", []) + [old["fingerprint"]]) if old else [],
+                "last_run_id": run["run_id"],
+                "superseded": (old.get("superseded", []) + ([old["fingerprint"]] if old["fingerprint"] != fp else [])) if old else [],
                 "units": SOURCE_SPECS[source]["units"]}
         atomic_write(mp, (json.dumps(meta, indent=1, sort_keys=True) + "\n").encode())   # meta last: a crash before this leaves a retryable state
-        rec.update(status="SUPERSEDED" if old else "WRITTEN", completeness=completeness, fingerprint=fp)
+        rec.update(status=("SUPERSEDED" if old["fingerprint"] != fp else "CLOSED") if old else "WRITTEN", completeness=completeness, fingerprint=fp)
         return rec
 
     def todo(self, source: str, labels: Sequence[str]) -> List[str]:
@@ -335,7 +344,8 @@ def _hl_default_funding(lo: int, hi: int, cache: Path, log: Counter) -> List[Dic
 
 
 def collect_hyperliquid(store: ForwardStore, labels: Sequence[str], run: Dict, now: int,
-                        candles_fn: Callable = _hl_default_candles, funding_fn: Callable = _hl_default_funding) -> List[Dict]:
+                        candles_fn: Callable = _hl_default_candles, funding_fn: Callable = _hl_default_funding,
+                        only: Sequence[str] = ("hyperliquid_hip3", "hyperliquid_btc_funding")) -> List[Dict]:
     """One request window covering all pending days; observations split into day partitions."""
     out = []
     if not labels:
@@ -343,7 +353,7 @@ def collect_hyperliquid(store: ForwardStore, labels: Sequence[str], run: Dict, n
     lo, hi = partition_bounds("day", labels[0])[0], partition_bounds("day", labels[-1])[1]
     cache = Path(tempfile.mkdtemp(prefix="hl_forward_"))
     log: Counter = Counter()
-    for source in ("hyperliquid_hip3", "hyperliquid_btc_funding"):
+    for source in [x for x in ("hyperliquid_hip3", "hyperliquid_btc_funding") if x in only]:
         try:
             if source == "hyperliquid_hip3":
                 by_sym = {sym: [c for c in candles_fn(sym, lo, hi, cache, log) if c["T"] < now] for sym in HL_SYMBOLS}
@@ -367,7 +377,7 @@ def collect_hyperliquid(store: ForwardStore, labels: Sequence[str], run: Dict, n
             a, b = partition_bounds("day", lab)
             part = [o for o in obs if a <= o["timestamp"] < b]
             raw = [dict(r, provenance="https://api.hyperliquid.xyz/info") for r in raw_rows if a <= raw_ts(r) < b]
-            rec = store.write(source, lab, part, raw, series, run)
+            rec = store.write(source, lab, part, raw, series, run, now=now)
             if rec["status"] == "NO_DATA":
                 rec["status"] = "MISSING"
             out.append(rec)
@@ -399,7 +409,7 @@ def collect_okx(store: ForwardStore, labels: Sequence[str], run: Dict, now: int,
         a, b = partition_bounds("day", lab)
         part = [o for o in obs if a <= o["timestamp"] < b]
         raw = [dict(r, provenance=s.OKX + s.OKX_FUNDING_PATH + "?instId=" + s.OKX_INST) for r in res["rows"] if a <= int(r["fundingTime"]) < b]
-        rec = store.write(source, lab, part, raw, series, run)
+        rec = store.write(source, lab, part, raw, series, run, now=now)
         if rec["status"] == "NO_DATA":
             # older than anything the provider returned and the pages never reached it: provider history limit
             rec["status"] = "BEYOND_PROVIDER_HISTORY" if (not res["reached_start"] and (earliest is None or b <= earliest)) else "MISSING"
@@ -413,12 +423,12 @@ def collect_okx(store: ForwardStore, labels: Sequence[str], run: Dict, now: int,
 def run_collection(root: Path, sources: Sequence[str], now: Optional[int] = None, max_days: int = 60,
                    cutoffs: Optional[Dict[str, int]] = None, fetch: Callable = oc.get_bytes,
                    candles_fn: Callable = _hl_default_candles, funding_fn: Callable = _hl_default_funding,
-                   okx_http: Optional["s.Http"] = None) -> Dict:
+                   okx_http: Optional["s.Http"] = None, open_day: bool = False) -> Dict:
     now = now or int(time.time() * 1000)
     cut = frozen_cutoffs() if cutoffs is None else cutoffs
     store = ForwardStore(root, cut)
     run = {"artifact": "risk-regime-forward-run", "run_id": os.environ.get("GITHUB_RUN_ID") or uuid.uuid4().hex[:12],
-           "started_at": iso(now), "sources": list(sources), "attempts": [], "errors": []}
+           "started_at": iso(now), "sources": list(sources), "open_day": open_day, "attempts": [], "errors": []}
     try:
         run["location"] = oc.location(fetch)
     except Exception as e:
@@ -437,10 +447,18 @@ def run_collection(root: Path, sources: Sequence[str], now: Optional[int] = None
             start = max(min(cut[k] + HOUR if (k := f"hyperliquid_hip3|{sym}|close") in cut else horizon for sym in HL_SYMBOLS), horizon)
             labels = sorted(set(store.todo("hyperliquid_hip3", labels_between("day", start, now - HOUR)))
                             | set(store.todo("hyperliquid_btc_funding", labels_between("day", start, now - HOUR))))
-            run["attempts"] += collect_hyperliquid(store, labels, run, now, candles_fn=candles_fn, funding_fn=funding_fn)
+            run["attempts"] += collect_hyperliquid(store, labels, run, now, candles_fn=candles_fn, funding_fn=funding_fn,
+                                                   only=[x for x in ("hyperliquid_hip3", "hyperliquid_btc_funding") if x in sources])
         if "okx_btc_funding" in sources:       # no frozen OKX data exists: the window starts at the horizon
             labels = store.todo("okx_btc_funding", labels_between("day", horizon, now))
             run["attempts"] += collect_okx(store, labels, run, now, http=okx_http)
+        if open_day:        # funding only: the UTC day(s) not yet closed (incl. the one that ended < 1 h ago for HL)
+            open_labels = sorted({partition_of("day", now - HOUR), partition_of("day", now)})
+            if "hyperliquid_btc_funding" in sources:
+                run["attempts"] += collect_hyperliquid(store, store.todo("hyperliquid_btc_funding", open_labels), run, now,
+                                                       candles_fn=candles_fn, funding_fn=funding_fn, only=("hyperliquid_btc_funding",))
+            if "okx_btc_funding" in sources:
+                run["attempts"] += collect_okx(store, store.todo("okx_btc_funding", open_labels), run, now, http=okx_http)
     except Exception as e:  # anything unexpected is recorded; partitions already written are complete and atomic
         run["errors"].append(f"{type(e).__name__}: {e}")
     finally:
@@ -468,8 +486,9 @@ def main(argv=None) -> int:
     ap.add_argument("--store", required=True)
     ap.add_argument("--sources", nargs="*", default=list(SOURCE_SPECS))
     ap.add_argument("--max-days", type=int, default=60)
+    ap.add_argument("--open-day", action="store_true", help="also collect the current UTC day for funding sources (OPEN)")
     args = ap.parse_args(argv)
-    run = run_collection(Path(args.store), args.sources, max_days=args.max_days)
+    run = run_collection(Path(args.store), args.sources, max_days=args.max_days, open_day=args.open_day)
     print(json.dumps({"location": run.get("location"), "summary": run["summary"], "errors": run["errors"], "stale": run["stale_sources"]}))
     return 0
 

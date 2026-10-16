@@ -457,3 +457,43 @@ def test_v050_spec_hash_and_v040_untouched():
     assert (ROOT / "research" / "exp23" / "BTC_12H_EARLY_WARNING_SPEC_v0.5.0.sha256").read_text().split()[0] == ew.SPEC_V050_SHA256
     assert sha(ROOT / "research" / "exp23" / "BTC_12H_EARLY_WARNING_SPEC_v0.4.0.md") == ew.SPEC_SHA256
     assert ew.FEATURE_SETS == {"F1": ("P",), "F2": ("P", "O"), "F3": ("P", "U"), "F4": ("P", "O", "U")}
+
+
+# ------------------------------- freshness boundary under intraday observation (unchanged limits); TEST data only
+def test_hl_freshness_boundary_needs_observation_within_one_hour_of_settlement():
+    S = ew.T1 + 40 * 24 * H                                          # a settlement (top of an hour)
+    t = S + H                                                        # the next decision hour: S is the latest usable
+    hist = hl_rows(S - 31 * 24 * H, S - H)                           # 30-day history observed 5 min after settlement
+    fb = ew.FeatureBuilder({}, None, None)
+    ok = hist + hl_rows(S, S, observed=lambda ts: ts + H)            # observed exactly at t
+    late = hist + hl_rows(S, S, observed=lambda ts: ts + H + 1)      # observed 1 ms after t
+    assert fb.source_funding_features("HL", series_of(ok, "HL"), t, [])["fund"] == ok[-1]["value"]
+    assert fb.source_funding_features("HL", series_of(late, "HL"), t, []) is None   # S-1h is 2 h old > 1 h 15 min
+    short = hl_rows(S - 26 * 24 * H, S, lag=60_000)                  # fresh but < 640 settlements in 30 days
+    assert fb.source_funding_features("HL", series_of(short, "HL"), t, []) is None
+
+
+def test_okx_freshness_boundary_one_hour_after_each_settlement():
+    S = ew.T1 + 40 * 24 * H
+    S -= S % (8 * H)
+    hist = okx_rows(S - 31 * 24 * H, S - 8 * H)
+    fb = ew.FeatureBuilder({}, None, None)
+    late = hist + okx_rows(S, S, observed=lambda ts: ts + 2 * H)     # observed 2 h after settlement
+    sl = series_of(late, "OKX")
+    assert fb.source_funding_features("OKX", sl, S + H, []) is None              # S-8h is 9 h old, S not yet seen
+    assert fb.source_funding_features("OKX", sl, S + 2 * H, [])["fund"] == late[-1]["value"]
+    assert fb.source_funding_features("OKX", sl, S, [])["fund"] == late[-2]["value"]   # S-8h: 8 h <= 8 h 15 min
+
+
+def test_hourly_observation_makes_hl_evaluable_and_missed_runs_stay_not_evaluable(env):
+    s = env["series"]
+    lo, hi = ew.SEAL_END - 900 * H, ew.SEAL_END + 60 * H
+    missed = {ts for ts in range(lo - lo % H, hi + 1, H) if (ts // H) % 7 == 0}        # every 7th run lost
+    obs = lambda ts: ts + (3 * H if ts in missed else 20 * 60_000)                      # else seen 20 min later
+    hl = series_of(hl_rows(lo, hi, observed=obs), "HL")
+    fb = ew.FeatureBuilder(s, None, None)
+    hours = [u for u in sorted(s) if ew.T1 <= u <= hi - H]
+    got = {t: fb.build_sources(t, {"HL": hl})["U_HL"] is not None for t in hours}
+    assert any(got.values())
+    for t in hours:
+        assert got[t] == ((t - H) not in missed), t                  # never filled from an older settlement

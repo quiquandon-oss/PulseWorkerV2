@@ -5,6 +5,7 @@ Collects, for times after the frozen historical datasets end:
   binance_funding_archive  Binance BTCUSDT funding settlements (archive, monthly files)
   hyperliquid_hip3         Hyperliquid cross-asset hourly candles (established implementation: candles + hyperliquid_obs)
   hyperliquid_btc_funding  Hyperliquid BTC hourly funding/premium (established implementation: fetch_funding)
+  okx_btc_funding          OKX BTC-USDT-SWAP funding settlements (public funding-rate-history; added for EXP-23 v0.5.0)
 
 Storage (research/results/risk_regime_forward/):
   <source>/<YYYY>/<partition>.jsonl.gz      normalised observations of one UTC day (funding archive: one month)
@@ -25,6 +26,10 @@ Rules:
   NOT_YET_PUBLISHED. Partitions that are not COMPLETE are retried by the next run (safe: same rules apply).
 - Only closed periods are collected (a day after it ends; a month after it ends).
 - No proxy, no credentials, no paid source, no substitution. Bybit and liquidations are not collected (missing).
+- Funding rows (Hyperliquid, OKX) carry `first_observed_at`: when this collector first had the record in hand (taken
+  after the response arrived). It is observation metadata, like `retrieved_at`: it is not part of the content
+  fingerprint or of conflict checks, and a superset update keeps the earlier row with its earlier observation time.
+  EXP-23 v0.5.0 uses it as the defensible availability of forward funding rows (settlement time alone is not).
 
 Usage: python3 research/risk_regime_forward.py --store research/results/risk_regime_forward [--sources ...] [--max-days 60]
 """
@@ -72,7 +77,15 @@ SOURCE_SPECS = {
     "hyperliquid_btc_funding": {"period": "day", "grid_ms": HOUR, "metrics": ("funding_rate", "premium"),
                                 "available_after_ms": HOUR, "stale_after_ms": 2 * DAY,
                                 "retention": "fundingHistory: full history", "units": {"funding_rate": "rate/1h", "premium": "fraction"}},
+    # Nominal 8h grid only for missing-slot accounting; actual spacing is recorded per row (raw.spacing_ms) and any
+    # irregular interval is reported by the run, never assumed away. realized_rate is stored when OKX provides it but
+    # is not an expected series (its absence is not a gap).
+    "okx_btc_funding": {"period": "day", "grid_ms": 8 * HOUR, "metrics": ("funding_rate",), "available_after_ms": 0,
+                        "stale_after_ms": 2 * DAY,
+                        "retention": "funding-rate-history serves recent months only (provider limit); older days are BEYOND_PROVIDER_HISTORY",
+                        "units": {"funding_rate": "rate per funding interval (nominal 8h)", "realized_rate": "rate per funding interval"}},
 }
+OBSERVATION_METADATA = ("retrieved_at", "first_observed_at")     # when we saw a row, not what the row says
 HL_SYMBOLS = s.HL_SYMBOLS
 
 
@@ -120,7 +133,7 @@ def content_fingerprint(obs: Iterable[Dict]) -> str:
     """Identity of a partition's content: everything except this run's retrieval time."""
     h = hashlib.sha256()
     for o in sorted(obs, key=lambda x: (series_key(x), x["timestamp"])):
-        x = {k: v for k, v in o.items() if k != "retrieved_at"}
+        x = {k: v for k, v in o.items() if k not in OBSERVATION_METADATA}
         h.update(json.dumps(x, sort_keys=True).encode())
         h.update(b"\n")
     return h.hexdigest()
@@ -129,7 +142,7 @@ def content_fingerprint(obs: Iterable[Dict]) -> str:
 def measurement(o: Dict) -> Dict:
     """What a conflict is judged on: the measured value and its definition, not this run's retrieval time and not
     file-level provenance in `raw` (a re-published archive file has a new sha256 but may carry identical values)."""
-    return {k: v for k, v in o.items() if k not in ("retrieved_at", "raw")}
+    return {k: v for k, v in o.items() if k not in OBSERVATION_METADATA + ("raw",)}
 
 
 def _gz_bytes(lines: Iterable[str]) -> bytes:
@@ -340,7 +353,10 @@ def collect_hyperliquid(store: ForwardStore, labels: Sequence[str], run: Dict, n
                 raw_ts = lambda r: r["t"]
             else:
                 fund = [r for r in funding_fn(lo, hi, cache, log) if r["t"] < now]
+                observed = int(time.time() * 1000)          # after the records were in hand
                 obs = s.hyperliquid_funding_obs(fund, now)
+                for o in obs:
+                    o["first_observed_at"] = max(observed, now)
                 raw_rows = list(fund)
                 series = [f"hyperliquid_btc_funding|BTC|{m}" for m in ("funding_rate", "premium")]
                 raw_ts = lambda r: r["t"]
@@ -359,10 +375,45 @@ def collect_hyperliquid(store: ForwardStore, labels: Sequence[str], run: Dict, n
     return out
 
 
+def _okx_default_http() -> "s.Http":
+    return s.Http(min_interval_s=0.25, max_backoff_s=10.0, retries=3)
+
+
+def collect_okx(store: ForwardStore, labels: Sequence[str], run: Dict, now: int, http: Optional["s.Http"] = None) -> List[Dict]:
+    """One paginated request window covering all pending closed days, split into day partitions (same store rules)."""
+    out: List[Dict] = []
+    if not labels:
+        return out
+    source, spec = "okx_btc_funding", SOURCE_SPECS["okx_btc_funding"]
+    lo, hi = partition_bounds("day", labels[0])[0], partition_bounds("day", labels[-1])[1]
+    http = http or _okx_default_http()
+    try:
+        res = s.collect_okx_funding(http, lo, min(hi, now))
+    except s.SourceError as e:      # BLOCKED_BY_NETWORK_POLICY / GEO_RESTRICTION / PROVIDER_ERROR / MALFORMED / PAGINATION
+        return [{"source": source, "partition": lab, "status": e.status, "error": str(e)[:300]} for lab in labels] + \
+               [{"source": "okx", "partition": None, "status": "REQUEST_LOG", "requests": dict(http.log)}]
+    obs = s.okx_funding_obs(res["rows"], now, max(res["first_observed_at"], now))
+    earliest = min((int(r["fundingTime"]) for r in res["rows"]), default=None)
+    series = [f"{source}|{s.OKX_INST}|{m}" for m in spec["metrics"]]
+    for lab in labels:
+        a, b = partition_bounds("day", lab)
+        part = [o for o in obs if a <= o["timestamp"] < b]
+        raw = [dict(r, provenance=s.OKX + s.OKX_FUNDING_PATH + "?instId=" + s.OKX_INST) for r in res["rows"] if a <= int(r["fundingTime"]) < b]
+        rec = store.write(source, lab, part, raw, series, run)
+        if rec["status"] == "NO_DATA":
+            # older than anything the provider returned and the pages never reached it: provider history limit
+            rec["status"] = "BEYOND_PROVIDER_HISTORY" if (not res["reached_start"] and (earliest is None or b <= earliest)) else "MISSING"
+        out.append(rec)
+    out.append({"source": "okx", "partition": None, "status": "REQUEST_LOG", "requests": dict(http.log), "pages": res["pages"],
+                "irregular_spacing_ms": res["irregular_spacing_ms"]})
+    return out
+
+
 # ---------------- run ----------------
 def run_collection(root: Path, sources: Sequence[str], now: Optional[int] = None, max_days: int = 60,
                    cutoffs: Optional[Dict[str, int]] = None, fetch: Callable = oc.get_bytes,
-                   candles_fn: Callable = _hl_default_candles, funding_fn: Callable = _hl_default_funding) -> Dict:
+                   candles_fn: Callable = _hl_default_candles, funding_fn: Callable = _hl_default_funding,
+                   okx_http: Optional["s.Http"] = None) -> Dict:
     now = now or int(time.time() * 1000)
     cut = frozen_cutoffs() if cutoffs is None else cutoffs
     store = ForwardStore(root, cut)
@@ -387,6 +438,9 @@ def run_collection(root: Path, sources: Sequence[str], now: Optional[int] = None
             labels = sorted(set(store.todo("hyperliquid_hip3", labels_between("day", start, now - HOUR)))
                             | set(store.todo("hyperliquid_btc_funding", labels_between("day", start, now - HOUR))))
             run["attempts"] += collect_hyperliquid(store, labels, run, now, candles_fn=candles_fn, funding_fn=funding_fn)
+        if "okx_btc_funding" in sources:       # no frozen OKX data exists: the window starts at the horizon
+            labels = store.todo("okx_btc_funding", labels_between("day", horizon, now))
+            run["attempts"] += collect_okx(store, labels, run, now, http=okx_http)
     except Exception as e:  # anything unexpected is recorded; partitions already written are complete and atomic
         run["errors"].append(f"{type(e).__name__}: {e}")
     finally:

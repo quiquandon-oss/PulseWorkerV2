@@ -21,6 +21,13 @@ differ between failed and correct calls on data nobody has seen yet?**
 | `binance_funding_archive` | BTCUSDT funding settlements | archive, monthly files | month / 8 h | **monthly only**: October's settlements arrive in early November (up to ~31 days of research latency). Values were public at settlement, so point-in-time use is unaffected |
 | `hyperliquid_hip3` | BTC, SP500, XYZ100, GOLD, SILVER, COPPER, BRENTOIL, EUR, 10Y: hourly close and volume | established `hyperliquid_asset_universe_run.candles` + `risk_regime_sources.hyperliquid_obs` | day / 1 h | `candleSnapshot` serves only the latest 5,000 candles (≈ 208 days): collection must not lapse that long |
 | `hyperliquid_btc_funding` | BTC hourly funding and premium | established `hyperliquid_research_run.fetch_funding` | day / 1 h | full history |
+| `okx_btc_funding` (added for EXP-23 v0.5.0) | BTC-USDT-SWAP funding settlements: `funding_rate`, and `realized_rate` when given; raw `fundingTime`, `fundingRate`, `realizedRate`, `formulaType`, `method`, `instType`, actual spacing | public `GET /api/v5/public/funding-rate-history`, newest first, `after` cursor, limit 100, pages checked to be strictly older (`risk_regime_sources.collect_okx_funding`) | day / nominal 8 h (actual spacing recorded; irregular spacing reported per run) | recent months only (provider limit): older days are `BEYOND_PROVIDER_HISTORY`. Reachability from the GitHub runner is unverified; a geo refusal is recorded as `BLOCKED_BY_PROVIDER_GEO_RESTRICTION` |
+
+**Observation time (`first_observed_at`).** Funding rows from Hyperliquid and OKX carry the time this collector first
+had them in hand, taken after the response arrived. Like `retrieved_at`, it is excluded from content fingerprints and
+conflict checks; a superset update keeps the earlier row and its earlier observation time. EXP-23 v0.5.0 uses
+`max(settlement, first_observed_at)` as the defensible availability of these rows
+(`research/exp23/BTC_12H_EARLY_WARNING_SPEC_v0.5.0.md` §3).
 
 **Not collected (still missing).**
 - **Bybit OI and funding:** refused from every location available (HTTP 403).

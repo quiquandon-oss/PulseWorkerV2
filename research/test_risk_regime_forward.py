@@ -152,3 +152,149 @@ def test_staleness_flag(tmp_path):
     idx = fw.ForwardStore(tmp_path, CUT).rebuild_index(T0 + 2 * D)
     assert idx["sources"]["binance_oi_archive"]["stale"] is False
     assert fw.ForwardStore(tmp_path, CUT).rebuild_index(T0 + 10 * D)["sources"]["binance_oi_archive"]["stale"] is True
+
+
+# ------------------------------------------------------------------- OKX BTC-USDT-SWAP funding (v0.5.0); TEST data only
+from collections import Counter  # noqa: E402
+import urllib.parse  # noqa: E402
+
+import risk_regime_sources as rs  # noqa: E402
+
+
+def okx_rec(ts, rate="0.0001"):
+    return {"instId": "BTC-USDT-SWAP", "instType": "SWAP", "fundingTime": str(ts), "fundingRate": rate, "realizedRate": rate,
+            "formulaType": "withRate", "method": "current_period"}
+
+
+def okx_http(rows, script=None):
+    """Mocked OKX opener: newest-first pages honouring `after`. No network."""
+    rows = sorted(rows, key=lambda r: -int(r["fundingTime"]))
+    script = list(script or [])
+
+    def opener(url, timeout=30):
+        if script:
+            return script.pop(0)
+        q = dict(urllib.parse.parse_qsl(urllib.parse.urlparse(url).query))
+        after = int(q["after"]) if "after" in q else None
+        page = [r for r in rows if after is None or int(r["fundingTime"]) < after][:100]
+        return 200, json.dumps({"code": "0", "msg": "", "data": page}).encode()
+    return rs.Http(opener=opener, sleep=lambda _x: None, log=Counter())
+
+
+def okx_day(day_ms, rates=("0.0001", "0.0002", "0.0003"), skip=()):
+    return [okx_rec(day_ms + i * 8 * H, r) for i, r in enumerate(rates) if i not in skip]
+
+
+def okx_run(tmp, rows, now, max_days=2, script=None):
+    return fw.run_collection(tmp, ["okx_btc_funding"], now=now, max_days=max_days, cutoffs={}, fetch=fetcher({}),
+                             okx_http=okx_http(rows, script))
+
+
+def test_okx_partition_written_once_idempotent_and_checksummed(tmp_path):
+    now = T0 + D + 3 * H                                 # 2026-10-08 closed
+    r1 = okx_run(tmp_path, okx_day(T0), now)
+    assert ("2026-10-08", "WRITTEN") in statuses(r1)
+    store = fw.ForwardStore(tmp_path, {})
+    p, m, raw = store.paths("okx_btc_funding", "2026-10-08")
+    b1, meta = p.read_bytes(), json.loads(m.read_text())
+    assert meta["completeness"] == "COMPLETE" and meta["expected_slots"] == 3 and meta["observations"] == 6   # + realized_rate
+    assert meta["file_sha256"] == hashlib.sha256(b1).hexdigest() and meta["raw_sha256"] == hashlib.sha256(raw.read_bytes()).hexdigest()
+    rows = fw.read_partition(p)
+    assert all(isinstance(o["timestamp"], int) and o["first_observed_at"] >= now and o["available_at"] == o["timestamp"] for o in rows)
+    raws = fw.read_partition(raw)
+    assert all(r["provenance"].endswith("funding-rate-history?instId=BTC-USDT-SWAP") and "formulaType" in r for r in raws)
+    r2 = okx_run(tmp_path, okx_day(T0), now + H)         # COMPLETE -> not re-attempted at all
+    assert not any(a.get("partition") == "2026-10-08" for a in r2["attempts"])
+    assert p.read_bytes() == b1
+    idx = json.loads((tmp_path / "index.json").read_text())["sources"]["okx_btc_funding"]
+    assert idx["files"]["2026-10-08"] == meta["file_sha256"] and idx["complete"] == 1
+
+
+def test_okx_rerun_of_identical_content_is_unchanged_despite_new_observation_time(tmp_path):
+    now = T0 + D + 3 * H
+    okx_run(tmp_path, okx_day(T0, skip=(2,)), now)     # GAPS -> retried next run
+    store = fw.ForwardStore(tmp_path, {})
+    p = store.paths("okx_btc_funding", "2026-10-08")[0]
+    b1 = p.read_bytes()
+    r2 = okx_run(tmp_path, okx_day(T0, skip=(2,)), now + 2 * H)
+    assert ("2026-10-08", "UNCHANGED") in statuses(r2) and p.read_bytes() == b1
+
+
+def test_okx_strict_superset_keeps_earlier_rows_and_their_first_observation(tmp_path):
+    now = T0 + D + 3 * H
+    okx_run(tmp_path, okx_day(T0, skip=(2,)), now)
+    store = fw.ForwardStore(tmp_path, {})
+    first = {(o["metric"], o["timestamp"]): o["first_observed_at"] for o in fw.read_partition(store.paths("okx_btc_funding", "2026-10-08")[0])}
+    r2 = okx_run(tmp_path, okx_day(T0), now + 5 * H)
+    assert ("2026-10-08", "SUPERSEDED") in statuses(r2)
+    rows = fw.read_partition(store.paths("okx_btc_funding", "2026-10-08")[0])
+    assert len(rows) == 6 and store.meta("okx_btc_funding", "2026-10-08")["completeness"] == "COMPLETE"
+    for o in rows:
+        k = (o["metric"], o["timestamp"])
+        assert o["first_observed_at"] == first[k] if k in first else o["first_observed_at"] >= now + 5 * H
+    assert len(store.meta("okx_btc_funding", "2026-10-08")["superseded"]) == 1
+
+
+def test_okx_conflicting_value_is_kept_out_and_recorded(tmp_path):
+    now = T0 + D + 3 * H
+    okx_run(tmp_path, okx_day(T0, skip=(2,)), now)
+    store = fw.ForwardStore(tmp_path, {})
+    p = store.paths("okx_btc_funding", "2026-10-08")[0]
+    b1 = p.read_bytes()
+    r2 = okx_run(tmp_path, okx_day(T0, rates=("0.0001", "0.0009", "0.0003")), now + 5 * H)
+    att = [a for a in r2["attempts"] if a.get("partition") == "2026-10-08"][0]
+    assert att["status"] == "CONFLICT" and att["differing"] and p.read_bytes() == b1
+
+
+def test_okx_duplicate_provider_records_are_counted_once(tmp_path):
+    now = T0 + D + 3 * H
+    page = okx_day(T0) + okx_day(T0)[:1]
+    script = [(200, json.dumps({"code": "0", "data": sorted(page, key=lambda r: -int(r["fundingTime"]))}).encode()),
+              (200, json.dumps({"code": "0", "data": []}).encode())]
+    okx_run(tmp_path, [], now, script=script)
+    assert fw.ForwardStore(tmp_path, {}).meta("okx_btc_funding", "2026-10-08")["observations"] == 6
+
+
+def test_okx_days_beyond_provider_history_and_missing_days_are_distinguished(tmp_path):
+    now = T0 + 3 * D + 3 * H                             # closed: 10-08, 10-09, 10-10
+    rows = okx_day(T0 + 2 * D)                           # provider returns only 10-10
+    r = okx_run(tmp_path, rows, now, max_days=3)
+    st = statuses(r)
+    assert ("2026-10-10", "WRITTEN") in st and ("2026-10-08", "BEYOND_PROVIDER_HISTORY") in st
+    assert not (tmp_path / "okx_btc_funding" / "2026" / "2026-10-08.jsonl.gz").exists()
+
+
+def test_okx_blocked_or_failing_provider_writes_nothing_and_says_why(tmp_path):
+    now = T0 + D + 3 * H
+    r = okx_run(tmp_path, [], now, script=[(403, b"We block access from your country")])
+    assert ("2026-10-08", "BLOCKED_BY_PROVIDER_GEO_RESTRICTION") in statuses(r)
+    r = okx_run(tmp_path, [], now, script=[(200, b"not json")])
+    assert ("2026-10-08", "MALFORMED_RESPONSE") in statuses(r)
+    assert not (tmp_path / "okx_btc_funding").exists()
+    assert json.loads((tmp_path / "index.json").read_text())["sources"]["okx_btc_funding"]["partitions"] == 0
+
+
+def test_index_rebuild_lists_every_source_including_okx(tmp_path):
+    okx_run(tmp_path, okx_day(T0), T0 + D + 3 * H)
+    idx = fw.ForwardStore(tmp_path, {}).rebuild_index(T0 + D + 3 * H)
+    assert set(idx["sources"]) == set(fw.SOURCE_SPECS) and "okx_btc_funding" in fw.SOURCE_SPECS
+    assert idx["sources"]["okx_btc_funding"]["stale"] is False
+    assert idx == fw.ForwardStore(tmp_path, {}).rebuild_index(T0 + D + 3 * H)      # deterministic
+
+
+def test_observation_metadata_never_counts_as_a_conflict():
+    a = {"source": "okx_btc_funding", "instrument": "X", "metric": "funding_rate", "timestamp": 1, "value": 1.0,
+         "retrieved_at": 5, "first_observed_at": 6}
+    b = dict(a, retrieved_at=50, first_observed_at=60)
+    assert fw.measurement(a) == fw.measurement(b) and fw.content_fingerprint([a]) == fw.content_fingerprint([b])
+
+
+def test_hyperliquid_funding_rows_carry_first_observed_at_and_keep_their_identity(tmp_path):
+    cut = {f"hyperliquid_hip3|{s}|{m}": T0 - H for s in fw.HL_SYMBOLS for m in ("close", "volume")}
+    cut.update({f"hyperliquid_btc_funding|BTC|{m}": T0 - H + 31 for m in ("funding_rate", "premium")})
+    now = T0 + D + 2 * H
+    fw.run_collection(tmp_path, ["hyperliquid_hip3", "hyperliquid_btc_funding"], now=now, cutoffs=cut,
+                      fetch=fetcher({}), candles_fn=candle_fn(), funding_fn=funding_fn)
+    rows = fw.read_partition(fw.ForwardStore(tmp_path, cut).paths("hyperliquid_btc_funding", "2026-10-08")[0])
+    assert rows and all(o["source"] == "hyperliquid_btc_funding" and o["instrument"] == "BTC" for o in rows)
+    assert all(o["first_observed_at"] >= now and o["available_at"] == o["timestamp"] for o in rows)

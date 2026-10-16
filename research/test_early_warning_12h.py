@@ -399,3 +399,53 @@ def test_missing_funding_blocks_only_f3_f4(tmp_path):
     assert c["F3_vs_F1"]["scored_hours"] == 0 and c["F4_vs_F1"]["scored_hours"] == 0
     assert any(b.startswith("funding:") for b in rep["blockers"])
     assert rep["status"] == "INSUFFICIENT_SAMPLE"
+
+
+# ---------------------------------------- non-positive Binance OI = provider placeholder = missing; TEST data only
+def write_oi(path, snaps):
+    """snaps: {ts: (oi_btc or None, oi_usd or None)}; None leaves that metric out (a missing record)."""
+    with gzip.open(path, "wt") as f:
+        for ts, vals in sorted(snaps.items()):
+            for metric, v in zip(("open_interest", "open_interest_usd"), vals):
+                if v is not None:
+                    f.write(json.dumps({"source": "binance_oi_archive", "metric": metric, "timestamp": ts,
+                                        "available_at": ts + 5 * 60_000, "value": v}) + "\n")
+
+
+def test_positive_oi_passes_through_unchanged_and_nothing_is_reported(tmp_path):
+    start = ew.T1
+    snaps = {ts: (90_000.0 + i, 8e9 + i) for i, ts in enumerate(range(start, start + 12 * 300_000, 300_000))}
+    write_oi(tmp_path / "oi.jsonl.gz", snaps)
+    oi, fund, dropped = ew.load_venue_series([str(tmp_path / "oi.jsonl.gz")])
+    assert oi == {ts: (ts + 5 * 60_000, b, u) for ts, (b, u) in snaps.items()} and dropped == [] and fund == {}
+
+
+def test_zero_negative_and_missing_oi_snapshots_are_dropped_never_replaced(tmp_path):
+    s = [ew.T1 + k * 300_000 for k in range(6)]
+    snaps = {s[0]: (90_000.0, 8e9), s[1]: (0.0, 0.0), s[2]: (91_000.0, 0.0),          # BTC and USD zero / USD zero only
+             s[3]: (-1.0, 8e9), s[4]: (92_000.0, None), s[5]: (93_000.0, 8.1e9)}     # negative / USD record missing
+    write_oi(tmp_path / "oi.jsonl.gz", snaps)
+    oi, _f, dropped = ew.load_venue_series([str(tmp_path / "oi.jsonl.gz")])
+    assert sorted(oi) == [s[0], s[5]] and oi[s[5]][1:] == (93_000.0, 8.1e9)
+    assert dropped == [("oi_nonpositive", s[1]), ("oi_nonpositive", s[2]), ("oi_nonpositive", s[3])]   # missing: not "invalid"
+
+
+def test_zero_oi_behaves_exactly_like_a_missing_snapshot_and_never_divides(tmp_path):
+    start, end = ew.SEAL_END - 800 * H, ew.T1 + 30 * H
+    base = oi_series(start, end)
+    gap = [ts for ts in base if ew.T1 + 13 * H + 40 * 60_000 <= ts <= ew.T1 + 14 * H + 45 * 60_000]   # 14 snapshots
+    as_zero = {ts: (0.0, 0.0) if ts in gap and i % 2 else (v[1], 0.0) if ts in gap else (v[1], v[2])
+               for i, (ts, v) in enumerate(sorted(base.items()))}
+    write_oi(tmp_path / "zero.jsonl.gz", as_zero)
+    write_oi(tmp_path / "missing.jsonl.gz", {ts: (v[1], v[2]) for ts, v in base.items() if ts not in gap})
+    oi_zero, _f, dropped = ew.load_venue_series([str(tmp_path / "zero.jsonl.gz")])
+    oi_miss = ew.load_venue_series([str(tmp_path / "missing.jsonl.gz")])[0]
+    assert oi_zero == oi_miss and sorted(t for _k, t in dropped) == sorted(gap)
+    prices = flat_prices(start, end)
+    fz, fm = ew.FeatureBuilder(prices, oi_zero, None), ew.FeatureBuilder(prices, oi_miss, None)
+    hours = list(range(ew.T1, end + 1, H))
+    rows = [fz.build(t)["O"] for t in hours]                       # no ZeroDivisionError anywhere
+    assert rows == [fm.build(t)["O"] for t in hours]
+    hit = {ew.T1 + 14 * H, ew.T1 + 15 * H, ew.T1 + 18 * H, ew.T1 + 26 * H}   # stale current / 1, 4, 12 h refs in the gap
+    assert {t for t, o in zip(hours, rows) if o is None} == hit
+    assert all(o["oi_btc"] > 0 and o["oi_usd"] > 0 for o in rows if o is not None)

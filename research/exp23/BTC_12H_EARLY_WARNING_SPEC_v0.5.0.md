@@ -17,6 +17,8 @@
 - walk-forward fitting (D9), pairwise scoring (D10), F0, the intervals, the D5 checkpoint (60 events, ≥ 25 per direction) and the 20-episode cell rule;
 - F1 = P, F2 = P + O, F3 = P + U, F4 = P + O + U, with U = Binance funding. Their report (`report.json`) and their Holm family (F2/F3/F4 vs F1) are produced exactly as before.
 
+**Input validity (all sets, including F1–F4):** a Binance OI snapshot whose BTC or USD open interest is zero or negative is a provider placeholder (the archive writes `0E-16` during an outage), not a measurement. The snapshot is treated as missing: it is dropped, never replaced, and listed in `conflicts_dropped` as `oi_nonpositive`. 0.4.0 has no defined output for such a snapshot (its OI change features divide by it). On data without such snapshots every output is unchanged.
+
 **Added:** four source-specific variants, reported separately in `source_variants.json`.
 
 | Set | Features | Funding source |

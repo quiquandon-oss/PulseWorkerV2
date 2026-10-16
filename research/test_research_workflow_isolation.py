@@ -89,3 +89,42 @@ def test_installed_scheduler_check_rejects_unpinned_stub():
     import pytest
     with pytest.raises(AssertionError):
         verify_installed_scheduler(STUB, "RESEARCH_CODE_SHA")
+
+
+# ------------------------------------------ EXP-23 v0.5.0 hourly intraday funding schedule (inert stub, not installed)
+INTRADAY = ROOT / "research" / "scheduler" / "research-funding-intraday-schedule.yml"
+INTRADAY_RUN = ("python3 code/research/risk_regime_forward.py --store data/risk_regime_forward "
+                "--sources hyperliquid_btc_funding okx_btc_funding --max-days 60 --open-day")
+
+
+def test_intraday_stub_is_schedule_only_hourly_funding_only_and_not_installed():
+    wf = common_checks(INTRADAY)
+    assert set(wf["on"]) == {"schedule"} and wf["on"]["schedule"] == [{"cron": "17 * * * *"}]
+    assert not set(wf["on"]) & FORBIDDEN_TRIGGERS
+    assert not (WF / "research-funding-intraday-schedule.yml").exists()  # inert until a human installs it on main
+    assert "RESEARCH_CODE_SHA" in INTRADAY.read_text()
+    runs = [s["run"] for s in wf["jobs"]["collect"]["steps"] if "risk_regime_forward.py" in s.get("run", "")]
+    assert runs == [INTRADAY_RUN]                                       # funding sources only; nothing else collected
+
+
+def test_intraday_and_daily_collectors_share_one_concurrency_group():
+    daily, hourly = load(STUB), load(INTRADAY)
+    assert hourly["concurrency"] == daily["concurrency"] == {"group": "research-forward-collection", "cancel-in-progress": False}
+    commit = lambda wf: [s for s in wf["jobs"]["collect"]["steps"] if s.get("env", {}).get("TARGET")][0]
+    assert commit(hourly) == commit(daily)                              # identical, reviewed commit/push step
+
+
+def verify_installed_intraday_scheduler(path, pinned_sha):
+    """Used before installing the hourly scheduler on main: the stub's checks plus a pinned 40-hex research commit."""
+    wf = common_checks(Path(path))
+    assert set(wf["on"]) == {"schedule"} and wf["on"]["schedule"] == [{"cron": "17 * * * *"}]
+    code = [s for s in wf["jobs"]["collect"]["steps"] if s.get("with", {}).get("path") == "code"][0]
+    assert re.fullmatch(r"[0-9a-f]{40}", pinned_sha) and code["with"]["ref"] == pinned_sha
+    assert "RESEARCH_CODE_SHA" not in Path(path).read_text()
+    return True
+
+
+def test_installed_intraday_check_rejects_unpinned_stub():
+    import pytest
+    with pytest.raises(AssertionError):
+        verify_installed_intraday_scheduler(INTRADAY, "RESEARCH_CODE_SHA")

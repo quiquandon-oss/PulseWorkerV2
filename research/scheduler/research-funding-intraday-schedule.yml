@@ -1,0 +1,73 @@
+# RESEARCH ONLY -- EXP-23 v0.5.0 intraday funding collection: HOURLY SCHEDULE (:17 every hour).
+#
+# NOT INSTALLED. This file is inert where it is (outside .github/workflows). GitHub runs `schedule` triggers only
+# from workflow files on the repository's DEFAULT branch, so enabling it requires placing exactly this one file at
+# .github/workflows/research-funding-intraday-schedule.yml on `main`, with the placeholder code ref replaced by the
+# reviewed commit. That is a write to main and needs its own explicit approval.
+#
+# Scope: Hyperliquid BTC and OKX BTC-USDT-SWAP funding only (`--sources`), with `--open-day` so the current UTC day
+# is observed close to settlement (OPEN partitions, spec v0.5.0 section 4). Candles, Binance OI and Binance funding
+# are not touched. Same isolation as research-forward-schedule.yml:
+# - trigger: schedule only (no push, no pull_request, no dispatch, no workflow_run) -> a push cannot start it;
+# - permissions: contents: write only; no secrets referenced; GITHUB_TOKEN pushes never start other workflows;
+# - writes: only refs/heads/research-data/risk-regime-forward, only paths under risk_regime_forward/;
+# - concurrency group shared with the daily collector: never two writers to the data branch at once.
+name: research-funding-intraday-schedule
+
+on:
+  schedule:
+    - cron: '17 * * * *'       # hourly at :17 (off the :00 peak); lateness is measured from run records, not assumed
+
+permissions:
+  contents: write          # only to push to research-data/risk-regime-forward; no actions/deployments/id-token/packages
+                           # (no `actions` permission: this token cannot dispatch or re-run workflows)
+
+concurrency:
+  group: research-forward-collection     # shared with the daily collector: never two writers at once
+  cancel-in-progress: false
+
+jobs:
+  collect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: "Check out the research code (read-only: no credentials kept)"
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683   # v4.2.2
+        with:
+          ref: RESEARCH_CODE_SHA   # pinned research commit; replaced with the reviewed SHA at installation
+          path: code
+          persist-credentials: false
+
+      - name: "Check out the research-data branch (the only write target)"
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683   # v4.2.2
+        with:
+          ref: research-data/risk-regime-forward
+          path: data
+          fetch-depth: 0
+          persist-credentials: false        # the collector step runs with no credentials on disk
+
+      - name: "Collect funding only, incl. the current UTC day as OPEN partitions (idempotent; gaps/conflicts recorded, never filled)"
+        run: python3 code/research/risk_regime_forward.py --store data/risk_regime_forward --sources hyperliquid_btc_funding okx_btc_funding --max-days 60 --open-day
+
+      - name: "Commit run record and new partitions to the research-data branch only"
+        if: always()
+        working-directory: data
+        env:
+          TARGET: research-data/risk-regime-forward
+          PUSH_TOKEN: ${{ github.token }}   # only this step sees the token; it can push only the fixed refspec below
+        run: |
+          set -euo pipefail
+          [ "$(git rev-parse --abbrev-ref HEAD)" = "$TARGET" ] || { echo "::error::data checkout is not $TARGET"; exit 1; }
+          git config user.name "research-forward-collection[bot]"
+          git config user.email "research-forward-collection@users.noreply.github.com"
+          git add -A risk_regime_forward
+          if git diff --cached --quiet; then echo "nothing to commit"; exit 0; fi
+          outside=$(git diff --cached --name-only | grep -v '^risk_regime_forward/' || true)
+          if [ -n "$outside" ]; then echo "::error::refusing to commit outside risk_regime_forward/: $outside"; exit 1; fi
+          git commit -m "Research data: forward collection run ${GITHUB_RUN_ID} (${GITHUB_EVENT_NAME})"
+          remote="https://x-access-token:${PUSH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          for i in 1 2 3 4; do
+            git push "$remote" "HEAD:refs/heads/${TARGET}" && exit 0
+            sleep $((2**i)); git pull --rebase "$remote" "$TARGET"
+          done
+          exit 1

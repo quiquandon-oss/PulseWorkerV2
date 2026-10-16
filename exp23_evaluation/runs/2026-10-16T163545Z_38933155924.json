@@ -1,0 +1,34 @@
+{
+ "code_sha256": {
+  "early_warning_12h.py": "614226b532b55d249024b97af168a91d684dfdeb3d9591ec1b43013860ca0a42",
+  "exp23_forward_eval.py": "f568edd45116c419dd4d415db7cb1077a54e31e1d8adca1a84b3ae2d94eaaae9"
+ },
+ "dataset_fingerprint": "b8a59dc93cb5c77e847184aa645de038e721c57bee09ae61ba9622759bde6341",
+ "detail": "ZeroDivisionError: float division by zero\nTraceback (most recent call last):\n  File \"/home/runner/work/PulseWorkerV2/PulseWorkerV2/code/research/exp23_forward_eval.py\", line 189, in evaluate\n    rep = ew.run(merged, oi, funding, conflicts=[[\"price\", t] for t in pconf] + [list(c) for c in vconf])\n          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/home/runner/work/PulseWorkerV2/PulseWorkerV2/code/research/early_warning_12h.py\", line 737, in run\n    row = fb.build(t)\n          ^^^^^^^^^^^\n  File \"/home/runner/work/PulseWorkerV2/PulseWorkerV2/code/research/early_warning_12h.py\", line 396, in build\n    o = self.oi_features(t, p, used)\n        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nZeroDivisionError: float division by zero\n",
+ "evaluated_at": "2026-10-16T16:35:45Z",
+ "inputs": {
+  "binance_oi_archive/2026/2026-10-08.jsonl.gz": "43e220f6400fefd897939ff9eddaefaa04383ae9f90ae61b539ffdcb30eb4c63",
+  "binance_oi_archive/2026/2026-10-09.jsonl.gz": "e72681a67d992f975d340fda4929b01736e40e177d4e8eaa24327c58dfe90dc3",
+  "binance_oi_archive/2026/2026-10-10.jsonl.gz": "0a44014feef53b5dfb5b3dc4a2534aacfaeeea917725835827e9453f9f0db8c5",
+  "binance_oi_archive/2026/2026-10-11.jsonl.gz": "962ada474ac3ccfc5831cfd77a48a8fb912932fbcb2249c054f4688907ccd2ed",
+  "binance_oi_archive/2026/2026-10-12.jsonl.gz": "4dd2731477b16b3de145c6086b61faa1313e6e8e099ec3382ddedbfd1cf5a143",
+  "binance_oi_archive/2026/2026-10-13.jsonl.gz": "bcb9dcffdc40042967ca71b12c552045d2e253907b1442b568dfa2f5158fb37c",
+  "binance_oi_archive/2026/2026-10-14.jsonl.gz": "2387448caf2fd68ff276a48cfc886462535b6f068fe5478947a21e0c87b07a51",
+  "binance_oi_archive/2026/2026-10-15.jsonl.gz": "2d629e652a1560f92333445f19b5dc08e9b7d1bb744855d28be7f055cbf3dbe0",
+  "hyperliquid_hip3/2026/2026-10-06.jsonl.gz": "6f077d57361d432cd8918dad8196cab5327bb15fddaf2c274cc682ae2f438832",
+  "hyperliquid_hip3/2026/2026-10-07.jsonl.gz": "a9c86721256001199a4c24cc4297284d3b7f8ac6bbd8d112feadcb30f7125d52",
+  "hyperliquid_hip3/2026/2026-10-08.jsonl.gz": "15f05006ab733bd20bdd6296ed239605e79694380bff0a2e71eb21a0b3965fef",
+  "hyperliquid_hip3/2026/2026-10-09.jsonl.gz": "4d781b1baad6933aab1ed4698d430e990ebeec2e24b1719aa899e68e541ea42a",
+  "hyperliquid_hip3/2026/2026-10-10.jsonl.gz": "38917ec058ddcaa94826322ece4bd86b56a6063673cf19193917af4c86a628fd",
+  "hyperliquid_hip3/2026/2026-10-11.jsonl.gz": "558838ee4886cb2e867cad871c602c6648a4c34901aee48a87ed72b86caa28be",
+  "hyperliquid_hip3/2026/2026-10-12.jsonl.gz": "f24dc621dcc2655d67857e1045ee9288116b44d91c069877df411fa51edea325",
+  "hyperliquid_hip3/2026/2026-10-13.jsonl.gz": "4a1f7d1d04dd2d44145790721fe0ce75ffa928efc0a410182dad0fe515a0f423",
+  "hyperliquid_hip3/2026/2026-10-14.jsonl.gz": "9a6dc08fa4e4bee443a01c3457141c200c7ee7c16ac857868e1d22d50fc10be4",
+  "hyperliquid_hip3/2026/2026-10-15.jsonl.gz": "bd19d2ea6c96d60090a84d86075d8ed1f7ca8302b628a3319a33ac4151e566e5",
+  "pinned/oi_funding": "0cadd101115773a828412dee0b142a6614b39b4b92ada6403ef119d637451d01",
+  "pinned/prices": "e0141555ced46de20e130e184f995aa506f122fb2302cc8b52ffe3ef38a6501d"
+ },
+ "problems": [],
+ "run_id": "38933155924",
+ "status": "EVALUATION_FAILED"
+}

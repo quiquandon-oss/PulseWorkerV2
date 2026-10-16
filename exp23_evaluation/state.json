@@ -48,11 +48,16 @@
    "fingerprint": "852d10b659bcb30485a6dc815d580fb0fbdf0300fd4119f23ffdd6aa7d2c233c",
    "run_id": "38773222891",
    "status": "EVALUATED"
+  },
+  {
+   "at": "2026-10-16T16:35:45Z",
+   "run_id": "38933155924",
+   "status": "EVALUATION_FAILED"
   }
  ],
  "last_evaluated_fingerprint": "852d10b659bcb30485a6dc815d580fb0fbdf0300fd4119f23ffdd6aa7d2c233c",
  "last_report": "reports/852d10b659bcb304",
- "last_run": "38773222891",
- "last_run_at": "2026-10-15T16:57:09Z",
- "last_status": "EVALUATED"
+ "last_run": "38933155924",
+ "last_run_at": "2026-10-16T16:35:45Z",
+ "last_status": "EVALUATION_FAILED"
 }

@@ -1,0 +1,67 @@
+# Controlled production test, Stage 1 (owner-authorised). Runs ONLY on a push to this branch; the step named in
+# .stage1-step selects exactly one action. Worker code deployed = PR #94 head c19e73c (this branch adds only this
+# workflow and .stage1-step). No secret value is ever printed; the run token is generated in-job and masked.
+name: event-stage1
+on:
+  push:
+    branches: [claude/epic-planck-uyapsw-event-stage1]
+permissions:
+  contents: read
+concurrency:
+  group: event-stage1
+  cancel-in-progress: false
+env:
+  DB_NAME: sentiment-history
+  DB_UUID: f91ca980-b886-423a-bd6f-f3baea46d181
+  MIGRATION: .ai/migrations/0023_event_detection.sql
+  MIGRATION_SHA256: 06d8bafa616684ba69c96b94e7e6e6f90371c2550aa2643ed5ee4cf3da4e3d91
+  CODE_SHA: c19e73c7fef16b26bd5902a8d807752b6679771d
+  V2: https://pulseworker-v2.quiquandon.workers.dev
+  V1: https://sentiment-ff75.quiquandon.workers.dev
+  W: npx --yes wrangler@4.151.1
+jobs:
+  stage1:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: '22' }
+      - name: Select step
+        id: sel
+        run: echo "step=$(tr -d '[:space:]' < .stage1-step)" >> "$GITHUB_OUTPUT"
+
+      - name: Identity (all steps)
+        env: { CLOUDFLARE_API_TOKEN: '${{ secrets.CLOUDFLARE_API_TOKEN }}' }
+        run: |
+          $W d1 info "$DB_NAME" --json > info.json
+          jq -c '{uuid, name, version, num_tables, file_size, running_in_region}' info.json
+          test "$(jq -r .uuid info.json)" = "$DB_UUID" || { echo "::error::DB identity mismatch"; exit 1; }
+
+      - name: Recovery point and retention
+        if: steps.sel.outputs.step == 'recovery'
+        env: { CLOUDFLARE_API_TOKEN: '${{ secrets.CLOUDFLARE_API_TOKEN }}' }
+        run: |
+          echo "now: $(date -u +%FT%TZ)"
+          echo "--- current bookmark"; $W d1 time-travel info "$DB_NAME" --json
+          for d in 1 6 8 29; do
+            ts=$(date -u -d "-$d days" +%FT%TZ)
+            echo "--- bookmark for $ts (-$d d)"; $W d1 time-travel info "$DB_NAME" --timestamp="$ts" --json || echo "RESULT: not available for -$d d"
+          done
+
+      - name: Migration 0023 (additive)
+        if: steps.sel.outputs.step == 'migrate'
+        env: { CLOUDFLARE_API_TOKEN: '${{ secrets.CLOUDFLARE_API_TOKEN }}' }
+        run: |
+          echo "$MIGRATION_SHA256  $MIGRATION" | sha256sum -c -
+          q() { $W d1 execute "$DB_NAME" --remote --json --command "$1"; }
+          pre=$(q "SELECT COUNT(*) n FROM sqlite_master WHERE name LIKE 'event%' OR name LIKE 'idx_event%'" | jq '.[0].results[0].n')
+          test "$pre" = "0" || { echo "::error::event objects already exist ($pre)"; exit 1; }
+          echo "--- restore point immediately before the migration"; $W d1 time-travel info "$DB_NAME" --json
+          q "SELECT COUNT(*) n FROM sqlite_master WHERE type='table'" | jq -c '.[0].results[0]'
+          $W d1 execute "$DB_NAME" --remote --yes --file="$MIGRATION"
+          q "SELECT type, name FROM sqlite_master WHERE name LIKE 'event%' OR name LIKE 'idx_event%' ORDER BY type, name" | jq -c '.[0].results'
+          post=$(q "SELECT COUNT(*) n FROM sqlite_master WHERE name LIKE 'event%' OR name LIKE 'idx_event%'" | jq '.[0].results[0].n')
+          test "$post" = "8" || { echo "::error::expected 8 event objects, got $post"; exit 1; }
+          q "SELECT COUNT(*) n FROM sqlite_master WHERE type='table'" | jq -c '.[0].results[0]'
+          q "SELECT (SELECT COUNT(*) FROM history) history_n,(SELECT MAX(ts) FROM history) history_max,(SELECT COUNT(*) FROM predictions) pred_n,(SELECT COUNT(*) FROM risk_regime_readings) rr_n,(SELECT COUNT(*) FROM sentiment_weight_adaptation) swa_n,(SELECT COUNT(*) FROM event_ledger) ev_n" | jq -c '.[0].results[0]'

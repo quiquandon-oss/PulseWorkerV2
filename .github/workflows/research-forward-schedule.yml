@@ -33,7 +33,7 @@ jobs:
       - name: "Check out the research code (read-only: no credentials kept)"
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683   # v4.2.2
         with:
-          ref: b5bcff8f924dcbd255b73ca94cb5bb743e461c40   # pinned, reviewed research commit (no floating branch reference)
+          ref: a199b795932f1bbfd36306495a16cf2921b06d33   # pinned, reviewed research commit (no floating branch reference)
           path: code
           persist-credentials: false
 

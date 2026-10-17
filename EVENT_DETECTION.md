@@ -8,14 +8,16 @@ None of them is a V1 sentiment source, score, weight, prediction input or tradin
 
 ## 0. Status at a glance (2026-10-17)
 
-| Detector | Code | Live-verified from | Operational in production |
-|---|---|---|---|
-| `deribit_options` | done | **build container: passed** (real API; full run stored 22 observations) | not deployed |
-| `okx_liquidations` | done | not from the build container (`www.okx.com` refused by its network policy); OKX's API answered HTTP 200 from GitHub's US runners on 2026-10-17 | not deployed |
-| `macro_fred` | done | not from the build container (`fred.stlouisfed.org` / `api.stlouisfed.org` refused) | not deployed |
-| `sec_edgar` | done | not from the build container (`data.sec.gov` / `www.sec.gov` refused) | not deployed; needs `EVENT_SEC_USER_AGENT` |
-| `binance_liquidation_sample` | done | `fapi.binance.com` returns **HTTP 451** to the build container | disabled by default |
-| GDELT geopolitical shock | research only (branch `claude/gdelt-risk-regime-shock`, 23 tests pass) | its host is refused by the build container | **not integrated** (section 3) |
+Verification has three levels, and none of them stands in for another: the **build container** (this development environment), a **GitHub-hosted runner** (Ashburn, Cloudflare colo IAD, US; probe run [39038918636](https://github.com/quiquandon-oss/PulseWorkerV2/actions/runs/39038918636), 2026-10-17 14:00 UTC, no secrets), and **Cloudflare** (the Worker's own egress, which only the production run in section 12 can test).
+
+| Detector | Code | Build container | GitHub runner (US) | Cloudflare / production |
+|---|---|---|---|---|
+| `deribit_options` | done | **passed** (full adapter run, 22 observations stored) | **200**; DVOL 745 candles in one page (`continuation:null`); book summary 200 | not verified |
+| `okx_liquidations` | done | refused by the container's network policy | **200**; `ctVal 0.01`, `ctValCcy BTC`; one `BTC-USDT-SWAP` group; 100 records spanned about 18.4 h; the `after` page was strictly older | not verified |
+| `macro_fred` | done | refused | **200** for the key-free `fredgraph.csv` DGS2 and DGS10; the keyed API wasn't probed | not verified |
+| `sec_edgar` | done | refused | **200** for submissions (MSTR, tickers include MSTR) with a User-Agent **without** contact details; documents weren't probed. Production must still send a contact User-Agent | not verified; needs `EVENT_SEC_USER_AGENT` |
+| `binance_liquidation_sample` | done | **451** | **451** (restricted location) | disabled by default |
+| GDELT geopolitical shock | research only (branch `claude/gdelt-risk-regime-shock`, 23 tests pass) | refused | not probed | **not integrated** (section 3) |
 
 **Current verification gap:** "Operational" can only be established by the owner's controlled production run in section 12, made from Cloudflare's egress. Until that run passes, no source is called operational.
 
@@ -92,7 +94,7 @@ This is not done because `data.gdeltproject.org` can't be reached from the build
 | **Limits / retention / sampling** | public, per-IP limit; codes 50011/50061 treated as rate limits; **history retention unverified**, so the baseline builds forward | **sampled**: latest order per symbol per 1000 ms; no history | public credits (code 10028 = rate limited); DVOL history ≥ 31 days (744 candles fetched live) | FRED CSV is official and key-free | ≤ 10 requests/s documented; this adapter sends ≤ 4/s, 8 submissions plus ≤ 6 new documents per run, and remembers processed accessions |
 | **Freshness / baseline** | bucket must have ended ≥ 5 min earlier; 48 hourly buckets needed; source stale after 4 h | n/a (no events) | candle closed; book snapshot ≤ 15 min old; DVOL ≥ 336 prior 24 h changes; OI ≥ 30 prior changes | stale if older than 6 days; ≥ 120 prior changes | acceptance within 7 days; source stale after 2 days |
 | **Failure behaviour** | fail-closed on a cursor that doesn't advance or a malformed payload; partly covered buckets never stored | 451/403 → `BLOCKED_BY_PROVIDER`; a disconnect ends the sample early | malformed candle → `PROVIDER_ERROR`; stale snapshot → `STALE` with no observation stored | malformed → `PROVIDER_ERROR`; calendar `NOT_CONFIGURED` without a key | CIK whose tickers don't match → skipped; no User-Agent → `NOT_CONFIGURED` |
-| **Live verification** | **pending** (production test) | blocked (451) | **passed** (build container) | **pending** | **pending** |
+| **Live verification** | GitHub runner: endpoints and payload shape **passed**; Cloudflare **pending** | 451 on both | build container **passed**; GitHub runner **passed**; Cloudflare pending | GitHub runner CSV **passed**; Cloudflare pending | GitHub runner submissions **passed**; Cloudflare pending |
 
 **Economic consensus and surprise: `DATA_UNAVAILABLE`.** No free source with licensed consensus estimates is integrated. A calendar of release dates is not a surprise detector, and no surprise value is computed.
 
@@ -290,8 +292,8 @@ Run every command from a checkout of `main` (so `wrangler.toml` resolves `sentim
 
 ## 13. Known limitations and acceptance gaps
 
-- No source is verified as operational in production yet; Deribit is verified from the build container only.
-- OKX's parameter table and history retention couldn't be read from the build container. Fail-closed runtime checks are in place.
+- No source is verified as operational in production yet. Deribit was verified from the build container. Deribit, OKX, FRED (CSV) and SEC (submissions) answered from a GitHub runner. Nothing has been verified from Cloudflare.
+- OKX history retention is unverified. A GitHub runner confirmed the endpoint, the payload fields and the `after` paging; Cloudflare's egress is untested. A US runner reaching OKX does not prove that the Worker's colo will. Fail-closed runtime checks are in place.
 - Liquidations cover one venue. Binance can only be sampled, and from some regions it is blocked.
 - Baselines build forward: about 48 h for liquidations, and about 30 runs (around 1.5 days hourly) for options OI. DVOL and yields are evaluable immediately.
 - Consensus and surprise are unavailable. The calendar is dates only and needs `FRED_API_KEY`.

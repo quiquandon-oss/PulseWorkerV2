@@ -4,6 +4,8 @@ import { getLearningMarket, getLearningCase, confirmLearningFinding } from './le
 import { LEARNING_LAB_HTML } from './learning/learning-ui.js';
 import { authorizeWrite, getSessionState, signIn, clearedCookieHeader, SIGNIN_HTML } from './learning/learning-session.js';
 import { listCandidates, getCandidate, createCandidate, updateCandidate, decideCandidate, listVersions } from './learning/learning-candidates.js';
+// Event Detection Layer (separate from V1 scoring): see events/ and EVENT_DETECTION.md.
+import { handleEventRoutes } from './events/event-api.js';
 // ---- BTC k-NN historical analog model ----
 // Feature vector: the 4 headline gauges already computed and logged by the
 // original CryptoPulse pipeline every cycle (sentiment composite, technical
@@ -9824,6 +9826,10 @@ export default {
       'Access-Control-Allow-Headers': 'Content-Type',
     };
     if (request.method === 'OPTIONS') return new Response(null, { headers: corsHeaders });
+
+    // ---- Event Detection Layer API (/api/events, /api/events/health, /api/event, POST /api/events/run) ----
+    const eventRoute = await handleEventRoutes(request, env, url, corsHeaders);
+    if (eventRoute) return eventRoute;
 
     // ---- GET / — health check ----
     if (url.pathname === '/' && request.method === 'GET') {

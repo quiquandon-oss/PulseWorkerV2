@@ -1,0 +1,214 @@
+// Event Detection Layer -- canonical event record, identifiers, robust baselines and source-health vocabulary.
+// Pure functions only (no I/O). Deliberately separate from V1 sentiment scoring: nothing here reads or writes V1
+// weights, confidence values, composite scores or predictions. A detected event is evidence, not a trading signal.
+
+export const RULESET_VERSION = 'ed-v1';
+
+export const DIRECTIONS = ['UP', 'DOWN', 'MIXED', 'UNKNOWN'];
+export const SEVERITIES = ['LOW', 'MEDIUM', 'HIGH', 'CRITICAL'];
+export const EVENT_STATUSES = ['ACTIVE', 'EXPIRED'];
+
+// Source-health states, shared by every adapter and the API/UI.
+export const SOURCE_STATUS = {
+  OK: 'OK',                                   // collected, fresh, baseline available
+  INSUFFICIENT_BASELINE: 'INSUFFICIENT_BASELINE', // collected, but not enough history to evaluate rules yet
+  STALE: 'STALE',                             // last good observation older than the source's freshness limit
+  DATA_UNAVAILABLE: 'DATA_UNAVAILABLE',       // required input does not exist for free (e.g. macro consensus)
+  NOT_CONFIGURED: 'NOT_CONFIGURED',           // a required setting (e.g. SEC User-Agent) is missing
+  BLOCKED: 'BLOCKED_BY_PROVIDER',             // provider refused access (geo restriction, 403/451)
+  RATE_LIMITED: 'RATE_LIMITED',
+  PROVIDER_ERROR: 'PROVIDER_ERROR',           // HTTP error / malformed payload / timeout after bounded retries
+  DISABLED: 'DISABLED',                       // adapter intentionally off in this configuration
+  NEVER_RUN: 'NEVER_RUN',
+};
+
+export class SourceError extends Error {
+  constructor(status, message, detail) {
+    super(message);
+    this.status = status;
+    this.detail = detail || null;
+  }
+}
+
+// ---- hashing / identifiers ----
+export async function sha256Hex(text) {
+  const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(String(text)));
+  return [...new Uint8Array(buf)].map((b) => b.toString(16).padStart(2, '0')).join('');
+}
+
+// The dedup key names WHAT happened (type, asset, source, and the observation window or document that proves it),
+// never WHEN this run noticed it -- so re-detecting the same window on a later run maps to the same key.
+export function dedupKey(parts) {
+  return parts.map((p) => (p === null || p === undefined ? '' : String(p).trim().toLowerCase())).join('|');
+}
+
+export async function eventIdFor(key) {
+  return 'ev_' + (await sha256Hex(key)).slice(0, 24);
+}
+
+// Syndicated / repeated text: normalise case, punctuation and whitespace, so the same headline or sentence from
+// two outlets (or an amendment repeating the original) shares one fingerprint.
+export function textFingerprint(text) {
+  return String(text || '')
+    .toLowerCase()
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/&[a-z#0-9]+;/g, ' ')
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim()
+    .replace(/\s+/g, ' ');
+}
+
+// ---- robust statistics ----
+export function median(values) {
+  const v = values.filter(Number.isFinite).slice().sort((a, b) => a - b);
+  if (!v.length) return null;
+  const m = Math.floor(v.length / 2);
+  return v.length % 2 ? v[m] : (v[m - 1] + v[m]) / 2;
+}
+
+export function mad(values, med = median(values)) {
+  if (med === null) return null;
+  return median(values.filter(Number.isFinite).map((x) => Math.abs(x - med)));
+}
+
+// Robust baseline of a series. Returns null (never a guess) when there are fewer than minCount finite values.
+// scale = 1.4826 * MAD (a consistent estimator of sigma for normal data); a floor keeps a perfectly flat history
+// from making every tiny change look infinite.
+export function robustBaseline(values, { minCount, scaleFloor = 0 } = {}) {
+  const v = values.filter(Number.isFinite);
+  if (v.length < (minCount || 1)) return null;
+  const med = median(v);
+  const m = mad(v, med);
+  return { count: v.length, median: med, mad: m, scale: Math.max(1.4826 * m, scaleFloor) };
+}
+
+// Robust z-score; null when no baseline.
+export function robustZ(value, baseline) {
+  if (!baseline || !Number.isFinite(value)) return null;
+  if (!(baseline.scale > 0)) return value === baseline.median ? 0 : (value > baseline.median ? Infinity : -Infinity);
+  return (value - baseline.median) / baseline.scale;
+}
+
+// Severity is a function of how far the observation exceeds its threshold -- not of direction, and not of how
+// confident we are that the event matters for price.
+export function severityFor(ratioOverThreshold) {
+  if (!Number.isFinite(ratioOverThreshold) || ratioOverThreshold < 1) return null;
+  if (ratioOverThreshold >= 4) return 'CRITICAL';
+  if (ratioOverThreshold >= 2) return 'HIGH';
+  if (ratioOverThreshold >= 1.4) return 'MEDIUM';
+  return 'LOW';
+}
+
+export function clamp01(x) {
+  return Math.max(0, Math.min(1, x));
+}
+
+// ---- canonical event record ----
+const REQUIRED = ['event_type', 'source', 'source_ts', 'detected_ts', 'rule_id', 'dedup_parts'];
+
+// Builds and validates one canonical event. Throws on an invalid record (a rule bug must fail loudly in tests,
+// not write a malformed row).
+export async function makeEvent(input) {
+  for (const k of REQUIRED) if (input[k] === undefined || input[k] === null) throw new Error(`event missing ${k}`);
+  const direction = input.direction || 'UNKNOWN';
+  if (!DIRECTIONS.includes(direction)) throw new Error(`invalid direction ${direction}`);
+  if (input.severity && !SEVERITIES.includes(input.severity)) throw new Error(`invalid severity ${input.severity}`);
+  for (const k of ['source_ts', 'detected_ts']) {
+    if (!Number.isInteger(input[k]) || input[k] < 1_000_000_000_000) throw new Error(`${k} must be epoch ms`);
+  }
+  if (input.source_ts > input.detected_ts) throw new Error('source_ts after detected_ts (look-ahead)');
+  const confidence = input.confidence === undefined || input.confidence === null ? null : Number(input.confidence);
+  if (confidence !== null && !(confidence >= 0 && confidence <= 1)) throw new Error('confidence must be within [0,1]');
+  const key = dedupKey(input.dedup_parts);
+  return {
+    event_id: await eventIdFor(key),
+    dedup_key: key,
+    event_type: input.event_type,
+    asset: input.asset || null,
+    market: input.market || null,
+    scope: input.scope || null,
+    source: input.source,
+    source_url: input.source_url || null,
+    source_ts: input.source_ts,
+    detected_ts: input.detected_ts,
+    direction,
+    severity: input.severity || 'LOW',
+    confidence,
+    rule_id: input.rule_id,
+    rule_version: input.rule_version || RULESET_VERSION,
+    observed_value: numOrNull(input.observed_value),
+    baseline_value: numOrNull(input.baseline_value),
+    threshold_value: numOrNull(input.threshold_value),
+    unit: input.unit || null,
+    evidence: input.evidence || [],
+    explanation: input.explanation || '',
+    freshness_ms: input.detected_ts - input.source_ts,
+    source_health: input.source_health || SOURCE_STATUS.OK,
+    status: 'ACTIVE',
+    expires_ts: Number.isInteger(input.expires_ts) ? input.expires_ts : null,
+    correlation_key: input.correlation_key || null,
+  };
+}
+
+function numOrNull(v) {
+  const n = Number(v);
+  return v === null || v === undefined || !Number.isFinite(n) ? null : n;
+}
+
+// Market-stress events on the same asset within the same 6-hour window share a correlation key. Correlation links
+// events for display; it never merges them or counts one piece of evidence twice.
+export function stressCorrelationKey(asset, ts, windowMs = 6 * 3600_000) {
+  return `stress|${String(asset || '').toLowerCase()}|${Math.floor(ts / windowMs) * windowMs}`;
+}
+
+// ---- HTTP with timeout, bounded retries and backoff (adapters receive this, never raw fetch) ----
+export function makeHttp({ fetchImpl = fetch, timeoutMs = 10_000, retries = 2, backoffMs = 500, sleep, log } = {}) {
+  const wait = sleep || ((ms) => new Promise((r) => setTimeout(r, ms)));
+  const counters = { requests: 0, retries: 0, rate_limited: 0, errors: 0 };
+  async function request(url, init = {}) {
+    let attempt = 0;
+    for (;;) {
+      counters.requests += 1;
+      let res;
+      try {
+        const signal = typeof AbortSignal !== 'undefined' && AbortSignal.timeout ? AbortSignal.timeout(timeoutMs) : undefined;
+        res = await fetchImpl(url, { ...init, signal });
+      } catch (e) {
+        if (attempt < retries) { attempt += 1; counters.retries += 1; await wait(backoffMs * 2 ** (attempt - 1)); continue; }
+        counters.errors += 1;
+        throw new SourceError(SOURCE_STATUS.PROVIDER_ERROR, `network error: ${e && e.name === 'TimeoutError' ? 'timeout' : (e && e.message) || e}`);
+      }
+      if (res.status === 429 || res.status >= 500) {
+        if (res.status === 429) counters.rate_limited += 1;
+        if (attempt < retries) {
+          attempt += 1; counters.retries += 1;
+          const ra = Number(res.headers && res.headers.get && res.headers.get('retry-after'));
+          await wait(Number.isFinite(ra) && ra > 0 ? Math.min(ra * 1000, 10_000) : backoffMs * 2 ** (attempt - 1));
+          continue;
+        }
+        counters.errors += 1;
+        throw new SourceError(res.status === 429 ? SOURCE_STATUS.RATE_LIMITED : SOURCE_STATUS.PROVIDER_ERROR, `HTTP ${res.status}`);
+      }
+      if (res.status === 451 || res.status === 403) {
+        counters.errors += 1;
+        throw new SourceError(SOURCE_STATUS.BLOCKED, `HTTP ${res.status} (provider refused access)`);
+      }
+      if (!res.ok) { counters.errors += 1; throw new SourceError(SOURCE_STATUS.PROVIDER_ERROR, `HTTP ${res.status}`); }
+      return res;
+    }
+  }
+  async function json(url, init) {
+    const res = await request(url, init);
+    try { return await res.json(); } catch (_e) { throw new SourceError(SOURCE_STATUS.PROVIDER_ERROR, 'malformed JSON'); }
+  }
+  async function text(url, init) {
+    const res = await request(url, init);
+    return res.text();
+  }
+  return { request, json, text, counters, log: log || (() => {}) };
+}
+
+// Structured log line (Workers Logs are enabled for this Worker).
+export function logEvent(kind, fields) {
+  try { console.log(JSON.stringify({ component: 'event-detection', kind, ...fields })); } catch (_e) { /* never throw from logging */ }
+}

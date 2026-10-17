@@ -2,14 +2,29 @@
 //   GET  /api/events?since=<ms|ISO>&type=&source=&asset=&status=&limit=   recent events with evidence
 //   GET  /api/event?id=ev_...                                              one event + correlated events
 //   GET  /api/events/health                                                detector health, freshness, existing-source inventory
-//   POST /api/events/run   (Authorization: Bearer <STAGE7_ADMIN_TOKEN>)    run all detectors once
+//   POST /api/events/run   (Authorization: Bearer <EVENT_RUN_TOKEN or STAGE7_ADMIN_TOKEN>)   run all detectors once
+//        header X-Event-Trigger: schedule  -> refused (409) unless EVENT_DETECTION_ENABLED is '1'
+// Each POST is its own Worker invocation with its own subrequest/D1 budget; detection never shares an invocation
+// with the prediction cron.
 // Responses always say these are derived events, separate from V1 composite scores.
 import { RULESET_VERSION, SOURCE_STATUS } from './event-core.js';
 import { eventTablesPresent, listEvents, getEvent, listHealth, EVENT_TABLES_MISSING } from './event-store.js';
 import { detectorRegistry, EXISTING_SOURCES, runEventDetection } from './event-runner.js';
-import { checkToken } from '../learning/learning-api.js';
+import { constantTimeEqual } from '../learning/learning-api.js';
 
 export const SEPARATION_NOTE = 'Derived events from the Event Detection Layer. They are not V1 composite inputs, scores or trading signals; severity, confidence and direction are independent fields.';
+
+export const RUN_MIN_INTERVAL_MS = 2 * 60_000;
+
+// Dedicated EVENT_RUN_TOKEN (least privilege: it can only trigger a detection run) or the existing admin token.
+export function runAuthorization(env, request) {
+  const auth = request.headers.get('Authorization') || '';
+  const token = auth.startsWith('Bearer ') ? auth.slice(7) : '';
+  const accepted = [env.EVENT_RUN_TOKEN, env.STAGE7_ADMIN_TOKEN].filter((t) => typeof t === 'string' && t.length >= 16);
+  if (!accepted.length) return { ok: false, status: 503, error: 'Event runs are disabled on this Worker: neither EVENT_RUN_TOKEN nor STAGE7_ADMIN_TOKEN is configured.' };
+  if (!token || !accepted.some((t) => constantTimeEqual(token, t))) return { ok: false, status: 401, error: 'Unauthorized' };
+  return { ok: true };
+}
 
 function parseSince(v, nowTs) {
   if (v === null || v === undefined || v === '') return nowTs - 7 * 24 * 3600_000;
@@ -67,10 +82,16 @@ export async function handleEventRoutes(request, env, url, corsHeaders) {
       return ev ? json({ ok: true, event: ev, note: SEPARATION_NOTE }) : json({ ok: false, error: 'not found' }, 404);
     }
     if (url.pathname === '/api/events/run' && request.method === 'POST') {
-      const auth = request.headers.get('Authorization') || '';
-      const denied = checkToken(env, auth.startsWith('Bearer ') ? auth.slice(7) : '');
-      if (denied) return json({ ok: false, error: denied.error }, denied.status);
-      return send(await runEventDetection(env, { trigger: 'manual' }));
+      const auth = runAuthorization(env, request);
+      if (!auth.ok) return json({ ok: false, error: auth.error }, auth.status);
+      const trigger = request.headers.get('X-Event-Trigger') === 'schedule' ? 'schedule' : 'manual';
+      if (trigger === 'schedule' && env.EVENT_DETECTION_ENABLED !== '1') {
+        return json({ ok: false, status: SOURCE_STATUS.DISABLED, error: 'Scheduled event detection is off (EVENT_DETECTION_ENABLED is not "1").' }, 409);
+      }
+      if (!(await eventTablesPresent(env))) return send({ ...EVENT_TABLES_MISSING });
+      const recent = await env.DB.prepare('SELECT run_id, started_ts FROM event_runs WHERE started_ts > ? ORDER BY started_ts DESC LIMIT 1').bind(Date.now() - RUN_MIN_INTERVAL_MS).first();
+      if (recent) return json({ ok: false, error: `a run started less than ${RUN_MIN_INTERVAL_MS / 60_000} min ago (${recent.run_id})` }, 409);
+      return send(await runEventDetection(env, { trigger }));
     }
     return json({ ok: false, error: 'method not allowed' }, 405);
   } catch (e) {

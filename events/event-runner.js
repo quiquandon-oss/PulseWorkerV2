@@ -1,8 +1,8 @@
 // Event Detection Layer -- orchestration. Sources -> adapters -> normalised observations -> rules -> deduplicated
 // events -> ledger. Each adapter is isolated (its own timeout and try/catch): one provider failing never stops the
 // others. Nothing here reads or writes V1 sentiment, weights, composite or predictions.
-import { RULESET_VERSION, SOURCE_STATUS, makeHttp, logEvent, sha256Hex } from './event-core.js';
-import { eventTablesPresent, insertEvent, insertObservations, observationsBefore, upsertHealth, recordRun, expireEvents, EVENT_TABLES_MISSING } from './event-store.js';
+import { RULESET_VERSION, SOURCE_STATUS, makeHttp, logEvent, sha256Hex, makeBudget, countedDb, DEFAULT_BUDGET } from './event-core.js';
+import { eventTablesPresent, insertEvents, insertObservations, observationsBefore, upsertHealth, recordRun, expireEvents, processedDocuments, markDocuments, EVENT_TABLES_MISSING } from './event-store.js';
 import { okxLiquidationsAdapter, binanceLiquidationSampleAdapter } from './adapters/liquidations.js';
 import { deribitAdapter } from './adapters/deribit.js';
 import { macroAdapter } from './adapters/macro.js';
@@ -34,41 +34,50 @@ function withTimeout(promise, ms, label) {
   ]);
 }
 
-export async function runEventDetection(env, { nowTs = Date.now(), trigger = 'cron', fetchImpl, adapters = DETECTORS, adapterTimeoutMs = 45_000, sleep, deps = {} } = {}) {
-  if (!(await eventTablesPresent(env))) { logEvent('run_skipped', { reason: 'tables missing' }); return { ...EVENT_TABLES_MISSING }; }
+// One run = one Worker invocation (POST /api/events/run). Everything is bounded to fit Workers Free per-invocation
+// limits (50 external subrequests, 50 D1 queries): a shared budget, multi-row inserts, one history read per series,
+// and a reserve of D1 queries so every adapter's health row and the run record can always be written.
+export async function runEventDetection(env, { nowTs = Date.now(), trigger = 'manual', fetchImpl, adapters = DETECTORS, adapterTimeoutMs = 25_000, sleep, deps = {}, limits = DEFAULT_BUDGET } = {}) {
+  const budget = makeBudget(limits);
+  const dbAll = { DB: countedDb(env.DB, budget) };
+  if (!(await eventTablesPresent(dbAll))) { logEvent('run_skipped', { reason: 'tables missing' }); return { ...EVENT_TABLES_MISSING }; }
   const run = { run_id: 'edr_' + (await sha256Hex(`${nowTs}|${trigger}|${Math.random()}`)).slice(0, 16), started_ts: nowTs, trigger, summary: {} };
-  await recordRun(env, run);
+  await recordRun(dbAll, run);
   const summary = {};
-  for (const a of adapters) {
+  for (let i = 0; i < adapters.length; i += 1) {
+    const a = adapters[i];
+    // Reserve one query per remaining health write plus expire + final run record.
+    const work = { ...env, DB: countedDb(env.DB, budget, { reserve: (adapters.length - i) + 2 }) };
     const base = { source: a.id, last_attempt_ts: nowTs };
     if (a.enabled && !a.enabled(env)) {
-      await upsertHealth(env, { ...base, status: SOURCE_STATUS.DISABLED, coverage: null, details: { reason: 'disabled by configuration' } }, nowTs);
+      await upsertHealth(dbAll, { ...base, status: SOURCE_STATUS.DISABLED, coverage: null, details: { reason: 'disabled by configuration' } }, nowTs);
       summary[a.id] = { status: SOURCE_STATUS.DISABLED };
       continue;
     }
-    const http = makeHttp({ fetchImpl: fetchImpl || ((...x) => fetch(...x)), sleep, timeoutMs: 10_000, retries: 2 });
-    const history = (series, fromTs, beforeTs) => observationsBefore(env, a.id, series, { fromTs, beforeTs, asOfTs: nowTs });
+    const http = makeHttp({ fetchImpl: fetchImpl || ((...x) => fetch(...x)), sleep, timeoutMs: 10_000, retries: 2, budget });
+    const history = (series, fromTs, beforeTs) => observationsBefore(work, a.id, series, { fromTs, beforeTs, asOfTs: nowTs });
+    const docs = { seen: (ids) => processedDocuments(work, a.id, ids) };
     try {
-      const res = await withTimeout(a.run({ env, http, nowTs, history, sleep, ...(deps[a.id] || {}) }), adapterTimeoutMs, a.id);
-      const written = await insertObservations(env, res.observations || []);
-      let newEvents = 0;
-      for (const ev of res.events || []) if (await insertEvent(env, ev, nowTs)) newEvents += 1;
+      const res = await withTimeout(a.run({ env, http, nowTs, history, docs, sleep, ...(deps[a.id] || {}) }), adapterTimeoutMs, a.id);
+      const written = await insertObservations(work, res.observations || []);
+      const newEvents = await insertEvents(work, res.events || [], nowTs);
+      if (res.documents && res.documents.length) await markDocuments(work, res.documents);
       let status = res.status;
       if (status === SOURCE_STATUS.OK && res.last_observation_ts && nowTs - res.last_observation_ts > a.freshnessLimitMs) status = SOURCE_STATUS.STALE;
-      const healthy = ![SOURCE_STATUS.PROVIDER_ERROR, SOURCE_STATUS.BLOCKED, SOURCE_STATUS.RATE_LIMITED, SOURCE_STATUS.NOT_CONFIGURED].includes(status);
-      await upsertHealth(env, { ...base, status, last_success_ts: healthy ? nowTs : null, last_observation_ts: res.last_observation_ts || null, last_error: null, coverage: res.coverage || null, details: res.details || {} }, nowTs);
+      const healthy = ![SOURCE_STATUS.PROVIDER_ERROR, SOURCE_STATUS.BLOCKED, SOURCE_STATUS.RATE_LIMITED, SOURCE_STATUS.NOT_CONFIGURED, SOURCE_STATUS.BUDGET_EXHAUSTED].includes(status);
+      await upsertHealth(dbAll, { ...base, status, last_success_ts: healthy ? nowTs : null, last_observation_ts: res.last_observation_ts || null, last_error: null, coverage: res.coverage || null, details: { ...(res.details || {}), budget_after: { fetches: budget.fetches, queries: budget.queries } } }, nowTs);
       summary[a.id] = { status, observations_written: written, events_detected: (res.events || []).length, events_new: newEvents };
       logEvent('adapter_done', { run_id: run.run_id, source: a.id, ...summary[a.id] });
     } catch (e) {
       const status = (e && e.status) || SOURCE_STATUS.PROVIDER_ERROR;
-      await upsertHealth(env, { ...base, status, last_error: String((e && e.message) || e).slice(0, 300), coverage: null, details: { requests: { ...http.counters } } }, nowTs);
+      await upsertHealth(dbAll, { ...base, status, last_error: String((e && e.message) || e).slice(0, 300), coverage: null, details: { requests: { ...http.counters }, budget_after: { fetches: budget.fetches, queries: budget.queries } } }, nowTs);
       summary[a.id] = { status, error: String((e && e.message) || e).slice(0, 300) };
       logEvent('adapter_failed', { run_id: run.run_id, source: a.id, status, error: summary[a.id].error });
     }
   }
-  const expired = await expireEvents(env, nowTs);
+  const expired = await expireEvents(dbAll, nowTs);
   run.finished_ts = Math.max(nowTs, Date.now());
-  run.summary = { ruleset: RULESET_VERSION, adapters: summary, expired };
-  await recordRun(env, run);
+  run.summary = { ruleset: RULESET_VERSION, trigger, adapters: summary, expired, budget: { fetches: budget.fetches, fetch_limit: budget.fetchLimit, queries: budget.queries, query_limit: budget.queryLimit } };
+  await recordRun(dbAll, run);
   return { ok: true, run_id: run.run_id, summary: run.summary };
 }

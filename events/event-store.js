@@ -8,33 +8,62 @@ export async function eventTablesPresent(env) {
   try { await env.DB.prepare('SELECT 1 FROM event_ledger LIMIT 1').all(); return true; } catch (_e) { return false; }
 }
 
-export async function insertEvent(env, ev, nowTs) {
-  const r = await env.DB.prepare(
-    `INSERT INTO event_ledger (event_id, dedup_key, event_type, asset, market, scope, source, source_url, source_ts,
-       detected_ts, direction, severity, confidence, rule_id, rule_version, observed_value, baseline_value,
-       threshold_value, unit, evidence_json, explanation, freshness_ms, source_health, status, expires_ts,
-       correlation_key, created_ts)
-     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-     ON CONFLICT(dedup_key) DO NOTHING`
-  ).bind(
-    ev.event_id, ev.dedup_key, ev.event_type, ev.asset, ev.market, ev.scope, ev.source, ev.source_url, ev.source_ts,
-    ev.detected_ts, ev.direction, ev.severity, ev.confidence, ev.rule_id, ev.rule_version, ev.observed_value,
-    ev.baseline_value, ev.threshold_value, ev.unit, JSON.stringify(ev.evidence || []), ev.explanation, ev.freshness_ms,
-    ev.source_health, ev.status, ev.expires_ts, ev.correlation_key, nowTs
-  ).run();
-  return !!(r && r.meta && r.meta.changes);
+// D1 caps bound parameters per statement (100), so multi-row inserts are chunked below that. One statement per chunk
+// keeps a whole run well inside the 50-queries-per-invocation limit of Workers Free.
+const EVENT_COLS = ['event_id', 'dedup_key', 'event_type', 'asset', 'market', 'scope', 'source', 'source_url', 'source_ts',
+  'detected_ts', 'direction', 'severity', 'confidence', 'rule_id', 'rule_version', 'observed_value', 'baseline_value',
+  'threshold_value', 'unit', 'evidence_json', 'explanation', 'freshness_ms', 'source_health', 'status', 'expires_ts',
+  'correlation_key', 'created_ts'];
+const OBS_COLS = ['source', 'series', 'bucket_ts', 'value', 'unit', 'coverage', 'observed_ts'];
+export const MAX_BOUND_PARAMS = 99;
+
+function chunks(rows, perRow) {
+  const size = Math.max(1, Math.floor(MAX_BOUND_PARAMS / perRow));
+  const out = [];
+  for (let i = 0; i < rows.length; i += size) out.push(rows.slice(i, i + size));
+  return out;
 }
 
-export async function insertObservations(env, rows) {
+async function insertRows(env, table, cols, conflict, rows) {
   let written = 0;
-  for (const o of rows) {
-    const r = await env.DB.prepare(
-      `INSERT INTO event_observations (source, series, bucket_ts, value, unit, coverage, observed_ts)
-       VALUES (?,?,?,?,?,?,?) ON CONFLICT(source, series, bucket_ts) DO NOTHING`
-    ).bind(o.source, o.series, o.bucket_ts, o.value, o.unit || null, o.coverage || 'COMPLETE', o.observed_ts).run();
-    if (r && r.meta && r.meta.changes) written += 1;
+  for (const part of chunks(rows, cols.length)) {
+    const ph = `(${cols.map(() => '?').join(',')})`;
+    const r = await env.DB.prepare(`INSERT INTO ${table} (${cols.join(', ')}) VALUES ${part.map(() => ph).join(',')} ON CONFLICT(${conflict}) DO NOTHING`)
+      .bind(...part.flat()).run();
+    written += (r && r.meta && r.meta.changes) || 0;
   }
   return written;
+}
+
+// Returns how many events were new (already-known dedup keys are left untouched: first detection wins).
+export async function insertEvents(env, events, nowTs) {
+  const rows = events.map((ev) => [ev.event_id, ev.dedup_key, ev.event_type, ev.asset, ev.market, ev.scope, ev.source, ev.source_url,
+    ev.source_ts, ev.detected_ts, ev.direction, ev.severity, ev.confidence, ev.rule_id, ev.rule_version, ev.observed_value,
+    ev.baseline_value, ev.threshold_value, ev.unit, JSON.stringify(ev.evidence || []), ev.explanation, ev.freshness_ms,
+    ev.source_health, ev.status, ev.expires_ts, ev.correlation_key, nowTs]);
+  return insertRows(env, 'event_ledger', EVENT_COLS, 'dedup_key', rows);
+}
+
+export async function insertObservations(env, obs) {
+  const rows = obs.map((o) => [o.source, o.series, o.bucket_ts, o.value, o.unit || null, o.coverage || 'COMPLETE', o.observed_ts]);
+  return insertRows(env, 'event_observations', OBS_COLS, 'source, series, bucket_ts', rows);
+}
+
+// Documents a source has already classified (e.g. SEC accession numbers), so later runs skip re-reading them.
+export async function processedDocuments(env, source, docIds) {
+  if (!docIds.length) return new Set();
+  const out = new Set();
+  for (let i = 0; i < docIds.length; i += 90) {
+    const part = docIds.slice(i, i + 90);      // 90 ids + the source parameter stays under the bound-parameter cap
+    const r = await env.DB.prepare(`SELECT doc_id FROM event_documents WHERE source = ? AND doc_id IN (${part.map(() => '?').join(',')})`).bind(source, ...part).all();
+    for (const row of (r && r.results) || []) out.add(row.doc_id);
+  }
+  return out;
+}
+
+export async function markDocuments(env, docs) {
+  const rows = docs.map((d) => [d.source, d.doc_id, d.processed_ts, d.findings]);
+  return insertRows(env, 'event_documents', ['source', 'doc_id', 'processed_ts', 'findings'], 'source, doc_id', rows);
 }
 
 // Point-in-time read: only observations this Worker had in hand at asOfTs.

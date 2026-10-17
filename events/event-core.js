@@ -19,6 +19,7 @@ export const SOURCE_STATUS = {
   RATE_LIMITED: 'RATE_LIMITED',
   PROVIDER_ERROR: 'PROVIDER_ERROR',           // HTTP error / malformed payload / timeout after bounded retries
   DISABLED: 'DISABLED',                       // adapter intentionally off in this configuration
+  BUDGET_EXHAUSTED: 'BUDGET_EXHAUSTED',       // this run hit its per-invocation subrequest / D1 query budget
   NEVER_RUN: 'NEVER_RUN',
 };
 
@@ -161,13 +162,46 @@ export function stressCorrelationKey(asset, ts, windowMs = 6 * 3600_000) {
   return `stress|${String(asset || '').toLowerCase()}|${Math.floor(ts / windowMs) * windowMs}`;
 }
 
+// ---- Per-invocation budgets (Workers Free: 50 external subrequests and 50 D1 queries per invocation) ----
+// One budget object is shared by every adapter in a run; exceeding it fails the CURRENT adapter with
+// BUDGET_EXHAUSTED (recorded in health) instead of letting the platform abort the whole invocation.
+export const DEFAULT_BUDGET = { fetches: 40, queries: 44 };
+export function makeBudget(limits = DEFAULT_BUDGET) {
+  return { fetchLimit: limits.fetches, queryLimit: limits.queries, fetches: 0, queries: 0 };
+}
+
+// Wraps a D1 binding so every executed statement is counted against the budget.
+export function countedDb(db, budget, { reserve = 0 } = {}) {
+  const spend = () => {
+    if (budget.queries + 1 > budget.queryLimit - reserve) throw new SourceError(SOURCE_STATUS.BUDGET_EXHAUSTED, `D1 query budget reached (${budget.queries}/${budget.queryLimit})`);
+    budget.queries += 1;
+  };
+  return {
+    prepare(sql) {
+      const st = db.prepare(sql);
+      let bound = st;
+      const wrap = {
+        bind(...args) { bound = st.bind(...args); return wrap; },
+        async first(...a) { spend(); return bound.first(...a); },
+        async all(...a) { spend(); return bound.all(...a); },
+        async run(...a) { spend(); return bound.run(...a); },
+      };
+      return wrap;
+    },
+  };
+}
+
 // ---- HTTP with timeout, bounded retries and backoff (adapters receive this, never raw fetch) ----
-export function makeHttp({ fetchImpl = fetch, timeoutMs = 10_000, retries = 2, backoffMs = 500, sleep, log } = {}) {
+export function makeHttp({ fetchImpl = fetch, timeoutMs = 10_000, retries = 2, backoffMs = 500, sleep, log, budget } = {}) {
   const wait = sleep || ((ms) => new Promise((r) => setTimeout(r, ms)));
   const counters = { requests: 0, retries: 0, rate_limited: 0, errors: 0 };
   async function request(url, init = {}) {
     let attempt = 0;
     for (;;) {
+      if (budget) {
+        if (budget.fetches + 1 > budget.fetchLimit) throw new SourceError(SOURCE_STATUS.BUDGET_EXHAUSTED, `subrequest budget reached (${budget.fetches}/${budget.fetchLimit})`);
+        budget.fetches += 1;
+      }
       counters.requests += 1;
       let res;
       try {

@@ -18,7 +18,7 @@ export const MACRO_CONFIG = {
   baselineObs: 250,
   k: 4,
   minAbsBp: 10,
-  maxStaleDays: 5,          // a daily series whose latest observation is older than this is STALE
+  maxStaleDays: 6,          // daily series: weekend + a holiday is 4 days; older than 6 days is STALE
   calendarHorizonMs: 7 * D,
   // Matched on FRED release NAMES (not hard-coded ids), so a renamed/removed release fails visibly.
   releases: [
@@ -130,7 +130,7 @@ export const macroAdapter = {
   id: 'macro_fred',
   label: 'Macro: FRED yields and release calendar',
   kind: 'macro',
-  freshnessLimitMs: 4 * D,
+  freshnessLimitMs: 7 * D,
   async run({ env, http, nowTs, config, calendar }) {
     const cfg = { ...MACRO_CONFIG, ...(config || {}) };
     const apiKey = env && env.FRED_API_KEY ? String(env.FRED_API_KEY) : null;

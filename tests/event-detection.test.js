@@ -7,7 +7,9 @@ import { createRequire } from 'node:module';
 import { describe, it, expect, vi } from 'vitest';
 import {
   makeEvent, dedupKey, eventIdFor, robustBaseline, robustZ, severityFor, textFingerprint, makeHttp, SOURCE_STATUS, stressCorrelationKey,
+  makeBudget, countedDb,
 } from '../events/event-core.js';
+import { evaluateDetections } from '../events/event-eval.js';
 import {
   normalizeOkxDetail, fetchOkxLiquidations, bucketize, liquidationDirection, evaluateLiquidationBucket, LIQ_CONFIG,
   okxLiquidationsAdapter, normalizeBinanceForceOrder, sampleBinanceForceOrders, binanceLiquidationSampleAdapter, mergeHistory,
@@ -16,7 +18,7 @@ import { fetchDvol, changes24h, evaluateDvol, summarizeOptionsBook, evaluateOpti
 import { parseFredCsv, parseFredApi, evaluateYieldShock, macroAdapter, fredReleaseCalendar, MACRO_CONFIG } from '../events/adapters/macro.js';
 import { classifyFilingText, htmlToText, recentFilings, secEdgarAdapter, filingUrl } from '../events/adapters/sec-edgar.js';
 import { runEventDetection, DETECTORS } from '../events/event-runner.js';
-import { listEvents, observationsBefore, insertObservations } from '../events/event-store.js';
+import { listEvents, observationsBefore, insertObservations, insertEvents, processedDocuments, markDocuments } from '../events/event-store.js';
 import worker from '../worker.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -516,27 +518,182 @@ describe('API routes', () => {
     expect(health.detectors.find((d) => d.id === 'binance_liquidation_sample').status).toBe(SOURCE_STATUS.DISABLED);
     expect(health.last_run.summary.adapters.okx_liquidations.events_new).toBe(2);
   });
-  it('POST /api/events/run is token-gated (503 without a configured token, 401 with a wrong one)', async () => {
-    const { env } = makeDb();
-    const post = (e, auth) => worker.fetch(new Request('https://w.example/api/events/run', { method: 'POST', headers: auth ? { Authorization: auth } : {} }), e);
-    expect((await post(env)).status).toBe(503);
-    expect((await post({ ...env, STAGE7_ADMIN_TOKEN: 'secret' }, 'Bearer wrong')).status).toBe(401);
+});
+
+// ------------------------------------------------------------------ scheduling, budgets and V1 separation
+describe('scheduling: detection never shares the prediction cron invocation', () => {
+  const src = readFileSync(join(__dirname, '..', 'worker.js'), 'utf8');
+  it('the scheduled handler does not run event detection at all; wrangler.toml adds no cron and no flag', () => {
+    const sched = src.slice(src.indexOf('async scheduled(event, env, ctx) {'));
+    expect(sched.slice(0, sched.indexOf('\n  },'))).not.toMatch(/runEventDetection|EVENT_DETECTION|events\//);
+    expect(src).not.toMatch(/runEventDetection/);
+    const toml = readFileSync(join(__dirname, '..', 'wrangler.toml'), 'utf8');
+    expect(toml).toMatch(/crons = \["0 \*\/3 \* \* \*", "0 7 \* \* \*"\]/);
+    expect(toml).not.toMatch(/EVENT_/);
+  });
+  it('the scheduler template is inert, schedule-only, tokenless for GitHub and secret-scoped to one step', () => {
+    const t = readFileSync(join(__dirname, '..', 'events', 'scheduler', 'event-detection-schedule.yml'), 'utf8').split('\n').map((l) => l.replace(/\s+#.*$|^#.*$/, '')).join('\n');
+    expect(() => readFileSync(join(__dirname, '..', '.github', 'workflows', 'event-detection-schedule.yml'))).toThrow();
+    expect(t).toMatch(/^on:\n  schedule:\n    - cron: '23 \* \* \* \*'/m);
+    expect(t).not.toMatch(/workflow_dispatch|pull_request|push:|workflow_run/);
+    expect(t).toMatch(/^permissions: \{\}$/m);
+    expect(t).not.toMatch(/actions\/checkout|wrangler|CLOUDFLARE|github\.token|STAGE7_ADMIN_TOKEN/);
+    expect(t.match(/secrets\./g)).toHaveLength(1);
+    expect(t).toContain("-H 'X-Event-Trigger: schedule'");
+    expect(t).toContain('https://pulseworker-v2.quiquandon.workers.dev/api/events/run');
   });
 });
 
-// ------------------------------------------------------------------ cron gate and V1 separation
-describe('cron gate and separation from V1 scoring', () => {
-  it('the 3 h cron does not run event detection unless EVENT_DETECTION_ENABLED is "1"', async () => {
-    const src = readFileSync(join(__dirname, '..', 'worker.js'), 'utf8');
-    const block = src.slice(src.indexOf("} else if (event.cron === '0 */3 * * *') {"), src.indexOf('// No catch-all else'));
-    expect(block).toMatch(/if \(env\.EVENT_DETECTION_ENABLED === '1'\) \{\s*ctx\.waitUntil\(runEventDetection\(env, \{ trigger: 'cron' \}\)/);
-    expect(src.match(/runEventDetection\(/g)).toHaveLength(1);           // the cron call is the only caller in worker.js
-    const toml = readFileSync(join(__dirname, '..', 'wrangler.toml'), 'utf8');
-    expect(toml).toMatch(/crons = \["0 \*\/3 \* \* \*", "0 7 \* \* \*"\]/);  // no new Cron Trigger
-    expect(toml).not.toMatch(/EVENT_DETECTION_ENABLED/);                  // not switched on by configuration
+describe('per-invocation budgets (Workers Free: 50 subrequests, 50 D1 queries)', () => {
+  it('the fetch budget fails only the adapter that exceeds it, with BUDGET_EXHAUSTED in health', async () => {
+    const { env } = makeDb();
+    const greedy = scriptedAdapter('greedy', async ({ http }) => { for (let i = 0; i < 10; i += 1) await http.json('https://x'); return { status: 'OK', observations: [], events: [] }; });
+    const after = scriptedAdapter('after', async () => ({ status: 'OK', observations: [], events: [] }));
+    const r = await runEventDetection(env, { nowTs: NOW, adapters: [greedy, after], fetchImpl: async () => jsonRes({}), limits: { fetches: 3, queries: 44 } });
+    expect(r.summary.adapters.greedy.status).toBe(SOURCE_STATUS.BUDGET_EXHAUSTED);
+    expect(r.summary.adapters.after.status).toBe('OK');
+    expect(r.summary.budget.fetches).toBe(3);
   });
+  it('the query budget keeps a reserve so every health row and the run record are still written', async () => {
+    const { env, db } = makeDb();
+    const hog = scriptedAdapter('hog', async ({ history }) => { for (let i = 0; i < 100; i += 1) await history('s', 0, NOW); return { status: 'OK', observations: [], events: [] }; });
+    const b = scriptedAdapter('b', async () => ({ status: 'OK', observations: [], events: [] }));
+    const r = await runEventDetection(env, { nowTs: NOW, adapters: [hog, b], limits: { fetches: 40, queries: 20 } });
+    expect(r.summary.adapters.hog.status).toBe(SOURCE_STATUS.BUDGET_EXHAUSTED);
+    expect(r.summary.adapters.b.status).toBe('OK');
+    expect(r.summary.budget.queries).toBeLessThanOrEqual(20);
+    expect(db.prepare('SELECT COUNT(*) n FROM event_source_health').get().n).toBe(2);
+    expect(db.prepare('SELECT finished_ts FROM event_runs').get().finished_ts).toBeGreaterThan(0);
+  });
+  it('countedDb counts every executed statement', async () => {
+    const { env } = makeDb();
+    const budget = makeBudget({ fetches: 1, queries: 2 });
+    const db = countedDb(env.DB, budget);
+    await db.prepare('SELECT 1').all();
+    await db.prepare('SELECT 1').bind().first();
+    await expect(db.prepare('SELECT 1').all()).rejects.toMatchObject({ status: SOURCE_STATUS.BUDGET_EXHAUSTED });
+  });
+  it('multi-row inserts are chunked under the 100 bound-parameter cap and stay idempotent', async () => {
+    const { env, db } = makeDb();
+    const rows = Array.from({ length: 40 }, (_x, i) => ({ source: 's', series: 'x', bucket_ts: i, value: i, observed_ts: NOW }));
+    expect(await insertObservations(env, rows)).toBe(40);
+    expect(await insertObservations(env, rows)).toBe(0);
+    const evs = await Promise.all([1, 2, 3, 4, 5].map((k) => makeEvent({ event_type: 'T', source: 's', source_ts: NOW - k, detected_ts: NOW, rule_id: 'r', dedup_parts: ['T', k] })));
+    expect(await insertEvents(env, evs, NOW)).toBe(5);
+    expect(await insertEvents(env, evs, NOW + 1)).toBe(0);
+    expect(db.prepare('SELECT COUNT(*) n FROM event_ledger').get().n).toBe(5);
+    await markDocuments(env, [{ source: 'sec', doc_id: 'a', processed_ts: NOW, findings: 0 }]);
+    expect([...(await processedDocuments(env, 'sec', ['a', 'b']))]).toEqual(['a']);
+  });
+  it('a full run of every real adapter (mocked providers, SEC configured) stays within both limits', async () => {
+    const { env } = makeDb();
+    const t = NOW - 30 * 60_000;
+    const csv = (sid) => `observation_date,${sid}\n` + Array.from({ length: 200 }, (_x, i) => `${new Date(NOW - (200 - i) * D).toISOString().slice(0, 10)},${4 + (i % 2) * 0.02}`).join('\n');
+    const sub = (cik) => jsonRes({ name: 'Co', tickers: [{ 1050446: 'MSTR', 1507605: 'MARA', 1167419: 'RIOT', 1679788: 'COIN', 1318605: 'TSLA', 1512673: 'XYZ', 1326380: 'GME', 1554859: 'SMLR' }[cik]],
+      filings: { recent: { accessionNumber: [`${cik}-26-1`, `${cik}-26-2`], form: ['8-K', '8-K'], filingDate: ['2026-10-14', '2026-10-15'], acceptanceDateTime: [new Date(NOW - D).toISOString(), new Date(NOW - 2 * D).toISOString()], primaryDocument: ['a.htm', 'b.htm'], items: ['8.01', '8.01'] } } });
+    const f = fakeFetch([
+      [/instruments/, () => okxInst.clone()],
+      [/after=/, () => okxPage([])],
+      [/liquidation-orders/, () => okxPage([det(t, 'sell', 'long', 80000, 500)])],
+      [/get_volatility_index_data/, () => jsonRes({ result: { data: dvolRows(744, (i) => 40 + Math.sin(i / 5)), continuation: null } })],
+      [/get_book_summary_by_currency\?currency=BTC/, () => jsonRes({ result: [{ instrument_name: 'BTC-19OCT26-71000-C', open_interest: 1, creation_timestamp: NOW - 1000 }] })],
+      [/get_book_summary_by_currency\?currency=ETH/, () => jsonRes({ result: [{ instrument_name: 'ETH-19OCT26-3000-C', open_interest: 1, creation_timestamp: NOW - 1000 }] })],
+      [/fredgraph\.csv\?id=DGS2&/, () => textRes(csv('DGS2'))],
+      [/fredgraph\.csv\?id=DGS10&/, () => textRes(csv('DGS10'))],
+      [/CIK0*(\d+)\.json/, (u) => sub(Number(/CIK0*(\d+)\.json/.exec(u)[1]))],
+      [/Archives/, () => textRes('<p>The Company acquired 10 bitcoins.</p>')],
+    ]);
+    const env2 = { ...env, EVENT_SEC_USER_AGENT: 'CryptoPulse research owner@example.com' };
+    const r1 = await runEventDetection(env2, { nowTs: NOW, fetchImpl: f, sleep: noSleep });
+    expect(r1.summary.budget.queries).toBeLessThanOrEqual(44);
+    expect(r1.summary.budget.fetches).toBeLessThanOrEqual(40);
+    expect(Object.values(r1.summary.adapters).some((a) => a.status === SOURCE_STATUS.BUDGET_EXHAUSTED)).toBe(false);
+    const firstSecFetches = f.calls.filter((u) => /Archives/.test(u)).length;
+    expect(firstSecFetches).toBe(6);                                   // capped per run
+    const r2 = await runEventDetection(env2, { nowTs: NOW + 3 * H, fetchImpl: f, sleep: noSleep });
+    expect(f.calls.filter((u) => /Archives/.test(u)).length - firstSecFetches).toBe(6);   // only the 10 deferred ones remain, 6 more read
+    const r3 = await runEventDetection(env2, { nowTs: NOW + 6 * H, fetchImpl: f, sleep: noSleep });
+    expect(f.calls.filter((u) => /Archives/.test(u)).length - firstSecFetches).toBe(10);  // already-classified filings are never re-read
+    expect(r3.summary.budget.queries).toBeLessThanOrEqual(44);
+    expect(r2.summary.adapters.sec_edgar.status).toBe('OK');
+  });
+  it('OKX: the next run starts after the last stored bucket (fewer pages), never before the lookback', async () => {
+    const { env } = makeDb();
+    const hist = Array.from({ length: 30 }, (_x, i) => ({ source: 'okx_liquidations', series: 'liq_total_usd', bucket_ts: Math.floor(NOW / H) * H - (31 - i) * H, value: 1, observed_ts: NOW - 2 * H }));
+    await insertObservations(env, hist);
+    const urls = [];
+    const f = fakeFetch([[/instruments/, () => okxInst.clone()], [/liquidation-orders/, (u) => { urls.push(u); return okxPage([det(NOW - 3 * H, 'sell', 'long', 80000, 10)]); }]]);
+    const r = await runEventDetection(env, { nowTs: NOW, adapters: [okxLiquidationsAdapter], fetchImpl: f, sleep: noSleep });
+    expect(r.summary.adapters.okx_liquidations.status).toBe(SOURCE_STATUS.INSUFFICIENT_BASELINE);
+    const health = (await env.DB.prepare("SELECT details_json FROM event_source_health WHERE source='okx_liquidations'").first());
+    expect(JSON.parse(health.details_json).window_start).toBe(new Date(NOW - 2 * H).toISOString());
+  });
+});
+
+describe('POST /api/events/run authorisation and the schedule gate', () => {
+  const post = (env, headers = {}) => worker.fetch(new Request('https://w.example/api/events/run', { method: 'POST', headers }), env);
+  const TOKEN = 'run-token-0123456789abcdef';
+  it('503 without any token configured, 401 for a wrong or short token', async () => {
+    const { env } = makeDb();
+    expect((await post(env)).status).toBe(503);
+    expect((await post({ ...env, EVENT_RUN_TOKEN: 'short' }, { Authorization: 'Bearer short' })).status).toBe(503);
+    expect((await post({ ...env, EVENT_RUN_TOKEN: TOKEN }, { Authorization: 'Bearer nope' })).status).toBe(401);
+  });
+  it('a scheduled trigger is refused (409 DISABLED) unless EVENT_DETECTION_ENABLED is "1"; a manual owner run is allowed', async () => {
+    const { env, db } = makeDb();
+    vi.stubGlobal('fetch', async () => new Response('blocked in tests', { status: 404 }));
+    try {
+      const e = { ...env, EVENT_RUN_TOKEN: TOKEN };
+      const s1 = await post(e, { Authorization: `Bearer ${TOKEN}`, 'X-Event-Trigger': 'schedule' });
+      expect(s1.status).toBe(409);
+      expect((await s1.json()).status).toBe(SOURCE_STATUS.DISABLED);
+      expect(db.prepare('SELECT COUNT(*) n FROM event_runs').get().n).toBe(0);
+      const m = await post(e, { Authorization: `Bearer ${TOKEN}` });
+      expect(m.status).toBe(200);
+      const body = await m.json();
+      expect(body.summary.trigger).toBe('manual');
+      expect(body.summary.adapters.okx_liquidations.status).toBe(SOURCE_STATUS.PROVIDER_ERROR);   // providers unreachable -> fail closed
+      expect(body.summary.adapters.sec_edgar.status).toBe(SOURCE_STATUS.NOT_CONFIGURED);
+      const again = await post(e, { Authorization: `Bearer ${TOKEN}` });
+      expect(again.status).toBe(409);                                                            // overlap guard
+      db.exec('DELETE FROM event_runs');
+      const s2 = await post({ ...e, EVENT_DETECTION_ENABLED: '1' }, { Authorization: `Bearer ${TOKEN}`, 'X-Event-Trigger': 'schedule' });
+      expect(s2.status).toBe(200);
+      expect((await s2.json()).summary.trigger).toBe('schedule');
+    } finally { vi.unstubAllGlobals(); }
+  });
+});
+
+describe('evaluation metrics (detection vs early warning; never "prediction")', () => {
+  const ep = (id, onset, dir) => ({ id, onset_ts: onset, end_ts: onset + 12 * H, direction: dir });
+  const ev = (id, t, dir = 'DOWN', type = 'LIQUIDATION_BURST') => ({ event_id: id, detected_ts: t, direction: dir, event_type: type });
+  const W = { start_ts: NOW - 30 * D, end_ts: NOW };
+  it('computes recall, precision, false positives, latency and early-warning vs detection from detected_ts only', () => {
+    const r = evaluateDetections({
+      events: [ev('a', NOW - 20 * D - 2 * H), ev('b', NOW - 10 * D + 3 * H, 'UP'), ev('c', NOW - 5 * D), { ...ev('d', NOW - 40 * D) }],
+      episodes: [ep('E1', NOW - 20 * D, 'DOWN'), ep('E2', NOW - 10 * D, 'DOWN'), ep('E3', NOW - 2 * D, 'UP')],
+      window: W, leadMs: 6 * H, lagMs: 6 * H,
+    });
+    expect(r).toMatchObject({ episodes_watched: 3, events_total: 3, early_warnings: 1, detections_after_onset: 1 });
+    expect(r.recall).toBeCloseTo(2 / 3);
+    expect(r.precision).toBeCloseTo(2 / 3);
+    expect(r.false_positives_per_30d).toBeCloseTo(1);
+    expect(r.matches.find((m) => m.episode === 'E1')).toMatchObject({ kind: 'EARLY_WARNING', latency_ms: -2 * H, direction_agreement: 1 });
+    expect(r.matches.find((m) => m.episode === 'E2')).toMatchObject({ kind: 'DETECTION', latency_ms: 3 * H, direction_agreement: 0 });
+    expect(r.caveat).toMatch(/Not evidence of predictive value/);
+  });
+  it('excludes episodes the detector was not watching from recall', () => {
+    const r = evaluateDetections({ events: [], episodes: [ep('E1', NOW - 20 * D, 'UP')], window: W, leadMs: 0, lagMs: 0, coverage: [{ start_ts: NOW - 5 * D, end_ts: NOW }] });
+    expect(r).toMatchObject({ episodes_total: 1, episodes_watched: 0, episodes_unwatched: 1, recall: null });
+  });
+  it('rejects an invalid window', () => {
+    expect(() => evaluateDetections({ events: [], episodes: [], window: { start_ts: 2, end_ts: 1 }, leadMs: 0, lagMs: 0 })).toThrow();
+  });
+});
+
+describe('separation from V1 scoring', () => {
   it('the events modules never touch V1 scoring, weights, sentiment or prediction tables', () => {
-    for (const f of ['event-core.js', 'event-store.js', 'event-runner.js', 'event-api.js', 'adapters/liquidations.js', 'adapters/deribit.js', 'adapters/macro.js', 'adapters/sec-edgar.js']) {
+    for (const f of ['event-core.js', 'event-store.js', 'event-runner.js', 'event-api.js', 'event-eval.js', 'adapters/liquidations.js', 'adapters/deribit.js', 'adapters/macro.js', 'adapters/sec-edgar.js']) {
       const s = readFileSync(join(__dirname, '..', 'events', f), 'utf8');
       expect(s).not.toMatch(/learning-core|v1Composite|V1_METHODOLOGY|sources_json|\bhistory\b\s+(SET|WHERE)|INSERT INTO (history|predictions|sentiment)|UPDATE (history|predictions)/);
     }

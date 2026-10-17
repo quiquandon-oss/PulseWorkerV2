@@ -27,7 +27,7 @@ export const SEC_COMPANIES = [
 ];
 
 export const SEC_FORMS = ['8-K', '8-K/A', '10-Q', '10-K', '424B2', '424B3', '424B5', '424B7', 'S-3', 'S-3ASR', '6-K'];
-export const SEC_CONFIG = { lookbackMs: 7 * D, maxDocsPerRun: 12, maxDocChars: 400_000, spacingMs: 250 };
+export const SEC_CONFIG = { lookbackMs: 7 * D, maxDocsPerRun: 6, maxDocChars: 400_000, spacingMs: 250 };
 
 const COND = /\b(intends?|intention|plans?|planned|may|might|could|would|will|expects?|anticipates?|proposes?|proposed|seeks?|if|subject to|contemplat\w*|potential(ly)?|from time to time)\b/i;
 const CRYPTO = /\b(bitcoins?|btc|ether(eum)?|eth|digital assets?|crypto(currenc(y|ies))?)\b/i;
@@ -142,7 +142,9 @@ export const secEdgarAdapter = {
   label: 'SEC EDGAR filings (tracked crypto-treasury companies)',
   kind: 'corporate_filings',
   freshnessLimitMs: 2 * D,
-  async run({ env, http, nowTs, config, sleep }) {
+  // Three phases keep requests and D1 queries bounded: (1) one submissions request per tracked company,
+  // (2) ONE lookup of already-classified accessions, (3) at most maxDocsPerRun new primary documents.
+  async run({ env, http, nowTs, config, sleep, docs }) {
     const cfg = { ...SEC_CONFIG, ...(config || {}) };
     const ua = env && env.EVENT_SEC_USER_AGENT ? String(env.EVENT_SEC_USER_AGENT) : '';
     if (!/\S+\s+\S+@\S+/.test(ua)) {
@@ -150,13 +152,18 @@ export const secEdgarAdapter = {
     }
     const wait = sleep || ((ms) => new Promise((r) => setTimeout(r, ms)));
     const headers = { 'User-Agent': ua, Accept: 'application/json, text/html' };
-    const events = [], companies = {};
-    let docs = 0, lastObs = null, status = SOURCE_STATUS.OK;
+    const events = [], companies = {}, candidates = [], documents = [];
+    let read = 0, lastObs = null, status = SOURCE_STATUS.OK;
     for (const c of (cfg.companies || SEC_COMPANIES)) {
       const cikPad = String(c.cik).padStart(10, '0');
       let sub;
       try { sub = await http.json(`${SEC_SUBMISSIONS}/CIK${cikPad}.json`, { headers }); }
-      catch (e) { companies[c.ticker] = { status: e.status || SOURCE_STATUS.PROVIDER_ERROR, error: e.message }; status = e.status || SOURCE_STATUS.PROVIDER_ERROR; continue; }
+      catch (e) {
+        companies[c.ticker] = { status: e.status || SOURCE_STATUS.PROVIDER_ERROR, error: e.message };
+        if (e.status === SOURCE_STATUS.BUDGET_EXHAUSTED) throw e;
+        status = e.status || SOURCE_STATUS.PROVIDER_ERROR;
+        continue;
+      }
       await wait(cfg.spacingMs);
       if (!Array.isArray(sub.tickers) || !sub.tickers.map((t) => String(t).toUpperCase()).includes(c.ticker)) {
         companies[c.ticker] = { status: 'SKIPPED_IDENTITY_MISMATCH', reported_tickers: sub.tickers || null };
@@ -164,24 +171,30 @@ export const secEdgarAdapter = {
       }
       const company = { ...c, name: sub.name || c.ticker };
       const filings = recentFilings(sub, { sinceTs: nowTs - cfg.lookbackMs });
-      companies[c.ticker] = { status: 'OK', recent_filings: filings.length, classified: 0 };
+      companies[c.ticker] = { status: 'OK', recent_filings: filings.length, classified: 0, already_classified: 0 };
       for (const f of filings) {
         lastObs = Math.max(lastObs || 0, f.accepted_ts);
-        if (docs >= cfg.maxDocsPerRun || !f.primary_document) continue;
-        let text;
-        try { text = htmlToText((await http.text(filingUrl(c.cik, f.accession, f.primary_document), { headers })).slice(0, cfg.maxDocChars)); }
-        catch (e) { companies[c.ticker].doc_error = e.message; continue; }
-        docs += 1;
-        await wait(cfg.spacingMs);
-        const findings = classifyFilingText(text);
-        events.push(...(await filingEvents({ company, filing: f, findings, nowTs, source: this.id })));
-        companies[c.ticker].classified += 1;
+        if (f.primary_document) candidates.push({ company, filing: f });
       }
     }
+    const seen = docs ? await docs.seen(candidates.map((x) => x.filing.accession)) : new Set();
+    for (const { company, filing } of candidates) {
+      if (seen.has(filing.accession)) { companies[company.ticker].already_classified += 1; continue; }
+      if (read >= cfg.maxDocsPerRun) { companies[company.ticker].deferred = (companies[company.ticker].deferred || 0) + 1; continue; }
+      let text;
+      try { text = htmlToText((await http.text(filingUrl(company.cik, filing.accession, filing.primary_document), { headers })).slice(0, cfg.maxDocChars)); }
+      catch (e) { companies[company.ticker].doc_error = e.message; if (e.status === SOURCE_STATUS.BUDGET_EXHAUSTED) throw e; continue; }
+      read += 1;
+      await wait(cfg.spacingMs);
+      const findings = classifyFilingText(text);
+      events.push(...(await filingEvents({ company, filing, findings, nowTs, source: this.id })));
+      documents.push({ source: this.id, doc_id: filing.accession, processed_ts: nowTs, findings: findings.length });
+      companies[company.ticker].classified += 1;
+    }
     return {
-      status, observations: [], events, last_observation_ts: lastObs,
-      coverage: `US SEC only; ${(cfg.companies || SEC_COMPANIES).length} tracked registrants; last ${Math.round(cfg.lookbackMs / D)} days; up to ${cfg.maxDocsPerRun} documents per run`,
-      details: { companies, documents_read: docs, requests: { ...http.counters } },
+      status, observations: [], events, documents, last_observation_ts: lastObs,
+      coverage: `US SEC only; ${(cfg.companies || SEC_COMPANIES).length} tracked registrants; last ${Math.round(cfg.lookbackMs / D)} days; up to ${cfg.maxDocsPerRun} new documents per run`,
+      details: { companies, documents_read: read, requests: { ...http.counters } },
     };
   },
 };

@@ -1,6 +1,6 @@
--- Migration 0023: Event Detection Layer (ledger, observations for baselines, source health, run log).
--- Additive only: four NEW tables. No existing table, column, V1 weight, sentiment row or prediction is touched.
--- Idempotent (IF NOT EXISTS). Rollback: see EVENT_DETECTION.md section "Rollback" (DROP these four tables).
+-- Migration 0023: Event Detection Layer (ledger, observations for baselines, source health, run log, processed
+-- documents). Additive only: five NEW tables. No existing table, column, V1 weight, sentiment row or prediction is touched.
+-- Idempotent (IF NOT EXISTS). Rollback: see EVENT_DETECTION.md section "Rollback" (DROP these five tables).
 
 -- One row per detected event. dedup_key names what happened (type|asset|source|window or document), so
 -- re-detecting the same window maps to the same row; INSERT ... ON CONFLICT(dedup_key) DO NOTHING keeps the
@@ -72,4 +72,13 @@ CREATE TABLE IF NOT EXISTS event_runs (
   finished_ts INTEGER,
   trigger TEXT NOT NULL,
   summary_json TEXT NOT NULL DEFAULT '{}'
+);
+
+-- Documents a detector has already read and classified (SEC accession numbers), so they are fetched once.
+CREATE TABLE IF NOT EXISTS event_documents (
+  source TEXT NOT NULL,
+  doc_id TEXT NOT NULL,
+  processed_ts INTEGER NOT NULL,
+  findings INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (source, doc_id)
 );

@@ -6,7 +6,6 @@ import { authorizeWrite, getSessionState, signIn, clearedCookieHeader, SIGNIN_HT
 import { listCandidates, getCandidate, createCandidate, updateCandidate, decideCandidate, listVersions } from './learning/learning-candidates.js';
 // Event Detection Layer (separate from V1 scoring): see events/ and EVENT_DETECTION.md.
 import { handleEventRoutes } from './events/event-api.js';
-import { runEventDetection } from './events/event-runner.js';
 // ---- BTC k-NN historical analog model ----
 // Feature vector: the 4 headline gauges already computed and logged by the
 // original CryptoPulse pipeline every cycle (sentiment composite, technical
@@ -10901,11 +10900,6 @@ export default {
       ctx.waitUntil(runCoinCronTick(env).then(
         () => refreshDailyReportCache(env).catch(err => console.error('Daily report cache refresh failed:', err))
       ));
-      // Event Detection Layer: off unless EVENT_DETECTION_ENABLED is '1'. Its own waitUntil and catch, so it can
-      // never delay or fail the prediction tick above (no new Cron Trigger: the account budget is fully used).
-      if (env.EVENT_DETECTION_ENABLED === '1') {
-        ctx.waitUntil(runEventDetection(env, { trigger: 'cron' }).catch(err => console.error('Event detection run failed:', err)));
-      }
     }
     // No catch-all else: an unrecognized event.cron does nothing.
     // refreshDailyReportCache runs once per 3h tick, after all three

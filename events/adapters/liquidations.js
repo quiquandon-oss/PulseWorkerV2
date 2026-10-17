@@ -19,9 +19,10 @@ export const LIQ_CONFIG = {
   instId: 'BTC-USDT-SWAP',
   asset: 'BTC',
   bucketMs: H,
-  lookbackMs: 8 * H,          // each run re-reads 8 h (cron every 3 h) -- overlaps are idempotent
+  lookbackMs: 8 * H,          // longest window one run re-reads; normally it starts after the last stored bucket
+  minLookbackMs: 2 * H,        // always re-read at least this much (overlaps are idempotent)
   settleMs: 5 * 60_000,        // a bucket is evaluated only 5 min after it ends
-  maxPages: 12,
+  maxPages: 8,                 // bounded subrequests per run (Workers Free: 50 per invocation)
   baselineBuckets: 168,        // 7 days of hourly buckets
   minBaselineBuckets: 48,
   k: 4,                        // robust z threshold
@@ -159,8 +160,11 @@ export const okxLiquidationsAdapter = {
   freshnessLimitMs: 4 * H,
   async run({ http, nowTs, history, config }) {
     const cfg = { ...LIQ_CONFIG, ...(config || {}) };
+    // ONE history read per run (baseline window + lookback), sliced per bucket below.
+    const stored = await history('liq_total_usd', nowTs - cfg.lookbackMs - cfg.baselineBuckets * cfg.bucketMs, nowTs);
+    const lastStored = stored.length ? stored[stored.length - 1].bucket_ts : null;
+    const startTs = Math.max(nowTs - cfg.lookbackMs, Math.min(lastStored !== null ? lastStored + cfg.bucketMs : -Infinity, nowTs - cfg.minLookbackMs));
     const ctVal = await fetchOkxCtVal(http, cfg.instId);
-    const startTs = nowTs - cfg.lookbackMs;
     const res = await fetchOkxLiquidations(http, { instFamily: cfg.instFamily, instId: cfg.instId, startTs, ctVal, maxPages: cfg.maxPages });
     // History is provably covered only back to the oldest record when the window start was not reached.
     const coveredFromTs = res.reachedStart ? startTs : (res.oldest === null ? nowTs : res.oldest);
@@ -178,8 +182,7 @@ export const okxLiquidationsAdapter = {
     const runRows = buckets.map((x) => ({ bucket_ts: x.bucket_ts, value: x.long_usd + x.short_usd }));
     for (const b of buckets) {
       const from = b.bucket_ts - cfg.baselineBuckets * cfg.bucketMs;
-      const stored = await history('liq_total_usd', from, b.bucket_ts);
-      const hist = mergeHistory(stored, runRows.filter((r) => r.bucket_ts >= from && r.bucket_ts < b.bucket_ts));
+      const hist = mergeHistory(stored.filter((r) => r.bucket_ts >= from && r.bucket_ts < b.bucket_ts), runRows.filter((r) => r.bucket_ts >= from && r.bucket_ts < b.bucket_ts));
       const r = await evaluateLiquidationBucket(b, hist, cfg, { nowTs, source: this.id, sourceUrl });
       baselineCount = r.baselineCount;
       if (r.status === SOURCE_STATUS.INSUFFICIENT_BASELINE) status = SOURCE_STATUS.INSUFFICIENT_BASELINE;
@@ -190,7 +193,7 @@ export const okxLiquidationsAdapter = {
       status, observations, events,
       coverage: `single venue (OKX ${cfg.instId}); ${res.reachedStart ? 'window fully covered' : 'history reached only ' + (res.oldest ? new Date(res.oldest).toISOString() : 'no records')}`,
       last_observation_ts: lastRecordTs,
-      details: { pages: res.pages, records: res.records.length, reached_window_start: res.reachedStart, complete_buckets: buckets.length, baseline_buckets: baselineCount, ct_val: ctVal, requests: { ...http.counters } },
+      details: { window_start: new Date(startTs).toISOString(), pages: res.pages, records: res.records.length, reached_window_start: res.reachedStart, complete_buckets: buckets.length, baseline_buckets: baselineCount, ct_val: ctVal, requests: { ...http.counters } },
     };
   },
 };

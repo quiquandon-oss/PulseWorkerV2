@@ -53,15 +53,29 @@ jobs:
         if: steps.sel.outputs.step == 'migrate'
         env: { CLOUDFLARE_API_TOKEN: '${{ secrets.CLOUDFLARE_API_TOKEN }}' }
         run: |
+          echo "start: $(date -u +%FT%TZ)"
           echo "$MIGRATION_SHA256  $MIGRATION" | sha256sum -c -
           q() { $W d1 execute "$DB_NAME" --remote --json --command "$1"; }
+          SCHEMA="SELECT type, name, tbl_name, sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' AND name NOT LIKE 'event%' AND name NOT LIKE 'idx_event%' ORDER BY type, name"
+          COUNTS="SELECT (SELECT COUNT(*) FROM history) history_n,(SELECT MAX(ts) FROM history) history_max,(SELECT COUNT(*) FROM predictions) pred_n,(SELECT COUNT(*) FROM eth_predictions) eth_n,(SELECT COUNT(*) FROM link_predictions) link_n,(SELECT COUNT(*) FROM challenger_predictions) chal_n,(SELECT COUNT(*) FROM risk_regime_readings) rr_n,(SELECT COUNT(*) FROM sentiment_weight_adaptation) swa_n,(SELECT COUNT(*) FROM v1_methodology_versions) mv_n"
           pre=$(q "SELECT COUNT(*) n FROM sqlite_master WHERE name LIKE 'event%' OR name LIKE 'idx_event%'" | jq '.[0].results[0].n')
           test "$pre" = "0" || { echo "::error::event objects already exist ($pre)"; exit 1; }
-          echo "--- restore point immediately before the migration"; $W d1 time-travel info "$DB_NAME" --json
-          q "SELECT COUNT(*) n FROM sqlite_master WHERE type='table'" | jq -c '.[0].results[0]'
+          q "$SCHEMA" | jq -c '.[0].results' > schema_pre.json
+          echo "pre schema: $(jq length schema_pre.json) objects, sha256 $(sha256sum schema_pre.json | cut -c1-64)"
+          jq -c 'group_by(.type) | map({(.[0].type): length}) | add' schema_pre.json
+          q "$COUNTS" | jq -c '.[0].results[0]' > counts_pre.json; echo "pre counts: $(cat counts_pre.json)"
+          echo "--- restore point immediately before the migration ($(date -u +%FT%TZ))"; $W d1 time-travel info "$DB_NAME" --json
           $W d1 execute "$DB_NAME" --remote --yes --file="$MIGRATION"
-          q "SELECT type, name FROM sqlite_master WHERE name LIKE 'event%' OR name LIKE 'idx_event%' ORDER BY type, name" | jq -c '.[0].results'
-          post=$(q "SELECT COUNT(*) n FROM sqlite_master WHERE name LIKE 'event%' OR name LIKE 'idx_event%'" | jq '.[0].results[0].n')
-          test "$post" = "8" || { echo "::error::expected 8 event objects, got $post"; exit 1; }
-          q "SELECT COUNT(*) n FROM sqlite_master WHERE type='table'" | jq -c '.[0].results[0]'
-          q "SELECT (SELECT COUNT(*) FROM history) history_n,(SELECT MAX(ts) FROM history) history_max,(SELECT COUNT(*) FROM predictions) pred_n,(SELECT COUNT(*) FROM risk_regime_readings) rr_n,(SELECT COUNT(*) FROM sentiment_weight_adaptation) swa_n,(SELECT COUNT(*) FROM event_ledger) ev_n" | jq -c '.[0].results[0]'
+          echo "applied: $(date -u +%FT%TZ)"
+          q "SELECT type, name FROM sqlite_master WHERE name LIKE 'event%' OR name LIKE 'idx_event%' ORDER BY type, name" | jq -c '.[0].results' > ev.json; cat ev.json
+          expected='[{"type":"index","name":"idx_event_ledger_corr"},{"type":"index","name":"idx_event_ledger_detected"},{"type":"index","name":"idx_event_ledger_type"},{"type":"table","name":"event_documents"},{"type":"table","name":"event_ledger"},{"type":"table","name":"event_observations"},{"type":"table","name":"event_runs"},{"type":"table","name":"event_source_health"}]'
+          test "$(jq -cS . ev.json)" = "$(echo "$expected" | jq -cS .)" || { echo "::error::event objects differ from the expected 8"; exit 1; }
+          q "$SCHEMA" | jq -c '.[0].results' > schema_post.json
+          echo "post schema (excluding event objects): sha256 $(sha256sum schema_post.json | cut -c1-64)"
+          cmp -s schema_pre.json schema_post.json || { echo "::error::pre-existing schema changed"; exit 1; }
+          q "$COUNTS" | jq -c '.[0].results[0]' > counts_post.json; echo "post counts: $(cat counts_post.json)"
+          for k in pred_n eth_n link_n chal_n swa_n mv_n; do test "$(jq .$k counts_pre.json)" = "$(jq .$k counts_post.json)" || { echo "::error::$k changed"; exit 1; }; done
+          for k in history_n rr_n; do test "$(jq .$k counts_post.json)" -ge "$(jq .$k counts_pre.json)" || { echo "::error::$k decreased"; exit 1; }; done
+          q "SELECT (SELECT COUNT(*) FROM event_ledger) ledger,(SELECT COUNT(*) FROM event_observations) obs,(SELECT COUNT(*) FROM event_source_health) health,(SELECT COUNT(*) FROM event_runs) runs,(SELECT COUNT(*) FROM event_documents) docs" | jq -c '.[0].results[0]'
+          echo "--- bookmark after migration"; $W d1 time-travel info "$DB_NAME" --json
+          echo "MIGRATION 0023: PASS"

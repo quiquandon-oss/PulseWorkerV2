@@ -29,3 +29,12 @@ jobs:
           probe fred_csv_dgs10 "https://fred.stlouisfed.org/graph/fredgraph.csv?id=DGS10&cosd=$(date -u -d '-30 days' +%F)"
           probe sec_submissions_nocontact_ua "https://data.sec.gov/submissions/CIK0001050446.json" -A "CryptoPulse provider probe"
           probe binance_fapi "https://fapi.binance.com/fapi/v1/ping"
+      - name: Shape checks (fields the adapters fail closed on)
+        run: |
+          curl -sS --max-time 20 "https://www.okx.com/api/v5/public/instruments?instType=SWAP&instId=BTC-USDT-SWAP" | jq -c '{code, inst: [.data[] | {instId, ctVal, ctValCcy}]}'
+          curl -sS --max-time 20 "https://www.okx.com/api/v5/public/liquidation-orders?instType=SWAP&instFamily=BTC-USDT&state=filled&limit=100" | jq -c '{code, groups: [.data[] | {instId, instFamily, n: (.details|length), newest: (.details|map(.ts|tonumber)|max), oldest: (.details|map(.ts|tonumber)|min)}]}'
+          oldest=$(curl -sS --max-time 20 "https://www.okx.com/api/v5/public/liquidation-orders?instType=SWAP&instFamily=BTC-USDT&state=filled&limit=100" | jq '[.data[].details[].ts|tonumber]|min')
+          curl -sS --max-time 20 "https://www.okx.com/api/v5/public/liquidation-orders?instType=SWAP&instFamily=BTC-USDT&state=filled&limit=100&after=$oldest" | jq -c --argjson c "$oldest" '{code, page2_n: ([.data[].details[]]|length), page2_newest_lt_cursor: (([.data[].details[].ts|tonumber]|max) < $c)}'
+          now=$(($(date +%s)*1000)); start=$((now-31*86400000))
+          curl -sS --max-time 20 "https://www.deribit.com/api/v2/public/get_volatility_index_data?currency=BTC&start_timestamp=$start&end_timestamp=$now&resolution=3600" | jq -c '{candles: (.result.data|length), continuation: .result.continuation}'
+          curl -sS --max-time 20 -A "CryptoPulse provider probe" "https://data.sec.gov/submissions/CIK0001050446.json" | jq -c '{name, tickers, recent: (.filings.recent.form|length)}'

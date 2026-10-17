@@ -172,12 +172,12 @@ The migration was validated locally on real SQLite, through the tests: it applie
 | Detector | Requests per run (typical / max) | Cadence | Notes |
 |---|---|---|---|
 | OKX liquidations | 2–4 / 9 | **hourly needed**: hourly buckets, and detection latency ≈ bucket end + run delay | 3-hourly would triple worst-case latency |
-| Deribit | 4 / ~6 | hourly (DVOL candles are hourly); OI is fine at 3 h | the OI baseline counts runs, so more frequent runs mature it faster |
+| Deribit | 4 / 10 (DVOL capped at 4 pages per currency) | hourly (DVOL candles are hourly); OI is fine at 3 h | the OI baseline counts runs, so more frequent runs mature it faster |
 | FRED | 2 / 3 | daily is enough; hourly is harmless (about 48 tiny requests a day) | releases are daily data |
 | SEC | 8 / 14 | hourly fine (≤ 4 req/s, about 200–330 requests a day) | processed-accession memory prevents re-reading |
 | Binance | 0 (off) | — | a sample is ≤ 30 s of a snapshot stream |
 
-The full run, typical to worst case, costs about 16–32 fetches and 15–35 queries. D1 writes are under about 60 rows per run, well within the Free plan's daily limits.
+The full run costs about 16–24 fetches typically and **36 in the worst case** (every provider at its page cap: 9 + 10 + 3 + 14). A test pins that count, and the 40-fetch budget leaves 10 subrequests of headroom below Cloudflare's 50. Retries count against the budget too, so a run with many retries ends the last adapter with `BUDGET_EXHAUSTED` instead of breaching the limit. Queries are 15–35 per run, against a budget of 44. D1 writes are under about 60 rows per run, well within the Free plan's daily limits.
 
 **GitHub schedules start late and can skip slots.** On 2026-10-17 the new hourly funding workflow skipped its 06:17–09:17 slots and ran at 10:44. Expect latency of up to an hour or more until runs are proven reliable. The alternative is Workers Paid ($5/month, 250 Cron Triggers, 1000 subrequests per invocation), which is the owner's decision.
 
@@ -233,8 +233,20 @@ The output carries the caveat that it is not evidence of predictive value.
 **Configuration checked against the repository:**
 - Worker `pulseworker-v2` (`wrangler.toml`), account `f58e761fbc8e62dc404d8684290af264`.
 - D1 binding `DB`, database **`sentiment-history`**, id `f91ca980-b886-423a-bd6f-f3baea46d181`. This database is **shared with V1 `sentiment-ff75`**; the migration is additive.
-- Deploy: a push to `main` touching `worker.js` runs `deploy.yml`.
+- Deploy: a push to `main` touching `worker.js` runs `deploy.yml`, which uploads only `GEMINI_API_KEY`. Merging PR #94 touches no path watched by `deploy-research-dispatcher.yml` (`dispatcher/**`).
+- The command syntax below was checked against the pinned `wrangler@4.151.1` help output. The commands were **not run** against any Cloudflare account.
 
+Run every command from a checkout of `main` (so `wrangler.toml` resolves `sentiment-history`), logged in as the owner. Never print `EVENT_RUN_TOKEN`: read it into a shell variable, for example `read -rs EVENT_RUN_TOKEN`.
+
+0. **Preconditions (read-only, plus one local backup file):**
+   - **Database identity.** `npx wrangler d1 info sentiment-history --json` must show uuid `f91ca980-b886-423a-bd6f-f3baea46d181`. If it shows anything else, or the name resolves to more than one database, **stop**.
+   - **No name clash.** `npx wrangler d1 execute sentiment-history --remote --command "SELECT name, type FROM sqlite_master WHERE name LIKE 'event%' OR name LIKE 'idx_event%'"` must return **no rows**. The migration uses `CREATE … IF NOT EXISTS`, so a pre-existing table of the same name would silently keep its old schema.
+   - **Restore point.** Record a Time Travel bookmark: `npx wrangler d1 time-travel info sentiment-history --json`. Save the bookmark and the UTC time.
+   - **Schema backup.** `npx wrangler d1 export sentiment-history --remote --no-data --output=pre-0023-schema.sql`. Keep this file outside the repository.
+   - **V1 baseline.** Save these responses before the change:
+     - `curl -s https://sentiment-ff75.quiquandon.workers.dev/risk-regime`
+     - `curl -s https://pulseworker-v2.quiquandon.workers.dev/prediction-freshness`
+     - a screenshot of the V1 Sentiment composite and source table.
 1. **Migration** (additive, idempotent):
    `npx wrangler d1 execute sentiment-history --remote --file=.ai/migrations/0023_event_detection.sql`
    Verify: `npx wrangler d1 execute sentiment-history --remote --command "SELECT name FROM sqlite_master WHERE name LIKE 'event_%'"`. Expect 5 tables.
@@ -260,7 +272,7 @@ The output carries the caveat that it is not evidence of predictive value.
 
    `summary.budget.fetches` ≤ 40 and `queries` ≤ 44.
 7. **Inspect:** `/api/events/health` (`last_error`, `coverage`, `details`) and `/api/events?since=0`. Any event must have evidence and a source URL.
-8. **V1 unchanged:** the Sentiment composite and source table are identical, and predictions keep updating on their own crons (the `scheduled()` handler is untouched).
+8. **V1 unchanged:** compare against the step 0 baseline. The Sentiment composite and source table must be identical (same weights version `2026-10-12-riskregime`). `/risk-regime` must still answer. `/prediction-freshness` must keep advancing on the existing crons after the next `0 */3 * * *` slot; the `scheduled()` handler is untouched.
 9. **Frontend:** merge CryptoPulse PR #5 (GitHub Pages). The Sentiment tab shows "Event Detection — Detected Events & Detector Health".
 10. **Only with separate approval, to start recurring runs:**
     - `npx wrangler secret put EVENT_DETECTION_ENABLED` with the value `1`;
@@ -273,6 +285,7 @@ The output carries the caveat that it is not evidence of predictive value.
 |---|---|---|
 | Stop recurring runs | `npx wrangler secret delete EVENT_DETECTION_ENABLED`, and/or delete the workflow file | Manual runs still work with the token: delete `EVENT_RUN_TOKEN` to disable all runs |
 | Remove the code | revert the merge commit on `main` (`deploy.yml` redeploys `worker.js`); revert CryptoPulse PR #5 | the routes return 404, and the panel shows "not deployed" |
+| Restore the database (last resort) | `npx wrangler d1 time-travel restore sentiment-history --bookmark=<step 0 bookmark>` | **Rolls back the whole shared database, V1 tables included**, losing every V1 write since the bookmark. Use it only if a V1 table was damaged. Event-only problems are undone with the `DROP TABLE` row below. Wrangler accepts timestamps within 30 days; the retention on this account's plan is unverified, so check it in the dashboard. |
 | Remove the data (irreversible) | `npx wrangler d1 execute sentiment-history --remote --command "DROP TABLE IF EXISTS event_ledger; DROP TABLE IF EXISTS event_observations; DROP TABLE IF EXISTS event_source_health; DROP TABLE IF EXISTS event_runs; DROP TABLE IF EXISTS event_documents;"` | deletes all collected history and events; baselines restart from zero. No V1 table is affected. |
 
 ## 13. Known limitations and acceptance gaps

@@ -617,6 +617,38 @@ describe('per-invocation budgets (Workers Free: 50 subrequests, 50 D1 queries)',
     expect(r3.summary.budget.queries).toBeLessThanOrEqual(44);
     expect(r2.summary.adapters.sec_edgar.status).toBe('OK');
   });
+  it('worst case: every provider at its page cap (OKX 8 pages, DVOL continuation, FRED key, 8 SEC filers) fits 40 fetches', async () => {
+    const { env } = makeDb();
+    const apiObs = Array.from({ length: 200 }, (_x, i) => ({ date: new Date(NOW - (200 - i) * D).toISOString().slice(0, 10), value: String(4 + (i % 2) * 0.02) }));
+    const sub = (cik) => jsonRes({ name: 'Co', tickers: [{ 1050446: 'MSTR', 1507605: 'MARA', 1167419: 'RIOT', 1679788: 'COIN', 1318605: 'TSLA', 1512673: 'XYZ', 1326380: 'GME', 1554859: 'SMLR' }[cik]],
+      filings: { recent: { accessionNumber: [`${cik}-26-1`], form: ['8-K'], filingDate: ['2026-10-15'], acceptanceDateTime: [new Date(NOW - D).toISOString()], primaryDocument: ['a.htm'], items: ['8.01'] } } });
+    const f = fakeFetch([
+      [/instruments/, () => okxInst.clone()],
+      // every page is older than the cursor but never reaches the 8 h window start -> all 8 pages are read
+      [/liquidation-orders/, (u) => { const c = /after=(\d+)/.exec(u); const top = c ? Number(c[1]) - 1 : NOW - 1000; return okxPage([det(top, 'sell', 'long', 80000, 1), det(top - 60_000, 'buy', 'short', 80000, 1)]); }],
+      // DVOL never completes: continuation always moves one hour back
+      [/get_volatility_index_data/, (u) => { const end = Number(/end_timestamp=(\d+)/.exec(u)[1]); return jsonRes({ result: { data: [[Math.floor((end - H) / H) * H, 1, 1, 1, 40]], continuation: end - H } }); }],
+      [/get_book_summary_by_currency\?currency=BTC/, () => jsonRes({ result: [{ instrument_name: 'BTC-19OCT26-71000-C', open_interest: 1, creation_timestamp: NOW - 1000 }] })],
+      [/get_book_summary_by_currency\?currency=ETH/, () => jsonRes({ result: [{ instrument_name: 'ETH-19OCT26-3000-C', open_interest: 1, creation_timestamp: NOW - 1000 }] })],
+      [/series\/observations/, () => jsonRes({ observations: apiObs })],
+      [/releases\/dates/, () => jsonRes({ release_dates: [] })],
+      [/CIK0*(\d+)\.json/, (u) => sub(Number(/CIK0*(\d+)\.json/.exec(u)[1]))],
+      [/Archives/, () => textRes('<p>The Company acquired 10 bitcoins.</p>')],
+    ]);
+    const env2 = { ...env, EVENT_SEC_USER_AGENT: 'CryptoPulse research owner@example.com', FRED_API_KEY: 'k'.repeat(32) };
+    const r = await runEventDetection(env2, { nowTs: NOW, fetchImpl: f, sleep: noSleep });
+    const n = (re) => f.calls.filter((u) => re.test(u)).length;
+    expect(n(/liquidation-orders/)).toBe(LIQ_CONFIG.maxPages);
+    expect(n(/get_volatility_index_data/)).toBe(2 * DERIBIT_CONFIG.dvolMaxPages);
+    expect(n(/fred/)).toBe(3);
+    expect(n(/CIK0*\d+\.json/)).toBe(8);
+    expect(n(/Archives/)).toBe(6);
+    expect(f.calls.length).toBe(1 + 8 + 8 + 2 + 3 + 8 + 6);           // 36: worst case without retries
+    expect(r.summary.budget.fetches).toBe(f.calls.length);
+    expect(r.summary.budget.fetches).toBeLessThanOrEqual(40);
+    expect(r.summary.budget.queries).toBeLessThanOrEqual(44);
+    expect(Object.values(r.summary.adapters).some((a) => a.status === SOURCE_STATUS.BUDGET_EXHAUSTED)).toBe(false);
+  });
   it('OKX: the next run starts after the last stored bucket (fewer pages), never before the lookback', async () => {
     const { env } = makeDb();
     const hist = Array.from({ length: 30 }, (_x, i) => ({ source: 'okx_liquidations', series: 'liq_total_usd', bucket_ts: Math.floor(NOW / H) * H - (31 - i) * H, value: 1, observed_ts: NOW - 2 * H }));

@@ -21,6 +21,7 @@ export const DERIBIT_CONFIG = {
   oiK: 3,
   oiMinAbsPct: 10,
   maxSnapshotAgeMs: 15 * 60_000,   // book summary older than this is STALE
+  dvolMaxPages: 4,                 // per currency; one page held the full 31 days live (744 candles). Bounds subrequests.
 };
 
 function rpcResult(payload) {
@@ -33,10 +34,12 @@ function rpcResult(payload) {
   return payload.result;
 }
 
-export async function fetchDvol(http, currency, startTs, endTs) {
+// Pages backwards from endTs. If maxPages is reached first, the most recent part is kept and the baseline minimum
+// (dvolMinBaseline) decides whether it is enough; nothing is filled.
+export async function fetchDvol(http, currency, startTs, endTs, maxPages = DERIBIT_CONFIG.dvolMaxPages) {
   const rows = new Map();
   let end = endTs;
-  for (let page = 0; page < 10; page += 1) {
+  for (let page = 0; page < maxPages; page += 1) {
     const r = rpcResult(await http.json(`${DERIBIT_BASE}/public/get_volatility_index_data?currency=${currency}&start_timestamp=${startTs}&end_timestamp=${end}&resolution=3600`));
     if (!r || !Array.isArray(r.data)) throw new SourceError(SOURCE_STATUS.PROVIDER_ERROR, 'Deribit DVOL: data is not a list');
     for (const c of r.data) {
@@ -161,7 +164,7 @@ export const deribitAdapter = {
     let status = SOURCE_STATUS.OK, lastObs = null;
     for (const cur of cfg.currencies) {
       // DVOL: closed candles only (start + 1 h <= now).
-      const candles = (await fetchDvol(http, cur, nowTs - cfg.dvolHistoryMs, nowTs)).filter((c) => c.ts + H <= nowTs);
+      const candles = (await fetchDvol(http, cur, nowTs - cfg.dvolHistoryMs, nowTs, cfg.dvolMaxPages)).filter((c) => c.ts + H <= nowTs);
       // Evaluation uses the fetched history; only the recent overlap is stored (bounded D1 writes per run).
       for (const c of candles.slice(-8)) observations.push({ source: this.id, series: `dvol_${cur.toLowerCase()}`, bucket_ts: c.ts, value: c.close, unit: 'DVOL index', coverage: 'COMPLETE', observed_ts: nowTs });
       const stored = await history(`dvol_${cur.toLowerCase()}`, nowTs - cfg.dvolHistoryMs, nowTs);

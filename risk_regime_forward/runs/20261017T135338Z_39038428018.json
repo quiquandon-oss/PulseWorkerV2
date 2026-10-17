@@ -1,0 +1,82 @@
+{
+ "artifact": "risk-regime-forward-run",
+ "attempts": [
+  {
+   "completeness": "COMPLETE",
+   "duplicates_dropped": 0,
+   "expected_slots": 576,
+   "files": {
+    "checksum_ok": 1
+   },
+   "fingerprint": "1722ef13b207c32c7f7cd9e584ccb1da66bd085256efaf512e625e930df3d25e",
+   "internal_conflicts": {},
+   "missing_ranges": {},
+   "missing_slots": 0,
+   "observations": 576,
+   "partition": "2026-10-16",
+   "source": "binance_oi_archive",
+   "status": "WRITTEN"
+  },
+  {
+   "completeness": "COMPLETE",
+   "duplicates_dropped": 0,
+   "expected_slots": 432,
+   "fingerprint": "f8a72a06efb37e54dc9f3da008651e0b8f8d7ed4cfc5f4902ebb46ce41044f76",
+   "internal_conflicts": {},
+   "missing_ranges": {},
+   "missing_slots": 0,
+   "observations": 432,
+   "partition": "2026-10-16",
+   "source": "hyperliquid_hip3",
+   "status": "WRITTEN"
+  },
+  {
+   "completeness": "COMPLETE",
+   "duplicates_dropped": 0,
+   "expected_slots": 48,
+   "internal_conflicts": {},
+   "missing_ranges": {},
+   "missing_slots": 0,
+   "observations": 48,
+   "partition": "2026-10-16",
+   "source": "hyperliquid_btc_funding",
+   "status": "UNCHANGED"
+  },
+  {
+   "partition": null,
+   "requests": {
+    "candleSnapshot_FETCHED": 9,
+    "fundingHistory_FETCHED": 2,
+    "fundingHistory_page_max_rows": 24
+   },
+   "source": "hyperliquid",
+   "status": "REQUEST_LOG"
+  }
+ ],
+ "errors": [],
+ "finished_at": "2026-10-17T13:53:53.277000+00:00",
+ "location": {
+  "checked_at": "2026-10-17T13:53:39.846000+00:00",
+  "colo": "LAX",
+  "ip_sha256_prefix": "50a293bfaf75",
+  "loc": "US",
+  "source": "https://www.cloudflare.com/cdn-cgi/trace",
+  "status": 200
+ },
+ "open_day": false,
+ "run_id": "39038428018",
+ "sources": [
+  "binance_oi_archive",
+  "binance_funding_archive",
+  "hyperliquid_hip3",
+  "hyperliquid_btc_funding",
+  "okx_btc_funding"
+ ],
+ "stale_sources": [],
+ "started_at": "2026-10-17T13:53:38.502000+00:00",
+ "summary": {
+  "REQUEST_LOG": 1,
+  "UNCHANGED": 1,
+  "WRITTEN": 2
+ }
+}

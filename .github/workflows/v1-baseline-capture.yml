@@ -1,0 +1,23 @@
+# Throwaway: read-only V1 baseline capture (public GET endpoints, no secrets, no writes). Runs on a push to this branch only.
+name: v1-baseline-capture
+on:
+  push:
+    branches: [claude/epic-planck-uyapsw-provider-probe]
+permissions: {}
+jobs:
+  capture:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Capture
+        run: |
+          B=https://sentiment-ff75.quiquandon.workers.dev
+          echo "captured_at=$(date -u +%FT%TZ)"
+          for p in risk-regime hl-oi weight-adaptation history; do
+            code=$(curl -sS -m 20 -o "$p.json" -w '%{http_code}' "$B/$p")
+            echo "GET /$p -> $code bytes=$(wc -c < $p.json) sha256=$(sha256sum $p.json | cut -c1-64)"
+          done
+          echo "--- risk-regime"; jq -c '.' risk-regime.json | head -c 4000; echo
+          echo "--- hl-oi"; jq -c '.' hl-oi.json | head -c 1500; echo
+          echo "--- weight-adaptation (top level)"; jq -c 'del(.history?)' weight-adaptation.json | head -c 3000; echo
+          echo "--- history latest"; jq -c '{n: (.history|length), latest: .history[-1]}' history.json

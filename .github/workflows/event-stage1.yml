@@ -79,3 +79,19 @@ jobs:
           q "SELECT (SELECT COUNT(*) FROM event_ledger) ledger,(SELECT COUNT(*) FROM event_observations) obs,(SELECT COUNT(*) FROM event_source_health) health,(SELECT COUNT(*) FROM event_runs) runs,(SELECT COUNT(*) FROM event_documents) docs" | jq -c '.[0].results[0]'
           echo "--- bookmark after migration"; $W d1 time-travel info "$DB_NAME" --json
           echo "MIGRATION 0023: PASS"
+
+      - name: Inspect (read-only; names and ids only, never values)
+        if: steps.sel.outputs.step == 'inspect'
+        env:
+          CLOUDFLARE_API_TOKEN: '${{ secrets.CLOUDFLARE_API_TOKEN }}'
+          HAS_REPO_EVENT_RUN_TOKEN: "${{ secrets.EVENT_RUN_TOKEN != '' }}"
+        run: |
+          echo "at: $(date -u +%FT%TZ)"
+          echo "--- Worker secret NAMES (pulseworker-v2)"
+          $W secret list --name pulseworker-v2 --format json | jq -c '[.[] | {name, type}]'
+          $W secret list --name pulseworker-v2 --format json | jq -e 'map(.name) | index("EVENT_DETECTION_ENABLED") == null' >/dev/null && echo "EVENT_DETECTION_ENABLED: absent" || echo "::warning::EVENT_DETECTION_ENABLED is present"
+          echo "--- recent deployments (ids, times, source; no author)"
+          $W deployments list --name pulseworker-v2 --json | jq -c '[.[-3:][] | {id, created_on, source, strategy, versions: [.versions[] | {version_id, percentage}], message: .annotations["workers/message"]}]'
+          echo "--- recent versions"
+          $W versions list --name pulseworker-v2 --json | jq -c '[.[-3:][] | {id, number, created_on: .metadata.created_on, source: .metadata.source, message: .annotations["workers/message"], tag: .annotations["workers/tag"]}]'
+          echo "repo secret EVENT_RUN_TOKEN present: $HAS_REPO_EVENT_RUN_TOKEN"

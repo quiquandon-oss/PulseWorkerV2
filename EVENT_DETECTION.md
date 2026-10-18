@@ -53,7 +53,7 @@ Running detection inside the 3-hourly prediction cron, as the first draft of PR 
 
 **How a run happens now:** each run is its own invocation, through `POST /api/events/run`.
 - **Manual (owner):** a one-time run. It is allowed whatever `EVENT_DETECTION_ENABLED` is set to.
-- **Scheduled:** from the inactive template `events/scheduler/event-detection-schedule.yml`, a GitHub schedule at `23 * * * *`. It sends `X-Event-Trigger: schedule`, and the Worker answers 409 `DISABLED` unless `EVENT_DETECTION_ENABLED` is `'1'`.
+- **Scheduled:** `.github/workflows/event-detection-schedule.yml` on `main` (installed 2026-10-18 from the reviewed template `events/scheduler/event-detection-schedule.yml`; non-comment content asserted identical), a GitHub schedule at `23 * * * *`. It sends `X-Event-Trigger: schedule`, and the Worker answers 409 `DISABLED` unless `EVENT_DETECTION_ENABLED` is `'1'`.
 - **Overlap:** a run is refused (409) if another started less than 2 minutes earlier.
 
 **Per-run budget:** 40 fetches and 44 D1 queries, enforced by `makeBudget` / `countedDb`.
@@ -321,9 +321,9 @@ Until step 3, do not merge PRs #83, #82 or #35, or any push touching `worker.js`
 
 Deployment path: the stage branch `claude/epic-planck-uyapsw-event-stage1` (step file `idle`), not `deploy.yml`. **Production runs `c19e73c`; `main` is `f4c6d99`.** Until PR #94 is merged with a merge commit, a push to `main` touching `worker.js`, `wrangler.toml`, the package files or `deploy.yml` (open PRs #83, #82, #35) would redeploy without the event routes. That failure is safe (routes return 404, tables stay) but silent. New prediction rows carry `git_commit_sha = c19e73c`; research that groups by commit must treat `8b12c9a` and `c19e73c` as the same prediction code (the `worker.js` diff is the 6-line event hook).
 
-## 14. Controlled collection plan (not active)
+## 14. Controlled collection plan (approved 2026-10-18)
 
-**No approved recurring mechanism exists.** `events/scheduler/event-detection-schedule.yml` is an inert template. Activation needs three separately approved production changes: `EVENT_DETECTION_ENABLED=1` on the Worker, the repository secret `EVENT_RUN_TOKEN` (already present), and installing the template at `.github/workflows/` on `main`.
+**Approved recurring mechanism (the only one):** `.github/workflows/event-detection-schedule.yml` on `main`, hourly at `:23`, installed from the reviewed template. It needs the Worker secret `EVENT_DETECTION_ENABLED=1` (set through the stage workflow after the schedule is verified) and the repository secret `EVENT_RUN_TOKEN` (already present). Limits, overlap guard, retries, provider isolation and scrubbing are unchanged; Binance stays disabled, SEC stays `NOT_CONFIGURED`, no FRED key.
 
 **Cost per run (measured in `edr_c46163d70fa2f878`, FRED fixed and SEC unconfigured assumed):**
 

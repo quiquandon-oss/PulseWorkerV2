@@ -1,4 +1,5 @@
-# EVENT DETECTION -- HOURLY TRIGGER (template). NOT INSTALLED.
+# EVENT DETECTION -- HOURLY TRIGGER (template). Installed on main as .github/workflows/event-detection-schedule.yml
+# (2026-10-18); keep both copies identical apart from comments.
 #
 # Inert where it is (outside .github/workflows). GitHub runs `schedule` triggers only from the default branch, so
 # enabling recurring detection requires placing this file at .github/workflows/event-detection-schedule.yml on

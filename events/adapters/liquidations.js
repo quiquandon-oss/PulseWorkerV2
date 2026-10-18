@@ -63,13 +63,19 @@ export async function fetchOkxCtVal(http, instId) {
   return ctVal;
 }
 
-// Pages backwards from now until the window start is covered. Every page must be strictly older than the cursor
-// (fails closed otherwise). Duplicates across pages are counted once.
+// Pages backwards from now until the window start is covered. OKX's `after` cursor is exclusive (records strictly
+// older than it), so each next page is requested with after = oldest_ts + 1: the boundary millisecond is read again,
+// because a page can end in the middle of several liquidations sharing one millisecond (common in bursts). Records
+// carry no id, so the overlap is de-duplicated by multiplicity at that millisecond only; identical-looking records
+// elsewhere are distinct liquidations and are all kept. Fails closed if a page is not older than the cursor or the
+// cursor cannot advance (e.g. a whole page of one millisecond).
+export const OKX_PAGE_LIMIT = 100;
 export async function fetchOkxLiquidations(http, { instFamily, instId, startTs, ctVal, maxPages }) {
-  const seen = new Map();
+  const records = [];
   let cursor = null, pages = 0, oldest = null, reachedStart = false, exhausted = false;
+  let boundary = null;                       // { ts, counts: Map(key -> times seen at ts) } from the previous page
   while (pages < maxPages) {
-    const q = `instType=SWAP&instFamily=${encodeURIComponent(instFamily)}&state=filled&limit=100${cursor ? `&after=${cursor}` : ''}`;
+    const q = `instType=SWAP&instFamily=${encodeURIComponent(instFamily)}&state=filled&limit=${OKX_PAGE_LIMIT}${cursor ? `&after=${cursor}` : ''}`;
     const data = okxCheck(await http.json(`${OKX_BASE}${OKX_LIQ_PATH}?${q}`));
     pages += 1;
     const recs = [];
@@ -79,14 +85,24 @@ export async function fetchOkxLiquidations(http, { instFamily, instId, startTs, 
     }
     if (!recs.length) { exhausted = true; break; }
     const pageOldest = Math.min(...recs.map((r) => r.ts));
-    if (cursor !== null && Math.max(...recs.map((r) => r.ts)) > cursor) throw new SourceError(SOURCE_STATUS.PROVIDER_ERROR, 'OKX pagination: page not older than cursor');
-    for (const r of recs) if (!seen.has(r.key)) seen.set(r.key, r);
+    if (cursor !== null && Math.max(...recs.map((r) => r.ts)) >= cursor) throw new SourceError(SOURCE_STATUS.PROVIDER_ERROR, 'OKX pagination: page not older than cursor');
+    let fresh = 0;
+    for (const r of recs) {
+      if (boundary && r.ts === boundary.ts && (boundary.counts.get(r.key) || 0) > 0) { boundary.counts.set(r.key, boundary.counts.get(r.key) - 1); continue; }
+      records.push(r); fresh += 1;
+    }
     oldest = oldest === null ? pageOldest : Math.min(oldest, pageOldest);
     if (pageOldest <= startTs) { reachedStart = true; break; }
-    if (cursor !== null && pageOldest >= cursor) throw new SourceError(SOURCE_STATUS.PROVIDER_ERROR, 'OKX pagination: cursor did not advance');
-    cursor = pageOldest;
+    // Only the already-seen boundary millisecond came back: a short page means the history ended there; a full
+    // page means one millisecond holds more records than a page and cannot be paged past (fail closed).
+    if (fresh === 0 && recs.length < OKX_PAGE_LIMIT) { exhausted = true; break; }
+    if (cursor !== null && (fresh === 0 || pageOldest + 1 >= cursor)) throw new SourceError(SOURCE_STATUS.PROVIDER_ERROR, 'OKX pagination: cursor did not advance');
+    const counts = new Map();
+    for (const r of recs) if (r.ts === pageOldest) counts.set(r.key, (counts.get(r.key) || 0) + 1);
+    boundary = { ts: pageOldest, counts };
+    cursor = pageOldest + 1;
   }
-  return { records: [...seen.values()], pages, oldest, reachedStart, exhausted };
+  return { records, pages, oldest, reachedStart, exhausted };
 }
 
 // Aggregates records into fixed buckets. A bucket is COMPLETE only when the fetched data provably covers it

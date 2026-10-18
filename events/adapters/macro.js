@@ -5,11 +5,13 @@
 //    FRED_API_KEY) supplies scheduled release DATES only -- no release time, no actual-vs-consensus.
 //  - Consensus / surprise: no free provider with licensed consensus estimates is integrated, so every
 //    consensus-dependent detection is reported DATA_UNAVAILABLE. A surprise value is never computed or invented.
-import { SOURCE_STATUS, SourceError, robustBaseline, severityFor, clamp01, makeEvent } from '../event-core.js';
+import { SOURCE_STATUS, SourceError, robustBaseline, severityFor, clamp01, makeEvent, EVENT_DETECTION_USER_AGENT } from '../event-core.js';
 
 const H = 3600_000, D = 24 * H;
 export const FRED_API = 'https://api.stlouisfed.org/fred';
 export const FRED_CSV = 'https://fred.stlouisfed.org/graph/fredgraph.csv';
+// FRED's edge resets requests without a User-Agent (a Worker's default) or with a browser-like one; see EVENT_DETECTION_USER_AGENT.
+export const FRED_HEADERS = { 'User-Agent': EVENT_DETECTION_USER_AGENT, Accept: 'text/csv, application/json;q=0.9, */*;q=0.1' };
 
 export const MACRO_CONFIG = {
   yieldSeries: ['DGS2', 'DGS10'],
@@ -71,10 +73,10 @@ function isoDate(ts) { return new Date(ts).toISOString().slice(0, 10); }
 export async function fetchYieldSeries(http, seriesId, { apiKey, nowTs, historyDays }) {
   const start = isoDate(nowTs - historyDays * D);
   if (apiKey) {
-    const p = await http.json(`${FRED_API}/series/observations?series_id=${seriesId}&api_key=${encodeURIComponent(apiKey)}&file_type=json&observation_start=${start}`, { cf: { cacheTtl: 0, cacheEverything: false } });
+    const p = await http.json(`${FRED_API}/series/observations?series_id=${seriesId}&api_key=${encodeURIComponent(apiKey)}&file_type=json&observation_start=${start}`, { headers: FRED_HEADERS, cf: { cacheTtl: 0, cacheEverything: false } });
     return { rows: parseFredApi(p, seriesId), via: 'FRED API' };
   }
-  const t = await http.text(`${FRED_CSV}?id=${seriesId}&cosd=${start}`, { cf: { cacheTtl: 0, cacheEverything: false } });
+  const t = await http.text(`${FRED_CSV}?id=${seriesId}&cosd=${start}`, { headers: FRED_HEADERS, cf: { cacheTtl: 0, cacheEverything: false } });
   return { rows: parseFredCsv(t, seriesId), via: 'FRED CSV (no key)' };
 }
 
@@ -112,7 +114,7 @@ export function fredReleaseCalendar({ http, apiKey, releases }) {
     supportsConsensus: false,
     async upcoming(nowTs, horizonMs) {
       if (!apiKey) return { status: SOURCE_STATUS.NOT_CONFIGURED, reason: 'FRED_API_KEY not set (fred/releases/dates requires a key)', items: [] };
-      const p = await http.json(`${FRED_API}/releases/dates?api_key=${encodeURIComponent(apiKey)}&file_type=json&realtime_start=${isoDate(nowTs)}&realtime_end=${isoDate(nowTs + horizonMs)}&include_release_dates_with_no_data=true&sort_order=asc&limit=1000`);
+      const p = await http.json(`${FRED_API}/releases/dates?api_key=${encodeURIComponent(apiKey)}&file_type=json&realtime_start=${isoDate(nowTs)}&realtime_end=${isoDate(nowTs + horizonMs)}&include_release_dates_with_no_data=true&sort_order=asc&limit=1000`, { headers: FRED_HEADERS });
       if (!p || !Array.isArray(p.release_dates)) throw new SourceError(SOURCE_STATUS.PROVIDER_ERROR, 'FRED releases/dates: malformed');
       const items = [];
       for (const r of p.release_dates) {
@@ -136,8 +138,16 @@ export const macroAdapter = {
     const apiKey = env && env.FRED_API_KEY ? String(env.FRED_API_KEY) : null;
     const observations = [], events = [], perSeries = {};
     let status = SOURCE_STATUS.OK, lastObs = null;
+    const failures = [];
     for (const sid of cfg.yieldSeries) {
-      const { rows, via } = await fetchYieldSeries(http, sid, { apiKey, nowTs, historyDays: cfg.historyDays });
+      // Series are isolated: one failing series is recorded and the others are still stored and evaluated.
+      let fetched;
+      try { fetched = await fetchYieldSeries(http, sid, { apiKey, nowTs, historyDays: cfg.historyDays }); } catch (e) {
+        failures.push(e);
+        perSeries[sid] = { error: String((e && e.message) || e).slice(0, 300), status: (e && e.status) || SOURCE_STATUS.PROVIDER_ERROR };
+        continue;
+      }
+      const { rows, via } = fetched;
       // Rules evaluate on the provider's own history; only the recent overlap is stored (audit + point-in-time).
       for (const r of rows.slice(-10)) observations.push({ source: this.id, series: sid, bucket_ts: r.ts, value: r.value, unit: 'percent', coverage: 'COMPLETE', observed_ts: nowTs });
       const latest = rows[rows.length - 1];
@@ -148,9 +158,14 @@ export const macroAdapter = {
       perSeries[sid] = { observations: rows.length, latest_date: latest ? latest.date : null, rule: res.status, baseline: res.baselineCount, via };
       if (res.status !== SOURCE_STATUS.OK && status === SOURCE_STATUS.OK) status = res.status;
     }
+    if (failures.length === cfg.yieldSeries.length) throw failures[0];       // nothing usable: the runner records the error
+    if (failures.length) status = failures[0].status || SOURCE_STATUS.PROVIDER_ERROR;
     // Scheduled releases (date only) -- never a surprise.
     const cal = calendar || fredReleaseCalendar({ http, apiKey, releases: cfg.releases });
-    const up = await cal.upcoming(nowTs, cfg.calendarHorizonMs);
+    let up;
+    try { up = await cal.upcoming(nowTs, cfg.calendarHorizonMs); } catch (e) {
+      up = { status: (e && e.status) || SOURCE_STATUS.PROVIDER_ERROR, reason: String((e && e.message) || e).slice(0, 300), items: [] };
+    }
     for (const it of up.items) {
       const dayTs = dateToUtc(it.scheduled_date);
       events.push(await makeEvent({

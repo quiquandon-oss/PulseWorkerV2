@@ -192,6 +192,21 @@ export function countedDb(db, budget, { reserve = 0 } = {}) {
 }
 
 // ---- HTTP with timeout, bounded retries and backoff (adapters receive this, never raw fetch) ----
+// Descriptive User-Agent for provider requests that need one (no contact email: SEC's contact-bearing UA is separate).
+// FRED's edge resets requests that carry no User-Agent or a browser-like one (verified 2026-10-18, see EVENT_DETECTION.md
+// section 4); a Worker's fetch sends none by default, which Cloudflare reports to the Worker as HTTP 520.
+export const EVENT_DETECTION_USER_AGENT = 'CryptoPulse-EventDetection/ed-v1 (+https://github.com/quiquandon-oss/PulseWorkerV2)';
+
+// Short, secret-free description of a failed response: server header, Cloudflare ray presence, body snippet.
+async function responseDiagnostics(res) {
+  const h = (k) => (res.headers && res.headers.get ? res.headers.get(k) : null);
+  let snippet = '';
+  try { snippet = (await res.text()).replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 80); } catch (_e) { snippet = ''; }
+  const parts = [`server=${h('server') || '-'}`, `cf-ray=${h('cf-ray') ? 'yes' : 'no'}`];
+  if (snippet) parts.push(`body="${snippet}"`);
+  return parts.join(' ');
+}
+
 export function makeHttp({ fetchImpl = fetch, timeoutMs = 10_000, retries = 2, backoffMs = 500, sleep, log, budget } = {}) {
   const wait = sleep || ((ms) => new Promise((r) => setTimeout(r, ms)));
   const counters = { requests: 0, retries: 0, rate_limited: 0, errors: 0 };
@@ -221,13 +236,13 @@ export function makeHttp({ fetchImpl = fetch, timeoutMs = 10_000, retries = 2, b
           continue;
         }
         counters.errors += 1;
-        throw new SourceError(res.status === 429 ? SOURCE_STATUS.RATE_LIMITED : SOURCE_STATUS.PROVIDER_ERROR, `HTTP ${res.status}`);
+        throw new SourceError(res.status === 429 ? SOURCE_STATUS.RATE_LIMITED : SOURCE_STATUS.PROVIDER_ERROR, `HTTP ${res.status} (${await responseDiagnostics(res)})`);
       }
       if (res.status === 451 || res.status === 403) {
         counters.errors += 1;
         throw new SourceError(SOURCE_STATUS.BLOCKED, `HTTP ${res.status} (provider refused access)`);
       }
-      if (!res.ok) { counters.errors += 1; throw new SourceError(SOURCE_STATUS.PROVIDER_ERROR, `HTTP ${res.status}`); }
+      if (!res.ok) { counters.errors += 1; throw new SourceError(SOURCE_STATUS.PROVIDER_ERROR, `HTTP ${res.status} (${await responseDiagnostics(res)})`); }
       return res;
     }
   }

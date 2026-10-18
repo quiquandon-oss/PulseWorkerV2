@@ -166,6 +166,32 @@ export function stressCorrelationKey(asset, ts, windowMs = 6 * 3600_000) {
 // One budget object is shared by every adapter in a run; exceeding it fails the CURRENT adapter with
 // BUDGET_EXHAUSTED (recorded in health) instead of letting the platform abort the whole invocation.
 export const DEFAULT_BUDGET = { fetches: 40, queries: 44 };
+
+// Per-detector share of the 40-subrequest budget, so retries on one provider cannot starve the detectors after it.
+// Each share covers that detector's own maximum of logical requests (retries come out of the same share):
+//   OKX 1 instruments + 8 pages = 9; Deribit 2 x 4 DVOL pages + 2 book summaries = 10; FRED 2 series + 1 calendar = 3;
+//   SEC 8 submissions + 6 documents = 14; Binance 1 WebSocket upgrade. Sum = 40 = DEFAULT_BUDGET.fetches.
+export const FETCH_ALLOCATION = { okx_liquidations: 10, binance_liquidation_sample: 1, deribit_options: 10, macro_fred: 5, sec_edgar: 14 };
+
+// A view of the run budget limited to `cap` further subrequests. Spending through it spends the parent, so the
+// run total can never exceed the parent limit and this detector can never exceed its cap.
+export function childBudget(parent, cap) {
+  const start = parent.fetches;
+  const limit = Math.min(Number.isFinite(cap) ? cap : Infinity, parent.fetchLimit - start);
+  return {
+    get fetches() { return parent.fetches - start; },
+    set fetches(v) { parent.fetches = start + v; },
+    fetchLimit: Math.max(0, limit),
+    get queries() { return parent.queries; },
+    set queries(v) { parent.queries = v; },
+    queryLimit: parent.queryLimit,
+  };
+}
+
+// Removes credentials that can appear in provider URLs or error text (FRED's api_key query parameter).
+export function scrubSecrets(text) {
+  return String(text).replace(/(api[_-]?key|token|key)=([^&\s"']+)/gi, '$1=***');
+}
 export function makeBudget(limits = DEFAULT_BUDGET) {
   return { fetchLimit: limits.fetches, queryLimit: limits.queries, fetches: 0, queries: 0 };
 }
@@ -192,6 +218,21 @@ export function countedDb(db, budget, { reserve = 0 } = {}) {
 }
 
 // ---- HTTP with timeout, bounded retries and backoff (adapters receive this, never raw fetch) ----
+// Descriptive User-Agent for provider requests that need one (no contact email: SEC's contact-bearing UA is separate).
+// FRED's edge resets requests that carry no User-Agent or a browser-like one (verified 2026-10-18, see EVENT_DETECTION.md
+// section 4); a Worker's fetch sends none by default, which Cloudflare reports to the Worker as HTTP 520.
+export const EVENT_DETECTION_USER_AGENT = 'CryptoPulse-EventDetection/ed-v1 (+https://github.com/quiquandon-oss/PulseWorkerV2)';
+
+// Short, secret-free description of a failed response: server header, Cloudflare ray presence, body snippet.
+async function responseDiagnostics(res) {
+  const h = (k) => (res.headers && res.headers.get ? res.headers.get(k) : null);
+  let snippet = '';
+  try { snippet = (await res.text()).replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 80); } catch (_e) { snippet = ''; }
+  const parts = [`server=${h('server') || '-'}`, `cf-ray=${h('cf-ray') ? 'yes' : 'no'}`];
+  if (snippet) parts.push(`body="${snippet}"`);
+  return scrubSecrets(parts.join(' '));
+}
+
 export function makeHttp({ fetchImpl = fetch, timeoutMs = 10_000, retries = 2, backoffMs = 500, sleep, log, budget } = {}) {
   const wait = sleep || ((ms) => new Promise((r) => setTimeout(r, ms)));
   const counters = { requests: 0, retries: 0, rate_limited: 0, errors: 0 };
@@ -210,7 +251,7 @@ export function makeHttp({ fetchImpl = fetch, timeoutMs = 10_000, retries = 2, b
       } catch (e) {
         if (attempt < retries) { attempt += 1; counters.retries += 1; await wait(backoffMs * 2 ** (attempt - 1)); continue; }
         counters.errors += 1;
-        throw new SourceError(SOURCE_STATUS.PROVIDER_ERROR, `network error: ${e && e.name === 'TimeoutError' ? 'timeout' : (e && e.message) || e}`);
+        throw new SourceError(SOURCE_STATUS.PROVIDER_ERROR, scrubSecrets(`network error: ${e && e.name === 'TimeoutError' ? 'timeout' : (e && e.message) || e}`));
       }
       if (res.status === 429 || res.status >= 500) {
         if (res.status === 429) counters.rate_limited += 1;
@@ -221,13 +262,13 @@ export function makeHttp({ fetchImpl = fetch, timeoutMs = 10_000, retries = 2, b
           continue;
         }
         counters.errors += 1;
-        throw new SourceError(res.status === 429 ? SOURCE_STATUS.RATE_LIMITED : SOURCE_STATUS.PROVIDER_ERROR, `HTTP ${res.status}`);
+        throw new SourceError(res.status === 429 ? SOURCE_STATUS.RATE_LIMITED : SOURCE_STATUS.PROVIDER_ERROR, `HTTP ${res.status} (${await responseDiagnostics(res)})`);
       }
       if (res.status === 451 || res.status === 403) {
         counters.errors += 1;
         throw new SourceError(SOURCE_STATUS.BLOCKED, `HTTP ${res.status} (provider refused access)`);
       }
-      if (!res.ok) { counters.errors += 1; throw new SourceError(SOURCE_STATUS.PROVIDER_ERROR, `HTTP ${res.status}`); }
+      if (!res.ok) { counters.errors += 1; throw new SourceError(SOURCE_STATUS.PROVIDER_ERROR, `HTTP ${res.status} (${await responseDiagnostics(res)})`); }
       return res;
     }
   }
@@ -239,7 +280,15 @@ export function makeHttp({ fetchImpl = fetch, timeoutMs = 10_000, retries = 2, b
     const res = await request(url, init);
     return res.text();
   }
-  return { request, json, text, counters, log: log || (() => {}) };
+  // Charges one subrequest made outside request() (e.g. a WebSocket upgrade) to the same budget.
+  function spend() {
+    if (budget) {
+      if (budget.fetches + 1 > budget.fetchLimit) throw new SourceError(SOURCE_STATUS.BUDGET_EXHAUSTED, `subrequest budget reached (${budget.fetches}/${budget.fetchLimit})`);
+      budget.fetches += 1;
+    }
+    counters.requests += 1;
+  }
+  return { request, json, text, spend, counters, log: log || (() => {}) };
 }
 
 // Structured log line (Workers Logs are enabled for this Worker).

@@ -7,7 +7,7 @@ import { createRequire } from 'node:module';
 import { describe, it, expect, vi } from 'vitest';
 import {
   makeEvent, dedupKey, eventIdFor, robustBaseline, robustZ, severityFor, textFingerprint, makeHttp, SOURCE_STATUS, stressCorrelationKey,
-  makeBudget, countedDb,
+  makeBudget, countedDb, EVENT_DETECTION_USER_AGENT, FETCH_ALLOCATION, DEFAULT_BUDGET, childBudget, scrubSecrets,
 } from '../events/event-core.js';
 import { evaluateDetections } from '../events/event-eval.js';
 import {
@@ -15,7 +15,7 @@ import {
   okxLiquidationsAdapter, normalizeBinanceForceOrder, sampleBinanceForceOrders, binanceLiquidationSampleAdapter, mergeHistory,
 } from '../events/adapters/liquidations.js';
 import { fetchDvol, changes24h, evaluateDvol, summarizeOptionsBook, evaluateOptionsOi, deribitAdapter, DERIBIT_CONFIG } from '../events/adapters/deribit.js';
-import { parseFredCsv, parseFredApi, evaluateYieldShock, macroAdapter, fredReleaseCalendar, MACRO_CONFIG } from '../events/adapters/macro.js';
+import { parseFredCsv, parseFredApi, evaluateYieldShock, macroAdapter, fredReleaseCalendar, MACRO_CONFIG, FRED_HEADERS } from '../events/adapters/macro.js';
 import { classifyFilingText, htmlToText, recentFilings, secEdgarAdapter, filingUrl } from '../events/adapters/sec-edgar.js';
 import { runEventDetection, DETECTORS } from '../events/event-runner.js';
 import { listEvents, observationsBefore, insertObservations, insertEvents, processedDocuments, markDocuments } from '../events/event-store.js';
@@ -151,9 +151,50 @@ describe('OKX liquidations adapter', () => {
     const r = await fetchOkxLiquidations(makeHttp({ fetchImpl: f, sleep: noSleep }), { instFamily: 'BTC-USDT', instId: 'BTC-USDT-SWAP', startTs: NOW - 8 * H, ctVal: 0.01, maxPages: 5 });
     expect(r.reachedStart).toBe(true);
     expect(r.records).toHaveLength(3);                    // duplicate across pages counted once
-    expect(f.calls[1]).toContain(`after=${NOW - 2 * H}`);
+    expect(f.calls[1]).toContain(`after=${NOW - 2 * H + 1}`);   // exclusive cursor: re-read the boundary millisecond
     const loop = fakeFetch([[/liquidation-orders/, okxPage(p1)]]);   // ignores the cursor
     await expect(fetchOkxLiquidations(makeHttp({ fetchImpl: loop, sleep: noSleep }), { instFamily: 'BTC-USDT', instId: 'BTC-USDT-SWAP', startTs: NOW - 8 * H, ctVal: 0.01, maxPages: 5 })).rejects.toThrow(/pagination/);
+  });
+  // A simulated OKX: newest first, `after` exclusive (records strictly older), at most 100 records per page.
+  const okxServer = (dataset) => async (url) => {
+    const m = /after=(\d+)/.exec(String(url));
+    const before = m ? Number(m[1]) : Infinity;
+    return okxPage(dataset.filter((d) => Number(d.ts) < before).sort((a, b) => Number(b.ts) - Number(a.ts)).slice(0, 100));
+  };
+  const okxOpts = (startTs) => ({ instFamily: 'BTC-USDT', instId: 'BTC-USDT-SWAP', startTs, ctVal: 0.01, maxPages: 8 });
+  it('a burst split across a page boundary at one millisecond is counted exactly (no loss, no double count)', async () => {
+    const T1 = NOW - 10 * 60_000, T0 = NOW - 20 * 60_000;
+    const dataset = [
+      ...Array.from({ length: 60 }, () => det(T1, 'sell', 'long', 80000, 1)),
+      ...Array.from({ length: 50 }, () => det(T0, 'sell', 'long', 79000, 2)),       // 50 identical-looking, distinct liquidations
+      ...Array.from({ length: 30 }, (_x, i) => det(NOW - 3 * H - i * 1000, 'buy', 'short', 81000, 1)),
+      det(NOW - 9 * H, 'sell', 'long', 80000, 1),
+    ];
+    const f = fakeFetch([[/liquidation-orders/, okxServer(dataset)]]);
+    const r = await fetchOkxLiquidations(makeHttp({ fetchImpl: f, sleep: noSleep }), okxOpts(NOW - 8 * H));
+    expect(r.reachedStart).toBe(true);
+    expect(r.records).toHaveLength(dataset.length);                        // 141: nothing lost at the 100-record boundary
+    expect(r.records.filter((x) => x.ts === T0)).toHaveLength(50);
+    expect(f.calls[1]).toContain(`after=${T0 + 1}`);
+  });
+  it('identical records away from page boundaries are kept (no content-based de-duplication)', async () => {
+    const dataset = [...Array.from({ length: 7 }, () => det(NOW - H, 'sell', 'long', 80000, 3)), det(NOW - 9 * H, 'buy', 'short', 80000, 1)];
+    const r = await fetchOkxLiquidations(makeHttp({ fetchImpl: fakeFetch([[/liquidation-orders/, okxServer(dataset)]]), sleep: noSleep }), okxOpts(NOW - 8 * H));
+    expect(r.records).toHaveLength(8);
+    expect(r.records.reduce((s2, x) => s2 + x.notional_usd, 0)).toBeCloseTo(7 * 80000 * 3 * 0.01 + 80000 * 0.01, 6);
+  });
+  it('a full page inside one millisecond cannot be paged past: fails closed instead of undercounting', async () => {
+    const T0 = NOW - 30 * 60_000;
+    const dataset = [det(NOW - 1000, 'sell', 'long', 80000, 1), ...Array.from({ length: 130 }, () => det(T0, 'sell', 'long', 80000, 1)), det(NOW - 9 * H, 'sell', 'long', 80000, 1)];
+    await expect(fetchOkxLiquidations(makeHttp({ fetchImpl: fakeFetch([[/liquidation-orders/, okxServer(dataset)]]), sleep: noSleep }), okxOpts(NOW - 8 * H))).rejects.toThrow(/cursor did not advance/);
+  });
+  it('history that ends before the window start (exhausted) never marks the uncovered hours COMPLETE', async () => {
+    const oldestTs = Date.UTC(2026, 9, 17, 9, 54);                      // NOW is 12:30Z: the 09:00 hour is only partly covered
+    const dataset = [det(NOW - 30 * 60_000, 'sell', 'long', 80000, 1), det(oldestTs, 'buy', 'short', 80000, 1)];
+    const r = await fetchOkxLiquidations(makeHttp({ fetchImpl: fakeFetch([[/liquidation-orders/, okxServer(dataset)]]), sleep: noSleep }), okxOpts(NOW - 8 * H));
+    expect(r).toMatchObject({ reachedStart: false, exhausted: true, oldest: oldestTs });
+    const b = bucketize(r.records, { bucketMs: H, coveredFromTs: r.oldest, nowTs: NOW, settleMs: 5 * 60_000 });
+    expect(b.map((x) => new Date(x.bucket_ts).toISOString().slice(11, 16))).toEqual(['10:00', '11:00']);  // 09:00 excluded; 12:00 not settled
   });
   it('rejects OKX error codes and rate-limit codes', async () => {
     await expect(fetchOkxLiquidations(http([[/liquidation/, jsonRes({ code: '50011', msg: 'too many', data: [] })]]), { instFamily: 'BTC-USDT', instId: 'BTC-USDT-SWAP', startTs: 0, ctVal: 0.01, maxPages: 1 })).rejects.toMatchObject({ status: SOURCE_STATUS.RATE_LIMITED });
@@ -188,6 +229,22 @@ describe('OKX liquidations adapter', () => {
     expect(r.event.confidence).toBeLessThanOrEqual(0.7);
     const quiet = await evaluateLiquidationBucket(bucket(300_000, 100_000), hist(100), LIQ_CONFIG, { nowTs: NOW });
     expect(quiet.event).toBeNull();
+  });
+  it('baseline maturity boundary: 47 prior complete buckets refuse, 48 evaluate; only the prior 168 h count', async () => {
+    expect((await evaluateLiquidationBucket(bucket(9e6, 0), hist(47), LIQ_CONFIG, { nowTs: NOW })).status).toBe(SOURCE_STATUS.INSUFFICIENT_BASELINE);
+    const at48 = await evaluateLiquidationBucket(bucket(9e6, 0), hist(48), LIQ_CONFIG, { nowTs: NOW });
+    expect(at48.status).toBe(SOURCE_STATUS.OK);
+    expect(at48.baselineCount).toBe(48);
+    const old = hist(48).map((h) => ({ ...h, bucket_ts: h.bucket_ts - 200 * H }));   // all older than the 168 h window
+    const okxStore = old.map((h) => ({ ...h }));
+    // the adapter slices history to [bucket - 168 h, bucket); emulate that slice here
+    const inWindow = okxStore.filter((h) => h.bucket_ts >= NOW - 2 * H - LIQ_CONFIG.baselineBuckets * H);
+    expect((await evaluateLiquidationBucket(bucket(9e6, 0), inWindow, LIQ_CONFIG, { nowTs: NOW })).status).toBe(SOURCE_STATUS.INSUFFICIENT_BASELINE);
+  });
+  it('threshold boundary: a bucket exactly at the threshold is an event, one dollar below is not', async () => {
+    const thr = (await evaluateLiquidationBucket(bucket(5e7, 0), hist(100), LIQ_CONFIG, { nowTs: NOW })).event.threshold_value;
+    expect((await evaluateLiquidationBucket(bucket(thr, 0), hist(100), LIQ_CONFIG, { nowTs: NOW })).event).not.toBeNull();
+    expect((await evaluateLiquidationBucket(bucket(thr - 1, 0), hist(100), LIQ_CONFIG, { nowTs: NOW })).event).toBeNull();
   });
   it('stored history wins over this run for the same bucket', () => {
     expect(mergeHistory([{ bucket_ts: 1, value: 5 }], [{ bucket_ts: 1, value: 9 }, { bucket_ts: 2, value: 3 }])).toEqual([{ bucket_ts: 1, value: 5 }, { bucket_ts: 2, value: 3 }]);
@@ -331,6 +388,57 @@ describe('Macro: FRED yields, calendar, consensus unavailable', () => {
     expect(sched.evidence[0]).toMatchObject({ consensus: 'DATA_UNAVAILABLE', actual: 'DATA_UNAVAILABLE' });
     expect(res.events.some((e) => /SURPRISE/.test(e.event_type))).toBe(false);
     expect(res.observations.length).toBeLessThanOrEqual(20);
+  });
+  // Regression for the 2026-10-18 production run (edr_c46163d70fa2f878): FRED's edge resets requests that carry no
+  // User-Agent (a Worker's default), which a Worker sees as HTTP 520. Reproduced from a GitHub runner (run 39114185612).
+  const fredEdge = (body) => async (url, init = {}) => {
+    const ua = (init.headers && (init.headers['User-Agent'] || init.headers['user-agent'])) || '';
+    if (!ua || /Mozilla|Cloudflare-Workers/.test(ua)) return new Response('error code: 520', { status: 520, headers: { server: 'cloudflare', 'cf-ray': 'x' } });
+    return textRes(body(String(url)));
+  };
+  const fredCsv = (u) => `observation_date,${/id=DGS10/.test(u) ? 'DGS10' : 'DGS2'}\n` + rows(200, 0).map((r) => `${r.date},${r.value}`).join('\n');
+  it('FRED requests send the descriptive User-Agent (CSV, keyed API, calendar) and no contact email', async () => {
+    expect(FRED_HEADERS['User-Agent']).toBe(EVENT_DETECTION_USER_AGENT);
+    expect(EVENT_DETECTION_USER_AGENT).not.toMatch(/@/);
+    const seen = [];
+    const rec = (res) => async (url, init = {}) => { seen.push([String(url), init.headers && init.headers['User-Agent']]); return res(String(url)); };
+    const calRes = () => jsonRes({ release_dates: [] });
+    const apiRes = () => jsonRes({ observations: rows(200, 0).map((r) => ({ date: r.date, value: String(r.value) })) });
+    const csvH = makeHttp({ fetchImpl: rec((u) => textRes(fredCsv(u))), sleep: noSleep });
+    await macroAdapter.run({ env: {}, http: csvH, nowTs: rows(200, 0)[199].ts + D, config: {} });
+    const apiH = makeHttp({ fetchImpl: rec((u) => (/releases/.test(u) ? calRes() : apiRes())), sleep: noSleep });
+    await macroAdapter.run({ env: { FRED_API_KEY: 'k'.repeat(32) }, http: apiH, nowTs: rows(200, 0)[199].ts + D, config: {} });
+    expect(seen.length).toBe(5);                                    // 2 CSV + 2 API + 1 calendar
+    expect(seen.every(([, ua]) => ua === EVENT_DETECTION_USER_AGENT)).toBe(true);
+  });
+  it('the observed failure mode: no UA -> 520 with bounded retries and a diagnosable error; with the UA -> OK', async () => {
+    const bare = makeHttp({ fetchImpl: fredEdge(fredCsv), sleep: noSleep, retries: 2 });
+    await expect(bare.text(`https://fred.stlouisfed.org/graph/fredgraph.csv?id=DGS2`)).rejects.toMatchObject({ status: SOURCE_STATUS.PROVIDER_ERROR, message: expect.stringMatching(/^HTTP 520 \(server=cloudflare cf-ray=yes body="error code: 520"\)$/) });
+    expect(bare.counters).toMatchObject({ requests: 3, retries: 2, errors: 1 });   // 1 + 2 retries, then stop
+    const h = makeHttp({ fetchImpl: fredEdge(fredCsv), sleep: noSleep });
+    const res = await macroAdapter.run({ env: {}, http: h, nowTs: rows(200, 0)[199].ts + D, config: {}, calendar: { id: 'none', upcoming: async () => ({ status: 'NOT_CONFIGURED', items: [] }) } });
+    expect(res.status).toBe(SOURCE_STATUS.OK);
+    expect(Object.keys(res.details.series)).toEqual(['DGS2', 'DGS10']);
+    expect(h.counters).toMatchObject({ requests: 2, retries: 0, errors: 0 });
+  });
+  it('series are isolated: one failing series is reported, the other is still stored; all failing raises', async () => {
+    const half = makeHttp({ sleep: noSleep, retries: 0, fetchImpl: async (u) => (/id=DGS2&/.test(String(u)) ? new Response('down', { status: 503 }) : textRes(fredCsv(String(u)))) });
+    const cal = { id: 'none', upcoming: async () => ({ status: 'NOT_CONFIGURED', items: [] }) };
+    const res = await macroAdapter.run({ env: {}, http: half, nowTs: rows(200, 0)[199].ts + D, config: {}, calendar: cal });
+    expect(res.status).toBe(SOURCE_STATUS.PROVIDER_ERROR);
+    expect(res.details.series.DGS2).toMatchObject({ status: SOURCE_STATUS.PROVIDER_ERROR, error: expect.stringMatching(/^HTTP 503/) });
+    expect(res.details.series.DGS10.rule).toBe(SOURCE_STATUS.OK);
+    expect(res.observations.every((o) => o.series === 'DGS10')).toBe(true);
+    expect(res.observations.length).toBe(10);
+    const down = makeHttp({ sleep: noSleep, retries: 0, fetchImpl: async () => new Response('down', { status: 503 }) });
+    await expect(macroAdapter.run({ env: {}, http: down, nowTs: NOW, config: {}, calendar: cal })).rejects.toMatchObject({ status: SOURCE_STATUS.PROVIDER_ERROR });
+  });
+  it('a failing release calendar does not discard the yield series', async () => {
+    const h = makeHttp({ sleep: noSleep, retries: 0, fetchImpl: async (u) => (/releases/.test(String(u)) ? new Response('x', { status: 500 }) : jsonRes({ observations: rows(200, 0).map((r) => ({ date: r.date, value: String(r.value) })) })) });
+    const res = await macroAdapter.run({ env: { FRED_API_KEY: 'k'.repeat(32) }, http: h, nowTs: rows(200, 0)[199].ts + D, config: {} });
+    expect(res.status).toBe(SOURCE_STATUS.OK);
+    expect(res.details.calendar).toMatchObject({ status: SOURCE_STATUS.PROVIDER_ERROR, upcoming: 0 });
+    expect(res.observations.length).toBe(20);
   });
   it('a stale daily series is STALE and evaluates no rule', async () => {
     const csv = (sid) => `observation_date,${sid}\n` + rows(200, 0.5).map((r) => `${r.date},${r.value}`).join('\n');
@@ -648,6 +756,72 @@ describe('per-invocation budgets (Workers Free: 50 subrequests, 50 D1 queries)',
     expect(r.summary.budget.fetches).toBeLessThanOrEqual(40);
     expect(r.summary.budget.queries).toBeLessThanOrEqual(44);
     expect(Object.values(r.summary.adapters).some((a) => a.status === SOURCE_STATUS.BUDGET_EXHAUSTED)).toBe(false);
+  });
+  it('per-detector allocation sums to the hard limit and covers each detector\'s own logical maximum', () => {
+    expect(Object.values(FETCH_ALLOCATION).reduce((a, b) => a + b, 0)).toBe(DEFAULT_BUDGET.fetches);
+    expect(Object.keys(FETCH_ALLOCATION).sort()).toEqual(DETECTORS.map((d) => d.id).sort());
+    expect(FETCH_ALLOCATION.okx_liquidations).toBeGreaterThanOrEqual(1 + LIQ_CONFIG.maxPages);
+    expect(FETCH_ALLOCATION.deribit_options).toBeGreaterThanOrEqual(2 * DERIBIT_CONFIG.dvolMaxPages + 2);
+    expect(FETCH_ALLOCATION.macro_fred).toBeGreaterThanOrEqual(MACRO_CONFIG.yieldSeries.length + 1);
+    expect(FETCH_ALLOCATION.sec_edgar).toBeGreaterThanOrEqual(8 + 6);
+    const parent = makeBudget({ fetches: 5, queries: 9 });
+    parent.fetches = 3;
+    const c = childBudget(parent, 10);
+    expect(c.fetchLimit).toBe(2);                                         // capped by what the parent has left
+    c.fetches += 1;
+    expect([c.fetches, parent.fetches]).toEqual([1, 4]);                  // spending the share spends the parent
+  });
+  it('worst case with every provider failing on every attempt: <= 40 subrequests, no detector exceeds its share, nothing stored', async () => {
+    const { env, db } = makeDb();
+    const env2 = { ...env, EVENT_SEC_USER_AGENT: 'CryptoPulse research owner@example.com', FRED_API_KEY: 'k'.repeat(32), EVENT_BINANCE_SAMPLE_MS: '1000' };
+    const f = fakeFetch([[/./, () => new Response('upstream down', { status: 503 })]]);
+    const per = {};
+    const counting = async (url, init) => { const u = String(url); const k = /okx/.test(u) ? 'okx_liquidations' : /deribit/.test(u) ? 'deribit_options' : /stlouisfed/.test(u) ? 'macro_fred' : /sec\.gov/.test(u) ? 'sec_edgar' : 'other'; per[k] = (per[k] || 0) + 1; return f(url, init); };
+    const r = await runEventDetection(env2, { nowTs: NOW, fetchImpl: counting, sleep: noSleep, deps: { binance_liquidation_sample: { connect: async () => { throw new Error('ws refused'); } } } });
+    expect(r.summary.budget.fetches).toBeLessThanOrEqual(DEFAULT_BUDGET.fetches);
+    for (const [id, n] of Object.entries(per)) if (id !== 'other') expect(n).toBeLessThanOrEqual(FETCH_ALLOCATION[id]);
+    expect(per.sec_edgar).toBeGreaterThan(0);                              // the last detector still got its share
+    expect(Object.values(r.summary.adapters).every((a) => [SOURCE_STATUS.PROVIDER_ERROR, SOURCE_STATUS.BUDGET_EXHAUSTED, SOURCE_STATUS.OK].includes(a.status))).toBe(true);
+    expect(r.summary.adapters.okx_liquidations.status).toBe(SOURCE_STATUS.PROVIDER_ERROR);
+    expect(db.prepare('SELECT COUNT(*) n FROM event_observations').get().n).toBe(0);   // no partial coverage recorded
+    expect(db.prepare('SELECT COUNT(*) n FROM event_source_health').get().n).toBe(DETECTORS.length);
+  });
+  it('FRED failing on both series with retries uses only its share; SEC (after it) still completes', async () => {
+    const { env } = makeDb();
+    const sub = () => jsonRes({ name: 'Co', tickers: ['X'], filings: { recent: { accessionNumber: [], form: [], filingDate: [], acceptanceDateTime: [], primaryDocument: [], items: [] } } });
+    const per = {};
+    const f = async (url) => { const u = String(url); const k = /stlouisfed/.test(u) ? 'fred' : /sec\.gov/.test(u) ? 'sec' : 'other'; per[k] = (per[k] || 0) + 1;
+      if (k === 'fred') return new Response('error code: 520', { status: 520, headers: { server: 'cloudflare', 'cf-ray': 'x' } });
+      if (k === 'sec') return sub();
+      return new Response('nope', { status: 404 }); };
+    const r = await runEventDetection({ ...env, EVENT_SEC_USER_AGENT: 'CryptoPulse research owner@example.com' }, { nowTs: NOW, fetchImpl: f, sleep: noSleep, adapters: [macroAdapter, secEdgarAdapter] });
+    expect(per.fred).toBeLessThanOrEqual(FETCH_ALLOCATION.macro_fred);
+    expect(r.summary.adapters.macro_fred).toMatchObject({ status: SOURCE_STATUS.PROVIDER_ERROR, error: expect.stringMatching(/^HTTP 520 \(server=cloudflare cf-ray=yes/) });
+    expect(per.sec).toBe(8);
+    expect(r.summary.adapters.sec_edgar.status).not.toBe(SOURCE_STATUS.BUDGET_EXHAUSTED);
+  });
+  it('a budget exhausted in the middle of OKX paging stores no OKX observations (never partial coverage as COMPLETE)', async () => {
+    const { env, db } = makeDb();
+    const page = (u) => { const m = /after=(\d+)/.exec(u); const top = m ? Number(m[1]) - 1 : NOW - 1000; return okxPage(Array.from({ length: 100 }, (_x, i) => det(top - i * 1000, 'sell', 'long', 80000, 1))); };
+    const f = fakeFetch([[/instruments/, () => okxInst.clone()], [/liquidation-orders/, page]]);
+    const r = await runEventDetection(env, { nowTs: NOW, fetchImpl: f, sleep: noSleep, adapters: [okxLiquidationsAdapter], limits: { fetches: 40, queries: 44, allocation: { okx_liquidations: 4 } } });
+    expect(r.summary.adapters.okx_liquidations.status).toBe(SOURCE_STATUS.BUDGET_EXHAUSTED);
+    expect(f.calls.length).toBe(4);
+    expect(db.prepare('SELECT COUNT(*) n FROM event_observations').get().n).toBe(0);
+  });
+  it('the Binance WebSocket upgrade is charged to the budget when the sample is enabled', async () => {
+    const { env } = makeDb();
+    const conn = async () => { const l = {}; setTimeout(() => l.close && l.close(), 5); return { addEventListener: (k, fn) => { l[k] = fn; }, close: () => {} }; };
+    const r = await runEventDetection({ ...env, EVENT_BINANCE_SAMPLE_MS: '10' }, { nowTs: NOW, adapters: [binanceLiquidationSampleAdapter], deps: { binance_liquidation_sample: { connect: conn } } });
+    expect(r.summary.budget.fetches).toBe(1);
+  });
+  it('credentials are scrubbed from error text before it reaches health rows or the public API', async () => {
+    expect(scrubSecrets('GET https://api.stlouisfed.org/fred/x?series_id=DGS2&api_key=SECRET123&file_type=json failed')).toBe('GET https://api.stlouisfed.org/fred/x?series_id=DGS2&api_key=***&file_type=json failed');
+    const { env, db } = makeDb();
+    const leaky = async () => { throw new TypeError('fetch failed for https://api.stlouisfed.org/fred/series/observations?api_key=SECRET123'); };
+    const r = await runEventDetection({ ...env, FRED_API_KEY: 'SECRET123'.padEnd(32, 'x') }, { nowTs: NOW, fetchImpl: leaky, sleep: noSleep, adapters: [macroAdapter] });
+    expect(JSON.stringify(r)).not.toMatch(/SECRET123/);
+    expect(db.prepare('SELECT last_error FROM event_source_health').get().last_error).not.toMatch(/SECRET123/);
   });
   it('OKX: the next run starts after the last stored bucket (fewer pages), never before the lookback', async () => {
     const { env } = makeDb();

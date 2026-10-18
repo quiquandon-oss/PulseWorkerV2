@@ -6,7 +6,7 @@ None of them is a V1 sentiment source, score, weight, prediction input or tradin
 
 **Pipeline:** sources → adapters (`events/adapters/*`) → normalised observations → deterministic rules → deduplication and correlation → D1 ledger → API (`events/event-api.js`) → V1 Sentiment-tab panel (CryptoPulse `index.html`, display only).
 
-## 0. Status at a glance (2026-10-17)
+## 0. Status at a glance (updated 2026-10-18)
 
 Verification has three levels, and none of them stands in for another: the **build container** (this development environment), a **GitHub-hosted runner** (Ashburn, Cloudflare colo IAD, US; probe run [39038918636](https://github.com/quiquandon-oss/PulseWorkerV2/actions/runs/39038918636), 2026-10-17 14:00 UTC, no secrets), and **Cloudflare** (the Worker's own egress, which only the production run in section 12 can test).
 
@@ -14,7 +14,7 @@ Verification has three levels, and none of them stands in for another: the **bui
 |---|---|---|---|---|
 | `deribit_options` | done | **passed** (full adapter run, 22 observations stored) | **200**; DVOL 745 candles in one page (`continuation:null`); book summary 200 | not verified |
 | `okx_liquidations` | done | refused by the container's network policy | **200**; `ctVal 0.01`, `ctValCcy BTC`; one `BTC-USDT-SWAP` group; 100 records spanned about 18.4 h; the `after` page was strictly older | not verified |
-| `macro_fred` | done | refused | **200** for the key-free `fredgraph.csv` DGS2 and DGS10; the keyed API wasn't probed | not verified |
+| `macro_fred` | done; **UA fix on PR #94, not deployed** | refused | **200** with curl's or the descriptive User-Agent; **stream reset with no UA or a browser UA** (run 39114185612) | **HTTP 520** in run `edr_c46163d70fa2f878` (deployed code sends no User-Agent); fix pending deploy |
 | `sec_edgar` | done | refused | **200** for submissions (MSTR, tickers include MSTR) with a User-Agent **without** contact details; documents weren't probed. Production must still send a contact User-Agent | not verified; needs `EVENT_SEC_USER_AGENT` |
 | `binance_liquidation_sample` | done | **451** | **451** (restricted location) | disabled by default |
 | GDELT geopolitical shock | research only (branch `claude/gdelt-risk-regime-shock`, 23 tests pass) | refused | not probed | **not integrated** (section 3) |
@@ -94,7 +94,19 @@ This is not done because `data.gdeltproject.org` can't be reached from the build
 | **Limits / retention / sampling** | public, per-IP limit; codes 50011/50061 treated as rate limits; **history retention unverified**, so the baseline builds forward | **sampled**: latest order per symbol per 1000 ms; no history | public credits (code 10028 = rate limited); DVOL history ≥ 31 days (744 candles fetched live) | FRED CSV is official and key-free | ≤ 10 requests/s documented; this adapter sends ≤ 4/s, 8 submissions plus ≤ 6 new documents per run, and remembers processed accessions |
 | **Freshness / baseline** | bucket must have ended ≥ 5 min earlier; 48 hourly buckets needed; source stale after 4 h | n/a (no events) | candle closed; book snapshot ≤ 15 min old; DVOL ≥ 336 prior 24 h changes; OI ≥ 30 prior changes | stale if older than 6 days; ≥ 120 prior changes | acceptance within 7 days; source stale after 2 days |
 | **Failure behaviour** | fail-closed on a cursor that doesn't advance or a malformed payload; partly covered buckets never stored | 451/403 → `BLOCKED_BY_PROVIDER`; a disconnect ends the sample early | malformed candle → `PROVIDER_ERROR`; stale snapshot → `STALE` with no observation stored | malformed → `PROVIDER_ERROR`; calendar `NOT_CONFIGURED` without a key | CIK whose tickers don't match → skipped; no User-Agent → `NOT_CONFIGURED` |
-| **Live verification** | GitHub runner: endpoints and payload shape **passed**; Cloudflare **pending** | 451 on both | build container **passed**; GitHub runner **passed**; Cloudflare pending | GitHub runner CSV **passed**; Cloudflare pending | GitHub runner submissions **passed**; Cloudflare pending |
+| **Live verification** | **Cloudflare passed** (run `edr_c46163d70fa2f878`: 3 requests, 200 records, window covered) | 451 on both; disabled | **Cloudflare passed** (4 requests; DVOL evaluated, OI snapshot stored) | **Cloudflare failed: HTTP 520** (root cause: missing User-Agent, see below) | not configured (no `EVENT_SEC_USER_AGENT`) |
+
+**FRED HTTP 520: root cause (2026-10-18).** `fred.stlouisfed.org` resolves to an Akamai address (23.13.165.165, `server: Apache`, no `cf-ray`), so it is not behind Cloudflare. From a GitHub runner with the adapter's exact URL (run [39114185612](https://github.com/quiquandon-oss/PulseWorkerV2/actions/runs/39114185612)):
+
+| Request | Result |
+|---|---|
+| curl default User-Agent | 200 (4754 bytes, CSV) |
+| **no User-Agent** (what a Worker `fetch` sends) | **HTTP/2 stream reset (`INTERNAL_ERROR`)**, 3 of 3 repeats |
+| no User-Agent, HTTP/1.1 | no response within 25 s |
+| `Mozilla/5.0 (compatible; Cloudflare-Workers)` or a browser UA | stream reset |
+| `CryptoPulse-EventDetection/ed-v1 (+repository URL)` | 200 |
+
+A Worker sees an upstream reset as HTTP 520. The failure is deterministic and caused by request headers, not transient. **Fix (PR #94, not deployed):** every FRED request sends `EVENT_DETECTION_USER_AGENT` (no contact email); failed responses now record `server`, `cf-ray` presence and a short body snippet; one failing series no longer discards the other; a failing release calendar no longer discards the yield series. **Remaining uncertainty:** the runner shares neither Cloudflare's egress IPs nor its TLS fingerprint, so the fix is verified only when a production run with the deployed fix returns 200.
 
 **Economic consensus and surprise: `DATA_UNAVAILABLE`.** No free source with licensed consensus estimates is integrated. A calendar of release dates is not a surprise detector, and no surprise value is computed.
 
@@ -290,9 +302,69 @@ Run every command from a checkout of `main` (so `wrangler.toml` resolves `sentim
 | Restore the database (last resort) | `npx wrangler d1 time-travel restore sentiment-history --bookmark=<step 0 bookmark>` | **Rolls back the whole shared database, V1 tables included**, losing every V1 write since the bookmark. Use it only if a V1 table was damaged. Event-only problems are undone with the `DROP TABLE` row below. Wrangler accepts timestamps within 30 days; the retention on this account's plan is unverified, so check it in the dashboard. |
 | Remove the data (irreversible) | `npx wrangler d1 execute sentiment-history --remote --command "DROP TABLE IF EXISTS event_ledger; DROP TABLE IF EXISTS event_observations; DROP TABLE IF EXISTS event_source_health; DROP TABLE IF EXISTS event_runs; DROP TABLE IF EXISTS event_documents;"` | deletes all collected history and events; baselines restart from zero. No V1 table is affected. |
 
-## 13. Known limitations and acceptance gaps
+## 13. Production history (controlled test)
+
+| UTC | Action | Run / identifier | Result |
+|---|---|---|---|
+| 2026-10-17 14:16 | Recovery check (Time Travel) | [39040059793](https://github.com/quiquandon-oss/PulseWorkerV2/actions/runs/39040059793) | bookmarks resolvable back 29 days |
+| 2026-10-17 14:31 | Migration 0023 | [39041121783](https://github.com/quiquandon-oss/PulseWorkerV2/actions/runs/39041121783) | 8 objects, existing schema hash unchanged; bookmark before `00002d35-0000004e-00005107-3ac9467d…` |
+| 2026-10-18 08:44 | Deploy `c19e73c` + `EVENT_RUN_TOKEN` | [39112591036](https://github.com/quiquandon-oss/PulseWorkerV2/actions/runs/39112591036) | version `2f229ddb-4d5b-43a0-bd29-0ef3e46a31e2`; 401/401/409 gates; V1 endpoints 200; rollback target `4f3e5069-3dee-4ed1-abc1-ec7e81ae3daf` |
+| 2026-10-18 09:02 | One manual run | [39113761264](https://github.com/quiquandon-oss/PulseWorkerV2/actions/runs/39113761264), `edr_c46163d70fa2f878` | 10/40 fetches, 17/44 queries; 40 observations, 5 health rows, 0 events; OKX and Deribit fetched, FRED 520, SEC not configured, Binance disabled |
+
+**Reconciliation plan (needs owner approval):**
+1. Deploy the reviewed PR head through the stage workflow (gates: CI green, code identical to that head, database identity, migration objects, secret names).
+2. Run one verification run.
+3. Mark PR #94 ready and merge it with a **merge commit**, so the deployed commit stays reachable. `deploy.yml` then redeploys identical code, with `GIT_COMMIT_SHA` set to the merge commit.
+4. Return the stage branch to `idle` and retire it.
+
+Until step 3, do not merge PRs #83, #82 or #35, or any push touching `worker.js`, `wrangler.toml`, the package files or `deploy.yml`. Each would redeploy `main` without the event routes. Rollback means the previous Worker version (`wrangler rollback`). Restoring the database or dropping event tables is **not** a routine rollback, because a restore would erase legitimate V1 writes.
+
+Deployment path: the stage branch `claude/epic-planck-uyapsw-event-stage1` (step file `idle`), not `deploy.yml`. **Production runs `c19e73c`; `main` is `f4c6d99`.** Until PR #94 is merged with a merge commit, a push to `main` touching `worker.js`, `wrangler.toml`, the package files or `deploy.yml` (open PRs #83, #82, #35) would redeploy without the event routes. That failure is safe (routes return 404, tables stay) but silent. New prediction rows carry `git_commit_sha = c19e73c`; research that groups by commit must treat `8b12c9a` and `c19e73c` as the same prediction code (the `worker.js` diff is the 6-line event hook).
+
+## 14. Controlled collection plan (not active)
+
+**No approved recurring mechanism exists.** `events/scheduler/event-detection-schedule.yml` is an inert template. Activation needs three separately approved production changes: `EVENT_DETECTION_ENABLED=1` on the Worker, the repository secret `EVENT_RUN_TOKEN` (already present), and installing the template at `.github/workflows/` on `main`.
+
+**Cost per run (measured in `edr_c46163d70fa2f878`, FRED fixed and SEC unconfigured assumed):**
+
+| Detector | Requests | D1 queries | New rows (typical, hourly) |
+|---|---|---|---|
+| OKX | 2–3 (instruments + 1–2 pages; 9 at worst) | 5 | ~3 (one new hour × 3 series; overlaps are ignored) |
+| Deribit | 4 | 8 | ~8 (1–2 new DVOL hours × 2 + 6 OI values) |
+| FRED | 2 (CSV) | 3 | ~0–2 (daily data) |
+| SEC | 0 until configured; then ≤ 14 | — | — |
+| Run record, health, expiry | — | ~4 | 1 run + 5 health upserts |
+| **Total** | **~9 typical; hard maximum 40 (see below)** | **~20 (budget 44)** | **~15** |
+
+**Hard request limit (derived from the code, `44e08a4` and later).** Every logical request may make 3 attempts (2 retries), so the uncapped maximum is 108 attempts: OKX 9×3, Deribit 10×3, FRED 3×3, SEC 14×3. Two mechanisms bound it:
+- `makeHttp` checks the run budget (40) **before every attempt**, so the run total can never exceed 40.
+- Each detector draws from its own share (`FETCH_ALLOCATION`: OKX 10, Binance 1, Deribit 10, FRED 5, SEC 14; the shares sum to 40). Each share covers that detector's own logical maximum, and retries come out of the same share, so a failing provider cannot starve the detectors after it.
+
+Binance's WebSocket upgrade is charged to the budget too. A detector that reaches its share ends `BUDGET_EXHAUSTED` and writes **no** observations, so partial coverage is never stored as `COMPLETE`. The D1 query budget is 44, enforced per statement with a reserve for the health rows and the run record. Tests cover all of this: all providers failing on every attempt, FRED failing on both series, exhaustion part-way through OKX paging, and the Binance charge. Error text is scrubbed of `api_key=`, `token=` and similar values before it reaches health rows or the public API.
+
+Hourly: ~216 requests, ~480 queries and ~360 row writes a day; storage about 40 KB a day (~15 MB a year), against a 12 MB database today. **Maturity** with hourly runs: OKX after 48 complete hours of coverage (gaps up to 8 h are re-read, longer gaps are lost); Deribit options OI after ~54 h (30 prior changes, each needing a reference ±3 h of 24 h earlier); DVOL and FRED yields evaluate on provider history from the first run.
+
+**Stop conditions (for the activation decision):** stop recurring runs if any run returns `BUDGET_EXHAUSTED`, if one detector is `PROVIDER_ERROR`/`BLOCKED` for 24 consecutive hours, if `/prediction-freshness` leaves `FRESH`, or if D1 row writes exceed 2,000 a day. Failed providers are represented by their health row (`last_error`, `requests`) and the run summary; they write no observations, so a retry or restart cannot create a misleading history (inserts are `ON CONFLICT DO NOTHING`, only complete buckets are stored).
+
+## 15. Goals: evidence status (2026-10-18)
+
+- **Goal A forward-evaluation protocol (declared 2026-10-18, before any forward Event Detection data exists).**
+  - **Ground truth:** market-moves v1.0.0, unchanged. BTC, ETH and LINK; |R24| > 3% (strict) on Hyperliquid hourly closes; the definition's own episode, onset and resolution rules; baselines B0–B3.
+  - **Window:** starts at the first hour when recurring collection is approved and running. Nothing before it, and nothing from the sealed period, is read.
+  - **Data and cadence:** hourly Event Detection runs. Hyperliquid hourly candles for the labels come from the market-moves collector, collected forward.
+  - **Coverage:** an episode counts as *watched* by a detector only if that detector's health was `OK` at its onset and its baseline was mature: OKX ≥ 48 complete prior buckets, DVOL ≥ 336 changes, options OI ≥ 30 changes, FRED ≥ 120. Unwatched episodes are reported, never counted as misses.
+  - **Timing:** only `detected_ts` is used. A detection counts for an episode if it falls in [onset − 12 h, resolution + 6 h]. Before onset it is an *early warning*; after onset it is a *detection*. Latency is `detected_ts − onset`.
+  - **Metrics, per detector and per event type:** recall over watched episodes; precision; false positives per 30 days; missed and duplicate alerts; lead time (median and minimum); coverage share; results by asset and direction where n ≥ 5.
+  - **Comparison:** each detector against B0 (the 24 h return crossing itself, which by construction has zero lead) and against B1–B3 as frozen.
+  - **Minimum sample:** ≥ 20 watched episodes, with ≥ 5 per direction. Below that the result is `NOT EVALUABLE`.
+  - **Single evaluation:** run once at the checkpoint with the `ed-v1` rules frozen. Changing a rule means a new version and a new window.
+- **Goal A (early detection): `NOT YET VALIDATED` / `NOT EVALUABLE`.** One production run, 0 events, baselines immature. Ground truth is predeclared (market-moves v1.0.0: |R24| > 3% strict, hourly Hyperliquid closes, BTC/ETH/LINK, episode/onset rules, baselines B0–B3), but its stored snapshot ends 2026-10-09 21:09Z, inside or before the sealed period, so it gives no usable post-seal episodes. The EXP-23 forward evaluator counts **2 post-seal episodes (DOWN 2, UP 0)** as of 2026-10-17. Evaluation needs ≥ 30 days of continuous forward collection with mature baselines and a predeclared minimum (proposed: ≥ 20 episodes, ≥ 5 per direction) before `evaluateDetections()` is run once with frozen `ed-v1` rules, lead 12 h and lag 6 h, against B0 (24 h return crossing) as the simple baseline.
+- **Goal B (prediction): `NOT YET VALIDATED`.** The designated protocol is EXP-23 (spec v0.4.0 sealed, v0.5.0 source variants): chronological, sealed holdout, burn-in, checkpoint of 60 events (25 per direction). Latest run (2026-10-17, [39045316218](https://github.com/quiquandon-oss/PulseWorkerV2/actions/runs/39045316218)): `INSUFFICIENT_SAMPLE`, 2/60 events, F3/F4 not evaluable. No predictive claim is made; Event Detection is not an input to any prediction.
+
+## 16. Known limitations and acceptance gaps
 
 - No source is verified as operational in production yet. Deribit was verified from the build container. Deribit, OKX, FRED (CSV) and SEC (submissions) answered from a GitHub runner. Nothing has been verified from Cloudflare.
+- OKX pagination: `after` is exclusive; the boundary millisecond is now re-read and de-duplicated by multiplicity (fix on PR #94, not deployed). A page of > 100 liquidations within one millisecond fails closed. Records first written win: if OKX publishes liquidations later than 5 minutes after the hour, the stored hour undercounts (unverified).
 - OKX history retention is unverified. A GitHub runner confirmed the endpoint, the payload fields and the `after` paging; Cloudflare's egress is untested. A US runner reaching OKX does not prove that the Worker's colo will. Fail-closed runtime checks are in place.
 - Liquidations cover one venue. Binance can only be sampled, and from some regions it is blocked.
 - Baselines build forward: about 48 h for liquidations, and about 30 runs (around 1.5 days hourly) for options OI. DVOL and yields are evaluable immediately.

@@ -1,7 +1,7 @@
 // Event Detection Layer -- orchestration. Sources -> adapters -> normalised observations -> rules -> deduplicated
 // events -> ledger. Each adapter is isolated (its own timeout and try/catch): one provider failing never stops the
 // others. Nothing here reads or writes V1 sentiment, weights, composite or predictions.
-import { RULESET_VERSION, SOURCE_STATUS, makeHttp, logEvent, sha256Hex, makeBudget, countedDb, DEFAULT_BUDGET } from './event-core.js';
+import { RULESET_VERSION, SOURCE_STATUS, makeHttp, logEvent, sha256Hex, makeBudget, countedDb, DEFAULT_BUDGET, childBudget, FETCH_ALLOCATION, scrubSecrets } from './event-core.js';
 import { eventTablesPresent, insertEvents, insertObservations, observationsBefore, upsertHealth, recordRun, expireEvents, processedDocuments, markDocuments, EVENT_TABLES_MISSING } from './event-store.js';
 import { okxLiquidationsAdapter, binanceLiquidationSampleAdapter } from './adapters/liquidations.js';
 import { deribitAdapter } from './adapters/deribit.js';
@@ -54,7 +54,8 @@ export async function runEventDetection(env, { nowTs = Date.now(), trigger = 'ma
       summary[a.id] = { status: SOURCE_STATUS.DISABLED };
       continue;
     }
-    const http = makeHttp({ fetchImpl: fetchImpl || ((...x) => fetch(...x)), sleep, timeoutMs: 10_000, retries: 2, budget });
+    const share = childBudget(budget, (limits.allocation || FETCH_ALLOCATION)[a.id]);   // per-detector cap within the run budget
+    const http = makeHttp({ fetchImpl: fetchImpl || ((...x) => fetch(...x)), sleep, timeoutMs: 10_000, retries: 2, budget: share });
     const history = (series, fromTs, beforeTs) => observationsBefore(work, a.id, series, { fromTs, beforeTs, asOfTs: nowTs });
     const docs = { seen: (ids) => processedDocuments(work, a.id, ids) };
     try {
@@ -70,8 +71,8 @@ export async function runEventDetection(env, { nowTs = Date.now(), trigger = 'ma
       logEvent('adapter_done', { run_id: run.run_id, source: a.id, ...summary[a.id] });
     } catch (e) {
       const status = (e && e.status) || SOURCE_STATUS.PROVIDER_ERROR;
-      await upsertHealth(dbAll, { ...base, status, last_error: String((e && e.message) || e).slice(0, 300), coverage: null, details: { requests: { ...http.counters }, budget_after: { fetches: budget.fetches, queries: budget.queries } } }, nowTs);
-      summary[a.id] = { status, error: String((e && e.message) || e).slice(0, 300) };
+      await upsertHealth(dbAll, { ...base, status, last_error: scrubSecrets(String((e && e.message) || e)).slice(0, 300), coverage: null, details: { requests: { ...http.counters }, budget_after: { fetches: budget.fetches, queries: budget.queries } } }, nowTs);
+      summary[a.id] = { status, error: scrubSecrets(String((e && e.message) || e)).slice(0, 300) };
       logEvent('adapter_failed', { run_id: run.run_id, source: a.id, status, error: summary[a.id].error });
     }
   }

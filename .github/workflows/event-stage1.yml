@@ -1,6 +1,7 @@
 # Controlled production test, Stage 1 (owner-authorised). Runs ONLY on a push to this branch; the step named in
 # .stage1-step selects exactly one action. Worker code deployed = PR #94 head c19e73c (this branch adds only this
 # workflow and .stage1-step). No secret value is ever printed; the run token is generated in-job and masked.
+# 2026-10-18: predeploy gate re-run after EVENT_RUN_TOKEN was replaced (the first value was 10 characters).
 name: event-stage1
 on:
   push:

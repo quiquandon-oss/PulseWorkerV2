@@ -639,9 +639,10 @@ describe('scheduling: detection never shares the prediction cron invocation', ()
     expect(toml).toMatch(/crons = \["0 \*\/3 \* \* \*", "0 7 \* \* \*"\]/);
     expect(toml).not.toMatch(/EVENT_/);
   });
-  it('the scheduler template is inert, schedule-only, tokenless for GitHub and secret-scoped to one step', () => {
-    const t = readFileSync(join(__dirname, '..', 'events', 'scheduler', 'event-detection-schedule.yml'), 'utf8').split('\n').map((l) => l.replace(/\s+#.*$|^#.*$/, '')).join('\n');
-    expect(() => readFileSync(join(__dirname, '..', '.github', 'workflows', 'event-detection-schedule.yml'))).toThrow();
+  it('the installed schedule matches the reviewed template, schedule-only, tokenless for GitHub and secret-scoped to one step', () => {
+    const strip = (p) => readFileSync(p, 'utf8').split('\n').map((l) => l.replace(/\s+#.*$|^#.*$/, '')).filter((l) => l.trim()).join('\n');
+    const t = strip(join(__dirname, '..', 'events', 'scheduler', 'event-detection-schedule.yml'));
+    expect(strip(join(__dirname, '..', '.github', 'workflows', 'event-detection-schedule.yml'))).toBe(t);
     expect(t).toMatch(/^on:\n  schedule:\n    - cron: '23 \* \* \* \*'/m);
     expect(t).not.toMatch(/workflow_dispatch|pull_request|push:|workflow_run/);
     expect(t).toMatch(/^permissions: \{\}$/m);

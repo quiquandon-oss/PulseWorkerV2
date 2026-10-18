@@ -1,0 +1,42 @@
+# EVENT DETECTION -- HOURLY TRIGGER (installed 2026-10-18, approved).
+#
+# Installed copy of the reviewed template events/scheduler/event-detection-schedule.yml. The non-comment content must
+# stay identical to the template (asserted in tests/event-detection.test.js). Recurring runs also require the Worker
+# secret EVENT_DETECTION_ENABLED=1; without it the Worker refuses this trigger with 409 and the job fails visibly.
+#
+# Why a GitHub schedule instead of a Worker Cron Trigger: the account's 5 Cron Triggers are all used, and running
+# detection inside the existing 3-hourly prediction cron would share that invocation's Workers Free limits
+# (50 external subrequests, 50 D1 queries) with the prediction tick. Each POST below is its own invocation.
+#
+# Isolation: schedule only (no push/PR/dispatch/workflow_run); `permissions: {}` (the job needs no GitHub token);
+# no checkout; the secret is visible only to the single curl step; the Worker refuses this trigger (409) unless
+# EVENT_DETECTION_ENABLED is "1"; a run started < 2 min earlier is refused (no overlap).
+# Stop recurring runs: delete this file and/or delete the Worker secret EVENT_DETECTION_ENABLED.
+name: event-detection-schedule
+
+on:
+  schedule:
+    - cron: '23 * * * *'       # hourly at :23 (off the :00 peak); GitHub may start scheduled runs late or skip them
+
+permissions: {}
+
+concurrency:
+  group: event-detection
+  cancel-in-progress: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: "Trigger one event-detection run on the Worker (separate invocation)"
+        env:
+          EVENT_RUN_TOKEN: ${{ secrets.EVENT_RUN_TOKEN }}
+        run: |
+          set -euo pipefail
+          [ -n "$EVENT_RUN_TOKEN" ] || { echo "::error::EVENT_RUN_TOKEN secret is not set"; exit 1; }
+          code=$(curl -sS -o body.json -w '%{http_code}' -X POST \
+            -H "Authorization: Bearer ${EVENT_RUN_TOKEN}" -H 'X-Event-Trigger: schedule' \
+            https://pulseworker-v2.quiquandon.workers.dev/api/events/run)
+          python3 -c "import json;d=json.load(open('body.json'));print(json.dumps({k:d.get(k) for k in ('ok','run_id','status','error','summary')})[:4000])"
+          [ "$code" = "200" ] || { echo "::error::event detection run returned HTTP $code"; exit 1; }

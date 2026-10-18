@@ -2,6 +2,7 @@
 # .stage1-step selects exactly one action. Worker code deployed = the reviewed PR #94 head in CODE_SHA (this branch adds only this
 # workflow and .stage1-step). No secret value is ever printed; EVENT_RUN_TOKEN comes from the repository secret and is only masked in logs.
 # 2026-10-18: predeploy gate re-run after EVENT_RUN_TOKEN was replaced (the first value was 10 characters).
+# 2026-10-18: step `enable` sets EVENT_DETECTION_ENABLED=1 only, after the approved schedule (PR #95, 96ec8bc) is verified on main.
 name: event-stage1
 on:
   push:
@@ -187,6 +188,75 @@ jobs:
           check "weight adaptation unchanged" '[ "$(jq .swa_n counts_pre.json)" = "$(jq .swa_n counts_post.json)" ]'
           [ "$fail" = 0 ] || { echo "::error::post-deploy verification failed (no automatic rollback; rollback target in live_pre.json)"; exit 1; }
           echo "DEPLOY + VERIFICATION: PASS (no detection run executed)"
+
+      - name: Enable controlled collection - set EVENT_DETECTION_ENABLED=1 only (no run, no other change)
+        if: steps.sel.outputs.step == 'enable'
+        env:
+          CLOUDFLARE_API_TOKEN: '${{ secrets.CLOUDFLARE_API_TOKEN }}'
+          EXPECTED_VERSION: 6129d19c-beb6-40b5-b66b-5e352b93cfa4
+          EXPECTED_SHA: 5056aa4f84235689626dc685e25ce8d2de23c891
+          SCHEDULE_SHA: 96ec8bc9df274e08e4b81d8012e592cbe4ff58ea
+        run: |
+          set -euo pipefail
+          q() { $W d1 execute "$DB_NAME" --remote --json --command "$1" | jq -c '.[0].results'; }
+          gh_api() { curl -sS -H "Authorization: Bearer ${{ github.token }}" -H 'Accept: application/vnd.github+json' "https://api.github.com/repos/${{ github.repository }}/$1"; }
+          V1Q="SELECT (SELECT COUNT(*) FROM history) history_n,(SELECT MAX(ts) FROM history) history_max,(SELECT COUNT(*) FROM predictions) pred_n,(SELECT MAX(ts) FROM predictions) pred_max,(SELECT COUNT(*) FROM eth_predictions) eth_n,(SELECT COUNT(*) FROM link_predictions) link_n,(SELECT COUNT(*) FROM challenger_predictions) chal_n,(SELECT COUNT(*) FROM risk_regime_readings) rr_n,(SELECT COUNT(*) FROM sentiment_weight_adaptation) swa_n,(SELECT COUNT(*) FROM v1_methodology_versions) mv_n"
+          EVQ="SELECT (SELECT COUNT(*) FROM event_runs) runs,(SELECT COUNT(*) FROM event_ledger) ledger,(SELECT COUNT(*) FROM event_observations) obs,(SELECT COUNT(*) FROM event_source_health) health,(SELECT COUNT(*) FROM event_documents) docs"
+          endpoints() { for u in "$V2/" "$V2/prediction-freshness" "$V2/api/learning/candidates" "$V2/api/events/health" "$V2/api/events" "$V1/risk-regime" "$V1/hl-oi" "$V1/history" "$V1/weight-adaptation"; do printf '%s %s\n' "$(curl -sS -m 25 -o /dev/null -w '%{http_code}' "$u")" "$u"; done; }
+          freshness() { curl -sS -m 25 "$V2/prediction-freshness" | jq -c '[.coins | to_entries[] | .key as $c | .value.horizons | to_entries[] | .key as $h | .value | to_entries[] | {status: .value.status, sha: (.value.latest_git_commit_sha // "")[0:7]}] | group_by(.status, .sha) | map({status: .[0].status, sha: .[0].sha, n: length})'; }
+          vsha() { $W versions view "$1" --name pulseworker-v2 --json | jq -r '[.. | objects | select(.name? == "GIT_COMMIT_SHA") | (.text // .value // empty)] | first // empty'; }
+          echo "=== GATES $(date -u +%FT%TZ)"
+          # 1. the approved schedule is installed and active on main, at the merge commit, with CI success
+          wf=$(gh_api actions/workflows/event-detection-schedule.yml | jq -r '.path + " " + .state'); echo "schedule workflow: $wf"
+          [ "$wf" = ".github/workflows/event-detection-schedule.yml active" ] || { echo "::error::schedule workflow not installed/active"; exit 1; }
+          main=$(gh_api git/ref/heads/main | jq -r .object.sha); echo "main: $main"
+          git fetch -q origin main; git merge-base --is-ancestor "$SCHEDULE_SHA" origin/main || { echo "::error::main does not contain $SCHEDULE_SHA"; exit 1; }
+          ci=$(gh_api "commits/$SCHEDULE_SHA/check-runs?check_name=test" | jq -r '[.check_runs[] | .conclusion] | join(",")')
+          [ "$ci" = "success" ] || { echo "::error::CI 'test' on $SCHEDULE_SHA is '$ci'"; exit 1; }
+          echo "CI test on $SCHEDULE_SHA: success"
+          # the installed workflow must still be schedule-only at :23 and send the schedule header
+          git show "origin/main:.github/workflows/event-detection-schedule.yml" > sched.yml
+          grep -q "cron: '23 \* \* \* \*'" sched.yml && grep -q "X-Event-Trigger: schedule" sched.yml && grep -q '^permissions: {}' sched.yml || { echo "::error::installed schedule differs from the approved one"; exit 1; }
+          # 2. live Worker = the merged #94 code, unchanged since its deploy
+          $W deployments list --name pulseworker-v2 --json | jq -c '.[-1] | {id, created_on, versions: [.versions[] | {version_id, percentage}]}' | tee live_pre.json
+          test "$(jq -r '.versions[0].version_id' live_pre.json)" = "$EXPECTED_VERSION" && test "$(jq -r '.versions[0].percentage' live_pre.json)" = "100" || { echo "::error::live version is not $EXPECTED_VERSION at 100%"; exit 1; }
+          [ "$(vsha "$EXPECTED_VERSION")" = "$EXPECTED_SHA" ] || { echo "::error::live GIT_COMMIT_SHA is not $EXPECTED_SHA"; exit 1; }
+          echo "live: $EXPECTED_VERSION (GIT_COMMIT_SHA $EXPECTED_SHA)"
+          # 3. secret names (never values): flag absent; SEC and Binance stay unset
+          $W secret list --name pulseworker-v2 --format json | jq -c 'map(.name) | sort' | tee names_pre.json
+          jq -e 'index("EVENT_RUN_TOKEN") != null and index("EVENT_DETECTION_ENABLED") == null and index("EVENT_SEC_USER_AGENT") == null and index("EVENT_BINANCE_SAMPLE_MS") == null and index("FRED_API_KEY") == null' names_pre.json >/dev/null || { echo "::error::Worker secret names not as required"; exit 1; }
+          curl -sS -m 20 "$V2/api/events/health" > h_pre.json; jq -c '{available, enabled, last_run: .last_run.run_id, detectors: [.detectors[] | {id, status}]}' h_pre.json
+          jq -e '.available == true and .enabled == false' h_pre.json >/dev/null || { echo "::error::health not available/disabled before enabling"; exit 1; }
+          q "$EVQ" | tee ev_pre.json; q "$V1Q" | tee v1_pre.json
+          endpoints | tee ep_pre.txt; freshness | tee fr_pre.json
+          echo "=== SET EVENT_DETECTION_ENABLED=1 $(date -u +%FT%TZ)"
+          printf '1' | $W secret put EVENT_DETECTION_ENABLED --name pulseworker-v2 > put.log 2>&1 || { cat put.log; echo "::error::secret put failed"; exit 1; }
+          grep -vi 'token' put.log || true
+          echo "set: $(date -u +%FT%TZ)"
+          echo "=== VERIFY"
+          fail=0; check() { if eval "$2"; then echo "PASS  $1"; else echo "FAIL  $1"; fail=1; fi; }
+          $W deployments list --name pulseworker-v2 --json | jq -c '.[-1] | {id, created_on, versions: [.versions[] | {version_id, percentage}]}' | tee live_post.json
+          NEWV=$(jq -r '.versions[0].version_id' live_post.json); echo "new version: $NEWV"
+          check "new version at 100% carries GIT_COMMIT_SHA $EXPECTED_SHA (code unchanged)" '[ "$(jq -r ".versions[0].percentage" live_post.json)" = 100 ] && [ "$(vsha "$NEWV")" = "$EXPECTED_SHA" ]'
+          $W secret list --name pulseworker-v2 --format json | jq -c 'map(.name) | sort' | tee names_post.json
+          check "secret names = before + EVENT_DETECTION_ENABLED only" '[ "$(jq -c ". + [\"EVENT_DETECTION_ENABLED\"] | sort" names_pre.json)" = "$(cat names_post.json)" ]'
+          for i in $(seq 1 24); do curl -sS -m 15 "$V2/api/events/health" > h_post.json || true; jq -e '.enabled == true' h_post.json >/dev/null 2>&1 && break; sleep 5; done
+          jq -c '{available, enabled, last_run: .last_run.run_id, detectors: [.detectors[] | {id, status}]}' h_post.json
+          check "health enabled=true; Binance DISABLED; SEC NOT_CONFIGURED" 'jq -e "(.enabled == true) and (.detectors | map(select(.id==\"binance_liquidation_sample\")) | .[0].status == \"DISABLED\") and (.detectors | map(select(.id==\"sec_edgar\")) | .[0].status == \"NOT_CONFIGURED\")" h_post.json >/dev/null'
+          # authorisation: no valid token is ever accepted (the valid token is NOT used here: that would start a run)
+          a1=$(curl -sS -m 15 -o /dev/null -w '%{http_code}' -X POST "$V2/api/events/run")
+          a2=$(curl -sS -m 15 -o /dev/null -w '%{http_code}' -X POST -H "Authorization: Bearer not-the-token-0123456789abcdef" -H 'X-Event-Trigger: schedule' "$V2/api/events/run")
+          check "run without token -> 401 ($a1); wrong token with schedule header -> 401 ($a2)" '[ "$a1" = 401 ] && [ "$a2" = 401 ]'
+          q "$EVQ" | tee ev_post.json
+          check "no event run triggered by enabling" '[ "$(jq -c ".[0].runs" ev_pre.json)" = "$(jq -c ".[0].runs" ev_post.json)" ]'
+          q "$V1Q" | tee v1_post.json
+          check "V1 prediction/weight/methodology counts not decreased; weight adaptation and methodology unchanged" '(for k in history_n pred_n eth_n link_n chal_n rr_n; do [ "$(jq ".[0].$k" v1_post.json)" -ge "$(jq ".[0].$k" v1_pre.json)" ] || exit 1; done) && [ "$(jq ".[0].swa_n" v1_pre.json)" = "$(jq ".[0].swa_n" v1_post.json)" ] && [ "$(jq ".[0].mv_n" v1_pre.json)" = "$(jq ".[0].mv_n" v1_post.json)" ]'
+          endpoints | tee ep_post.txt
+          check "endpoint status codes unchanged" 'diff ep_pre.txt ep_post.txt'
+          freshness | tee fr_post.json
+          check "prediction-freshness all FRESH" 'jq -e "all(.status == \"FRESH\")" fr_post.json >/dev/null'
+          [ "$fail" = 0 ] || { echo "::error::verification failed. Stop collection: npx wrangler secret delete EVENT_DETECTION_ENABLED (rollback target in live_pre.json)"; exit 1; }
+          echo "ENABLE: PASS ($(date -u +%FT%TZ)); first scheduled run expected at the next :23 slot"
 
       - name: Stage 2 - exactly one manual event-detection run, with pre/post evidence
         if: steps.sel.outputs.step == 'run'

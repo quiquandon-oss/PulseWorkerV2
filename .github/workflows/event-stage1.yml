@@ -193,7 +193,8 @@ jobs:
         env:
           CLOUDFLARE_API_TOKEN: '${{ secrets.CLOUDFLARE_API_TOKEN }}'
           RUN_TOKEN: '${{ secrets.EVENT_RUN_TOKEN }}'
-          EXPECTED_VERSION: 2f229ddb-4d5b-43a0-bd29-0ef3e46a31e2
+          EXPECTED_VERSION: 9fcc142f-7e86-4fbe-a16a-d765b1f502bf
+          PRIOR_RUN: edr_c46163d70fa2f878
         run: |
           set -euo pipefail
           q() { $W d1 execute "$DB_NAME" --remote --json --command "$1" | jq -c '.[0].results'; }
@@ -205,6 +206,11 @@ jobs:
           echo "=== PRE-RUN CHECKS $(date -u +%FT%TZ)"
           $W deployments list --name pulseworker-v2 --json | jq -c '.[-1] | {id, created_on, versions: [.versions[] | {version_id, percentage}]}' | tee live.json
           test "$(jq -r '.versions[0].version_id' live.json)" = "$EXPECTED_VERSION" && test "$(jq -r '.versions[0].percentage' live.json)" = "100" || { echo "::error::live version is not $EXPECTED_VERSION at 100%"; exit 1; }
+          # deployed code SHA (plain-text var of the live version; never a secret)
+          $W versions view "$EXPECTED_VERSION" --name pulseworker-v2 --json > ver.json
+          dsha=$(jq -r '[.. | objects | select(.name? == "GIT_COMMIT_SHA") | (.text // .value // empty)] | first // empty' ver.json)
+          echo "deployed GIT_COMMIT_SHA: ${dsha:-<not found>}"
+          [ "$dsha" = "$CODE_SHA" ] || { echo "::error::deployed GIT_COMMIT_SHA is not $CODE_SHA"; exit 1; }
           $W secret list --name pulseworker-v2 --format json | jq -c 'map(.name)' | tee names.json
           jq -e 'index("EVENT_RUN_TOKEN") != null and index("EVENT_DETECTION_ENABLED") == null and index("EVENT_SEC_USER_AGENT") == null and index("EVENT_BINANCE_SAMPLE_MS") == null' names.json >/dev/null || { echo "::error::Worker secret names not as expected"; exit 1; }
           echo "EVENT_RUN_TOKEN set; EVENT_DETECTION_ENABLED, EVENT_SEC_USER_AGENT, EVENT_BINANCE_SAMPLE_MS absent"
@@ -212,7 +218,10 @@ jobs:
           curl -sS -m 20 "$V2/api/events/health" > h_pre.json; jq -c '{available, enabled, last_run, detectors: [.detectors[] | {id, status}]}' h_pre.json
           jq -e '.available == true and .enabled == false' h_pre.json >/dev/null || { echo "::error::health not available/disabled"; exit 1; }
           q "$EVQ" | tee ev_pre.json
-          test "$(jq '.[0].runs' ev_pre.json)" = "0" || { echo "::error::an event run already exists; refusing to run again (exactly-one rule)"; exit 1; }
+          # single-run guard: the store must hold exactly the one recorded run; anything else (incl. a re-run of this job) refuses
+          q "SELECT run_id FROM event_runs ORDER BY started_ts" | jq -r '.[].run_id' > runs_pre.txt
+          [ "$(cat runs_pre.txt)" = "$PRIOR_RUN" ] || { echo "::error::event_runs is not exactly [$PRIOR_RUN]; refusing to run (exactly-one rule)"; cat runs_pre.txt; exit 1; }
+          echo "event_runs before: $(tr '\n' ' ' < runs_pre.txt)"
           q "$V1Q" | tee v1_pre.json
           q "$SCHEMA" > schema_pre.json; echo "schema objects $(jq length schema_pre.json) sha256 $(sha256sum schema_pre.json | cut -c1-16)"
           endpoints | tee ep_pre.txt; freshness | tee fr_pre.json
@@ -241,5 +250,18 @@ jobs:
           diff ep_pre.txt ep_post.txt && echo "endpoint status codes unchanged" || echo "::warning::endpoint status codes changed"
           $W deployments list --name pulseworker-v2 --json | jq -c '.[-1] | {id, versions: [.versions[] | {version_id, percentage}]}'
           $W secret list --name pulseworker-v2 --format json | jq -c 'map(.name)'
+          # exactly one new run; budgets within limits; no credential text in public outputs
+          q "SELECT run_id FROM event_runs ORDER BY started_ts" | jq -r '.[].run_id' > runs_post.txt
+          echo "event_runs after: $(tr '\n' ' ' < runs_post.txt)"
+          [ "$(wc -l < runs_post.txt)" = "2" ] && [ "$(head -1 runs_post.txt)" = "$PRIOR_RUN" ] || { echo "::error::expected exactly one new run"; exit 1; }
+          jq -e '.summary.budget | (.fetches <= .fetch_limit) and (.queries <= .query_limit) and .fetch_limit == 40 and .query_limit == 44' run.json >/dev/null || { echo "::error::budget exceeded or limits changed"; exit 1; }
+          if grep -F -q -- "$RUN_TOKEN" run.json h_post.json e_post.json; then echo "::error::run token found in public output"; exit 1; fi
+          if grep -E -q 'api_key=[^*&" ]' run.json h_post.json e_post.json; then echo "::error::credential text found in public output"; exit 1; fi
+          echo "no credential text in run response, /api/events/health or /api/events"
+          a1=$(curl -sS -m 15 -o /dev/null -w '%{http_code}' -X POST "$V2/api/events/run")
+          a2=$(curl -sS -m 15 -o /dev/null -w '%{http_code}' -X POST -H "Authorization: Bearer ${RUN_TOKEN}" -H 'X-Event-Trigger: schedule' "$V2/api/events/run")
+          echo "post-run auth: no token -> $a1; scheduled trigger while disabled -> $a2"
+          [ "$a1" = 401 ] && [ "$a2" = 409 ] || { echo "::error::authorisation gates not as expected after the run"; exit 1; }
+          [ "$(q "SELECT COUNT(*) n FROM event_runs" | jq '.[0].n')" = "2" ] || { echo "::error::auth checks created a run"; exit 1; }
           [ "$rc" = 0 ] && [ "$code" = 200 ] && jq -e '.ok == true' run.json >/dev/null || { echo "::error::manual run did not return ok (http $code, curl $rc); evidence above; not retried"; exit 1; }
           echo "STAGE 2 RUN: request completed (see per-detector outcomes above); not retried"

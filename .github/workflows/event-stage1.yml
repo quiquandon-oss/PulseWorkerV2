@@ -25,6 +25,7 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
       - uses: actions/setup-node@v4
         with: { node-version: '22' }
       - name: Select step
@@ -95,3 +96,89 @@ jobs:
           echo "--- recent versions"
           $W versions list --name pulseworker-v2 --json | jq -c '[.[-3:][] | {id, number, created_on: .metadata.created_on, source: .metadata.source, message: .annotations["workers/message"], tag: .annotations["workers/tag"]}]'
           echo "repo secret EVENT_RUN_TOKEN present: $HAS_REPO_EVENT_RUN_TOKEN"
+
+      - name: Pre-deploy gates (read-only; the run token is never printed)
+        if: steps.sel.outputs.step == 'predeploy' || steps.sel.outputs.step == 'deploy'
+        env:
+          CLOUDFLARE_API_TOKEN: '${{ secrets.CLOUDFLARE_API_TOKEN }}'
+          RUN_TOKEN: '${{ secrets.EVENT_RUN_TOKEN }}'
+        run: |
+          set -euo pipefail
+          echo "at: $(date -u +%FT%TZ)"
+          # 1. repository secret: present, >= 32 printable non-space characters (length only is reported)
+          [ -n "$RUN_TOKEN" ] || { echo "::error::repository secret EVENT_RUN_TOKEN not available to this workflow"; exit 1; }
+          n=${#RUN_TOKEN}
+          [[ "$RUN_TOKEN" =~ ^[[:graph:]]+$ ]] || { echo "::error::EVENT_RUN_TOKEN contains whitespace or control characters"; exit 1; }
+          [ "$n" -ge 32 ] || { echo "::error::EVENT_RUN_TOKEN is shorter than 32 characters ($n)"; exit 1; }
+          echo "EVENT_RUN_TOKEN: available, printable, length $n (>= 32)"
+          # 2. code: this branch differs from the reviewed commit only by the stage workflow and its step file
+          diff=$(git diff --name-only "$CODE_SHA" HEAD | sort | tr '\n' ' ')
+          [ "$diff" = ".github/workflows/event-stage1.yml .stage1-step " ] || { echo "::error::branch differs from $CODE_SHA beyond the stage files: $diff"; exit 1; }
+          echo "code identical to $CODE_SHA except: $diff"
+          # 3. database: migration 0023 objects present, exactly 8, tables empty
+          q() { $W d1 execute "$DB_NAME" --remote --json --command "$1"; }
+          q "SELECT type, name FROM sqlite_master WHERE name LIKE 'event%' OR name LIKE 'idx_event%' ORDER BY type, name" | jq -c '.[0].results' > ev.json
+          expected='[{"type":"index","name":"idx_event_ledger_corr"},{"type":"index","name":"idx_event_ledger_detected"},{"type":"index","name":"idx_event_ledger_type"},{"type":"table","name":"event_documents"},{"type":"table","name":"event_ledger"},{"type":"table","name":"event_observations"},{"type":"table","name":"event_runs"},{"type":"table","name":"event_source_health"}]'
+          test "$(jq -cS . ev.json)" = "$(echo "$expected" | jq -cS .)" || { echo "::error::event schema objects differ"; cat ev.json; exit 1; }
+          echo "event schema: 8 expected objects present"
+          q "SELECT (SELECT COUNT(*) FROM event_ledger) ledger,(SELECT COUNT(*) FROM event_observations) obs,(SELECT COUNT(*) FROM event_source_health) health,(SELECT COUNT(*) FROM event_runs) runs,(SELECT COUNT(*) FROM event_documents) docs,(SELECT COUNT(*) FROM history) history_n,(SELECT MAX(ts) FROM history) history_max,(SELECT COUNT(*) FROM predictions) pred_n,(SELECT MAX(ts) FROM predictions) pred_max,(SELECT COUNT(*) FROM eth_predictions) eth_n,(SELECT COUNT(*) FROM link_predictions) link_n,(SELECT COUNT(*) FROM challenger_predictions) chal_n,(SELECT COUNT(*) FROM risk_regime_readings) rr_n,(SELECT COUNT(*) FROM sentiment_weight_adaptation) swa_n" | jq -c '.[0].results[0]' | tee counts_pre.json
+          test "$(jq '.runs + .ledger' counts_pre.json)" = "0" || { echo "::error::event tables are not empty before deploy"; exit 1; }
+          # 4. Worker secrets (names only): EVENT_DETECTION_ENABLED absent
+          $W secret list --name pulseworker-v2 --format json | jq -c 'map(.name)' | tee names_pre.json
+          jq -e 'index("EVENT_DETECTION_ENABLED") == null' names_pre.json >/dev/null || { echo "::error::EVENT_DETECTION_ENABLED is set on the Worker"; exit 1; }
+          echo "EVENT_DETECTION_ENABLED: absent"
+          # 5. current live version (rollback target) and bundle build
+          $W deployments list --name pulseworker-v2 --json | jq -c '.[-1] | {id, created_on, versions: [.versions[] | {version_id, percentage}]}' | tee live_pre.json
+          $W deploy --dry-run --outdir "$RUNNER_TEMP/bundle" --var GIT_COMMIT_SHA:$CODE_SHA > dryrun.log 2>&1 || { cat dryrun.log; echo "::error::bundle build failed"; exit 1; }
+          grep -E "Total Upload|env\.|D1 Database" dryrun.log
+          echo "PRE-DEPLOY GATES: PASS"
+
+      - name: Deploy reviewed Worker code (c19e73c) with EVENT_RUN_TOKEN; verify; no detection run
+        if: steps.sel.outputs.step == 'deploy'
+        env:
+          CLOUDFLARE_API_TOKEN: '${{ secrets.CLOUDFLARE_API_TOKEN }}'
+          RUN_TOKEN: '${{ secrets.EVENT_RUN_TOKEN }}'
+        run: |
+          set -euo pipefail
+          SECRETS_FILE="$RUNNER_TEMP/event-secrets.json"
+          trap 'rm -f "$SECRETS_FILE"' EXIT
+          ( umask 077; python3 -c 'import json,os; print(json.dumps({"EVENT_RUN_TOKEN": os.environ["RUN_TOKEN"]}))' > "$SECRETS_FILE" )
+          echo "deploy start: $(date -u +%FT%TZ)"
+          $W deploy --var GIT_COMMIT_SHA:$CODE_SHA --secrets-file "$SECRETS_FILE" > deploy.log 2>&1 || { rm -f "$SECRETS_FILE"; cat deploy.log; echo "::error::wrangler deploy failed"; exit 1; }
+          grep -E "Uploaded|Deployed|Current Version ID|Total Upload|schedule|https://|env\.|Worker Startup" deploy.log || true
+          rm -f "$SECRETS_FILE"
+          echo "deploy end: $(date -u +%FT%TZ)"
+          $W deployments list --name pulseworker-v2 --json | jq -c '.[-1] | {id, created_on, versions: [.versions[] | {version_id, percentage}]}' | tee live_post.json
+          test "$(jq -r '.versions[0].version_id' live_post.json)" != "$(jq -r '.versions[0].version_id' live_pre.json)" || { echo "::error::live version did not change"; exit 1; }
+          $W secret list --name pulseworker-v2 --format json | jq -c 'map(.name)' | tee names_post.json
+          jq -e 'index("EVENT_RUN_TOKEN") != null and index("EVENT_DETECTION_ENABLED") == null' names_post.json >/dev/null || { echo "::error::secret names not as expected"; exit 1; }
+          fail=0; check() { if eval "$2"; then echo "PASS  $1"; else echo "FAIL  $1"; fail=1; fi; }
+          # event health: wait for the new version to serve
+          for i in $(seq 1 18); do
+            code=$(curl -sS -m 15 -o health.json -w '%{http_code}' "$V2/api/events/health" || echo 000)
+            [ "$code" = "200" ] && break; sleep 5
+          done
+          echo "health HTTP $code: $(jq -c '{ok, available, enabled, ruleset, detectors: [.detectors[] | {id, status}], last_run}' health.json)"
+          check "health 200, available, enabled=false" '[ "$code" = 200 ] && jq -e ".available == true and .enabled == false" health.json >/dev/null'
+          check "detectors NEVER_RUN except Binance DISABLED, no last_run" 'jq -e "(.detectors | map(select(.id==\"binance_liquidation_sample\")) | .[0].status == \"DISABLED\") and (.detectors | map(select(.id!=\"binance_liquidation_sample\")) | all(.status == \"NEVER_RUN\")) and (.last_run == null)" health.json >/dev/null'
+          code=$(curl -sS -m 15 -o events.json -w '%{http_code}' "$V2/api/events"); echo "events HTTP $code: $(jq -c '{ok, available, count}' events.json)"
+          check "/api/events 200, count 0" '[ "$code" = 200 ] && jq -e ".count == 0" events.json >/dev/null'
+          code=$(curl -sS -m 15 -o r1.json -w '%{http_code}' -X POST "$V2/api/events/run"); echo "run without auth -> $code $(cat r1.json)"
+          check "POST /api/events/run without auth -> 401" '[ "$code" = 401 ]'
+          code=$(curl -sS -m 15 -o r2.json -w '%{http_code}' -X POST -H "Authorization: Bearer not-the-token-0123456789abcdef" "$V2/api/events/run"); echo "run with wrong token -> $code $(cat r2.json)"
+          check "POST /api/events/run with wrong token -> 401" '[ "$code" = 401 ]'
+          code=$(curl -sS -m 15 -o r3.json -w '%{http_code}' -X POST -H "Authorization: Bearer ${RUN_TOKEN}" -H 'X-Event-Trigger: schedule' "$V2/api/events/run"); echo "scheduled run while disabled -> $code $(cat r3.json)"
+          check "scheduled run refused while disabled -> 409 DISABLED" '[ "$code" = 409 ] && jq -e ".status == \"DISABLED\"" r3.json >/dev/null'
+          # existing endpoints
+          for u in "$V2/" "$V2/prediction-freshness" "$V2/api/learning/candidates" "$V1/risk-regime" "$V1/hl-oi" "$V1/history"; do
+            code=$(curl -sS -m 20 -o ep.json -w '%{http_code}' "$u"); check "GET $u -> 200" '[ "$code" = 200 ]'
+          done
+          curl -sS -m 20 "$V2/prediction-freshness" | jq -c '[.coins | to_entries[] | .key as $c | .value.horizons | to_entries[] | .key as $h | .value | to_entries[] | {c: $c, h: $h, m: .key, status: .value.status, sha: (.value.latest_git_commit_sha // "")[0:7]}] | group_by(.status, .sha) | map({status: .[0].status, sha: .[0].sha, n: length})' | tee pf.json
+          check "prediction-freshness all FRESH" 'jq -e "all(.status == \"FRESH\")" pf.json >/dev/null'
+          # nothing was collected; V1 data intact
+          q() { $W d1 execute "$DB_NAME" --remote --json --command "$1"; }
+          q "SELECT (SELECT COUNT(*) FROM event_ledger) ledger,(SELECT COUNT(*) FROM event_observations) obs,(SELECT COUNT(*) FROM event_source_health) health,(SELECT COUNT(*) FROM event_runs) runs,(SELECT COUNT(*) FROM event_documents) docs,(SELECT COUNT(*) FROM history) history_n,(SELECT MAX(ts) FROM history) history_max,(SELECT COUNT(*) FROM predictions) pred_n,(SELECT MAX(ts) FROM predictions) pred_max,(SELECT COUNT(*) FROM eth_predictions) eth_n,(SELECT COUNT(*) FROM link_predictions) link_n,(SELECT COUNT(*) FROM challenger_predictions) chal_n,(SELECT COUNT(*) FROM risk_regime_readings) rr_n,(SELECT COUNT(*) FROM sentiment_weight_adaptation) swa_n" | jq -c '.[0].results[0]' | tee counts_post.json
+          check "no event run / rows written" 'jq -e ".runs + .ledger + .obs + .health + .docs == 0" counts_post.json >/dev/null'
+          check "weight adaptation unchanged" '[ "$(jq .swa_n counts_pre.json)" = "$(jq .swa_n counts_post.json)" ]'
+          [ "$fail" = 0 ] || { echo "::error::post-deploy verification failed (no automatic rollback; rollback target in live_pre.json)"; exit 1; }
+          echo "DEPLOY + VERIFICATION: PASS (no detection run executed)"

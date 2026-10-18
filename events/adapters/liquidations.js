@@ -269,8 +269,9 @@ export const binanceLiquidationSampleAdapter = {
   kind: 'liquidations',
   freshnessLimitMs: 4 * H,
   enabled: (env) => Number(env.EVENT_BINANCE_SAMPLE_MS) > 0,
-  async run({ env, nowTs, connect }) {
+  async run({ env, http, nowTs, connect }) {
     const durationMs = Math.min(Number(env.EVENT_BINANCE_SAMPLE_MS) || 0, 30_000);
+    if (http && http.spend) http.spend();          // the WebSocket upgrade is a subrequest: charge it to the budget
     const res = await sampleBinanceForceOrders({ durationMs, connect: connect || ((u) => workersWebSocketConnect(env.EVENT_BINANCE_WS_URL || u)) });
     const bucket = Math.floor(nowTs / H) * H;
     const total = res.records.reduce((s, r) => s + r.notional_usd, 0);

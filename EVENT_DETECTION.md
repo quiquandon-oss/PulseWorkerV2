@@ -311,6 +311,14 @@ Run every command from a checkout of `main` (so `wrangler.toml` resolves `sentim
 | 2026-10-18 08:44 | Deploy `c19e73c` + `EVENT_RUN_TOKEN` | [39112591036](https://github.com/quiquandon-oss/PulseWorkerV2/actions/runs/39112591036) | version `2f229ddb-4d5b-43a0-bd29-0ef3e46a31e2`; 401/401/409 gates; V1 endpoints 200; rollback target `4f3e5069-3dee-4ed1-abc1-ec7e81ae3daf` |
 | 2026-10-18 09:02 | One manual run | [39113761264](https://github.com/quiquandon-oss/PulseWorkerV2/actions/runs/39113761264), `edr_c46163d70fa2f878` | 10/40 fetches, 17/44 queries; 40 observations, 5 health rows, 0 events; OKX and Deribit fetched, FRED 520, SEC not configured, Binance disabled |
 
+**Reconciliation plan (needs owner approval):**
+1. Deploy the reviewed PR head through the stage workflow (gates: CI green, code identical to that head, database identity, migration objects, secret names).
+2. Run one verification run.
+3. Mark PR #94 ready and merge it with a **merge commit**, so the deployed commit stays reachable. `deploy.yml` then redeploys identical code, with `GIT_COMMIT_SHA` set to the merge commit.
+4. Return the stage branch to `idle` and retire it.
+
+Until step 3, do not merge PRs #83, #82 or #35, or any push touching `worker.js`, `wrangler.toml`, the package files or `deploy.yml`. Each would redeploy `main` without the event routes. Rollback means the previous Worker version (`wrangler rollback`). Restoring the database or dropping event tables is **not** a routine rollback, because a restore would erase legitimate V1 writes.
+
 Deployment path: the stage branch `claude/epic-planck-uyapsw-event-stage1` (step file `idle`), not `deploy.yml`. **Production runs `c19e73c`; `main` is `f4c6d99`.** Until PR #94 is merged with a merge commit, a push to `main` touching `worker.js`, `wrangler.toml`, the package files or `deploy.yml` (open PRs #83, #82, #35) would redeploy without the event routes. That failure is safe (routes return 404, tables stay) but silent. New prediction rows carry `git_commit_sha = c19e73c`; research that groups by commit must treat `8b12c9a` and `c19e73c` as the same prediction code (the `worker.js` diff is the 6-line event hook).
 
 ## 14. Controlled collection plan (not active)
@@ -326,7 +334,13 @@ Deployment path: the stage branch `claude/epic-planck-uyapsw-event-stage1` (step
 | FRED | 2 (CSV) | 3 | ~0–2 (daily data) |
 | SEC | 0 until configured; then ≤ 14 | — | — |
 | Run record, health, expiry | — | ~4 | 1 run + 5 health upserts |
-| **Total** | **~9 (36 at worst; up to 42 if FRED fails on both series with retries, in which case the budget ends the last detector, SEC, as `BUDGET_EXHAUSTED`; budget 40)** | **~20 (budget 44)** | **~15** |
+| **Total** | **~9 typical; hard maximum 40 (see below)** | **~20 (budget 44)** | **~15** |
+
+**Hard request limit (derived from the code, `44e08a4` and later).** Every logical request may make 3 attempts (2 retries), so the uncapped maximum is 108 attempts: OKX 9×3, Deribit 10×3, FRED 3×3, SEC 14×3. Two mechanisms bound it:
+- `makeHttp` checks the run budget (40) **before every attempt**, so the run total can never exceed 40.
+- Each detector draws from its own share (`FETCH_ALLOCATION`: OKX 10, Binance 1, Deribit 10, FRED 5, SEC 14; the shares sum to 40). Each share covers that detector's own logical maximum, and retries come out of the same share, so a failing provider cannot starve the detectors after it.
+
+Binance's WebSocket upgrade is charged to the budget too. A detector that reaches its share ends `BUDGET_EXHAUSTED` and writes **no** observations, so partial coverage is never stored as `COMPLETE`. The D1 query budget is 44, enforced per statement with a reserve for the health rows and the run record. Tests cover all of this: all providers failing on every attempt, FRED failing on both series, exhaustion part-way through OKX paging, and the Binance charge. Error text is scrubbed of `api_key=`, `token=` and similar values before it reaches health rows or the public API.
 
 Hourly: ~216 requests, ~480 queries and ~360 row writes a day; storage about 40 KB a day (~15 MB a year), against a 12 MB database today. **Maturity** with hourly runs: OKX after 48 complete hours of coverage (gaps up to 8 h are re-read, longer gaps are lost); Deribit options OI after ~54 h (30 prior changes, each needing a reference ±3 h of 24 h earlier); DVOL and FRED yields evaluate on provider history from the first run.
 
@@ -334,6 +348,16 @@ Hourly: ~216 requests, ~480 queries and ~360 row writes a day; storage about 40 
 
 ## 15. Goals: evidence status (2026-10-18)
 
+- **Goal A forward-evaluation protocol (declared 2026-10-18, before any forward Event Detection data exists).**
+  - **Ground truth:** market-moves v1.0.0, unchanged. BTC, ETH and LINK; |R24| > 3% (strict) on Hyperliquid hourly closes; the definition's own episode, onset and resolution rules; baselines B0–B3.
+  - **Window:** starts at the first hour when recurring collection is approved and running. Nothing before it, and nothing from the sealed period, is read.
+  - **Data and cadence:** hourly Event Detection runs. Hyperliquid hourly candles for the labels come from the market-moves collector, collected forward.
+  - **Coverage:** an episode counts as *watched* by a detector only if that detector's health was `OK` at its onset and its baseline was mature: OKX ≥ 48 complete prior buckets, DVOL ≥ 336 changes, options OI ≥ 30 changes, FRED ≥ 120. Unwatched episodes are reported, never counted as misses.
+  - **Timing:** only `detected_ts` is used. A detection counts for an episode if it falls in [onset − 12 h, resolution + 6 h]. Before onset it is an *early warning*; after onset it is a *detection*. Latency is `detected_ts − onset`.
+  - **Metrics, per detector and per event type:** recall over watched episodes; precision; false positives per 30 days; missed and duplicate alerts; lead time (median and minimum); coverage share; results by asset and direction where n ≥ 5.
+  - **Comparison:** each detector against B0 (the 24 h return crossing itself, which by construction has zero lead) and against B1–B3 as frozen.
+  - **Minimum sample:** ≥ 20 watched episodes, with ≥ 5 per direction. Below that the result is `NOT EVALUABLE`.
+  - **Single evaluation:** run once at the checkpoint with the `ed-v1` rules frozen. Changing a rule means a new version and a new window.
 - **Goal A (early detection): `NOT YET VALIDATED` / `NOT EVALUABLE`.** One production run, 0 events, baselines immature. Ground truth is predeclared (market-moves v1.0.0: |R24| > 3% strict, hourly Hyperliquid closes, BTC/ETH/LINK, episode/onset rules, baselines B0–B3), but its stored snapshot ends 2026-10-09 21:09Z, inside or before the sealed period, so it gives no usable post-seal episodes. The EXP-23 forward evaluator counts **2 post-seal episodes (DOWN 2, UP 0)** as of 2026-10-17. Evaluation needs ≥ 30 days of continuous forward collection with mature baselines and a predeclared minimum (proposed: ≥ 20 episodes, ≥ 5 per direction) before `evaluateDetections()` is run once with frozen `ed-v1` rules, lead 12 h and lag 6 h, against B0 (24 h return crossing) as the simple baseline.
 - **Goal B (prediction): `NOT YET VALIDATED`.** The designated protocol is EXP-23 (spec v0.4.0 sealed, v0.5.0 source variants): chronological, sealed holdout, burn-in, checkpoint of 60 events (25 per direction). Latest run (2026-10-17, [39045316218](https://github.com/quiquandon-oss/PulseWorkerV2/actions/runs/39045316218)): `INSUFFICIENT_SAMPLE`, 2/60 events, F3/F4 not evaluable. No predictive claim is made; Event Detection is not an input to any prediction.
 

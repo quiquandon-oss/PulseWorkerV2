@@ -7,7 +7,7 @@ import { createRequire } from 'node:module';
 import { describe, it, expect, vi } from 'vitest';
 import {
   makeEvent, dedupKey, eventIdFor, robustBaseline, robustZ, severityFor, textFingerprint, makeHttp, SOURCE_STATUS, stressCorrelationKey,
-  makeBudget, countedDb, EVENT_DETECTION_USER_AGENT,
+  makeBudget, countedDb, EVENT_DETECTION_USER_AGENT, FETCH_ALLOCATION, DEFAULT_BUDGET, childBudget, scrubSecrets,
 } from '../events/event-core.js';
 import { evaluateDetections } from '../events/event-eval.js';
 import {
@@ -756,6 +756,72 @@ describe('per-invocation budgets (Workers Free: 50 subrequests, 50 D1 queries)',
     expect(r.summary.budget.fetches).toBeLessThanOrEqual(40);
     expect(r.summary.budget.queries).toBeLessThanOrEqual(44);
     expect(Object.values(r.summary.adapters).some((a) => a.status === SOURCE_STATUS.BUDGET_EXHAUSTED)).toBe(false);
+  });
+  it('per-detector allocation sums to the hard limit and covers each detector\'s own logical maximum', () => {
+    expect(Object.values(FETCH_ALLOCATION).reduce((a, b) => a + b, 0)).toBe(DEFAULT_BUDGET.fetches);
+    expect(Object.keys(FETCH_ALLOCATION).sort()).toEqual(DETECTORS.map((d) => d.id).sort());
+    expect(FETCH_ALLOCATION.okx_liquidations).toBeGreaterThanOrEqual(1 + LIQ_CONFIG.maxPages);
+    expect(FETCH_ALLOCATION.deribit_options).toBeGreaterThanOrEqual(2 * DERIBIT_CONFIG.dvolMaxPages + 2);
+    expect(FETCH_ALLOCATION.macro_fred).toBeGreaterThanOrEqual(MACRO_CONFIG.yieldSeries.length + 1);
+    expect(FETCH_ALLOCATION.sec_edgar).toBeGreaterThanOrEqual(8 + 6);
+    const parent = makeBudget({ fetches: 5, queries: 9 });
+    parent.fetches = 3;
+    const c = childBudget(parent, 10);
+    expect(c.fetchLimit).toBe(2);                                         // capped by what the parent has left
+    c.fetches += 1;
+    expect([c.fetches, parent.fetches]).toEqual([1, 4]);                  // spending the share spends the parent
+  });
+  it('worst case with every provider failing on every attempt: <= 40 subrequests, no detector exceeds its share, nothing stored', async () => {
+    const { env, db } = makeDb();
+    const env2 = { ...env, EVENT_SEC_USER_AGENT: 'CryptoPulse research owner@example.com', FRED_API_KEY: 'k'.repeat(32), EVENT_BINANCE_SAMPLE_MS: '1000' };
+    const f = fakeFetch([[/./, () => new Response('upstream down', { status: 503 })]]);
+    const per = {};
+    const counting = async (url, init) => { const u = String(url); const k = /okx/.test(u) ? 'okx_liquidations' : /deribit/.test(u) ? 'deribit_options' : /stlouisfed/.test(u) ? 'macro_fred' : /sec\.gov/.test(u) ? 'sec_edgar' : 'other'; per[k] = (per[k] || 0) + 1; return f(url, init); };
+    const r = await runEventDetection(env2, { nowTs: NOW, fetchImpl: counting, sleep: noSleep, deps: { binance_liquidation_sample: { connect: async () => { throw new Error('ws refused'); } } } });
+    expect(r.summary.budget.fetches).toBeLessThanOrEqual(DEFAULT_BUDGET.fetches);
+    for (const [id, n] of Object.entries(per)) if (id !== 'other') expect(n).toBeLessThanOrEqual(FETCH_ALLOCATION[id]);
+    expect(per.sec_edgar).toBeGreaterThan(0);                              // the last detector still got its share
+    expect(Object.values(r.summary.adapters).every((a) => [SOURCE_STATUS.PROVIDER_ERROR, SOURCE_STATUS.BUDGET_EXHAUSTED, SOURCE_STATUS.OK].includes(a.status))).toBe(true);
+    expect(r.summary.adapters.okx_liquidations.status).toBe(SOURCE_STATUS.PROVIDER_ERROR);
+    expect(db.prepare('SELECT COUNT(*) n FROM event_observations').get().n).toBe(0);   // no partial coverage recorded
+    expect(db.prepare('SELECT COUNT(*) n FROM event_source_health').get().n).toBe(DETECTORS.length);
+  });
+  it('FRED failing on both series with retries uses only its share; SEC (after it) still completes', async () => {
+    const { env } = makeDb();
+    const sub = () => jsonRes({ name: 'Co', tickers: ['X'], filings: { recent: { accessionNumber: [], form: [], filingDate: [], acceptanceDateTime: [], primaryDocument: [], items: [] } } });
+    const per = {};
+    const f = async (url) => { const u = String(url); const k = /stlouisfed/.test(u) ? 'fred' : /sec\.gov/.test(u) ? 'sec' : 'other'; per[k] = (per[k] || 0) + 1;
+      if (k === 'fred') return new Response('error code: 520', { status: 520, headers: { server: 'cloudflare', 'cf-ray': 'x' } });
+      if (k === 'sec') return sub();
+      return new Response('nope', { status: 404 }); };
+    const r = await runEventDetection({ ...env, EVENT_SEC_USER_AGENT: 'CryptoPulse research owner@example.com' }, { nowTs: NOW, fetchImpl: f, sleep: noSleep, adapters: [macroAdapter, secEdgarAdapter] });
+    expect(per.fred).toBeLessThanOrEqual(FETCH_ALLOCATION.macro_fred);
+    expect(r.summary.adapters.macro_fred).toMatchObject({ status: SOURCE_STATUS.PROVIDER_ERROR, error: expect.stringMatching(/^HTTP 520 \(server=cloudflare cf-ray=yes/) });
+    expect(per.sec).toBe(8);
+    expect(r.summary.adapters.sec_edgar.status).not.toBe(SOURCE_STATUS.BUDGET_EXHAUSTED);
+  });
+  it('a budget exhausted in the middle of OKX paging stores no OKX observations (never partial coverage as COMPLETE)', async () => {
+    const { env, db } = makeDb();
+    const page = (u) => { const m = /after=(\d+)/.exec(u); const top = m ? Number(m[1]) - 1 : NOW - 1000; return okxPage(Array.from({ length: 100 }, (_x, i) => det(top - i * 1000, 'sell', 'long', 80000, 1))); };
+    const f = fakeFetch([[/instruments/, () => okxInst.clone()], [/liquidation-orders/, page]]);
+    const r = await runEventDetection(env, { nowTs: NOW, fetchImpl: f, sleep: noSleep, adapters: [okxLiquidationsAdapter], limits: { fetches: 40, queries: 44, allocation: { okx_liquidations: 4 } } });
+    expect(r.summary.adapters.okx_liquidations.status).toBe(SOURCE_STATUS.BUDGET_EXHAUSTED);
+    expect(f.calls.length).toBe(4);
+    expect(db.prepare('SELECT COUNT(*) n FROM event_observations').get().n).toBe(0);
+  });
+  it('the Binance WebSocket upgrade is charged to the budget when the sample is enabled', async () => {
+    const { env } = makeDb();
+    const conn = async () => { const l = {}; setTimeout(() => l.close && l.close(), 5); return { addEventListener: (k, fn) => { l[k] = fn; }, close: () => {} }; };
+    const r = await runEventDetection({ ...env, EVENT_BINANCE_SAMPLE_MS: '10' }, { nowTs: NOW, adapters: [binanceLiquidationSampleAdapter], deps: { binance_liquidation_sample: { connect: conn } } });
+    expect(r.summary.budget.fetches).toBe(1);
+  });
+  it('credentials are scrubbed from error text before it reaches health rows or the public API', async () => {
+    expect(scrubSecrets('GET https://api.stlouisfed.org/fred/x?series_id=DGS2&api_key=SECRET123&file_type=json failed')).toBe('GET https://api.stlouisfed.org/fred/x?series_id=DGS2&api_key=***&file_type=json failed');
+    const { env, db } = makeDb();
+    const leaky = async () => { throw new TypeError('fetch failed for https://api.stlouisfed.org/fred/series/observations?api_key=SECRET123'); };
+    const r = await runEventDetection({ ...env, FRED_API_KEY: 'SECRET123'.padEnd(32, 'x') }, { nowTs: NOW, fetchImpl: leaky, sleep: noSleep, adapters: [macroAdapter] });
+    expect(JSON.stringify(r)).not.toMatch(/SECRET123/);
+    expect(db.prepare('SELECT last_error FROM event_source_health').get().last_error).not.toMatch(/SECRET123/);
   });
   it('OKX: the next run starts after the last stored bucket (fewer pages), never before the lookback', async () => {
     const { env } = makeDb();

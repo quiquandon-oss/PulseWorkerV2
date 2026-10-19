@@ -1,0 +1,118 @@
+{
+ "artifact": "risk-regime-forward-run",
+ "attempts": [
+  {
+   "completeness": "COMPLETE",
+   "duplicates_dropped": 0,
+   "expected_slots": 48,
+   "fingerprint": "99622999f157db419464542940a19876699a6011076014702810660b328e3e82",
+   "internal_conflicts": {},
+   "missing_ranges": {},
+   "missing_slots": 0,
+   "observations": 48,
+   "partition": "2026-10-18",
+   "source": "hyperliquid_btc_funding",
+   "status": "CLOSED"
+  },
+  {
+   "partition": null,
+   "requests": {
+    "fundingHistory_FETCHED": 2,
+    "fundingHistory_page_max_rows": 24
+   },
+   "source": "hyperliquid",
+   "status": "REQUEST_LOG"
+  },
+  {
+   "completeness": "COMPLETE",
+   "duplicates_dropped": 0,
+   "expected_slots": 3,
+   "fingerprint": "9ea89796ab02a41ec1f3722f10da70e63f0a7d17410675d3927175af9aca8f42",
+   "internal_conflicts": {},
+   "missing_ranges": {},
+   "missing_slots": 0,
+   "observations": 6,
+   "partition": "2026-10-18",
+   "source": "okx_btc_funding",
+   "status": "CLOSED"
+  },
+  {
+   "irregular_spacing_ms": [],
+   "pages": 1,
+   "partition": null,
+   "requests": {
+    "http_200": 1
+   },
+   "source": "okx",
+   "status": "REQUEST_LOG"
+  },
+  {
+   "completeness": "OPEN",
+   "duplicates_dropped": 0,
+   "expected_slots": 4,
+   "fingerprint": "65e9aab5f86b63c236b94f75319ee98c6dd0ccd1db6dd6d095524425259b9150",
+   "internal_conflicts": {},
+   "missing_ranges": {},
+   "missing_slots": 0,
+   "observations": 4,
+   "partition": "2026-10-19",
+   "source": "hyperliquid_btc_funding",
+   "status": "WRITTEN"
+  },
+  {
+   "partition": null,
+   "requests": {
+    "fundingHistory_FETCHED": 2,
+    "fundingHistory_page_max_rows": 2
+   },
+   "source": "hyperliquid",
+   "status": "REQUEST_LOG"
+  },
+  {
+   "completeness": "OPEN",
+   "duplicates_dropped": 0,
+   "expected_slots": 1,
+   "fingerprint": "dd41822531ef94751b1260a38adb6cf62e29bdf44eca0077f4b33d30d6fb2e11",
+   "internal_conflicts": {},
+   "missing_ranges": {},
+   "missing_slots": 0,
+   "observations": 2,
+   "partition": "2026-10-19",
+   "source": "okx_btc_funding",
+   "status": "WRITTEN"
+  },
+  {
+   "irregular_spacing_ms": [],
+   "pages": 1,
+   "partition": null,
+   "requests": {
+    "http_200": 1
+   },
+   "source": "okx",
+   "status": "REQUEST_LOG"
+  }
+ ],
+ "errors": [],
+ "finished_at": "2026-10-19T01:17:28.903000+00:00",
+ "location": {
+  "checked_at": "2026-10-19T01:17:26.289000+00:00",
+  "colo": "IAD",
+  "ip_sha256_prefix": "7ec8391bed9d",
+  "loc": "US",
+  "source": "https://www.cloudflare.com/cdn-cgi/trace",
+  "status": 200
+ },
+ "open_day": true,
+ "run_id": "39184670087",
+ "sources": [
+  "hyperliquid_btc_funding",
+  "okx_btc_funding"
+ ],
+ "stale_sources": [],
+ "started_at": "2026-10-19T01:17:24.589000+00:00",
+ "summary": {
+  "CLOSED": 2,
+  "REQUEST_LOG": 4,
+  "WRITTEN": 2
+ }
+}

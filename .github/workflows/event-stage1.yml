@@ -2,6 +2,7 @@
 # .stage1-step selects exactly one action. Worker code deployed = the reviewed PR #94 head in CODE_SHA (this branch adds only this
 # workflow and .stage1-step). No secret value is ever printed; EVENT_RUN_TOKEN comes from the repository secret and is only masked in logs.
 # 2026-10-18: predeploy gate re-run after EVENT_RUN_TOKEN was replaced (the first value was 10 characters).
+# 2026-10-21: step `inspect` also runs the owner-approved read-only prediction-freshness investigation.
 # 2026-10-18: step `enable` sets EVENT_DETECTION_ENABLED=1 only, after the approved schedule (PR #95, 96ec8bc) is verified on main.
 name: event-stage1
 on:
@@ -99,6 +100,68 @@ jobs:
           echo "--- recent versions"
           $W versions list --name pulseworker-v2 --json | jq -c '[.[-3:][] | {id, number, created_on: .metadata.created_on, source: .metadata.source, message: .annotations["workers/message"], tag: .annotations["workers/tag"]}]'
           echo "repo secret EVENT_RUN_TOKEN present: $HAS_REPO_EVENT_RUN_TOKEN"
+          # --- 2026-10-21 V2 prediction-freshness investigation (owner-approved, read-only, targeted).
+          # Prints counts, timestamps, statuses and truncated error text only: no prediction values, no secrets.
+          set +e
+          ACCT=f58e761fbc8e62dc404d8684290af264
+          NOW_MS=$(( $(date +%s) * 1000 )); SINCE_MS=$(( NOW_MS - 7*24*3600*1000 )); T=10800000; G=300000
+          echo "=== A. cron-grid prediction rows per 3h tick, last 7 days (since $(date -u -d @$((SINCE_MS/1000)) +%FT%TZ))"
+          SQL="SELECT 'BTC' coin, horizon_hours h, 'core' m, (ts/$T)*$T tick, COUNT(*) n, MIN(ts) t0, MAX(ts) t1 FROM predictions WHERE ts >= $SINCE_MS AND ts % $T < $G GROUP BY h, tick
+          UNION ALL SELECT 'ETH', horizon_hours, 'core', (ts/$T)*$T, COUNT(*), MIN(ts), MAX(ts) FROM eth_predictions WHERE ts >= $SINCE_MS AND ts % $T < $G GROUP BY horizon_hours, (ts/$T)*$T
+          UNION ALL SELECT 'LINK', horizon_hours, 'core', (ts/$T)*$T, COUNT(*), MIN(ts), MAX(ts) FROM link_predictions WHERE ts >= $SINCE_MS AND ts % $T < $G GROUP BY horizon_hours, (ts/$T)*$T
+          UNION ALL SELECT coin, horizon_hours, 'challenger', (ts/$T)*$T, COUNT(*), MIN(ts), MAX(ts) FROM challenger_predictions WHERE ts >= $SINCE_MS AND ts % $T < $G GROUP BY coin, horizon_hours, (ts/$T)*$T"
+          $W d1 execute "$DB_NAME" --remote --json --command "$SQL" > grid.json; echo "d1 rc=$?"
+          jq --argjson since "$SINCE_MS" --argjson now "$NOW_MS" --argjson T "$T" -r '
+            (.[0].results) as $r
+            | [range((($since / $T) | ceil) * $T; $now - 600000; $T)] as $ticks
+            | [ "BTC","ETH","LINK" ] as $coins
+            | [ $coins[] as $c | (12,24) as $h | ("core","challenger") as $m | "\($c)/\($h)/\($m)" ] as $series
+            | ($r | map({key: "\(.coin)/\(.h)/\(.m)@\(.tick)", value: .}) | from_entries) as $ix
+            | "ticks expected: \($ticks|length); series: \($series|length); rows on grid: \($r|map(.n)|add)",
+              "per-series ticks present (of \($ticks|length)): " + ([ $series[] as $s | "\($s)=\([ $ticks[] | select($ix["\($s)@\(.)"]) ] | length)" ] | join(" ")),
+              "duplicates (n>1): \([ $r[] | select(.n > 1) | "\(.coin)/\(.h)/\(.m)@\(.tick/1000|todate)x\(.n)" ] | join(" "))",
+              "--- ticks with missing series (tick UTC: missing count / missing list; write span = max-min ts of present rows, s)",
+              ( $ticks[] as $t
+                | [ $series[] | select($ix["\(.)@\($t)"] | not) ] as $miss
+                | [ $series[] | $ix["\(.)@\($t)"] | select(.) ] as $pres
+                | select(($miss|length) > 0)
+                | "\($t/1000|todate): \($miss|length) missing [\($miss|join(","))] present=\($pres|length) span_s=\(if ($pres|length)>0 then ((($pres|map(.t1)|max) - ($pres|map(.t0)|min))/1000|floor) else null end)" ),
+              "--- write latency of complete ticks: max seconds after tick start = \([ $ticks[] as $t | [ $series[] | $ix["\(.)@\($t)"] | select(.) ] | select(length==12) | ((map(.t1)|max) - $t)/1000 | floor ] | (if length>0 then {min: min, median: (sort|.[length/2|floor]), max: max} else null end))"
+          ' grid.json
+          echo "=== B. Cloudflare scheduled invocations of pulseworker-v2 (GraphQL analytics), last 7 days"
+          FROM=$(date -u -d '-7 days' +%FT%TZ); TO=$(date -u +%FT%TZ)
+          gql() { curl -sS -m 60 -X POST https://api.cloudflare.com/client/v4/graphql -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" -H 'Content-Type: application/json' --data "$1"; }
+          Q=$(jq -nc --arg a "$ACCT" --arg f "$FROM" --arg t "$TO" '{query: "query($a: String!, $f: Time!, $t: Time!) { viewer { accounts(filter: {accountTag: $a}) { workersInvocationsScheduled(limit: 1000, filter: {scriptName: \"pulseworker-v2\", datetime_geq: $f, datetime_leq: $t}, orderBy: [datetime_ASC]) { cron datetime scheduledDatetime status cpuTimeUs } } } }", variables: {a: $a, f: $f, t: $t}}')
+          gql "$Q" > sched.json
+          if jq -e '.errors == null or (.errors|length) == 0' sched.json >/dev/null && jq -e '.data.viewer.accounts[0]' sched.json >/dev/null; then
+            jq -r '.data.viewer.accounts[0].workersInvocationsScheduled as $x
+              | "scheduled invocations: \($x|length); by cron/status: \($x | group_by(.cron, .status) | map("\(.[0].cron)|\(.[0].status)=\(length)") | join(" "))",
+                "--- 3h cron (0 */3 * * *) per firing: scheduled -> started, status, cpu_ms",
+                ( $x[] | select(.cron == "0 */3 * * *") | "\(.scheduledDatetime) -> \(.datetime) \(.status) cpu_ms=\((.cpuTimeUs // 0)/1000|floor)" ),
+                "--- non-success invocations (any cron)",
+                ( $x[] | select(.status != "success") | "\(.cron) \(.scheduledDatetime) \(.status) cpu_ms=\((.cpuTimeUs // 0)/1000|floor)" )' sched.json
+          else
+            echo "GraphQL workersInvocationsScheduled unavailable: $(jq -c '[.errors[]?.message] | .[0:3]' sched.json 2>/dev/null | cut -c1-400)"
+            echo "--- fallback: workersInvocationsAdaptive hourly by status (no cron detail)"
+            Q2=$(jq -nc --arg a "$ACCT" --arg f "$FROM" --arg t "$TO" '{query: "query($a: String!, $f: Time!, $t: Time!) { viewer { accounts(filter: {accountTag: $a}) { workersInvocationsAdaptive(limit: 2000, filter: {scriptName: \"pulseworker-v2\", datetime_geq: $f, datetime_leq: $t}, orderBy: [datetimeHour_ASC]) { dimensions { datetimeHour status } sum { requests errors subrequests } } } } }", variables: {a: $a, f: $f, t: $t}}')
+            gql "$Q2" > adaptive.json
+            jq -r 'if .errors then "adaptive unavailable: \([.errors[]?.message] | .[0:3] | tostring | .[0:400])" else (.data.viewer.accounts[0].workersInvocationsAdaptive[] | select((.dimensions.datetimeHour | .[11:13] | tonumber) % 3 == 0) | "\(.dimensions.datetimeHour) \(.dimensions.status) req=\(.sum.requests) err=\(.sum.errors) subreq=\(.sum.subrequests)") end' adaptive.json
+          fi
+          echo "=== C. Worker logs (Workers Observability), error-level only, first 20 min of each 3h tick in the last 48 h"
+          LFROM=$(( NOW_MS - 48*3600*1000 ))
+          LQ=$(jq -nc --argjson f "$LFROM" --argjson t "$NOW_MS" '{queryId: "pf-investigation", timeframe: {from: $f, to: $t}, view: "events", limit: 200, parameters: {filters: [{key: "$workers.scriptName", operation: "eq", type: "string", value: "pulseworker-v2"}, {key: "$metadata.level", operation: "eq", type: "string", value: "error"}]}}')
+          code=$(curl -sS -m 60 -o logs.json -w '%{http_code}' -X POST "https://api.cloudflare.com/client/v4/accounts/$ACCT/workers/observability/telemetry/query" -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" -H 'Content-Type: application/json' --data "$LQ")
+          echo "telemetry HTTP $code"
+          if [ "$code" = 200 ] && jq -e '.success == true' logs.json >/dev/null 2>&1; then
+            jq -r '[.result.events.events[]? | {ts: (.timestamp // .["$metadata"].timestamp // 0), msg: ((.["$metadata"].message // .message // (.source|tostring)) | tostring)}]
+              | map(select(((.ts / 1000 | floor) % 10800) < 1200))
+              | "error events in tick windows: \(length)",
+                (.[] | "\(.ts/1000|floor|todate) \(.msg | gsub("(?i)(token|key|secret|authorization)[^ ]*"; "[redacted]") | .[0:200])")' logs.json | head -60
+          else
+            echo "telemetry unavailable: $(jq -c '[.errors[]?.message] | .[0:3]' logs.json 2>/dev/null | cut -c1-400)"
+          fi
+          set -e
+          echo "PREDICTION FRESHNESS INVESTIGATION: done (read-only)"
 
       - name: Pre-deploy gates (read-only; the run token is never printed)
         if: steps.sel.outputs.step == 'predeploy' || steps.sel.outputs.step == 'deploy'

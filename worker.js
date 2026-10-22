@@ -4902,12 +4902,49 @@ async function backfillGeminiBiasShort(env) {
 
 const LINK_FUNDING_FLOOR_HOURLY = 0.0000125; // same constant already proven correct for BTC in V1
 
+// Hyperliquid /info rate limiting (HTTP 429) on the 3h tick: 17 chain
+// failures between 2026-10-19 and 10-21, all transient (other chains in the
+// same tick succeeded seconds later). Bounded retry for this snapshot call
+// only: at most 3 attempts, exponential backoff with jitter, Retry-After
+// honoured (a Retry-After longer than the per-wait cap means no retry), at
+// most 8 s of waiting per call. A response that is still not ok is returned
+// unchanged, so the caller fails exactly as before -- a 429 can never turn
+// into a stale or partial snapshot treated as success. Waiting costs wall
+// time, not CPU; each retry is one extra subrequest (at most +2 per chain).
+const HL_INFO_RETRY = { maxAttempts: 3, baseDelayMs: 1000, maxDelayMs: 4000, maxTotalWaitMs: 8000 };
+
+// Retry-After as delta-seconds or an HTTP date; null when absent/unparseable.
+function parseRetryAfterMs(value, nowMs = Date.now()) {
+  if (value === null || value === undefined || value === '') return null;
+  const seconds = Number(value);
+  if (Number.isFinite(seconds) && seconds >= 0) return Math.round(seconds * 1000);
+  const t = Date.parse(value);
+  return Number.isFinite(t) ? Math.max(0, t - nowMs) : null;
+}
+
+async function fetchHyperliquidInfo(body, { fetchImpl = fetch, sleep = (ms) => new Promise(r => setTimeout(r, ms)), random = Math.random, cfg = HL_INFO_RETRY } = {}) {
+  let waitedMs = 0;
+  for (let attempt = 1; ; attempt++) {
+    const res = await fetchImpl('https://api.hyperliquid.xyz/info', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    if (res.status !== 429 || attempt >= cfg.maxAttempts) return res;
+    const retryAfterMs = parseRetryAfterMs(res.headers && res.headers.get('Retry-After'));
+    if (retryAfterMs !== null && retryAfterMs > cfg.maxDelayMs) return res;
+    const backoffMs = Math.min(cfg.maxDelayMs, cfg.baseDelayMs * 2 ** (attempt - 1));
+    const delayMs = retryAfterMs !== null ? retryAfterMs : Math.round(backoffMs / 2 + random() * (backoffMs / 2));
+    if (waitedMs + delayMs > cfg.maxTotalWaitMs) return res;
+    console.warn(JSON.stringify({ evt: 'hyperliquid_429_retry', attempt, delay_ms: delayMs, retry_after: retryAfterMs !== null }));
+    try { await res.text(); } catch (_e) { /* release the 429 body before retrying */ }
+    await sleep(delayMs);
+    waitedMs += delayMs;
+  }
+}
+
 async function fetchHyperliquidPrice(coinName) {
-  const res = await fetch('https://api.hyperliquid.xyz/info', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ type: 'metaAndAssetCtxs' }),
-  });
+  const res = await fetchHyperliquidInfo({ type: 'metaAndAssetCtxs' });
   if (!res.ok) throw new Error('Hyperliquid info ' + res.status);
   const [meta, ctxs] = await res.json();
   const idx = (meta.universe || []).findIndex(u => u.name === coinName);

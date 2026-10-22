@@ -129,6 +129,13 @@ jobs:
                 | "\($t/1000|todate): \($miss|length) missing [\($miss|join(","))] present=\($pres|length) span_s=\(if ($pres|length)>0 then ((($pres|map(.t1)|max) - ($pres|map(.t0)|min))/1000|floor) else null end)" ),
               "--- write latency of complete ticks: max seconds after tick start = \([ $ticks[] as $t | [ $series[] | $ix["\(.)@\($t)"] | select(.) ] | select(length==12) | ((map(.t1)|max) - $t)/1000 | floor ] | (if length>0 then {min: min, median: (sort|.[length/2|floor]), max: max} else null end))"
           ' grid.json
+          echo "=== A2. off-grid prediction rows (written >5 min after a tick), last 7 days: series, ts, minutes after tick"
+          SQL2="SELECT 'BTC' coin, horizon_hours h, 'core' m, ts FROM predictions WHERE ts >= $SINCE_MS AND ts % $T >= $G
+          UNION ALL SELECT 'ETH', horizon_hours, 'core', ts FROM eth_predictions WHERE ts >= $SINCE_MS AND ts % $T >= $G
+          UNION ALL SELECT 'LINK', horizon_hours, 'core', ts FROM link_predictions WHERE ts >= $SINCE_MS AND ts % $T >= $G
+          UNION ALL SELECT coin, horizon_hours, 'challenger', ts FROM challenger_predictions WHERE ts >= $SINCE_MS AND ts % $T >= $G ORDER BY ts LIMIT 300"
+          $W d1 execute "$DB_NAME" --remote --json --command "$SQL2" > offgrid.json; echo "d1 rc=$?"
+          jq -r --argjson T "$T" '.[0].results as $r | "off-grid rows: \($r|length)", ($r[] | "\(.coin)/\(.h)/\(.m) \(.ts/1000|floor|todate) +\(((.ts % $T)/60000)|floor)min after tick \(((.ts - (.ts % $T))/1000)|todate)")' offgrid.json
           echo "=== D. 7-day Worker log review (owner-approved 2026-10-22): per tick, per chain; warnings; 429s outside ticks"
           tq() { # $1 from_ms $2 to_ms $3 extra filter json (or empty) -> logs page on stdout
             local f; f=$(jq -nc --argjson f "$1" --argjson t "$2" --argjson x "${3:-null}" '{queryId: "pf-7d", timeframe: {from: $f, to: $t}, view: "events", limit: 1000, parameters: {filters: ([{key: "$workers.scriptName", operation: "eq", type: "string", value: "pulseworker-v2"}] + (if $x then [$x] else [] end))}}')

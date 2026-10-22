@@ -155,7 +155,7 @@ jobs:
           EV='[.result.events.events[]? | {ts: (.timestamp // 0), level: (.["$metadata"].level // (if (.source|type)=="object" then .source.level else null end) // .level // ""), j: (if (.source|type)=="object" and .source.evt then .source else null end), msg: ((.["$metadata"].message // (if (.source|type)=="object" then .source.message else null end) // .message // (.source|tostring)) | tostring)}]'
           : > ticks.jsonl
           FIRST_TICK=$(( (SINCE_MS / T + 1) * T ))
-          for (( t=FIRST_TICK; t <= NOW_MS - 1800000; t += T )); do
+          for (( t=FIRST_TICK; t <= NOW_MS - 600000; t += T )); do
             tq "$t" $(( t + 1800000 )) "" | jq -c --argjson t "$t" "{tick: \$t, ok: (.success == true), err: ([.errors[]?.message] | .[0:1]), ev: $EV}" >> ticks.jsonl
           done
           jq -s -r --argjson T "$T" '

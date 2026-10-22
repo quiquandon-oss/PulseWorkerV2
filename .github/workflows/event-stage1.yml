@@ -133,7 +133,7 @@ jobs:
           tq() { # $1 from_ms $2 to_ms $3 extra filter json (or empty) -> logs page on stdout
             local f; f=$(jq -nc --argjson f "$1" --argjson t "$2" --argjson x "${3:-null}" '{queryId: "pf-7d", timeframe: {from: $f, to: $t}, view: "events", limit: 1000, parameters: {filters: ([{key: "$workers.scriptName", operation: "eq", type: "string", value: "pulseworker-v2"}] + (if $x then [$x] else [] end))}}')
             curl -sS -m 60 -X POST "https://api.cloudflare.com/client/v4/accounts/$ACCT/workers/observability/telemetry/query" -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" -H 'Content-Type: application/json' --data "$f"; }
-          EV='[.result.events.events[]? | {ts: (.timestamp // 0), level: (.["$metadata"].level // .level // ""), msg: ((.["$metadata"].message // .message // "") | tostring)}]'
+          EV='[.result.events.events[]? | {ts: (.timestamp // 0), level: (.["$metadata"].level // (if (.source|type)=="object" then .source.level else null end) // .level // ""), j: (if (.source|type)=="object" and .source.evt then .source else null end), msg: ((.["$metadata"].message // (if (.source|type)=="object" then .source.message else null end) // .message // (.source|tostring)) | tostring)}]'
           : > ticks.jsonl
           FIRST_TICK=$(( (SINCE_MS / T + 1) * T ))
           for (( t=FIRST_TICK; t <= NOW_MS - 1800000; t += T )); do
@@ -148,7 +148,7 @@ jobs:
               "log retention: earliest event returned = \(if ($evs|length)>0 then ($evs | map(.ts) | min / 1000 | floor | todate) else "none" end); events total = \($evs|length)",
               "--- per tick: chains (coin/h: started? result) -- only ticks with a non-ok chain or a warning are listed",
               ( $all[] | select(.ok) | .tick as $tk
-                | [ .ev[] | . as $e | (try (.msg | fromjson) catch null) as $j | select($j and $j.evt) | $j + {lvl: $e.level} ] as $js
+                | [ .ev[] | . as $e | (.j // (try (.msg | fromjson) catch null)) as $j | select($j and $j.evt) | $j + {lvl: $e.level} ] as $js
                 | [ "BTC","LINK","ETH" ] as $coins
                 | [ $coins[] as $c | (24,12) as $h
                     | [ $js[] | select(.coin == $c and .horizon == $h) ] as $cj
@@ -160,9 +160,9 @@ jobs:
                 | select(([ $ch[] | select(.failed or (.started|not) or (.done and (.done.prediction_status != "ok"))) ] | length) > 0 or ($w|length) > 0)
                 | "\($tk/1000|todate): " + ([ $ch[] | "\(.k)=" + (if .failed then "FAILED(\(.failed.error_message|tostring|red); \(.failed.elapsed_ms)ms)" elif .done then "done(\(.done.prediction_status // "?")/chal:\(.done.challenger_status // .done.challenger_ok | tostring))" elif .started then "started-no-result" else "NOT-STARTED" end) ] | join(" | ")) + (if ($w|length)>0 then "  warnings=\($w|length)" else "" end) ),
               "--- error messages in tick windows (count, normalised)",
-              ( [ $evs[] | select(.level == "error") | . as $x | (try ($x.msg|fromjson|.error_message // .evt) catch $x.msg) | tostring | red | norm ] | group_by(.) | map("\(length)x \(.[0])") | .[] ),
+              ( [ $evs[] | select(.level == "error") | . as $x | (if $x.j then ($x.j.error_message // $x.j.evt) else (try ($x.msg|fromjson|.error_message // .evt) catch $x.msg) end) | tostring | red | norm ] | group_by(.) | map("\(length)x \(.[0])") | .[] ),
               "--- warning messages in tick windows (count, normalised)",
-              ( [ $evs[] | select(.level == "warn" or .level == "warning") | . as $x | (try ($x.msg|fromjson|.evt + " " + ((.error_message // .reason // .status // "")|tostring)) catch $x.msg) | tostring | red | norm ] | group_by(.) | map("\(length)x \(.[0])") | .[] )
+              ( [ $evs[] | select(.level == "warn" or .level == "warning") | . as $x | (if $x.j then ($x.j.evt + " " + (($x.j.error_message // $x.j.reason // $x.j.status // "")|tostring)) else (try ($x.msg|fromjson|.evt + " " + ((.error_message // .reason // .status // "")|tostring)) catch $x.msg) end) | tostring | red | norm ] | group_by(.) | map("\(length)x \(.[0])") | .[] )
           ' ticks.jsonl
           echo "--- 429 mentions anywhere in the last 7 days (error level, whole range; page limit 1000)"
           tq "$SINCE_MS" "$NOW_MS" '{"key":"$metadata.level","operation":"eq","type":"string","value":"error"}' > err7.json

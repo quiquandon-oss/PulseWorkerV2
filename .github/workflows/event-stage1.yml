@@ -136,6 +136,18 @@ jobs:
           UNION ALL SELECT coin, horizon_hours, 'challenger', ts FROM challenger_predictions WHERE ts >= $SINCE_MS AND ts % $T >= $G ORDER BY ts LIMIT 300"
           $W d1 execute "$DB_NAME" --remote --json --command "$SQL2" > offgrid.json; echo "d1 rc=$?"
           jq -r --argjson T "$T" '.[0].results as $r | "off-grid rows: \($r|length)", ($r[] | "\(.coin)/\(.h)/\(.m) \(.ts/1000|floor|todate) +\(((.ts % $T)/60000)|floor)min after tick \(((.ts - (.ts % $T))/1000)|todate)")' offgrid.json
+          echo "=== E. subrequest headroom of the 3h tick (GraphQL workersInvocationsAdaptive, first 3 min of each tick, last 7 days)"
+          FROM7=$(date -u -d '-7 days' +%FT%TZ); TO7=$(date -u +%FT%TZ)
+          QE=$(jq -nc --arg a "$ACCT" --arg f "$FROM7" --arg t "$TO7" '{query: "query($a: String!, $f: Time!, $t: Time!) { viewer { accounts(filter: {accountTag: $a}) { workersInvocationsAdaptive(limit: 5000, filter: {scriptName: \"pulseworker-v2\", datetime_geq: $f, datetime_leq: $t}, orderBy: [datetimeMinute_ASC]) { dimensions { datetimeMinute status } sum { requests subrequests errors } max { cpuTime wallTime } } } } }", variables: {a: $a, f: $f, t: $t}}')
+          curl -sS -m 60 -X POST https://api.cloudflare.com/client/v4/graphql -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" -H 'Content-Type: application/json' --data "$QE" > adaptive.json
+          jq -r 'if (.errors // [] | length) > 0 then "adaptive unavailable: \([.errors[]?.message] | .[0:3] | tostring | .[0:400])" else
+            (.data.viewer.accounts[0].workersInvocationsAdaptive
+             | map(select((.dimensions.datetimeMinute[11:13] | tonumber) % 3 == 0 and (.dimensions.datetimeMinute[14:16] | tonumber) < 3))
+             | group_by(.dimensions.datetimeMinute[0:13])
+             | map({tick: .[0].dimensions.datetimeMinute[0:13], requests: (map(.sum.requests)|add), subrequests: (map(.sum.subrequests)|add), errors: (map(.sum.errors)|add), max_wall_ms: (map(.max.wallTime // 0)|max/1000|floor)})) as $t
+            | "ticks with data: \($t|length); subrequests per tick window (all invocations in the window): min=\($t|map(.subrequests)|min) median=\($t|map(.subrequests)|sort|.[length/2|floor]) max=\($t|map(.subrequests)|max); requests per window max=\($t|map(.requests)|max)",
+              ($t[] | select(.subrequests >= ($t|map(.subrequests)|sort|.[(length*0.9)|floor])) | "  high: \(.tick)Z subreq=\(.subrequests) req=\(.requests) err=\(.errors) max_wall_ms=\(.max_wall_ms)")
+          end' adaptive.json
           echo "=== D. 7-day Worker log review (owner-approved 2026-10-22): per tick, per chain; warnings; 429s outside ticks"
           tq() { # $1 from_ms $2 to_ms $3 extra filter json (or empty) -> logs page on stdout
             local f; f=$(jq -nc --argjson f "$1" --argjson t "$2" --argjson x "${3:-null}" '{queryId: "pf-7d", timeframe: {from: $f, to: $t}, view: "events", limit: 1000, parameters: {filters: ([{key: "$workers.scriptName", operation: "eq", type: "string", value: "pulseworker-v2"}] + (if $x then [$x] else [] end))}}')

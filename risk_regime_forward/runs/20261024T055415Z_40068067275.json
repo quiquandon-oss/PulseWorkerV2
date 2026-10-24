@@ -1,0 +1,93 @@
+{
+ "artifact": "risk-regime-forward-run",
+ "attempts": [
+  {
+   "completeness": "COMPLETE",
+   "duplicates_dropped": 0,
+   "expected_slots": 48,
+   "internal_conflicts": {},
+   "missing_ranges": {},
+   "missing_slots": 0,
+   "observations": 48,
+   "partition": "2026-10-23",
+   "source": "hyperliquid_btc_funding",
+   "status": "UNCHANGED"
+  },
+  {
+   "partition": null,
+   "requests": {
+    "fundingHistory_FETCHED": 2,
+    "fundingHistory_page_max_rows": 24
+   },
+   "source": "hyperliquid",
+   "status": "REQUEST_LOG"
+  },
+  {
+   "completeness": "OPEN",
+   "duplicates_dropped": 0,
+   "expected_slots": 12,
+   "fingerprint": "098126a81b212d48234875bd659b0e33d502dfad3e259703ce8bddbd34924e1d",
+   "internal_conflicts": {},
+   "missing_ranges": {},
+   "missing_slots": 0,
+   "observations": 12,
+   "partition": "2026-10-24",
+   "source": "hyperliquid_btc_funding",
+   "status": "SUPERSEDED"
+  },
+  {
+   "partition": null,
+   "requests": {
+    "fundingHistory_FETCHED": 2,
+    "fundingHistory_page_max_rows": 6
+   },
+   "source": "hyperliquid",
+   "status": "REQUEST_LOG"
+  },
+  {
+   "completeness": "OPEN",
+   "duplicates_dropped": 0,
+   "expected_slots": 1,
+   "internal_conflicts": {},
+   "missing_ranges": {},
+   "missing_slots": 0,
+   "observations": 2,
+   "partition": "2026-10-24",
+   "source": "okx_btc_funding",
+   "status": "UNCHANGED"
+  },
+  {
+   "irregular_spacing_ms": [],
+   "pages": 1,
+   "partition": null,
+   "requests": {
+    "http_200": 1
+   },
+   "source": "okx",
+   "status": "REQUEST_LOG"
+  }
+ ],
+ "errors": [],
+ "finished_at": "2026-10-24T05:54:19.170000+00:00",
+ "location": {
+  "checked_at": "2026-10-24T05:54:17.190000+00:00",
+  "colo": "ORD",
+  "ip_sha256_prefix": "98f32ab4f58d",
+  "loc": "US",
+  "source": "https://www.cloudflare.com/cdn-cgi/trace",
+  "status": 200
+ },
+ "open_day": true,
+ "run_id": "40068067275",
+ "sources": [
+  "hyperliquid_btc_funding",
+  "okx_btc_funding"
+ ],
+ "stale_sources": [],
+ "started_at": "2026-10-24T05:54:15.708000+00:00",
+ "summary": {
+  "REQUEST_LOG": 3,
+  "SUPERSEDED": 1,
+  "UNCHANGED": 2
+ }
+}

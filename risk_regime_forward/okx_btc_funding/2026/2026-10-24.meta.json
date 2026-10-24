@@ -1,0 +1,20 @@
+{
+ "completeness": "OPEN",
+ "expected_slots": 1,
+ "file_sha256": "c230ef3e7710571253d629c3a4ea9167fa250c370b65ffe7634fd365b6e6f9b4",
+ "fingerprint": "0dd5532ef107218896e69e6d475430cd4241c40f66dd748a642e5e8c1a7c16bd",
+ "first_collected_at": "2026-10-24T00:42:30.492000+00:00",
+ "last_run_id": "40046291280",
+ "last_written_at": "2026-10-24T00:42:30.492000+00:00",
+ "missing_ranges": {},
+ "missing_slots": 0,
+ "observations": 2,
+ "partition": "2026-10-24",
+ "raw_sha256": "ff994638f095c0c18d0482e892553729e2bdeefb397a36721eb39c6efff185c1",
+ "source": "okx_btc_funding",
+ "superseded": [],
+ "units": {
+  "funding_rate": "rate per funding interval (nominal 8h)",
+  "realized_rate": "rate per funding interval"
+ }
+}

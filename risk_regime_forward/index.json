@@ -17,7 +17,7 @@
    "with_gaps": []
   },
   "binance_oi_archive": {
-   "complete": 15,
+   "complete": 16,
    "files": {
     "2026-10-08": "43e220f6400fefd897939ff9eddaefaa04383ae9f90ae61b539ffdcb30eb4c63",
     "2026-10-09": "e72681a67d992f975d340fda4929b01736e40e177d4e8eaa24327c58dfe90dc3",
@@ -33,13 +33,14 @@
     "2026-10-19": "e6683cbd6cbdb3ea19cb3f86e0bc12f03e1b2a5a59abbaccfaffa9712f62c55d",
     "2026-10-20": "f3644d0725e1aff5ae93289a9e3bfdd4ec7d684447a3fe3911c227837922d125",
     "2026-10-21": "ad52c7695a10b2cb11a24f7ceaf8fc73d05f79686701ead8a1e24209f7d01601",
-    "2026-10-22": "d630b3974afe357381d9cb56280e2ed90e73463f835f73260ea1bff43c7fdee1"
+    "2026-10-22": "d630b3974afe357381d9cb56280e2ed90e73463f835f73260ea1bff43c7fdee1",
+    "2026-10-23": "807cb26ae0d3c4c066f97b29c41663ef5b332f38587dec2e9cdeaa69afa48106"
    },
    "first": "2026-10-08",
-   "last": "2026-10-22",
-   "latest_complete": "2026-10-22",
-   "observations": 8640,
-   "partitions": 15,
+   "last": "2026-10-23",
+   "latest_complete": "2026-10-23",
+   "observations": 9216,
+   "partitions": 16,
    "retention": "archive keeps daily files back to 2021-12; no expiry is documented",
    "stale": false,
    "units": {
@@ -87,7 +88,7 @@
    ]
   },
   "hyperliquid_hip3": {
-   "complete": 17,
+   "complete": 18,
    "files": {
     "2026-10-06": "6f077d57361d432cd8918dad8196cab5327bb15fddaf2c274cc682ae2f438832",
     "2026-10-07": "a9c86721256001199a4c24cc4297284d3b7f8ac6bbd8d112feadcb30f7125d52",
@@ -105,13 +106,14 @@
     "2026-10-19": "79a77bbab559e891b2b9ff65b4744ec2cc875c380cf1bdb9df460fd614b80cb0",
     "2026-10-20": "9ef92d86e0986f5f41736fff583f89e6c03ad1fe113ace874a45cc6c3a67d679",
     "2026-10-21": "2d16a9fd3dc644e8e4591a9ea247d9d4f356b87358806ee1b09fbf66925db7a3",
-    "2026-10-22": "6a01a1a9c63864ed366a321f338ebac1ddcafbf09b6a7506429ded9e9e6bb0a4"
+    "2026-10-22": "6a01a1a9c63864ed366a321f338ebac1ddcafbf09b6a7506429ded9e9e6bb0a4",
+    "2026-10-23": "7236b7939245fa3d7445508e13fa4b35e4ab73b144b100330e6ec4992c63ec23"
    },
    "first": "2026-10-06",
-   "last": "2026-10-22",
-   "latest_complete": "2026-10-22",
-   "observations": 7200,
-   "partitions": 17,
+   "last": "2026-10-23",
+   "latest_complete": "2026-10-23",
+   "observations": 7632,
+   "partitions": 18,
    "retention": "candleSnapshot serves only the latest 5,000 candles (1h ~ 208 days): collect well within that",
    "stale": false,
    "units": {

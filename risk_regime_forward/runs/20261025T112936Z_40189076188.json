@@ -1,0 +1,94 @@
+{
+ "artifact": "risk-regime-forward-run",
+ "attempts": [
+  {
+   "completeness": "COMPLETE",
+   "duplicates_dropped": 0,
+   "expected_slots": 48,
+   "internal_conflicts": {},
+   "missing_ranges": {},
+   "missing_slots": 0,
+   "observations": 48,
+   "partition": "2026-10-24",
+   "source": "hyperliquid_btc_funding",
+   "status": "UNCHANGED"
+  },
+  {
+   "partition": null,
+   "requests": {
+    "fundingHistory_FETCHED": 2,
+    "fundingHistory_page_max_rows": 24
+   },
+   "source": "hyperliquid",
+   "status": "REQUEST_LOG"
+  },
+  {
+   "completeness": "OPEN",
+   "duplicates_dropped": 0,
+   "expected_slots": 24,
+   "fingerprint": "9fd4db30231affbf35bf5bb04b2dad1e39aef39893ffd3a24c4b10aa0a9e8819",
+   "internal_conflicts": {},
+   "missing_ranges": {},
+   "missing_slots": 0,
+   "observations": 24,
+   "partition": "2026-10-25",
+   "source": "hyperliquid_btc_funding",
+   "status": "SUPERSEDED"
+  },
+  {
+   "partition": null,
+   "requests": {
+    "fundingHistory_FETCHED": 2,
+    "fundingHistory_page_max_rows": 12
+   },
+   "source": "hyperliquid",
+   "status": "REQUEST_LOG"
+  },
+  {
+   "completeness": "OPEN",
+   "duplicates_dropped": 0,
+   "expected_slots": 2,
+   "fingerprint": "5d7cce4590e33342c9249f7e18a780d676ce7cce94d2ccf5fdbf0d42976e1564",
+   "internal_conflicts": {},
+   "missing_ranges": {},
+   "missing_slots": 0,
+   "observations": 4,
+   "partition": "2026-10-25",
+   "source": "okx_btc_funding",
+   "status": "SUPERSEDED"
+  },
+  {
+   "irregular_spacing_ms": [],
+   "pages": 1,
+   "partition": null,
+   "requests": {
+    "http_200": 1
+   },
+   "source": "okx",
+   "status": "REQUEST_LOG"
+  }
+ ],
+ "errors": [],
+ "finished_at": "2026-10-25T11:29:39.592000+00:00",
+ "location": {
+  "checked_at": "2026-10-25T11:29:37.830000+00:00",
+  "colo": "SJC",
+  "ip_sha256_prefix": "0a9c91ec1ff5",
+  "loc": "US",
+  "source": "https://www.cloudflare.com/cdn-cgi/trace",
+  "status": 200
+ },
+ "open_day": true,
+ "run_id": "40189076188",
+ "sources": [
+  "hyperliquid_btc_funding",
+  "okx_btc_funding"
+ ],
+ "stale_sources": [],
+ "started_at": "2026-10-25T11:29:36.129000+00:00",
+ "summary": {
+  "REQUEST_LOG": 3,
+  "SUPERSEDED": 2,
+  "UNCHANGED": 1
+ }
+}

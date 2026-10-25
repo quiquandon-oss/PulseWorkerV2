@@ -1,0 +1,132 @@
+# RESEARCH ONLY -- Google Drive research archive: DAILY FEED (13:30 UTC).
+#
+# Publishes the append-only archive feed that the owner's Apps Script ("CryptoPulseV2 archive sync") mirrors into
+# My Drive/CryptoPulseV2_Research_Archive at 14:00 UTC. Design: research/archive/INCREMENTAL_ARCHIVE.md on branch
+# claude/epic-planck-uyapsw-archive. The archive code is NOT on main: it is checked out read-only at the pinned,
+# reviewed commit below, and its own tests must pass before a feed is published.
+#
+# Isolation:
+# - reads git only: no D1, no Cloudflare, no Google credential, no secrets. The D1 data it archives is what
+#   export-learning-data.yml already commits to main (data-exports/), plus the existing research branches;
+# - writes: only refs/heads/archive-feed, only feed.json and blobs/<sha256>; never force-pushes;
+# - append-only: the new feed must keep every previously listed path with identical checksums, and an existing
+#   blob is never replaced. Otherwise the job fails and nothing is pushed;
+# - deploy.yml runs only on pushes to main touching worker.js / wrangler.toml / package*.json / deploy.yml.
+#   This file matches none of them, and the job never pushes to main.
+name: research-archive-feed
+
+on:
+  schedule:
+    - cron: '30 13 * * *'      # daily 13:30 UTC: after the learning export lands, before the 14:00 UTC Drive sync
+  workflow_dispatch: {}        # manual run, e.g. to seed archive-feed right after merge
+
+permissions:
+  contents: write              # only to push refs/heads/archive-feed
+
+concurrency:
+  group: research-archive-feed
+  cancel-in-progress: false
+
+env:
+  ARCHIVE_CODE_SHA: 1a8bae7a6f9588f3deeb9e6bee80a0ff15bb7306   # claude/epic-planck-uyapsw-archive, reviewed
+  FEED_BRANCH: archive-feed
+
+jobs:
+  feed:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: "Check out the archive code (pinned, read-only)"
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683   # v4.2.2
+        with:
+          ref: ${{ env.ARCHIVE_CODE_SHA }}
+          path: code
+          persist-credentials: false
+
+      - name: "Check out every branch with full history (the planner reads origin/* refs)"
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683   # v4.2.2
+        with:
+          path: repo
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: "Archive code tests (planner, Drive mirror, Apps Script entry points)"
+        working-directory: code
+        run: |
+          set -euo pipefail
+          python3 -m pip install --quiet pytest==8.3.3
+          python3 -m pytest -q -p no:cacheprovider research/archive/test_increment.py
+          node research/archive/apps_script/test_mirror.mjs
+          node research/archive/apps_script/test_entrypoints.mjs
+
+      - name: "Previous feed: archive-feed if it exists, else the verified baseline"
+        run: |
+          set -euo pipefail
+          if git -C repo rev-parse -q --verify "refs/remotes/origin/${FEED_BRANCH}" >/dev/null; then
+            git -C repo worktree add -q --detach ../feed "origin/${FEED_BRANCH}"
+            echo "PREVIOUS=feed/feed.json" >> "$GITHUB_ENV"
+          else
+            git -C repo worktree add -q --detach ../feed HEAD
+            git -C feed checkout -q --orphan "${FEED_BRANCH}"
+            git -C feed rm -rf -q .
+            echo "PREVIOUS=code/research/archive/baseline/feed-000000.json" >> "$GITHUB_ENV"
+            echo "SEEDING=1" >> "$GITHUB_ENV"
+          fi
+
+      - name: "Plan the increment (append-only; a changed archived file is a PlanConflict and fails the job)"
+        run: python3 code/research/archive/increment.py plan --repo repo --previous "$PREVIOUS" --out out
+
+      - name: "Verify: strict extension of the previous feed, blobs named by their SHA-256"
+        run: |
+          python3 -I - "$PREVIOUS" out <<'EOF'
+          import hashlib, json, os, sys
+          prev, out = json.load(open(sys.argv[1])), sys.argv[2]
+          new = json.load(open(os.path.join(out, "feed.json")))
+          cur = {f["path"]: f for f in new["files"]}
+          if len(cur) != len(new["files"]):
+              sys.exit("duplicate paths in the new feed")
+          for f in prev["files"]:
+              g = cur.get(f["path"])
+              if g is None:
+                  sys.exit(f"FEED_DROPPED_PATH {f['path']}")
+              if f.get("sha256") and g.get("sha256") != f["sha256"]:
+                  sys.exit(f"FEED_CHANGED_PATH {f['path']}")
+          if new["feed_seq"] < prev.get("feed_seq", 0):
+              sys.exit("feed_seq went backwards")
+          for name in os.listdir(os.path.join(out, "blobs")) if os.path.isdir(os.path.join(out, "blobs")) else []:
+              if hashlib.sha256(open(os.path.join(out, "blobs", name), "rb").read()).hexdigest() != name:
+                  sys.exit(f"blob {name} does not match its name")
+          added = [f for f in new["files"] if f["path"] not in {p["path"] for p in prev["files"]}]
+          print(f"feed_seq {prev.get('feed_seq', 0)} -> {new['feed_seq']}; files {len(prev['files'])} -> "
+                f"{len(new['files'])}; added {len(added)} ({sum(f['size'] for f in added)} bytes)")
+          EOF
+
+      - name: "Publish to archive-feed only (skipped when nothing changed)"
+        working-directory: feed
+        env:
+          PUSH_TOKEN: ${{ github.token }}   # only this step sees the token; it pushes only the fixed refspec below
+        run: |
+          set -euo pipefail
+          if [ -z "${SEEDING:-}" ] && python3 -I -c '
+          import json, sys
+          a, b = (json.load(open(p)) for p in sys.argv[1:3])
+          sys.exit(0 if (a["files_sha256"], a.get("code_heads"), a["feed_seq"]) == (b["files_sha256"], b.get("code_heads"), b["feed_seq"]) else 1)
+          ' feed.json ../out/feed.json; then
+            echo "feed unchanged; nothing to publish"; exit 0
+          fi
+          mkdir -p blobs
+          for f in ../out/blobs/*; do
+            [ -e "$f" ] || continue
+            b="blobs/$(basename "$f")"
+            if [ -e "$b" ]; then cmp -s "$f" "$b" || { echo "::error::existing blob differs: $b"; exit 1; }
+            else cp "$f" "$b"; fi
+          done
+          cp ../out/feed.json feed.json
+          git add -A feed.json blobs
+          outside=$(git diff --cached --name-only | grep -v -E '^(feed\.json|blobs/[0-9a-f]{64})$' || true)
+          if [ -n "$outside" ]; then echo "::error::refusing to commit outside feed.json/blobs/: $outside"; exit 1; fi
+          git config user.name "research-archive-feed[bot]"
+          git config user.email "research-archive-feed@users.noreply.github.com"
+          seq=$(python3 -c 'import json; print(json.load(open("feed.json"))["feed_seq"])')
+          git commit -q -m "Archive feed seq ${seq} (run ${GITHUB_RUN_ID}, ${GITHUB_EVENT_NAME})"
+          git push "https://x-access-token:${PUSH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" "HEAD:refs/heads/${FEED_BRANCH}"

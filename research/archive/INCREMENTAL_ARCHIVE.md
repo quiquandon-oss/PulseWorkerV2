@@ -62,7 +62,13 @@ Each entry has:
 ### What the planner adds (`increment.py plan`)
 
 - **Append-only stores** (the forward collector): each new partition once, under `…/partitions/`. A partition
-  whose bytes changed upstream is a **PlanConflict**, and the job fails. Mutable files (the index) go into a new
+  whose bytes changed upstream is a **PlanConflict**, and the job fails.
+  - **Only settled partitions (2026-10-27).** The collector keeps rewriting a day while it is `OPEN` (the current UTC
+    day, collected hourly by EXP-23 with `--open-day` since 2026-10-17) or has `GAPS`, for up to 60 days. So a
+    forward-store day (data, `.meta.json` and raw file together) is archived only when its meta says `COMPLETE` and
+    the meta's `file_sha256` / `raw_sha256` match the files, or once it is older than the 60-day retry window.
+    Unsettled days wait for a later run. Before this rule, feed seq 1 (2026-10-25) listed that day's open funding
+    partitions, and the next run stopped with a PlanConflict when they were completed. Mutable files (the index) go into a new
   `snapshot=<date>_git-<commit>/`.
 - **Frozen datasets, pre-registrations, run records, exports:** a new `snapshot=` folder only when the dataset's
   content differs from every archived snapshot. Old snapshots are never replaced. Daily export versions therefore

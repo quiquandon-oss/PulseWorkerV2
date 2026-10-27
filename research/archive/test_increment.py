@@ -220,3 +220,86 @@ def test_staged_increment_feed_extends_the_baseline_by_exactly_its_new_files():
     for e in stage["files"][len(base["files"]):]:
         blob = (HERE / "feed_stage" / "blobs" / e["sha256"]).read_bytes()
         assert hashlib.sha256(blob).hexdigest() == e["sha256"] and len(blob) == e["size"] and e["url"].endswith(e["sha256"])
+
+
+# ------------------------------------------------------------------ forward store: only settled partitions
+
+def _fwd_day(source, label, rows, completeness, raw=b'{"r": 1}\n', meta_override=None):
+    """Data, meta and raw files of one forward-store partition, as research/risk_regime_forward.py writes them."""
+    y = label[:4]
+    data = gzip.compress(b"".join(json.dumps({"timestamp": t}).encode() + b"\n" for t in rows), mtime=0)
+    rawb = gzip.compress(raw, mtime=0)
+    meta = {"partition": label, "source": source, "completeness": completeness,
+            "file_sha256": hashlib.sha256(data).hexdigest(), "raw_sha256": hashlib.sha256(rawb).hexdigest()}
+    meta.update(meta_override or {})
+    return {f"risk_regime_forward/{source}/{y}/{label}.jsonl.gz": data,
+            f"risk_regime_forward/{source}/{y}/{label}.meta.json": json.dumps(meta).encode(),
+            f"risk_regime_forward/raw/{source}/{y}/{label}.jsonl.gz": rawb}
+
+
+@pytest.fixture
+def fwd_repo(tmp_path):
+    up = tmp_path / "up"
+    up.mkdir()
+    git(up, "init", "-q", "-b", "data")
+    git(up, "config", "user.email", "t@example.invalid")
+    git(up, "config", "user.name", "t")
+    clone = tmp_path / "clone"
+    for p, data in {**_fwd_day("hl", "2026-10-24", [1, 2], "COMPLETE"), **_fwd_day("hl", "2026-10-25", [1], "OPEN"),
+                    "risk_regime_forward/runs/r1.json": b"{}", "risk_regime_forward/index.json": b'{"n": 1}'}.items():
+        (up / p).parent.mkdir(parents=True, exist_ok=True)
+        (up / p).write_bytes(data)
+    git(up, "add", "-A")
+    git(up, "commit", "-q", "-m", "seed")
+    subprocess.run(["git", "clone", "-q", str(up), str(clone)], check=True)
+    catalog = {"catalog_version": "t", "datasets": [
+        {"id": "rr_forward_store", "status": "PROSPECTIVE_APPEND_ONLY", "format": "jsonl.gz", "provenance": "t",
+         "mutable_paths": ["risk_regime_forward/index.json"],
+         "source": {"kind": "git", "ref": "origin/data", "paths": ["risk_regime_forward/*/2026/*.jsonl.gz",
+                    "risk_regime_forward/*/2026/*.meta.json", "risk_regime_forward/raw/*/2026/*.jsonl.gz",
+                    "risk_regime_forward/runs/*.json", "risk_regime_forward/index.json"]}}]}
+    return up, clone, catalog
+
+
+def _fwd_paths(feed):
+    return {f["path"].split("/partitions/")[1] for f in feed["files"] if "/partitions/" in f["path"]}
+
+
+def test_open_forward_day_is_deferred_then_archived_once_complete_without_conflict(fwd_repo):
+    up, clone, cat = fwd_repo
+    today = increment.dt.date(2026, 10, 25)
+    empty = {"files": [], "feed_seq": 0, "code_heads": {}}
+    f1, _, _ = increment.plan(clone, empty, cat, code_refs=["data"], today=today)
+    got = _fwd_paths(f1)
+    assert "risk_regime_forward/hl/2026/2026-10-24.jsonl.gz" in got                       # COMPLETE: archived
+    assert "risk_regime_forward/raw/hl/2026/2026-10-24.jsonl.gz" in got
+    assert not any("2026-10-25" in p for p in got)                                        # OPEN: data, meta, raw all held back
+    assert "risk_regime_forward/runs/r1.json" in got                                      # run records are not partitions of a day
+    # the collector supersedes the open day and later marks it COMPLETE (the exact case that broke run 2)
+    commit(up, clone, _fwd_day("hl", "2026-10-25", [1, 2], "OPEN"), "open day grows")
+    f2, _, new2 = increment.plan(clone, f1, cat, code_refs=["data"], today=today)
+    assert not any("2026-10-25" in e["path"] for e in new2 if "/partitions/" in e["path"])
+    commit(up, clone, _fwd_day("hl", "2026-10-25", [1, 2, 3], "COMPLETE"), "day closed")
+    f3, _, new3 = increment.plan(clone, f2, cat, code_refs=["data"], today=today + increment.dt.timedelta(days=1))
+    assert {e["path"].split("/partitions/")[1] for e in new3 if "/partitions/" in e["path"]} >= {
+        "risk_regime_forward/hl/2026/2026-10-25.jsonl.gz", "risk_regime_forward/hl/2026/2026-10-25.meta.json",
+        "risk_regime_forward/raw/hl/2026/2026-10-25.jsonl.gz"}
+    assert f3["files"][: len(f2["files"])] == f2["files"]                                 # strictly appended
+
+
+def test_forward_day_with_gaps_waits_until_outside_the_retry_window(fwd_repo):
+    up, clone, cat = fwd_repo
+    commit(up, clone, _fwd_day("hl", "2026-08-01", [1], "GAPS"), "a day with gaps")
+    empty = {"files": [], "feed_seq": 0, "code_heads": {}}
+    inside, _, _ = increment.plan(clone, empty, cat, code_refs=["data"], today=increment.dt.date(2026, 9, 30))
+    assert not any("2026-08-01" in p for p in _fwd_paths(inside))                         # 60 days: still retried
+    outside, _, _ = increment.plan(clone, empty, cat, code_refs=["data"], today=increment.dt.date(2026, 10, 1))
+    assert "risk_regime_forward/hl/2026/2026-08-01.jsonl.gz" in _fwd_paths(outside)        # 61 days: frozen as it is
+
+
+def test_forward_day_whose_meta_does_not_match_its_files_is_held_back(fwd_repo):
+    up, clone, cat = fwd_repo
+    commit(up, clone, _fwd_day("hl", "2026-10-23", [1], "COMPLETE", meta_override={"file_sha256": "0" * 64}), "mid-write")
+    f, _, _ = increment.plan(clone, {"files": [], "feed_seq": 0, "code_heads": {}}, cat, code_refs=["data"],
+                             today=increment.dt.date(2026, 10, 25))
+    assert not any("2026-10-23" in p for p in _fwd_paths(f))

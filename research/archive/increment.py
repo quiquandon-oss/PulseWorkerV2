@@ -151,6 +151,69 @@ def _records_meta(ds, path, data):
     return meta
 
 
+# Forward-store partitions the collector may still rewrite. research/risk_regime_forward.py retries every
+# partition that is not COMPLETE (OPEN: the current UTC day under --open-day; GAPS: missing slots) while it is
+# inside its --max-days window, superseding the stored file. A COMPLETE partition is never retried. So a day's
+# data, meta and raw files are archived together, and only once settled: COMPLETE with the meta's checksums
+# matching both files, or older than the retry window. Unsettled days are left for a later run.
+FORWARD_STORE_SETTLE = {"rr_forward_store": {"root": "risk_regime_forward", "retry_days": 60}}
+
+
+def _forward_partition_key(root, path):
+    """(source, label) of a forward-store data/meta/raw partition path, else None (runs/, index.json)."""
+    parts = path.split("/")
+    if len(parts) == 5 and parts[0] == root and parts[1] == "raw" and parts[4].endswith(".jsonl.gz"):
+        return parts[2], parts[4][: -len(".jsonl.gz")]
+    if len(parts) == 4 and parts[0] == root and parts[1] not in ("raw", "runs"):
+        for suffix in (".jsonl.gz", ".meta.json"):
+            if parts[3].endswith(suffix):
+                return parts[1], parts[3][: -len(suffix)]
+    return None
+
+
+def _label_end(label):
+    """Last day covered by a partition label (YYYY-MM-DD or YYYY-MM), or None if it is neither."""
+    try:
+        if len(label) == 10:
+            return dt.date.fromisoformat(label)
+        if len(label) == 7:
+            y, m = int(label[:4]), int(label[5:7])
+            return dt.date(y + m // 12, m % 12 + 1, 1) - dt.timedelta(days=1)
+    except ValueError:
+        return None
+    return None
+
+
+def unsettled_partitions(ds_id, datas, today):
+    """Paths of forward-store partitions that are not yet final (see FORWARD_STORE_SETTLE)."""
+    rule = FORWARD_STORE_SETTLE.get(ds_id)
+    if not rule:
+        return set()
+    groups = {}
+    for p in datas:
+        k = _forward_partition_key(rule["root"], p)
+        if k:
+            groups.setdefault(k, []).append(p)
+    out = set()
+    for (source, label), paths in groups.items():
+        end = _label_end(label)
+        if end is not None and (today - end).days > rule["retry_days"]:
+            continue                                  # outside the collector's retry window: frozen as it is
+        meta_path = f"{rule['root']}/{source}/{label[:4]}/{label}.meta.json"
+        data_path = f"{rule['root']}/{source}/{label[:4]}/{label}.jsonl.gz"
+        raw_path = f"{rule['root']}/raw/{source}/{label[:4]}/{label}.jsonl.gz"
+        try:
+            meta = json.loads(datas[meta_path])
+        except (KeyError, ValueError):
+            meta = None
+        settled = (meta is not None and meta.get("completeness") == "COMPLETE"
+                   and data_path in datas and meta.get("file_sha256") == sha256(datas[data_path])
+                   and (raw_path not in datas or meta.get("raw_sha256") == sha256(datas[raw_path])))
+        if not settled:
+            out.update(paths)
+    return out
+
+
 def plan(repo, previous, catalog=None, code_refs=None, today=None, blob_base=None):
     """Return (feed, blobs, new_entries). `previous` is the last feed (or the baseline feed).
 
@@ -185,8 +248,9 @@ def plan(repo, previous, catalog=None, code_refs=None, today=None, blob_base=Non
         url = lambda p: f"{RAW_BASE}/{src.commit}/{p}"   # noqa: E731  commit-pinned, immutable
         if ds["status"] == "PROSPECTIVE_APPEND_ONLY":
             mutable = [p for p in paths if not archive._is_partition(ds, p)]
+            unsettled = unsettled_partitions(ds["id"], datas, today or dt.datetime.now(dt.timezone.utc).date())
             for p in paths:
-                if p not in mutable:
+                if p not in mutable and p not in unsettled:
                     add(entry(f"{base}/partitions/{p}", datas[p], "git", url(p), ds["id"], "partitions"))
             paths = mutable
             if not paths:

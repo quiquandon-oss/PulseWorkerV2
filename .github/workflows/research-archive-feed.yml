@@ -28,7 +28,7 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  ARCHIVE_CODE_SHA: 1a8bae7a6f9588f3deeb9e6bee80a0ff15bb7306   # claude/epic-planck-uyapsw-archive, reviewed
+  ARCHIVE_CODE_SHA: 501dd610574376dd29193c1cef4d86b8b87bb163   # claude/epic-planck-uyapsw-archive, reviewed (settled-partition fix)
   FEED_BRANCH: archive-feed
 
 jobs:

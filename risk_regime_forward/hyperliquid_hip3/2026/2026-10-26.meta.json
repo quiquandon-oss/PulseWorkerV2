@@ -1,0 +1,20 @@
+{
+ "completeness": "COMPLETE",
+ "expected_slots": 432,
+ "file_sha256": "3fe161f8e3d9114f505d07d395bb38a17839d7d1d9be571b57ff106364beb114",
+ "fingerprint": "d4dd68b12bfb796fab7fb8cb685d4c13271d108ad68e427ee1d8935b803678ff",
+ "first_collected_at": "2026-10-27T15:59:33.060000+00:00",
+ "last_run_id": "40536449985",
+ "last_written_at": "2026-10-27T15:59:33.060000+00:00",
+ "missing_ranges": {},
+ "missing_slots": 0,
+ "observations": 432,
+ "partition": "2026-10-26",
+ "raw_sha256": "16c93072dc016a8f879179e5d423bfb9c946defbc1934698df73221262b8829b",
+ "source": "hyperliquid_hip3",
+ "superseded": [],
+ "units": {
+  "close": "price",
+  "volume": "base units"
+ }
+}

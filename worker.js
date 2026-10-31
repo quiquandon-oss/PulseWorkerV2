@@ -7876,23 +7876,23 @@ const PORTFOLIO_REVIEW = { proposed_ts: 1793404800000, proposed_by: 'Portfolio r
 const rec = (proposal, basis, next_checkpoint) => ({ proposal, basis, next_checkpoint, ...PORTFOLIO_REVIEW });
 const PROPOSED_DECISION_RECORDS = {
   'EXP-001': rec('DEFER', 'Descriptive audit with no hypothesis; nothing is scheduled, so it costs nothing until run on demand.', 'When an anomaly question needs it.'),
-  'EXP-002': rec('BLOCKED', 'No required sample or decision rule is registered, and its report endpoint aggregates the sealed period. Logging is a by-product of production selection and costs little.', 'Owner: pre-register a sample size and rule; then evaluate rows logged after the rule is frozen.'),
+  'EXP-002': rec('CONTINUE', 'Owner decisions H1/H2 (2026-10-31): a prospective plan is frozen (paired shadow vs production calls on pairs that differ, non-overlapping windows, exact sign test); rows before 2026-11-01, including the sealed period, are excluded.', 'One analysis at 111 kept informative pairs per horizon from 2026-11-01; count reviewed after the first month.'),
   'EXP-003': rec('CONTINUE', 'The 2026-10-31 REJECT proposal is withdrawn: it compared momentum with the stored production lca_score, which is the best variant\'s LCA, not the chosen variant\'s. On the registered reading (same-row scores) momentum ranked above the production choice in 15 of 34 unique post-seal decisions (12h 10/17, 24h 5/17; 8 ties). A prospective sign test is now frozen.', 'First analysis at 60 non-tied unique decisions per horizon from 2026-11-01 (about 2 months).'),
   'EXP-004': rec('CONTINUE', 'No demonstrated skill or harm on 19 paired post-seal origins per horizon (descriptive). The retrospective sample cannot support a confirmatory test; a prospective plan is now frozen.', 'First analysis at 100 resolved origins per horizon from 2026-11-01 (about mid-February 2027).'),
-  'EXP-005': rec('BLOCKED', 'Evaluation windows (latest ~500 V1 history rows, about 90 days) overlap the sealed period until about January 2027, and consecutive weekly windows overlap, so "independent weekly runs" cannot be satisfied as registered.', 'Owner: redefine independence (non-overlapping windows) or accept overlapping runs; first fully post-seal window about 2027-01-07.'),
+  'EXP-005': rec('BLOCKED', 'Owner decision H1 (2026-10-31): wait for fully post-seal windows. Evaluation windows (latest ~500 V1 history rows, about 90 days) overlap the sealed period until about January 2027, and consecutive weekly windows overlap.', 'First fully post-seal window about 2027-01-07; independence (non-overlapping windows) to be fixed in a plan before then.'),
   'EXP-006': rec('DEFER', 'No hypothesis, baseline or criterion is defined; depends on an EXP-005 candidate that does not yet exist.', 'After EXP-005 produces an evidence-worthy candidate.'),
   'EXP-007': rec('DEFER', 'No protocol; needs V4 signal data that is not federated with the V2 database.', 'When a comparison protocol and data path are defined.'),
   'EXP-008': rec('CONTINUE', 'Research-only collection is live with the real amazon/chronos-2 model (first run 2026-10-31, paired with TimesFM origins). Plan frozen before any confirmatory observation.', 'First analysis at 100 paired origins per horizon from 2026-11-01.'),
-  'EXP-009': rec('BLOCKED', 'A schema-validation milestone with no hypothesis; it can only be checked on stored batches whose windows overlap the sealed period.', 'Owner: allow a structural-only check of stored batches, or wait for fully post-seal windows; then PAUSE the weekly run if the milestone holds.'),
-  'EXP-010': rec('BLOCKED', 'Same as EXP-009 (diagnostic milestone on stored batches overlapping the sealed period); its registry next_action is stale.', 'As EXP-009.'),
-  'EXP-011': rec('BLOCKED', 'No minimum sample is registered and the results endpoint aggregates decisions since 2026-08-27, including the sealed period. Staging PRs #83/#84 have been inactive since early October.', 'Owner: set a minimum sample and a post-seal cut; decide PRs #83/#84.'),
-  'EXP-012': rec('DEFER', 'Staging-only workflow; PRs #82/#85 inactive since early October and about 80 commits behind main. No production dependency.', 'Owner: finish Stage 7 or close #82/#85.'),
+  'EXP-009': rec('BLOCKED', 'Owner decision H1 (2026-10-31): structural checks only (schema, duplicates, labels, temporal integrity), no predictive conclusion; blocked wherever a check cannot be isolated from sealed outcomes.', 'Run the seal-safe structural check; PAUSE the weekly run if the milestone holds.'),
+  'EXP-010': rec('BLOCKED', 'As EXP-009 (owner decision H1: structural checks only); its registry next_action is stale.', 'As EXP-009.'),
+  'EXP-011': rec('BLOCKED', 'Owner decisions H1/H2/H4 (2026-10-31): plan frozen (exact binomial, 210 decisions after production activation), but the pipeline is not active in production and PRs #83/#84 stay blocked until a seal-safe evidence path exists.', 'Owner: activation after a seal-safe evidence path is reviewed.'),
+  'EXP-012': rec('CONTINUE', 'Owner decision H4 (2026-10-31): finish Stage 7 in staging against explicit acceptance criteria; production migrations need separate authorization.', 'Staging acceptance record against the criteria; then the owner decides on production.'),
   'EXP-023': rec('CONTINUE', 'Pre-registered checkpoint 60 events (>= 25 per direction); 4 so far, all DOWN. A small sample is not a reason to reject.', 'Early November: confirm the October Binance funding archive arrives (F3/F4); next count review monthly.'),
   'EXP-024': rec('CONTINUE', 'Shared forward collector: feeds EXP-023 (funding variants), EXP-026 (OI) and the research archive. Stopping it would break three dependants.', 'Monthly completeness check.'),
-  'EXP-025': rec('BLOCKED', 'In production (V1 hloi, owner decision 2026-10-11) without a pre-registered evaluation; the registered criterion has no test, window or sample.', 'Owner: freeze an out-of-sample test before any weight change.'),
+  'EXP-025': rec('CONTINUE', 'Owner decision H2 (2026-10-31): prospective validation of the existing production use is frozen (daily partial association with the 24h BTC return given the V1 composite). Production decision and weight unchanged.', 'One analysis at 195 daily units from 2026-11-01 (about 2027-05-15).'),
   'EXP-026': rec('CONTINUE', 'Pre-registered OI test 46c0d52b exists; collection via EXP-024 is healthy (22 complete days).', 'At the pre-registered horizon.'),
-  'EXP-027': rec('BLOCKED', 'Its market component (rrs-v1) is in V1 production by owner decision (2026-10-12) without a forward evaluation; the combined signal is not built.', 'Owner: pre-register a forward test of the stored rrs-v1 readings.'),
-  'EXP-028': rec('BLOCKED', 'Collecting hourly (770 snapshots) with no pre-registered test, window or sample.', 'Owner: freeze an evaluation plan before any confirmatory claim.'),
+  'EXP-027': rec('CONTINUE', 'Owner decision H2 (2026-10-31): scoped to the market component (rrs-v1) in production since 2026-10-12; its prospective validation is frozen. The combined GDELT + market signal was never built and is not evaluated.', 'One analysis at 195 daily units from 2026-11-01 (about 2027-05-15).'),
+  'EXP-028': rec('CONTINUE', 'Owner decision H2 (2026-10-31): plan frozen (daily partial association of DVOL and USDT supply with the 24h BTC return given the V1 composite, Holm over 2).', 'One analysis at 236 daily units per source from 2026-11-01 (about 2027-06-25).'),
 };
 // Production use that exists outside the registry, with the owner decision that put it there. Shown separately from the
 // experiment's own decision state: production use is not an experiment outcome.
@@ -7906,10 +7906,12 @@ const PRODUCTION_USE_RECORDS = {
 };
 // Collection verified outside the registry row (the D1 row is stale until updated by a migration).
 const COLLECTION_EVIDENCE_RECORDS = {
+  'EXP-027': { active_since: '2026-10-12', evidence_ref: 'V1 history sources_json riskregime (rrs-v1), CryptoPulse COMPOSITE_WEIGHTS_CHANGELOG 2026-10-12-riskregime' },
   'EXP-008': { active_since: '2026-10-31', evidence_ref: 'research-data/exp008-chronos (first run 41175040652)', registry_status_stale: true },
 };
 // Registry contradictions that are known and not yet fixed at their source.
 const REGISTRY_CONFLICTS = {
+  'EXP-027': ['Registry status is PROPOSED, but its market component (rrs-v1) has been a V1 production source, with readings stored hourly, since 2026-10-12.'],
   'EXP-003': ['selection_decisions_momentum logs some decisions twice (6 duplicate (horizon, prediction_ts) rows after the seal); evaluations must deduplicate.',
     'The stored production_chosen_lca column is the best variant\'s LCA, not the chosen variant\'s; compare with the same row\'s scores_json.'],
   'EXP-008': ['D1 registry status is PROPOSED, but research collection has run since 2026-10-31 (research-data/exp008-chronos).'],
@@ -7922,14 +7924,37 @@ const EVAL_RECORDED_TS_20261031 = 1793404800000;
 const EVAL_RECORDED_BY_20261031 = 'Portfolio review 2026-10-31 (read-only; post-seal rows only)';
 const PLAN_REF = 'research/plans/2026-11-01-prospective-evaluation-plans.md';
 const PLAN_SHA = '4d82c697e4d37c9ee1a68cd0f5e856afd9f56d0dff749c56b28904b8a33938ff';
+const PLAN_H2_REF = 'research/plans/2026-11-01-prospective-plans-h2.md';
+const PLAN_H2_SHA = 'ac8c9780730844c1cf22fa0efddf6748ffef8a03c4b107c8a07cf57973443df8';
+const H2_RECORDED_BY = 'Prospective plans under owner decision H2 (2026-10-31)';
 const evalRec = (id, n, o) => ({ record_id: `code:${id}:standalone:${n}`, recorded_ts: EVAL_RECORDED_TS_20261031, recorded_by: EVAL_RECORDED_BY_20261031,
   plan_sha256: null, window: null, out_of_sample: null, metrics: null, uncertainty: null, checks: [], limitations: [], evaluator_version: null, ...o });
 const CODE_EVALUATION_ADDENDA = {
+  'EXP-025': [evalRec('EXP-025', 1, { recorded_by: H2_RECORDED_BY, evaluation_version: 'exp025-prospective-v1', spec_ref: PLAN_H2_REF + ' (A. EXP-025)', spec_sha256: PLAN_H2_SHA, plan_sha256: PLAN_H2_SHA,
+    evaluation_status: 'NOT_RUN', scientific_outcome: null,
+    reason: 'Prospective validation of existing production use, frozen 2026-10-31 (H2): Spearman partial correlation of the daily 00:00 UTC hloi score with the next 24h BTC log return given the V1 composite, from 2026-11-01; one analysis at 195 daily units (minimum |partial rho| 0.20, power 0.80, alpha 0.05). The production decision and weight are unchanged.',
+    sample: { count: null, required: 195, meaning: 'daily units (00:00 UTC V1 reading, resolved 24h return) since 2026-11-01' }, baseline: 'V1 composite (covariate)',
+    evaluator_version: null, limitations: ['Evaluator committed before the checkpoint (earliest about 2027-05-15).'], evidence_refs: [PLAN_H2_REF] })],
+  'EXP-027': [evalRec('EXP-027', 1, { recorded_by: H2_RECORDED_BY, evaluation_version: 'exp027-market-prospective-v1', spec_ref: PLAN_H2_REF + ' (A. EXP-027)', spec_sha256: PLAN_H2_SHA, plan_sha256: PLAN_H2_SHA,
+    evaluation_status: 'NOT_RUN', scientific_outcome: null,
+    reason: 'Market component (rrs-v1) only, frozen 2026-10-31 (H2): Spearman partial correlation of the daily 00:00 UTC riskregime score with the next 24h BTC log return given the V1 composite, from 2026-11-01; one analysis at 195 daily units. The combined GDELT + market signal was never built and is not evaluated. The production decision and weight are unchanged.',
+    sample: { count: null, required: 195, meaning: 'daily units (00:00 UTC V1 reading, resolved 24h return) since 2026-11-01' }, baseline: 'V1 composite (covariate)',
+    evaluator_version: null, limitations: ['Evaluator committed before the checkpoint (earliest about 2027-05-15).'], evidence_refs: [PLAN_H2_REF] })],
+  'EXP-028': [evalRec('EXP-028', 1, { recorded_by: H2_RECORDED_BY, evaluation_version: 'exp028-prospective-v1', spec_ref: PLAN_H2_REF + ' (A. EXP-028)', spec_sha256: PLAN_H2_SHA, plan_sha256: PLAN_H2_SHA,
+    evaluation_status: 'NOT_RUN', scientific_outcome: null,
+    reason: 'Frozen 2026-10-31 (H2): Spearman partial correlation of daily DVOL and USDT-supply values with the next 24h BTC log return given the V1 composite, from 2026-11-01, Holm over the 2 sources; one analysis at 236 daily units each.',
+    sample: { count: null, required: 236, meaning: 'daily units per source since 2026-11-01' }, baseline: 'V1 composite (covariate)',
+    evaluator_version: null, limitations: ['Evaluator committed before the checkpoint (earliest about 2027-06-25).'], evidence_refs: [PLAN_H2_REF] })],
   'EXP-002': [evalRec('EXP-002', 1, { evaluation_version: 'exp002-standalone-v1', spec_ref: 'worker.js CODE_REGISTRY_ENTRIES (EXP-002 success_criterion)',
     spec_sha256: 'b002b134605da5c343016151ea06e5d532a39adea8406d973ba6e0b8c97eec53', evaluation_status: 'BLOCKED', scientific_outcome: null,
     reason: 'No required sample or decision rule is registered for "shadow choices outperform production choices". /research/anomaly-gate aggregates every logged row, including the sealed period, so no post-seal-only evaluation route exists yet.',
     sample: { count: null, required: null, meaning: 'logged shadow decisions (selection_decisions_anomaly)' }, baseline: 'Production selection_decisions',
-    limitations: ['Unblock: pre-register a sample size and test, then evaluate only rows logged after the rule is frozen.'], evidence_refs: ['research/evaluations/2026-10-31-portfolio.md'] })],
+    limitations: ['Unblock: pre-register a sample size and test, then evaluate only rows logged after the rule is frozen.'], evidence_refs: ['research/evaluations/2026-10-31-portfolio.md'] }),
+    evalRec('EXP-002', 2, { recorded_by: H2_RECORDED_BY, evaluation_version: 'exp002-prospective-v1', spec_ref: PLAN_H2_REF + ' (B. EXP-002)', spec_sha256: PLAN_H2_SHA, plan_sha256: PLAN_H2_SHA,
+      evaluation_status: 'NOT_RUN', scientific_outcome: null,
+      reason: 'Prospective plan frozen 2026-10-31 (H2): shadow vs production call on pairs from 2026-11-01 whose calls differ, non-overlapping windows per horizon, exact sign test, Holm over 2 horizons; first and only analysis at 111 kept informative units per horizon (minimum effect 0.65, power 0.80).',
+      sample: { count: null, required: 111, meaning: 'kept informative pairs per horizon since 2026-11-01' }, baseline: 'Production selection_decisions (same prediction_ts)',
+      evaluator_version: null, limitations: ['Evaluator committed before the checkpoint; no date estimate until the first month\'s count of informative pairs is known.'], evidence_refs: [PLAN_H2_REF] })],
   'EXP-003': [
     evalRec('EXP-003', 1, { evaluation_version: 'exp003-standalone-v1', spec_ref: 'worker.js CODE_REGISTRY_ENTRIES (EXP-003 success_criterion)',
       spec_sha256: '6bb79db3c65cdf9675fc4902bf6032c3d32c1255c070bfca6508b3e4c9f6da92', evaluation_status: 'BLOCKED', scientific_outcome: null,
@@ -7975,7 +8000,12 @@ const CODE_EVALUATION_ADDENDA = {
     spec_sha256: '7fdefd01328a79e6a2acbda7d8fa03c67328c971e94f88b8f9e69a41885aa73b', evaluation_status: 'BLOCKED', scientific_outcome: null,
     reason: 'No minimum sample is registered for "hypotheses pass out-of-sample holdout", and /api/research-lab/experiment5-results aggregates every resolved decision since 2026-08-27, including the sealed period.',
     sample: { count: null, required: null, meaning: 'resolved hypothesis decisions' }, baseline: 'V1 composite without the hypothesis',
-    limitations: ['Unblock: owner sets a minimum sample and a post-seal cut; staging PRs #83/#84 are inactive.'], evidence_refs: ['research/evaluations/2026-10-31-portfolio.md'] })],
+    limitations: ['Unblock: owner sets a minimum sample and a post-seal cut; staging PRs #83/#84 are inactive.'], evidence_refs: ['research/evaluations/2026-10-31-portfolio.md'] }),
+    evalRec('EXP-011', 2, { recorded_by: H2_RECORDED_BY, evaluation_version: 'exp011-prospective-v1', spec_ref: PLAN_H2_REF + ' (C. EXP-011)', spec_sha256: PLAN_H2_SHA, plan_sha256: PLAN_H2_SHA,
+      evaluation_status: 'BLOCKED', scientific_outcome: null,
+      reason: 'Plan frozen 2026-10-31 (H2): exact binomial test of hit rate 0.5 on one resolved decision per subject per non-overlapping 24h window, anchors from the later of 2026-11-01 and production activation; one analysis at 210 units. Blocked: the pipeline is not active in production and PRs #83/#84 stay blocked until a seal-safe evidence path exists (H1, H4).',
+      sample: { count: null, required: 210, meaning: 'resolved decisions after production activation' }, baseline: 'Hit rate 0.5',
+      evaluator_version: null, evidence_refs: [PLAN_H2_REF] })],
 };
 
 function decisionStateFor(e) {

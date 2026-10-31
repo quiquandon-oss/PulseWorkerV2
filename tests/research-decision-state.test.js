@@ -91,7 +91,8 @@ describe('decisionStateFor', () => {
 
   it('production use carries its own owner decision and never becomes the experiment\'s decided state', () => {
     const d = scope().decisionStateFor({ experiment_id: 'EXP-027', status: 'PROPOSED' });
-    expect(d.state).toBe('PROPOSED');
+    expect(d.conflicts.join(' ')).toMatch(/PROPOSED/);                 // its market component has collected since 2026-10-12
+    expect(d.state).toBe('COLLECTING');
     expect(d.production_use.where).toMatch(/riskregime/);
     expect(d.production_use.decision_recorded).toBe(true);
     expect(d.production_use.decision_ref).toMatch(/COMPOSITE_WEIGHTS_CHANGELOG 2026-10-12-riskregime/);

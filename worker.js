@@ -7886,7 +7886,7 @@ const PROPOSED_DECISION_RECORDS = {
   'EXP-009': rec('BLOCKED', 'Owner decision H1 (2026-10-31): structural checks only (schema, duplicates, labels, temporal integrity), no predictive conclusion; blocked wherever a check cannot be isolated from sealed outcomes.', 'Run the seal-safe structural check; PAUSE the weekly run if the milestone holds.'),
   'EXP-010': rec('BLOCKED', 'As EXP-009 (owner decision H1: structural checks only); its registry next_action is stale.', 'As EXP-009.'),
   'EXP-011': rec('BLOCKED', 'Owner decisions H1/H2/H4 (2026-10-31): plan frozen (exact binomial, 210 decisions after production activation), but the pipeline is not active in production and PRs #83/#84 stay blocked until a seal-safe evidence path exists.', 'Owner: activation after a seal-safe evidence path is reviewed.'),
-  'EXP-012': rec('CONTINUE', 'Owner decision H4 (2026-10-31): finish Stage 7 in staging against explicit acceptance criteria; production migrations need separate authorization.', 'Staging acceptance record against the criteria; then the owner decides on production.'),
+  'EXP-012': rec('CONTINUE', 'Owner decision H4 (2026-10-31): finish Stage 7 against explicit acceptance criteria; production changes need separate authorization. Finding: Stage 7 is already active in production through the learning loop, and PR #82 as written would switch it off (its STAGE7_ENABLED gate fails 8 learning-loop tests on current main).', 'Owner: port #82\'s remaining safety fixes onto main without the production kill switch, or close #82 as superseded (research/evaluations/2026-10-31-stage7-finish-line.md).'),
   'EXP-023': rec('CONTINUE', 'Pre-registered checkpoint 60 events (>= 25 per direction); 4 so far, all DOWN. A small sample is not a reason to reject.', 'Early November: confirm the October Binance funding archive arrives (F3/F4); next count review monthly.'),
   'EXP-024': rec('CONTINUE', 'Shared forward collector: feeds EXP-023 (funding variants), EXP-026 (OI) and the research archive. Stopping it would break three dependants.', 'Monthly completeness check.'),
   'EXP-025': rec('CONTINUE', 'Owner decision H2 (2026-10-31): prospective validation of the existing production use is frozen (daily partial association with the 24h BTC return given the V1 composite). Production decision and weight unchanged.', 'One analysis at 195 daily units from 2026-11-01 (about 2027-05-15).'),
@@ -7911,6 +7911,7 @@ const COLLECTION_EVIDENCE_RECORDS = {
 };
 // Registry contradictions that are known and not yet fixed at their source.
 const REGISTRY_CONFLICTS = {
+  'EXP-012': ['Registry says STAGING_ONLY and "production migration 0016 not applied", but on 2026-10-31 production /api/research-lab/stage7-overview reported activated with 10 requests and /api/learning/market stage7_available: true (research/evaluations/2026-10-31-stage7-finish-line.md).'],
   'EXP-027': ['Registry status is PROPOSED, but its market component (rrs-v1) has been a V1 production source, with readings stored hourly, since 2026-10-12.'],
   'EXP-003': ['selection_decisions_momentum logs some decisions twice (6 duplicate (horizon, prediction_ts) rows after the seal); evaluations must deduplicate.',
     'The stored production_chosen_lca column is the best variant\'s LCA, not the chosen variant\'s; compare with the same row\'s scores_json.'],

@@ -1,9 +1,15 @@
-# EXP-008 evaluation plan: PROPOSED (not frozen)
+# EXP-008 evaluation plan: FROZEN
 
-**Status:** PROPOSED by the implementation, 2026-10-31, before any Chronos-2 forecast exists. It becomes
-the pre-registered plan only when the owner approves it unchanged. Approval should be recorded by commit
-here before the first checkpoint below is reached. Until then, every EXP-008 result is descriptive.
+**Frozen:** 2026-10-31, under the owner's authorization of 2026-10-31 to pre-register before confirmatory analysis
+(see `research/plans/2026-11-01-prospective-evaluation-plans.md`). It was frozen before any observation in its
+population existed.
 
+**Population start:** origins at or after **2026-11-01T00:00:00Z**. The 2026-10-30 and 2026-10-31 forecasts are a
+descriptive pilot and are excluded.
+
+**Persistence:** defined exactly as in the shared plan (sign of the last deduplicated tick's return).
+
+**Changes:** none after the first observation, except by a new versioned plan committed before the checkpoint it affects.
 ## Population
 
 - **Included:** every Chronos-2 forecast in `research-data/exp008-chronos` with a resolution, paired on
@@ -15,7 +21,7 @@ here before the first checkpoint below is reached. Until then, every EXP-008 res
   - no k-NN prediction;
   - ground truth disagreeing with TimesFM.
 - **No cherry-picking:** nothing else is excluded, and windows are never chosen after looking.
-- **Sealed period:** no origin before 2026-10-09T21:00Z can exist. Collection starts after it.
+- **Population start:** origins before 2026-11-01T00:00Z are excluded (pilot). No sealed-period origin can exist.
 
 ## Outcome and metric
 

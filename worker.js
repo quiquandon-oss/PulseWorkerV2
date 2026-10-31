@@ -7527,7 +7527,7 @@ const CODE_REGISTRY_ENTRIES = [
     purpose: 'Roadmap candidate (Learning Candidate #1). Research so far: INSUFFICIENT DATA; components do not converge beyond chance.',
     experiment_type: 'CANDIDATE_SIGNAL', expected_result: null, success_criterion: 'A defined score that beats chance on forward data.',
     start_date: null, target_date: null, status: 'PROPOSED', baseline: 'V1 regime scorecard', required_sample: null, conclusion: null,
-    next_action: 'Define the score and a forward collector; no production use.', github_refs: 'RISK_REGIME_SHOCK_RESEARCH.md (research branches)',
+    next_action: 'The market component (rule rrs-v1, Hyperliquid cross-asset) is a V1 composite source since 2026-10-12 by owner decision (V1 COMPOSITE_WEIGHTS_CHANGELOG 2026-10-12-riskregime, weight 4 x 0.3); the combined GDELT + market signal is not built. Pre-register a forward evaluation of the stored rrs-v1 readings before any weight change.', github_refs: 'RISK_REGIME_SHOCK_RESEARCH.md (research branches); PulseWorker RISK_REGIME_SHOCK.md',
     data_source_table: null },
   { experiment_id: 'EXP-028', title: 'Candidate sources: Deribit DVOL and DeFiLlama USDT supply',
     research_question: 'Do BTC implied volatility (DVOL) and USDT supply growth carry forward information beyond the V1 composite?',
@@ -7772,7 +7772,9 @@ async function loadEvaluationRows(env) {
 function attachEvaluationDimensions(experiments, rows) {
   for (const e of experiments) {
     const code = CODE_EVALUATION_RECORDS[e.experiment_id] || null;
-    const standalone = [...((code && code.standalone) || []).map(r => ({ ...r, record_source: 'code' })), ...(rows.standalone[e.experiment_id] || [])];
+    const addenda = (typeof CODE_EVALUATION_ADDENDA !== 'undefined' && CODE_EVALUATION_ADDENDA[e.experiment_id]) || [];
+    const standalone = [...((code && code.standalone) || []).map(r => ({ ...r, record_source: 'code' })),
+      ...addenda.map(r => ({ ...r, record_source: 'code' })), ...(rows.standalone[e.experiment_id] || [])];
     if (standalone.length) e.standalone_evaluations = standalone;
     const pool = [...((code && code.pool) || []).map(r => ({ ...r, record_source: 'code' })), ...(rows.pool[e.experiment_id] || [])];
     e.pool_evaluations = pool;
@@ -7831,17 +7833,113 @@ const DECISION_STATE_LABELS = {
 // Owner decisions. Added by a reviewed commit per decision; none is recorded yet.
 // Shape: { decision: 'REJECTED'|'IMPLEMENTED_RESEARCH_ONLY'|'IMPLEMENTED_PRODUCTION', decided_ts, decided_by, rationale, evidence_ref }
 const OWNER_DECISION_RECORDS = {};
-// Proposals from evaluation reports. Displayed as proposals only; the owner decides.
+// Portfolio recommendations (review of 2026-10-31). Shown as the `proposal`, never as a decision; the owner decides.
+// Actions: CONTINUE, EVALUATE_NOW, PAUSE, CLOSE_OR_REJECT_PROPOSED, DEFER, BLOCKED.
+const PORTFOLIO_REVIEW = { proposed_ts: 1793404800000, proposed_by: 'Portfolio review 2026-10-31 (read-only evidence)',
+  evidence_ref: 'research/evaluations/2026-10-31-portfolio.md' };
+const rec = (proposal, basis, next_checkpoint) => ({ proposal, basis, next_checkpoint, ...PORTFOLIO_REVIEW });
 const PROPOSED_DECISION_RECORDS = {
-  'EXP-003': { proposal: 'REJECT', proposed_ts: 1793404800000, proposed_by: 'Research review 2026-10-31 (read-only)',
-    basis: 'Frozen criterion "momentum LCA ranks above the production choice" held in 7 of 40 post-seal decisions (12h 4/20, 24h 3/20). No statistical rule is registered; daily rows overlap.',
-    evidence_ref: 'research/evaluations/2026-10-31-all-experiments.md' },
+  'EXP-001': rec('DEFER', 'Descriptive audit with no hypothesis; nothing is scheduled, so it costs nothing until run on demand.', 'When an anomaly question needs it.'),
+  'EXP-002': rec('BLOCKED', 'No required sample or decision rule is registered, and its report endpoint aggregates the sealed period. Logging is a by-product of production selection and costs little.', 'Owner: pre-register a sample size and rule; then evaluate rows logged after the rule is frozen.'),
+  'EXP-003': rec('CONTINUE', 'The 2026-10-31 REJECT proposal is withdrawn: it compared momentum with the stored production lca_score, which is the best variant\'s LCA, not the chosen variant\'s. On the registered reading (same-row scores) momentum ranked above the production choice in 15 of 34 unique post-seal decisions (12h 10/17, 24h 5/17; 8 ties). A prospective sign test is now frozen.', 'First analysis at 60 non-tied unique decisions per horizon from 2026-11-01 (about 2 months).'),
+  'EXP-004': rec('CONTINUE', 'No demonstrated skill or harm on 19 paired post-seal origins per horizon (descriptive). The retrospective sample cannot support a confirmatory test; a prospective plan is now frozen.', 'First analysis at 100 resolved origins per horizon from 2026-11-01 (about mid-February 2027).'),
+  'EXP-005': rec('BLOCKED', 'Evaluation windows (latest ~500 V1 history rows, about 90 days) overlap the sealed period until about January 2027, and consecutive weekly windows overlap, so "independent weekly runs" cannot be satisfied as registered.', 'Owner: redefine independence (non-overlapping windows) or accept overlapping runs; first fully post-seal window about 2027-01-07.'),
+  'EXP-006': rec('DEFER', 'No hypothesis, baseline or criterion is defined; depends on an EXP-005 candidate that does not yet exist.', 'After EXP-005 produces an evidence-worthy candidate.'),
+  'EXP-007': rec('DEFER', 'No protocol; needs V4 signal data that is not federated with the V2 database.', 'When a comparison protocol and data path are defined.'),
+  'EXP-008': rec('CONTINUE', 'Research-only collection is live with the real amazon/chronos-2 model (first run 2026-10-31, paired with TimesFM origins). Plan frozen before any confirmatory observation.', 'First analysis at 100 paired origins per horizon from 2026-11-01.'),
+  'EXP-009': rec('BLOCKED', 'A schema-validation milestone with no hypothesis; it can only be checked on stored batches whose windows overlap the sealed period.', 'Owner: allow a structural-only check of stored batches, or wait for fully post-seal windows; then PAUSE the weekly run if the milestone holds.'),
+  'EXP-010': rec('BLOCKED', 'Same as EXP-009 (diagnostic milestone on stored batches overlapping the sealed period); its registry next_action is stale.', 'As EXP-009.'),
+  'EXP-011': rec('BLOCKED', 'No minimum sample is registered and the results endpoint aggregates decisions since 2026-08-27, including the sealed period. Staging PRs #83/#84 have been inactive since early October.', 'Owner: set a minimum sample and a post-seal cut; decide PRs #83/#84.'),
+  'EXP-012': rec('DEFER', 'Staging-only workflow; PRs #82/#85 inactive since early October and about 80 commits behind main. No production dependency.', 'Owner: finish Stage 7 or close #82/#85.'),
+  'EXP-023': rec('CONTINUE', 'Pre-registered checkpoint 60 events (>= 25 per direction); 4 so far, all DOWN. A small sample is not a reason to reject.', 'Early November: confirm the October Binance funding archive arrives (F3/F4); next count review monthly.'),
+  'EXP-024': rec('CONTINUE', 'Shared forward collector: feeds EXP-023 (funding variants), EXP-026 (OI) and the research archive. Stopping it would break three dependants.', 'Monthly completeness check.'),
+  'EXP-025': rec('BLOCKED', 'In production (V1 hloi, owner decision 2026-10-11) without a pre-registered evaluation; the registered criterion has no test, window or sample.', 'Owner: freeze an out-of-sample test before any weight change.'),
+  'EXP-026': rec('CONTINUE', 'Pre-registered OI test 46c0d52b exists; collection via EXP-024 is healthy (22 complete days).', 'At the pre-registered horizon.'),
+  'EXP-027': rec('BLOCKED', 'Its market component (rrs-v1) is in V1 production by owner decision (2026-10-12) without a forward evaluation; the combined signal is not built.', 'Owner: pre-register a forward test of the stored rrs-v1 readings.'),
+  'EXP-028': rec('BLOCKED', 'Collecting hourly (770 snapshots) with no pre-registered test, window or sample.', 'Owner: freeze an evaluation plan before any confirmatory claim.'),
 };
-// Production use that exists outside the registry, shown so research and production use are never confused.
+// Production use that exists outside the registry, with the owner decision that put it there. Shown separately from the
+// experiment's own decision state: production use is not an experiment outcome.
 const PRODUCTION_USE_RECORDS = {
-  'EXP-025': { where: 'V1 composite source "hloi" (PulseWorker)', since: '2026-10-11', decision_recorded: false },
-  'EXP-027': { where: 'V1 composite source "riskregime", rule rrs-v1, weight 4 x 0.3 (PulseWorker RISK_REGIME_SHOCK.md)', since: '2026-10-12', decision_recorded: false,
-    note: 'The registry entry says PROPOSED / no production use; this record states the actual V1 use.' },
+  'EXP-025': { where: 'V1 composite source "hloi" (Hyperliquid BTC OI), default weight 4 x confidence 0.3', since: '2026-10-11', decision_recorded: true,
+    decision_ref: 'CryptoPulse index.html COMPOSITE_WEIGHTS_CHANGELOG 2026-10-11-hloi: "Owner prioritised Hyperliquid OI for production"',
+    note: 'Browser settings can override the default weight per viewer.' },
+  'EXP-027': { where: 'V1 composite source "riskregime" (rule rrs-v1, market component only), default weight 4 x confidence 0.3', since: '2026-10-12', decision_recorded: true,
+    decision_ref: 'CryptoPulse index.html COMPOSITE_WEIGHTS_CHANGELOG 2026-10-12-riskregime: "Owner decision to integrate Risk Regime Shock in V1"',
+    note: 'The combined GDELT + market signal registered as EXP-027 is not built; only the market component is in production.' },
+};
+// Collection verified outside the registry row (the D1 row is stale until updated by a migration).
+const COLLECTION_EVIDENCE_RECORDS = {
+  'EXP-008': { active_since: '2026-10-31', evidence_ref: 'research-data/exp008-chronos (first run 41175040652)', registry_status_stale: true },
+};
+// Registry contradictions that are known and not yet fixed at their source.
+const REGISTRY_CONFLICTS = {
+  'EXP-003': ['selection_decisions_momentum logs some decisions twice (6 duplicate (horizon, prediction_ts) rows after the seal); evaluations must deduplicate.',
+    'The stored production_chosen_lca column is the best variant\'s LCA, not the chosen variant\'s; compare with the same row\'s scores_json.'],
+  'EXP-008': ['D1 registry status is PROPOSED, but research collection has run since 2026-10-31 (research-data/exp008-chronos).'],
+  'EXP-009': ['Registry next_action still says to wire a data source "once the first real run exists"; 7 runs exist.'],
+  'EXP-010': ['Registry next_action still says to wire a data source "once the first real run exists"; 6 runs exist.'],
+};
+// Evaluation records appended by the 2026-10-31 review. Append-only: earlier records stay; the latest drives the state.
+// spec_sha256 is the sha256 of the spec file, or, for code-defined registry entries, of the registered success_criterion text.
+const EVAL_RECORDED_TS_20261031 = 1793404800000;
+const EVAL_RECORDED_BY_20261031 = 'Portfolio review 2026-10-31 (read-only; post-seal rows only)';
+const PLAN_REF = 'research/plans/2026-11-01-prospective-evaluation-plans.md';
+const PLAN_SHA = '4d82c697e4d37c9ee1a68cd0f5e856afd9f56d0dff749c56b28904b8a33938ff';
+const evalRec = (id, n, o) => ({ record_id: `code:${id}:standalone:${n}`, recorded_ts: EVAL_RECORDED_TS_20261031, recorded_by: EVAL_RECORDED_BY_20261031,
+  plan_sha256: null, window: null, out_of_sample: null, metrics: null, uncertainty: null, checks: [], limitations: [], evaluator_version: null, ...o });
+const CODE_EVALUATION_ADDENDA = {
+  'EXP-002': [evalRec('EXP-002', 1, { evaluation_version: 'exp002-standalone-v1', spec_ref: 'worker.js CODE_REGISTRY_ENTRIES (EXP-002 success_criterion)',
+    spec_sha256: 'b002b134605da5c343016151ea06e5d532a39adea8406d973ba6e0b8c97eec53', evaluation_status: 'BLOCKED', scientific_outcome: null,
+    reason: 'No required sample or decision rule is registered for "shadow choices outperform production choices". /research/anomaly-gate aggregates every logged row, including the sealed period, so no post-seal-only evaluation route exists yet.',
+    sample: { count: null, required: null, meaning: 'logged shadow decisions (selection_decisions_anomaly)' }, baseline: 'Production selection_decisions',
+    limitations: ['Unblock: pre-register a sample size and test, then evaluate only rows logged after the rule is frozen.'], evidence_refs: ['research/evaluations/2026-10-31-portfolio.md'] })],
+  'EXP-003': [
+    evalRec('EXP-003', 1, { evaluation_version: 'exp003-standalone-v1', spec_ref: 'worker.js CODE_REGISTRY_ENTRIES (EXP-003 success_criterion)',
+      spec_sha256: '6bb79db3c65cdf9675fc4902bf6032c3d32c1255c070bfca6508b3e4c9f6da92', evaluation_status: 'BLOCKED', scientific_outcome: null,
+      reason: 'The registered criterion ("momentum LCA ranks above the production choice") has no statistical rule. Post-seal descriptive look (2026-10-10 to 2026-10-30, unique decisions): on the same-row scores momentum ranked above the chosen variant in 15 of 34 (12h 10/17, 24h 5/17; 8 ties). The stored production_chosen_lca is the best variant\'s LCA; against it, 5 of 34. The 2026-10-31 REJECT proposal used that column and is withdrawn.',
+      sample: { count: 34, required: null, meaning: 'unique post-seal decisions (6 duplicate rows dropped)' }, baseline: 'Production chosen variant (same-row LCA)',
+      metrics: { above_same_row: 15, ties_same_row: 8, above_stored_column: 5, unique: 34, duplicates_dropped: 6 },
+      limitations: ['Descriptive only: no frozen test existed for these rows; they are excluded from the prospective plan.'],
+      evidence_refs: ['data-exports/selection_decisions_momentum.csv@a1bc1fe', 'research/evaluations/2026-10-31-portfolio.md'] }),
+    evalRec('EXP-003', 2, { evaluation_version: 'exp003-prospective-v1', spec_ref: PLAN_REF + ' (EXP-003)', spec_sha256: PLAN_SHA, plan_sha256: PLAN_SHA,
+      evaluation_status: 'NOT_RUN', scientific_outcome: null,
+      reason: 'Prospective plan frozen 2026-10-31: exact sign test of momentum vs chosen-variant LCA (same row) on unique decisions from 2026-11-01, ties excluded, Holm over 2 horizons; first analysis at 60 non-tied decisions per horizon, replication in the next 60.',
+      sample: { count: null, required: 60, meaning: 'non-tied unique decisions per horizon since 2026-11-01' }, baseline: 'Production chosen variant',
+      evaluator_version: 'research/prospective_eval.py exp003', evidence_refs: [PLAN_REF] }),
+  ],
+  'EXP-004': [
+    evalRec('EXP-004', 2, { evaluation_version: 'exp004-postseal-descriptive-v1', spec_ref: '.ai/migrations/0010_research_experiment_registry.sql (EXP-004 success_criterion)',
+      spec_sha256: '902fe68e5523a8fd018033610f6969106b88a0ad8542d0f211d60a276acf9aa2', evaluation_status: 'INCOMPLETE', scientific_outcome: null,
+      reason: 'Descriptive post-seal comparison on 19 shared origins per horizon (2026-10-10 to 2026-10-30): 12h TimesFM 8/19 vs k-NN 9/19 vs always-UP 9/19; 24h 10/19 vs 12/19 vs 8/19. Exact McNemar p >= 0.5 for every pair. No pre-registered test applied, persistence was undefined, no replication: no confirmatory conclusion.',
+      sample: { count: 19, required: null, meaning: 'paired post-seal origins per horizon' }, baseline: 'k-NN, always-UP (paired)',
+      metrics: { h12: { timesfm: 8, knn: 9, always_up: 9, n: 19 }, h24: { timesfm: 10, knn: 12, always_up: 8, n: 19 } },
+      limitations: ['These outcomes are excluded from the prospective plan.'], evidence_refs: ['research/evaluations/2026-10-31-portfolio.md'] }),
+    evalRec('EXP-004', 3, { evaluation_version: 'exp004-prospective-v1', spec_ref: PLAN_REF + ' (EXP-004)', spec_sha256: PLAN_SHA, plan_sha256: PLAN_SHA,
+      evaluation_status: 'NOT_RUN', scientific_outcome: null,
+      reason: 'Prospective plan frozen 2026-10-31: exact McNemar vs always-UP and last-tick persistence per horizon on origins from 2026-11-01, Holm over 4; first analysis at 100 resolved origins per horizon, replication in the next 100.',
+      sample: { count: null, required: 100, meaning: 'resolved origins per horizon since 2026-11-01' }, baseline: 'Always-UP and last-tick persistence',
+      evaluator_version: 'research/prospective_eval.py exp004', evidence_refs: [PLAN_REF] }),
+  ],
+  'EXP-005': [evalRec('EXP-005', 2, { evaluation_version: 'exp005-standalone-v2', spec_ref: '.ai/migrations/0011_exp005_activation.sql (EXP-005 success_criterion)',
+    spec_sha256: '505a18cb296348d77a6790e8e16ad9cea6c2cc74995cfa3a6e7c1b122152ddbe', evaluation_status: 'BLOCKED', scientific_outcome: null,
+    reason: 'Each run analyses the latest ~500 V1 history rows (about 90 days), so every run until about 2027-01-07 overlaps the sealed period, and weekly windows overlap each other: "4 independent weekly runs" cannot be met as registered. Needs an owner ruling on independence or on overlapping windows.',
+    sample: { count: 7, required: 4, meaning: 'stored weekly runs (none fully post-seal)' }, baseline: 'V1 composite (OOS RMSE)',
+    evidence_refs: ['research/evaluations/2026-10-12-exp004-005-009.md', 'research/evaluations/2026-10-31-portfolio.md'] })],
+  'EXP-008': [evalRec('EXP-008', 1, { evaluation_version: 'exp008-prospective-v1', spec_ref: 'exp008-chronos/EVALUATION_PLAN.md',
+    spec_sha256: '6994b7e3291043010ae79a83d374c97e1c3fe32eab5f8b10ca059fb2517870c6', plan_sha256: null, evaluation_status: 'NOT_RUN', scientific_outcome: null,
+    reason: 'Plan frozen 2026-10-31: exact McNemar vs always-UP and persistence (success), TimesFM and k-NN (reported), Holm over 8, on origins from 2026-11-01; first analysis at 100 paired origins per horizon, replication in the next 100.',
+    sample: { count: null, required: 100, meaning: 'paired resolved origins per horizon since 2026-11-01' }, baseline: 'Always-UP and last-tick persistence',
+    evaluator_version: 'exp008-chronos/evaluate.py', evidence_refs: ['exp008-chronos/EVALUATION_PLAN.md', 'research-data/exp008-chronos'] })],
+  'EXP-010': [evalRec('EXP-010', 1, { evaluation_version: 'exp010-standalone-v1', spec_ref: '.ai/migrations/0013_exp010_activation.sql (EXP-010 success_criterion)',
+    spec_sha256: '99e97e21030ec6f25128af067f6df2928c0f8b1f1d1f8356233eb0c4eaf902af', evaluation_status: 'BLOCKED', scientific_outcome: 'NOT_APPLICABLE',
+    reason: 'Diagnostic milestone (4 well-formed weekly runs) with no hypothesis. It can only be checked on stored batches in research_analyses, whose windows overlap the sealed period. Needs an owner ruling on a structural-only check.',
+    sample: { count: 6, required: 4, meaning: 'stored weekly runs' }, baseline: null, evidence_refs: ['research/evaluations/2026-10-31-portfolio.md'] })],
+  'EXP-011': [evalRec('EXP-011', 1, { evaluation_version: 'exp011-standalone-v1', spec_ref: 'worker.js CODE_REGISTRY_ENTRIES (EXP-011 success_criterion)',
+    spec_sha256: '7fdefd01328a79e6a2acbda7d8fa03c67328c971e94f88b8f9e69a41885aa73b', evaluation_status: 'BLOCKED', scientific_outcome: null,
+    reason: 'No minimum sample is registered for "hypotheses pass out-of-sample holdout", and /api/research-lab/experiment5-results aggregates every resolved decision since 2026-08-27, including the sealed period.',
+    sample: { count: null, required: null, meaning: 'resolved hypothesis decisions' }, baseline: 'V1 composite without the hypothesis',
+    limitations: ['Unblock: owner sets a minimum sample and a post-seal cut; staging PRs #83/#84 are inactive.'], evidence_refs: ['research/evaluations/2026-10-31-portfolio.md'] })],
 };
 
 function decisionStateFor(e) {
@@ -7851,6 +7949,7 @@ function decisionStateFor(e) {
   let state, basis;
   if (owner) { state = owner.decision; basis = 'Owner decision recorded.'; }
   else if (st === 'REJECTED' || st === 'RETIRED') { state = 'REJECTED'; basis = `Registry status ${st}.`; }
+  else if (st === 'PROPOSED' && COLLECTION_EVIDENCE_RECORDS[id]) { state = 'COLLECTING'; basis = `Collecting since ${COLLECTION_EVIDENCE_RECORDS[id].active_since} (${COLLECTION_EVIDENCE_RECORDS[id].evidence_ref}); the registry row still says PROPOSED.`; }
   else if (st === 'PROPOSED') { state = 'PROPOSED'; basis = 'Registry status PROPOSED: not started.'; }
   else if (st === 'STAGING_ONLY') { state = 'STAGING_ONLY'; basis = 'Registry status STAGING_ONLY.'; }
   else if (st === 'ON_DEMAND_AUDIT') { state = 'ON_DEMAND'; basis = 'Descriptive audit run on demand; no hypothesis test.'; }
@@ -7859,6 +7958,7 @@ function decisionStateFor(e) {
     const progress = typeof e.progress_count === 'number' ? e.progress_count : null;
     const required = typeof e.required_sample === 'number' ? e.required_sample : null;
     if (ev && String(ev.evaluation_status).toUpperCase() === 'BLOCKED') { state = 'BLOCKED'; basis = ev.reason || 'Latest evaluation is BLOCKED.'; }
+    else if (ev && String(ev.evaluation_status).toUpperCase() === 'NOT_RUN') { state = 'COLLECTING'; basis = `Prospective plan frozen; collecting toward its checkpoint. ${ev.reason || ''}`.trim(); }
     else if (ev && ev.scientific_outcome) { state = 'EVALUATED_DECISION_PENDING'; basis = `Evaluated (${ev.scientific_outcome}); no owner decision recorded.`; }
     else if (progress != null && required != null && progress >= required) { state = 'READY_FOR_EVALUATION'; basis = `Sample ${progress} >= required ${required}: eligible for evaluation, not a result.`; }
     else { state = 'COLLECTING'; basis = required == null ? 'Collecting; no required sample is registered.' : `Collecting: ${progress == null ? 'sample not reported' : progress} of ${required} required.`; }
@@ -7869,7 +7969,8 @@ function decisionStateFor(e) {
     owner_decision: owner,
     proposal: PROPOSED_DECISION_RECORDS[id] || null,
     production_use: PRODUCTION_USE_RECORDS[id] || null,
-    collection_active: ['ACCUMULATING', 'COLLECTING'].includes(st),
+    conflicts: REGISTRY_CONFLICTS[id] || [],
+    collection_active: ['ACCUMULATING', 'COLLECTING'].includes(st) || !!COLLECTION_EVIDENCE_RECORDS[id],
     model_version: DECISION_MODEL_VERSION,
   };
 }

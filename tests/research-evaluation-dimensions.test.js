@@ -13,7 +13,8 @@ const TEST_SHA = 'a'.repeat(64);
 function scope() {
   return evalInScope(
     extractFunctions('loadEvaluationRows', 'attachEvaluationDimensions', 'parseJsonColumn') + '\n' +
-    extractConstants('EVAL_RECORDED_TS', 'EVAL_RECORDED_BY', 'CODE_EVALUATION_RECORDS'), {});
+    extractConstants('EVAL_RECORDED_TS', 'EVAL_RECORDED_BY', 'CODE_EVALUATION_RECORDS', 'EVAL_RECORDED_TS_20261031', 'EVAL_RECORDED_BY_20261031',
+      'PLAN_REF', 'PLAN_SHA', 'evalRec', 'CODE_EVALUATION_ADDENDA', 'CODE_REGISTRY_ENTRIES'), {});
 }
 
 // A local SQLite database standing in for D1 (same SQL dialect), wrapped in D1's prepare().all() shape.
@@ -80,7 +81,7 @@ describe('migration 0022 (local SQLite only -- never applied to production here)
 });
 
 describe('registry evaluation dimensions', () => {
-  const entries = () => ['EXP-003', 'EXP-004', 'EXP-005', 'EXP-009'].map(experiment_id => ({ experiment_id, conclusion: null }));
+  const entries = () => ['EXP-001', 'EXP-004', 'EXP-005', 'EXP-009'].map(experiment_id => ({ experiment_id, conclusion: null }));
 
   it('without migration 0022 (today): tables NOT_PRESENT, code records attached, nothing invented elsewhere', async () => {
     const { loadEvaluationRows, attachEvaluationDimensions } = scope();
@@ -88,8 +89,9 @@ describe('registry evaluation dimensions', () => {
     expect(rows).toMatchObject({ tables: 'NOT_PRESENT', error: null });
     const out = attachEvaluationDimensions(entries(), rows);
     const by = Object.fromEntries(out.map(e => [e.experiment_id, e]));
-    for (const id of ['EXP-004', 'EXP-005', 'EXP-009']) {
-      expect(by[id].standalone_evaluations).toHaveLength(1);
+    // 2026-10-12 record first, then the 2026-10-31 addenda (EXP-004: 2, EXP-005: 1, EXP-009: none).
+    for (const [id, n] of [['EXP-004', 3], ['EXP-005', 2], ['EXP-009', 1]]) {
+      expect(by[id].standalone_evaluations).toHaveLength(n);
       expect(by[id].standalone_evaluations[0]).toMatchObject({ evaluation_status: 'BLOCKED', record_source: 'code' });
     }
     expect(by['EXP-004'].standalone_evaluations[0].scientific_outcome).toBeNull();
@@ -98,9 +100,9 @@ describe('registry evaluation dimensions', () => {
     expect(by['EXP-005'].pool_evaluations.map(r => r.pool_state)).toEqual(['CANDIDATE']);
     expect(by['EXP-009'].pool_evaluations.map(r => r.pool_state)).toEqual(['NOT_TESTED']);
     // An experiment with no record: no standalone status is invented; pool has no evaluation (empty list).
-    expect(by['EXP-003'].standalone_evaluations).toBeUndefined();
-    expect(by['EXP-003'].pool_evaluations).toEqual([]);
-    expect(by['EXP-003'].conclusion).toBeNull();
+    expect(by['EXP-001'].standalone_evaluations).toBeUndefined();
+    expect(by['EXP-001'].pool_evaluations).toEqual([]);
+    expect(by['EXP-001'].conclusion).toBeNull();
   });
 
   it('code records are never conclusive and carry provenance', () => {
@@ -116,6 +118,36 @@ describe('registry evaluation dimensions', () => {
         expect(p.recorded_by && p.recorded_ts && p.reason, id).toBeTruthy();
       }
     }
+  });
+
+  it('appended records: never conclusive, append-only ids, hashes match the plan file or the registered criterion text', async () => {
+    const { createHash } = await import('node:crypto');
+    const { CODE_EVALUATION_ADDENDA, CODE_REGISTRY_ENTRIES } = scope();
+    const sha = (b) => createHash('sha256').update(b).digest('hex');
+    for (const [id, list] of Object.entries(CODE_EVALUATION_ADDENDA)) {
+      const ids = list.map(r => r.record_id);
+      expect(new Set(ids).size, id).toBe(ids.length);
+      for (const r of list) {
+        expect(r.evaluation_status, id).not.toBe('EVALUATED');
+        expect(['NOT_RUN', 'BLOCKED', 'INCOMPLETE']).toContain(r.evaluation_status);
+        expect(r.recorded_by && r.recorded_ts && r.reason && r.spec_ref, id).toBeTruthy();
+        const file = r.spec_ref.split(' ')[0];
+        if (file === 'worker.js') {
+          const entry = CODE_REGISTRY_ENTRIES.find(x => x.experiment_id === id);
+          expect(sha(entry.success_criterion), id).toBe(r.spec_sha256);
+        } else {
+          expect(sha(readFileSync(new URL(`../${file}`, import.meta.url))), `${id} ${file}`).toBe(r.spec_sha256);
+        }
+        if (r.evaluation_status === 'NOT_RUN') expect(r.sample.required, id).toBeGreaterThan(0);
+      }
+    }
+  });
+
+  it('appended records follow the 2026-10-12 records, so the latest one drives the state', () => {
+    const { attachEvaluationDimensions } = scope();
+    const e = attachEvaluationDimensions([{ experiment_id: 'EXP-004' }], { standalone: {}, pool: {} })[0];
+    expect(e.standalone_evaluations.map(r => r.record_id)).toEqual(['code:EXP-004:standalone:1', 'code:EXP-004:standalone:2', 'code:EXP-004:standalone:3']);
+    expect(e.standalone_evaluations.at(-1).evaluation_status).toBe('NOT_RUN');
   });
 
   it('frozen spec hashes in the code records match the migration files', async () => {
@@ -139,7 +171,7 @@ describe('registry evaluation dimensions', () => {
     expect(e.pool_evaluations[1]).toMatchObject({ pool: { pool_id: 'TEST-pool', version: 'v1' }, out_of_sample: true,
       eligible: { baseline_n: 50, candidate_n: 50, overlap_n: 50 }, baseline_metrics: { acc: 0.5 }, evidence_refs: ['test://evidence'] });
     expect(e.pool_component).toMatchObject({ component_id: 'TEST component' });
-    expect(e.standalone_evaluations).toHaveLength(1);
+    expect(e.standalone_evaluations).toHaveLength(3);
     expect(e.standalone_evaluations[0].evaluation_status).toBe('BLOCKED');
   });
 

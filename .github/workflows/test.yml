@@ -56,9 +56,9 @@ jobs:
       # dev environments), confirmed by this exact step failing with
       # "No module named 'yaml'" before this line was added.
       - name: Install pytest
-        run: pip install pytest pyyaml --break-system-packages
+        run: pip install pytest pyyaml numpy --break-system-packages   # numpy: exp008-chronos input arrays (no torch/chronos in CI)
       - name: Run Experiment 4 and research schema tests
-        run: python3 -m pytest exp004-timesfm/ research/ -v
+        run: python3 -m pytest exp004-timesfm/ exp008-chronos/ research/ -v
 
   # STAGING ONLY, manual only: deploys this branch's worker.js to pulseworker-v2-staging and sets its
   # STAGE7_ADMIN_TOKEN. Runs only when a human dispatches Test with job=staging-deploy-learning; never on push or PR.

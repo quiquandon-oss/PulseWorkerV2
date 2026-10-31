@@ -1,0 +1,114 @@
+# RESEARCH ONLY -- Experiment 8: Amazon Chronos-2 BTC challenger (exp008-chronos/README.md).
+#
+# Runs right after each EXP-004 TimesFM run and forecasts from the same origin (input_end_ts), so both
+# challengers share origins, targets and ground truth. Daily fallback at 21:40 UTC resolves due forecasts.
+#
+# Isolation:
+# - production D1: read-only (btc_data up to the origin, the newest experiment_4_timesfm row per
+#   horizon, and one btc_data row per due resolution). No D1 write, no new table;
+# - writes: only refs/heads/research-data/exp008-chronos, only paths under exp008_chronos/; never
+#   force-pushes; files are immutable (one per forecast, resolution and run);
+# - never touches predictions, selection, source weights or EXP-004; deploy.yml's path filter does not
+#   match this file.
+name: Experiment 8 - Chronos-2 Challenger (BTC only, research only)
+
+on:
+  workflow_run:
+    workflows: ["Experiment 4 - TimesFM Challenger (BTC only, research only)"]
+    types: [completed]
+  schedule:
+    - cron: '40 21 * * *'
+  workflow_dispatch: {}
+
+permissions:
+  contents: write              # only to push research-data/exp008-chronos
+
+concurrency:
+  group: exp008-chronos
+  cancel-in-progress: false
+
+env:
+  DATA_BRANCH: research-data/exp008-chronos
+  CHRONOS_REVISION: ''         # pin a Hugging Face revision here once the first live run records one
+
+jobs:
+  exp008:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: "Check out the code (read-only)"
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683   # v4.2.2
+        with:
+          path: code
+          persist-credentials: false
+
+      - name: "Check out the data branch, or start it empty"
+        run: |
+          set -euo pipefail
+          remote="https://github.com/${GITHUB_REPOSITORY}.git"     # public repo: no credential needed to read
+          git init -q data && cd data
+          if git ls-remote --exit-code --heads "$remote" "$DATA_BRANCH" >/dev/null; then
+            git fetch -q --depth=1 "$remote" "$DATA_BRANCH" && git checkout -q -B "$DATA_BRANCH" FETCH_HEAD
+          else
+            git checkout -q --orphan "$DATA_BRANCH"
+          fi
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Install wrangler
+        run: npm install -g wrangler@4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install Chronos-2 (CPU) and pytest
+        run: |
+          pip install torch --index-url https://download.pytorch.org/whl/cpu
+          pip install -r code/exp008-chronos/requirements.txt pytest
+
+      - name: Cache the Chronos-2 weights
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/huggingface
+          key: hf-amazon-chronos-2-${{ env.CHRONOS_REVISION || 'main' }}
+
+      - name: "Tests (runner, resolution, evaluation, real Chronos-2 code on a tiny model)"
+        run: python -m pytest -q code/exp008-chronos/
+
+      - name: "Run Experiment 8 (resolve + forecast)"
+        id: run
+        working-directory: code          # wrangler reads wrangler.toml (account id) from here
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          set +e
+          python exp008-chronos/run_experiment.py --store ../data/exp008_chronos
+          echo "rc=$?" >> "$GITHUB_OUTPUT"
+
+      - name: "Commit to the data branch only"
+        if: always() && steps.run.outcome != 'skipped'
+        working-directory: data
+        env:
+          PUSH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          git config user.name "exp008-chronos[bot]"
+          git config user.email "exp008-chronos@users.noreply.github.com"
+          git add -A exp008_chronos 2>/dev/null || true
+          if git diff --cached --quiet; then echo "nothing to commit"; exit 0; fi
+          outside=$(git diff --cached --name-only | grep -v '^exp008_chronos/' || true)
+          if [ -n "$outside" ]; then echo "::error::refusing to commit outside exp008_chronos/: $outside"; exit 1; fi
+          git commit -q -m "EXP-008 run ${GITHUB_RUN_ID} (${GITHUB_EVENT_NAME})"
+          remote="https://x-access-token:${PUSH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          for i in 1 2 3 4; do
+            git push "$remote" "HEAD:refs/heads/${DATA_BRANCH}" && exit 0
+            sleep $((2**i)); git pull -q --rebase "$remote" "$DATA_BRANCH" || true
+          done
+          exit 1
+
+      - name: "Fail the job if the run reported errors"
+        if: steps.run.outputs.rc != '0'
+        run: |
+          echo "::error::run_experiment.py exited ${{ steps.run.outputs.rc }} (see its run record)"
+          exit 1

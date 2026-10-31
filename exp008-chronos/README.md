@@ -27,8 +27,10 @@ evaluation plan in `EVALUATION_PLAN.md` is **PROPOSED** until the owner freezes 
 4. **Resolution:** the first `btc_data` price at or after `target_ts = input_end_ts + horizon`, compared
    with `price_at_prediction`, exactly as EXP-004 does. So both challengers share ground truth.
 5. **Persistence:** each forecast records the last tick's return and direction. The resolution records
-   whether "same direction as the last tick" was right. This rule is **provisional**: the registry names
-   "last-tick persistence" but never defined it.
+   whether "same direction as the last tick" was right. The rule is defined in the frozen plan
+   `research/plans/2026-11-01-prospective-evaluation-plans.md` (forecasts from 2026-11-01 onward).
+6. **Model revision:** `model_revision` is the pinned `CHRONOS_REVISION` (or "main (unpinned)"), and
+   `model_revision_resolved` is the commit sha of the Hugging Face snapshot actually loaded.
 
 ## Storage
 

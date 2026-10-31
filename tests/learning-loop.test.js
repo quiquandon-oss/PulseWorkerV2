@@ -217,10 +217,23 @@ function makeEnv({ withStage7 = true, withLearning = true, token = 'learning-tes
       async first() { const r = db.prepare(sql).get(...args); return r ? { ...r } : null; },
       async all() { return { results: db.prepare(sql).all(...args).map((r) => ({ ...r })) }; },
       async run() { const r = db.prepare(sql).run(...args); return { meta: { changes: r.changes } }; },
+      runSync() { const r = db.prepare(sql).run(...args); return { meta: { changes: r.changes } }; },
     };
     return o;
   }
-  const env = { DB: { prepare: stmt } };
+  // D1 batch semantics in SQLite: all statements in one transaction, rolled back if any fails.
+  function batch(statements) {
+    db.exec('BEGIN');
+    try {
+      const out = statements.map((st) => st.runSync());
+      db.exec('COMMIT');
+      return Promise.resolve(out);
+    } catch (err) {
+      db.exec('ROLLBACK');
+      return Promise.reject(err);
+    }
+  }
+  const env = { DB: { prepare: stmt, batch } };
   if (token) env.STAGE7_ADMIN_TOKEN = token;
   return { env, db, token };
 }

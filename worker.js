@@ -6759,45 +6759,49 @@ async function getResearchLabStage7Overview(env) {
     byStatusRows = await env.DB.prepare(
       'SELECT status, COUNT(*) AS n FROM stage7_research_requests GROUP BY status'
     ).all();
-  } catch (_err) {
-    return {
-      ok: true,
-      activated: false,
-      reason: 'Stage 7 migration (0016: stage7_research_requests/stage7_research_responses/stage7_event_sentiment) is not yet applied to production D1.',
-    };
+  } catch (err) {
+    // Only "no such table/column" is evidence of a missing migration; any other D1 failure (timeout, overload,
+    // network) is reported as a failed check, never as "not applied".
+    return stage7OverviewSchemaResult(err, 'NOT_APPLIED');
   }
 
   const byStatus = {};
   for (const row of (byStatusRows && byStatusRows.results) || []) byStatus[row.status] = row.n;
 
-  const [openRequestsResult, sentimentResult] = await Promise.all([
-    env.DB.prepare(
-      `SELECT r.request_id, r.event_id, re.category AS event_category, re.event_ts AS event_ts,
-              r.status, r.sufficiency_status, r.reasons_json, r.questions_json, r.missing_categories_json,
-              r.created_ts, r.updated_ts, r.github_path, r.github_published_ts, r.github_publish_error,
-              resp.response_id AS response_id, resp.validation_status AS response_validation_status,
-              resp.registered_ts AS response_registered_ts
-       FROM stage7_research_requests r
-       LEFT JOIN research_events re ON re.event_id = r.event_id
-       LEFT JOIN stage7_research_responses resp ON resp.request_id = r.request_id
-       WHERE r.status NOT IN ('INTEGRATED', 'REJECTED')
-       ORDER BY r.created_ts DESC`
-    ).all(),
-    // One row per event: the most recent stage7_event_sentiment row for
-    // that event_id (id is AUTOINCREMENT, so MAX(id) per event_id is
-    // always the latest calculation -- same "latest per key" idiom this
-    // file's own latest_sentiment computation already uses elsewhere).
-    env.DB.prepare(
-      `SELECT s.event_id, re.category AS event_category, re.event_ts AS event_ts,
-              s.evidence_sufficiency, s.sentiment_label, s.sentiment_score, s.calculation_ts,
-              s.formula_version, s.ai_research_response_id, s.contributing_evidence_ids_json,
-              s.excluded_evidence_json
-       FROM stage7_event_sentiment s
-       LEFT JOIN research_events re ON re.event_id = s.event_id
-       WHERE s.id IN (SELECT MAX(id) FROM stage7_event_sentiment GROUP BY event_id)
-       ORDER BY s.calculation_ts DESC`
-    ).all(),
-  ]);
+  let openRequestsResult, sentimentResult;
+  try {
+    [openRequestsResult, sentimentResult] = await Promise.all([
+      env.DB.prepare(
+        `SELECT r.request_id, r.event_id, re.category AS event_category, re.event_ts AS event_ts,
+                r.status, r.sufficiency_status, r.reasons_json, r.questions_json, r.missing_categories_json,
+                r.created_ts, r.updated_ts, r.github_path, r.github_published_ts, r.github_publish_error,
+                resp.response_id AS response_id, resp.validation_status AS response_validation_status,
+                resp.registered_ts AS response_registered_ts
+         FROM stage7_research_requests r
+         LEFT JOIN research_events re ON re.event_id = r.event_id
+         LEFT JOIN stage7_research_responses resp ON resp.request_id = r.request_id
+         WHERE r.status NOT IN ('INTEGRATED', 'REJECTED')
+         ORDER BY r.created_ts DESC`
+      ).all(),
+      // One row per event: the most recent stage7_event_sentiment row for
+      // that event_id (id is AUTOINCREMENT, so MAX(id) per event_id is
+      // always the latest calculation -- same "latest per key" idiom this
+      // file's own latest_sentiment computation already uses elsewhere).
+      env.DB.prepare(
+        `SELECT s.event_id, re.category AS event_category, re.event_ts AS event_ts,
+                s.evidence_sufficiency, s.sentiment_label, s.sentiment_score, s.calculation_ts,
+                s.formula_version, s.ai_research_response_id, s.contributing_evidence_ids_json,
+                s.excluded_evidence_json
+         FROM stage7_event_sentiment s
+         LEFT JOIN research_events re ON re.event_id = s.event_id
+         WHERE s.id IN (SELECT MAX(id) FROM stage7_event_sentiment GROUP BY event_id)
+         ORDER BY s.calculation_ts DESC`
+      ).all(),
+    ]);
+  } catch (err) {
+    // The requests table exists (the query above succeeded), so a missing object here means a partial schema.
+    return stage7OverviewSchemaResult(err, 'PARTIAL');
+  }
 
   const openRequests = ((openRequestsResult && openRequestsResult.results) || []).map((row) => ({
     request_id: row.request_id,
@@ -6852,6 +6856,94 @@ async function getResearchLabStage7Overview(env) {
 
 const STAGE7_SENTIMENT_ASSESSMENTS = ['POSITIVE', 'NEGATIVE', 'MIXED', 'INDETERMINATE'];
 
+// ---- Stage 7 error handling (2026-10-31 corrective patch). Callers never see raw D1/SQLite error text, SQL or
+// request content: errors map to stable codes, and the original error goes to the Worker log only. ----
+
+// Classifies a D1 error from a Stage 7 statement. Only "no such table/column" is evidence of a missing schema
+// object; a uniqueness violation is a competing write; everything else is unexpected (including transient failures).
+function classifyStage7DbError(err) {
+  const text = String((err && err.message) || err || '');
+  const missing = text.match(/no such (table|column): ([A-Za-z0-9_.]+)/i);
+  if (missing) return { kind: 'SCHEMA_MISSING', object_type: missing[1].toLowerCase(), object: missing[2] };
+  // Only a uniqueness violation is a competing registration. FOREIGN KEY, NOT NULL and CHECK failures are not, and
+  // must not be reported as one.
+  if (/UNIQUE constraint failed|PRIMARY KEY constraint failed|SQLITE_CONSTRAINT_(UNIQUE|PRIMARYKEY)/i.test(text)) return { kind: 'UNIQUE' };
+  return { kind: 'UNEXPECTED' };
+}
+
+// Overview result when a read fails. `missingState` is NOT_APPLIED for the first (requests-table) query and
+// PARTIAL for the later ones. The missing object's name comes from the database, never from the request.
+function stage7OverviewSchemaResult(err, missingState) {
+  const c = classifyStage7DbError(err);
+  if (c.kind === 'SCHEMA_MISSING') {
+    return {
+      ok: true,
+      activated: false,
+      schema_state: missingState,
+      missing: { type: c.object_type, name: c.object },
+      reason: missingState === 'NOT_APPLIED'
+        ? 'Stage 7 migration (0016: stage7_research_requests/stage7_research_responses/stage7_event_sentiment) is not yet applied to this database.'
+        : 'Stage 7 schema is only partially applied on this database (migration 0016 or 0005 incomplete).',
+    };
+  }
+  console.error('stage7 overview query failed:', err);
+  return {
+    ok: false,
+    status: 503,
+    code: 'STAGE7_SCHEMA_CHECK_FAILED',
+    error: 'Could not read Stage 7 state because a database query failed. This is not evidence that a migration is missing; retry shortly.',
+  };
+}
+
+// Route-level mapping of an unexpected error to a generic response.
+function stage7SafeError(err) {
+  const c = classifyStage7DbError(err);
+  if (c.kind === 'SCHEMA_MISSING') {
+    return { status: 503, body: { ok: false, code: 'STAGE7_SCHEMA_NOT_READY', error: 'Stage 7 schema is not ready on this database. See GET /api/research-lab/stage7-overview.' } };
+  }
+  console.error('stage7 route error:', err);
+  return { status: 500, body: { ok: false, code: 'STAGE7_INTERNAL_ERROR', error: 'Stage 7 request failed. See the Worker logs.' } };
+}
+
+// Write authorization, checked before any D1 access: 503 when STAGE7_ADMIN_TOKEN is not configured (fail closed,
+// no fallback), 401 for a missing or wrong token. Returns null when authorized.
+function stage7AuthorizeWrite(env, providedToken) {
+  const configuredToken = env.STAGE7_ADMIN_TOKEN;
+  if (!configuredToken) {
+    return {
+      ok: false,
+      error: 'Stage 7 response registration is disabled on this Worker: STAGE7_ADMIN_TOKEN is not configured. Set it with `wrangler secret put STAGE7_ADMIN_TOKEN` before this endpoint can be used.',
+      status: 503,
+    };
+  }
+  if (typeof providedToken !== 'string' || !providedToken || !stage7ConstantTimeEqual(providedToken, configuredToken)) {
+    return { ok: false, error: 'Unauthorized', status: 401 };
+  }
+  return null;
+}
+
+// JSON text in a canonical form: object keys sorted at every level, array order and values unchanged. Returns null
+// when the text is not valid JSON, so a malformed stored value never compares equal to anything.
+function canonicalStage7Json(text) {
+  const sortKeys = (v) => (Array.isArray(v) ? v.map(sortKeys)
+    : v && typeof v === 'object' ? Object.fromEntries(Object.keys(v).sort().map((k) => [k, sortKeys(v[k])])) : v);
+  try { return JSON.stringify(sortKeys(JSON.parse(text))); } catch (_e) { return null; }
+}
+
+// Identical-retry test on the columns migration 0016 provides. Every content column must match: provider,
+// submitted_ts, confidence and validation_status exactly; findings and sources as JSON, ignoring object key order
+// only. The original timestamps (registered_ts, validated_ts) are the first registration's and are not compared.
+function sameStage7Registration(row, candidate) {
+  const sameJson = (a, b) => { const ca = canonicalStage7Json(a); return ca !== null && ca === canonicalStage7Json(b); };
+  return !!row
+    && (row.provider ?? null) === candidate.provider
+    && (row.submitted_ts ?? null) === candidate.submitted_ts
+    && sameJson(row.findings_json, candidate.findings_json)
+    && sameJson(row.sources_json, candidate.sources_json)
+    && (row.confidence ?? null) === candidate.confidence
+    && row.validation_status === candidate.validation_status;
+}
+
 // Plain, dependency-free constant-time-ish string compare for the Stage 7
 // admin token below. Cloudflare Workers has no Node crypto.timingSafeEqual;
 // this always scans the full length of both operands (never short-circuits
@@ -6900,61 +6992,82 @@ function stage7ConstantTimeEqual(a, b) {
 // never hardcoded here. The token itself is never logged or echoed back in
 // any response, including error responses.
 async function registerStage7ResearchResponse(env, { requestId, provider, submittedTs, findings, sources, confidence, validated, providedToken }) {
-  const configuredToken = env.STAGE7_ADMIN_TOKEN;
-  if (!configuredToken) {
-    return {
-      ok: false,
-      error: 'Stage 7 response registration is disabled on this Worker: STAGE7_ADMIN_TOKEN is not configured. Set it with `wrangler secret put STAGE7_ADMIN_TOKEN` before this endpoint can be used.',
-      status: 503,
-    };
-  }
-  if (typeof providedToken !== 'string' || !providedToken || !stage7ConstantTimeEqual(providedToken, configuredToken)) {
-    return { ok: false, error: 'Unauthorized', status: 401 };
-  }
+  const denied = stage7AuthorizeWrite(env, providedToken);
+  if (denied) return denied;
 
   const request = await env.DB.prepare(
     'SELECT request_id, status FROM stage7_research_requests WHERE request_id = ?'
   ).bind(requestId).first();
-  if (!request) return { ok: false, error: `No stage7_research_requests row exists for request_id ${requestId}`, status: 404 };
+  if (!request) return { ok: false, error: 'No research request exists for this request_id.', status: 404 };
   if (request.status === 'INTEGRATED' || request.status === 'REJECTED') {
-    return { ok: false, error: `Request ${requestId} is already terminal (${request.status}) -- a new research pass requires a NEW request, never overwriting this one`, status: 409 };
+    return { ok: false, error: `This request is already terminal (${request.status}) -- a new research pass requires a NEW request, never overwriting this one`, status: 409 };
   }
-  const existingResponse = await env.DB.prepare(
-    'SELECT response_id FROM stage7_research_responses WHERE request_id = ?'
-  ).bind(requestId).first();
-  if (existingResponse) {
-    return { ok: false, error: `Request ${requestId} already has a registered response (${existingResponse.response_id}) -- never overwritten; a new research pass requires a new request`, status: 409 };
-  }
+
+  const validationStatus = validated === true ? 'VALIDATED' : 'PENDING';
+  const candidate = {
+    provider: provider || null,
+    submitted_ts: Number.isFinite(submittedTs) ? submittedTs : null,
+    findings_json: JSON.stringify(findings),
+    sources_json: JSON.stringify(Array.isArray(sources) ? sources : []),
+    confidence: confidence || null,
+    validation_status: validationStatus,
+  };
+  const existingSql = 'SELECT response_id, provider, submitted_ts, findings_json, sources_json, confidence, validation_status FROM stage7_research_responses WHERE request_id = ?';
+  // An identical retry is idempotent (200, nothing written); different content is refused and never overwrites.
+  const settle = (existing) => (sameStage7Registration(existing, candidate)
+    ? { ok: true, status: 200, already_registered: true, response_id: existing.response_id, validation_status: existing.validation_status,
+      note: 'This exact response was already registered for this request. Nothing was changed.' }
+    : { ok: false, error: `This request already has a registered response (${existing.response_id}) with different content -- never overwritten; a new research pass requires a new request`, status: 409 });
+
+  const existingResponse = await env.DB.prepare(existingSql).bind(requestId).first();
+  if (existingResponse) return settle(existingResponse);
   if (!findings || !STAGE7_SENTIMENT_ASSESSMENTS.includes(findings.sentiment_assessment)) {
     return { ok: false, error: `findings.sentiment_assessment must be one of ${STAGE7_SENTIMENT_ASSESSMENTS.join(', ')}`, status: 400 };
   }
 
   const responseId = `stage7-resp-${requestId}`;
   const registeredTs = Date.now();
-  const validationStatus = validated === true ? 'VALIDATED' : 'PENDING';
   const validatedTs = validated === true ? registeredTs : null;
 
-  await env.DB.prepare(
+  // One D1 batch (a single transaction: if either statement fails, neither is applied). The INSERT only happens
+  // while the request is still non-terminal, the same predicate as the UPDATE, so a request that became terminal
+  // after the check above gets neither row. UNIQUE(request_id) and the response_id primary key (migration 0016)
+  // make a concurrent second registration fail here instead of overwriting.
+  const insert = env.DB.prepare(
     `INSERT INTO stage7_research_responses
        (response_id, request_id, provider, submitted_ts, registered_ts, findings_json, sources_json,
         confidence, validation_status, validated_ts, validator_notes)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+     SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+     WHERE EXISTS (SELECT 1 FROM stage7_research_requests WHERE request_id = ? AND status NOT IN ('INTEGRATED', 'REJECTED'))`
   ).bind(
-    responseId, requestId, provider || null,
-    Number.isFinite(submittedTs) ? submittedTs : null, registeredTs,
-    JSON.stringify(findings), JSON.stringify(Array.isArray(sources) ? sources : []),
-    confidence || null, validationStatus, validatedTs,
-    null
-  ).run();
-
+    responseId, requestId, candidate.provider, candidate.submitted_ts, registeredTs,
+    candidate.findings_json, candidate.sources_json, candidate.confidence, validationStatus, validatedTs,
+    null, requestId
+  );
   // Reflects registration immediately; INTEGRATION_REVIEW (once Stage 7's
   // own scheduled recalculation actually runs against a VALIDATED
   // response) is set by stage7-research-pipeline/run_stage7.py, never
   // guessed here ahead of that recalculation actually happening.
-  await env.DB.prepare(
+  const update = env.DB.prepare(
     `UPDATE stage7_research_requests SET status = ?, updated_ts = ?
      WHERE request_id = ? AND status NOT IN ('INTEGRATED', 'REJECTED')`
-  ).bind(validated === true ? 'RESEARCH_COMPLETED' : 'RESEARCH_RESPONSE_RECEIVED', registeredTs, requestId).run();
+  ).bind(validated === true ? 'RESEARCH_COMPLETED' : 'RESEARCH_RESPONSE_RECEIVED', registeredTs, requestId);
+
+  let results;
+  try {
+    results = await env.DB.batch([insert, update]);
+  } catch (err) {
+    if (classifyStage7DbError(err).kind !== 'UNIQUE') throw err;
+    // A concurrent registration won the race. Report it against what is actually stored; if no stored row explains
+    // the violation, fail (500) rather than claim a registration that cannot be shown.
+    const winner = await env.DB.prepare(existingSql).bind(requestId).first();
+    if (!winner) throw err;
+    return settle(winner);
+  }
+  const inserted = results && results[0] && results[0].meta ? results[0].meta.changes : undefined;
+  if (inserted === 0) {
+    return { ok: false, status: 409, error: 'This request became terminal before the response could be registered -- nothing was written.' };
+  }
 
   return { ok: true, response_id: responseId, validation_status: validationStatus, status: 200 };
 }
@@ -10927,7 +11040,9 @@ export default {
           return json(result, result.ok ? 200 : (result.status || 500));
         }
       } catch (err) {
-        return json({ ok: false, error: String(err) }, 500);
+        // Never return raw D1 error text (it can carry SQL or stored values); the error goes to the Worker log.
+        console.error('learning route error:', err);
+        return json({ ok: false, code: 'LEARNING_INTERNAL_ERROR', error: 'Request failed. See the Worker logs.' }, 500);
       }
       return json({ ok: false, error: 'not_found' }, 404);
     }
@@ -11009,9 +11124,10 @@ export default {
     if (url.pathname === '/api/research-lab/stage7-overview' && request.method === 'GET') {
       try {
         const result = await getResearchLabStage7Overview(env);
-        return new Response(JSON.stringify(result), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+        return new Response(JSON.stringify(result), { status: result.ok ? 200 : (result.status || 500), headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
       } catch (err) {
-        return new Response(JSON.stringify({ ok: false, error: String(err) }), { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+        const safe = stage7SafeError(err);
+        return new Response(JSON.stringify(safe.body), { status: safe.status, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
       }
     }
 
@@ -11029,15 +11145,25 @@ export default {
     // logged, and the error responses below never echo request headers or
     // body content back to the caller.
     if (url.pathname === '/api/research-lab/stage7-register-response' && request.method === 'POST') {
+      const send = (body, status) => new Response(JSON.stringify(body), { status, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
       try {
         const authHeader = request.headers.get('Authorization') || '';
         const providedToken = authHeader.startsWith('Bearer ') ? authHeader.slice('Bearer '.length) : null;
-        const body = await request.json();
+        // Authorization first: an unauthorized caller gets 401/503 before the body is parsed or D1 is touched.
+        const denied = stage7AuthorizeWrite(env, providedToken);
+        if (denied) return send({ ok: false, error: denied.error }, denied.status);
+        let body;
+        try {
+          body = await request.json();
+        } catch (_err) {
+          // The parser's message quotes part of the input, so it is never returned.
+          return send({ ok: false, code: 'INVALID_JSON', error: 'Request body must be valid JSON.' }, 400);
+        }
         if (!body || typeof body.request_id !== 'string' || !body.request_id.trim()) {
-          return new Response(JSON.stringify({ ok: false, error: 'request_id is required' }), { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+          return send({ ok: false, error: 'request_id is required' }, 400);
         }
         if (!body.findings || typeof body.findings !== 'object') {
-          return new Response(JSON.stringify({ ok: false, error: 'findings object is required' }), { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+          return send({ ok: false, error: 'findings object is required' }, 400);
         }
         const result = await registerStage7ResearchResponse(env, {
           requestId: body.request_id,
@@ -11049,13 +11175,10 @@ export default {
           validated: body.validated === true,
           providedToken,
         });
-        return new Response(JSON.stringify(result), { status: result.status || (result.ok ? 200 : 500), headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+        return send(result, result.status || (result.ok ? 200 : 500));
       } catch (err) {
-        // Never echo the caught error's own message verbatim here if it
-        // could ever originate from something request-controlled; today
-        // it cannot (JSON.parse failures and D1 errors only), but the
-        // token itself never flows through `err` in any code path above.
-        return new Response(JSON.stringify({ ok: false, error: String(err) }), { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+        const safe = stage7SafeError(err);
+        return send(safe.body, safe.status);
       }
     }
 

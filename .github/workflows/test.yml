@@ -58,7 +58,7 @@ jobs:
       - name: Install pytest
         run: pip install pytest pyyaml --break-system-packages
       - name: Run Experiment 4 and research schema tests
-        run: python3 -m pytest exp004-timesfm/ research/ -v
+        run: python3 -m pytest exp004-timesfm/ exp008-chronos/ research/ -v
 
   # STAGING ONLY, manual only: deploys this branch's worker.js to pulseworker-v2-staging and sets its
   # STAGE7_ADMIN_TOKEN. Runs only when a human dispatches Test with job=staging-deploy-learning; never on push or PR.

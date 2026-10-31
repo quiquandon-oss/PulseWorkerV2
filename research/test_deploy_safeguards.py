@@ -70,10 +70,11 @@ def test_every_production_job_needs_tests_main_and_the_production_environment():
         job = load(name)["jobs"][job_id]
         needs = job.get("needs")
         needs = [needs] if isinstance(needs, str) else needs
-        assert needs == ["test"], (name, job_id)
+        assert needs == ["test", "approval-gate"], (name, job_id)
         cond = job.get("if", "")
         assert "github.ref == 'refs/heads/main'" in cond, (name, job_id)
         assert "needs.test.result == 'success'" in cond, (name, job_id)
+        assert "needs.approval-gate.result == 'success'" in cond, (name, job_id)
         assert not re.search(r"\b(always|failure|cancelled)\(\)", cond), (name, job_id)   # never overrides the gate
         assert job.get("environment") == "production", (name, job_id)
 
@@ -140,7 +141,7 @@ def test_the_pr_check_runs_the_same_reusable_suite():
 
 # ------------------------------------------------------------------ simulation of GitHub's gating rules
 
-def evaluate_if(cond, ref, test_result):
+def evaluate_if(cond, ref, test_result, gate_result="success"):
     """Evaluates the conjunctive `if:` forms used by the gated jobs. GitHub prepends success() to an `if:` with no
     status function, so the job also needs every `needs` job to have succeeded."""
     clauses = [c.strip() for c in cond.split("&&")]
@@ -154,11 +155,17 @@ def evaluate_if(cond, ref, test_result):
         if m:
             ok = ok and test_result == m.group(1)
             continue
+        m = re.fullmatch(r"needs\.approval-gate\.result == '([^']+)'", c)
+        if m:
+            ok = ok and gate_result == m.group(1)
+            continue
+        if re.fullmatch(r"\(inputs\.job == '[^']+'( \|\| inputs\.job == '[^']+')*\)", c):
+            continue                                                            # trigger selector, assumed satisfied
         m = re.fullmatch(r"(github\.event_name|inputs\.job) == '([^']+)'", c)
         if m:
             continue                                                            # trigger selectors, assumed satisfied
         raise AssertionError(f"unrecognised clause in a gated if: {c!r}")
-    implicit_success = test_result == "success"
+    implicit_success = test_result == "success" and (gate_result == "success" or "approval-gate" not in cond)
     return ok and implicit_success
 
 
@@ -169,8 +176,9 @@ def test_simulated_gate_allows_a_deploy_only_for_main_with_successful_tests():
         cond = load(name)["jobs"][job_id]["if"]
         for ref in refs:
             for res in results:
-                allowed = evaluate_if(cond, ref, res)
-                assert allowed == (ref == "refs/heads/main" and res == "success"), (name, job_id, ref, res)
+                for gate in results:
+                    allowed = evaluate_if(cond, ref, res, gate)
+                    assert allowed == (ref == "refs/heads/main" and res == "success" and gate == "success"), (name, job_id, ref, res, gate)
 
 
 def test_simulated_test_job_is_skipped_off_main_so_the_deploy_is_too():
@@ -187,3 +195,66 @@ def test_simulator_rejects_unknown_clauses_so_a_new_condition_cannot_slip_past_t
     except AssertionError:
         return
     raise AssertionError("an unrecognised clause was accepted")
+
+
+# ------------------------------------------------------------------ approval gate (fail-closed preflight)
+
+import importlib.util  # noqa: E402
+
+_spec = importlib.util.spec_from_file_location("verify_production_environment", os.path.join(ROOT, ".github", "scripts", "verify_production_environment.py"))
+vpe = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(vpe)
+GATED_WORKFLOWS = ("deploy.yml", "deploy-research-dispatcher.yml", "test.yml")
+
+
+def test_every_production_workflow_has_a_secret_free_approval_gate_that_runs_the_check():
+    for name in GATED_WORKFLOWS:
+        gate = load(name)["jobs"]["approval-gate"]
+        assert gate["needs"] == "test", name
+        assert "needs.test.result == 'success'" in gate["if"] and "github.ref == 'refs/heads/main'" in gate["if"], name
+        assert "environment" not in gate, name
+        text = job_text(gate)
+        assert "secrets." not in text, name
+        assert "verify_production_environment.py" in text and "--environment production --branch main" in text, name
+        assert gate["permissions"] == {"contents": "read"}, name
+
+
+def env_api(env=None, env_status=200, policies=None, pol_status=200):
+    def get(url, token=None):
+        if url.endswith("/deployment-branch-policies"):
+            return pol_status, policies
+        return env_status, env
+    return get
+
+
+GOOD_ENV = {"protection_rules": [{"type": "required_reviewers", "reviewers": [{"type": "User", "reviewer": {"login": "owner"}}]}],
+            "deployment_branch_policy": {"protected_branches": False, "custom_branch_policies": True}}
+MAIN_ONLY = {"branch_policies": [{"name": "main", "type": "branch"}]}
+
+
+def test_gate_passes_only_with_reviewers_and_a_main_only_branch_policy():
+    assert vpe.check("o/r", "production", "main", get=env_api(GOOD_ENV, policies=MAIN_ONLY)) == []
+
+
+def test_gate_fails_closed_for_every_missing_or_weaker_setting():
+    cases = [
+        env_api(None, env_status=404),                                                      # environment does not exist
+        env_api(None, env_status=0),                                                        # API unreachable
+        env_api({**GOOD_ENV, "protection_rules": []}, policies=MAIN_ONLY),                  # auto-created, no rules
+        env_api({**GOOD_ENV, "protection_rules": [{"type": "required_reviewers", "reviewers": []}]}, policies=MAIN_ONLY),
+        env_api({**GOOD_ENV, "protection_rules": [{"type": "wait_timer", "wait_timer": 5}]}, policies=MAIN_ONLY),
+        env_api({**GOOD_ENV, "deployment_branch_policy": None}, policies=MAIN_ONLY),       # all branches allowed
+        env_api({**GOOD_ENV, "deployment_branch_policy": {"protected_branches": True, "custom_branch_policies": False}}),
+        env_api(GOOD_ENV, policies={"branch_policies": [{"name": "*", "type": "branch"}]}),
+        env_api(GOOD_ENV, policies={"branch_policies": [{"name": "main", "type": "branch"}, {"name": "dev", "type": "branch"}]}),
+        env_api(GOOD_ENV, policies={"branch_policies": [{"name": "main", "type": "tag"}]}),
+        env_api(GOOD_ENV, policies=None, pol_status=403),
+    ]
+    for get in cases:
+        assert vpe.check("o/r", "production", "main", get=get), get
+
+
+def test_gate_cli_exits_non_zero_when_not_configured(monkeypatch):
+    monkeypatch.setattr(vpe, "fetch", env_api(None, env_status=404))
+    monkeypatch.setattr(vpe, "check", lambda repo, env, branch, get=vpe.fetch, token=None: ["missing"])
+    assert vpe.main(["--repo", "o/r", "--environment", "production", "--branch", "main"]) == 1

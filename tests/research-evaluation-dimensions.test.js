@@ -14,7 +14,7 @@ function scope() {
   return evalInScope(
     extractFunctions('loadEvaluationRows', 'attachEvaluationDimensions', 'parseJsonColumn') + '\n' +
     extractConstants('EVAL_RECORDED_TS', 'EVAL_RECORDED_BY', 'CODE_EVALUATION_RECORDS', 'EVAL_RECORDED_TS_20261031', 'EVAL_RECORDED_BY_20261031',
-      'PLAN_REF', 'PLAN_SHA', 'evalRec', 'CODE_EVALUATION_ADDENDA', 'CODE_REGISTRY_ENTRIES'), {});
+      'PLAN_REF', 'PLAN_SHA', 'PLAN_H2_REF', 'PLAN_H2_SHA', 'H2_RECORDED_BY', 'evalRec', 'CODE_EVALUATION_ADDENDA', 'CODE_REGISTRY_ENTRIES'), {});
 }
 
 // A local SQLite database standing in for D1 (same SQL dialect), wrapped in D1's prepare().all() shape.

@@ -1,0 +1,39 @@
+name: EXP-009 / EXP-010 structural check (research only, seal-safe)
+
+# Owner decision H1 (2026-10-31): EXP-009 and EXP-010 may run structural checks only (schema, duplicates, labels,
+# temporal integrity), with no predictive conclusion. This job reads the stored research_analyses batches (read-only
+# SELECT) and prints pass/fail per invariant via research/structural_check_exp009_010.py. It never prints a label
+# count, outcome value or distribution, and does not check label reachability on batches overlapping the seal.
+# Manual dispatch only; writes nothing anywhere.
+on:
+  workflow_dispatch: {}
+
+concurrency:
+  group: structural-check-exp009-010
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Install wrangler
+        run: npm install -g wrangler
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install pytest
+        run: pip install pytest --break-system-packages
+      - name: Checker tests (never run against production on red tests)
+        run: python3 -m pytest research/test_structural_check_exp009_010.py -q
+      - name: Structural check (read-only)
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: python3 research/structural_check_exp009_010.py --from-d1

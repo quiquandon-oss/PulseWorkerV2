@@ -5,7 +5,7 @@ import { extractFunctions, extractConstants, evalInScope } from './helpers/extra
 
 function scope(overrides = '') {
   return evalInScope(
-    extractConstants('DECISION_MODEL_VERSION', 'DECISION_STATE_LABELS', 'OWNER_DECISION_RECORDS', 'PORTFOLIO_REVIEW', 'rec',
+    extractConstants('DECISION_MODEL_VERSION', 'DECISION_STATE_LABELS', 'OWNER_DECISION_RECORDS', 'OWNER_DIRECTIVES_20261031', 'OWNER_DIRECTIVES', 'OWNER_DIRECTIVE_RECORDS', 'GLOBAL_OWNER_DIRECTIVES', 'PORTFOLIO_REVIEW', 'rec',
       'PROPOSED_DECISION_RECORDS', 'PRODUCTION_USE_RECORDS', 'COLLECTION_EVIDENCE_RECORDS', 'REGISTRY_CONFLICTS') + '\n' + overrides + '\n' +
     extractFunctions('decisionStateFor', 'attachDecisionState'), {});
 }
@@ -104,6 +104,29 @@ describe('decisionStateFor', () => {
     for (const s of ['PROPOSED', 'COLLECTING', 'READY_FOR_EVALUATION', 'BLOCKED', 'EVALUATED_DECISION_PENDING', 'REJECTED',
       'IMPLEMENTED_RESEARCH_ONLY', 'IMPLEMENTED_PRODUCTION', 'STAGING_ONLY', 'ON_DEMAND']) expect(DECISION_STATE_LABELS[s]).toBeTruthy();
     expect(Object.keys(OWNER_DECISION_RECORDS)).toEqual([]);
+  });
+
+  it('owner directives (H1-H4, approved 2026-10-31) are attached but never change the state or mark a decision', () => {
+    const { decisionStateFor, OWNER_DIRECTIVES, OWNER_DIRECTIVE_RECORDS, GLOBAL_OWNER_DIRECTIVES } = scope();
+    for (const keys of Object.values(OWNER_DIRECTIVE_RECORDS)) for (const k of keys) expect(OWNER_DIRECTIVES[k]).toBeTruthy();
+    for (const d of Object.values(OWNER_DIRECTIVES)) {
+      expect(d.decided_by).toBe('Owner');
+      expect(d.decided_ts).toBe(Date.UTC(2026, 9, 31));
+      expect(['H1', 'H2', 'H3', 'H4']).toContain(d.id);
+    }
+    expect(GLOBAL_OWNER_DIRECTIVES).toEqual(['H3-EVENT-TRIGGER']);
+    expect(OWNER_DIRECTIVE_RECORDS['EXP-009']).toEqual(['H1-STRUCTURAL-ONLY']);
+    expect(OWNER_DIRECTIVE_RECORDS['EXP-005']).toEqual(['H1-WAIT-POST-SEAL']);
+    expect(OWNER_DIRECTIVE_RECORDS['EXP-025']).toContain('H2-PRODUCTION-VALIDATION');
+    expect(OWNER_DIRECTIVE_RECORDS['EXP-027']).toContain('H2-SCOPE-MARKET-COMPONENT');
+    expect(OWNER_DIRECTIVE_RECORDS['EXP-003']).toBeUndefined();
+    const withDir = decisionStateFor(entry({ experiment_id: 'EXP-009', status: 'ACCUMULATING' }));
+    const without = decisionStateFor(entry({ experiment_id: 'EXP-900', status: 'ACCUMULATING' }));
+    expect(withDir.state).toBe(without.state);
+    expect(withDir.owner_decided).toBe(false);
+    expect(withDir.owner_decision).toBeNull();
+    expect(withDir.owner_directives.map((d) => d.directive)).toEqual(['STRUCTURAL_CHECK_ALLOWED']);
+    expect(without.owner_directives).toEqual([]);
   });
 
   it('attachDecisionState decorates every entry in place', () => {

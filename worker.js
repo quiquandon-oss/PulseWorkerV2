@@ -7810,7 +7810,8 @@ async function getUnifiedResearchRegistry(env, nowTs = Date.now()) {
   attachDecisionState(experiments);
   return { ok: true, generated_ts: nowTs, experiments,
     evaluation_dimensions: { tables: evalRows.tables, error: evalRows.error, approved_pool_protocols: [] },
-    decision_model: { version: DECISION_MODEL_VERSION, states: DECISION_STATE_LABELS } };
+    decision_model: { version: DECISION_MODEL_VERSION, states: DECISION_STATE_LABELS,
+      global_owner_directives: GLOBAL_OWNER_DIRECTIVES.map((k) => ({ key: k, ...OWNER_DIRECTIVES[k] })) } };
 }
 
 // ---- Decision state (2026-10-31): one display model for every frontend ----
@@ -7833,6 +7834,41 @@ const DECISION_STATE_LABELS = {
 // Owner decisions. Added by a reviewed commit per decision; none is recorded yet.
 // Shape: { decision: 'REJECTED'|'IMPLEMENTED_RESEARCH_ONLY'|'IMPLEMENTED_PRODUCTION', decided_ts, decided_by, rationale, evidence_ref }
 const OWNER_DECISION_RECORDS = {};
+// Owner directives: policy rulings by the owner that govern HOW an experiment may proceed. Unlike
+// OWNER_DECISION_RECORDS they never produce a decided state (REJECTED / IMPLEMENTED_*) and never change `state`;
+// they are attached as `decision.owner_directives`. Approved by the owner on 2026-10-31 (H1-H4 of the portfolio
+// review, approved as written); each experiment lists the directives that apply to it.
+const OWNER_DIRECTIVES_20261031 = { decided_ts: 1793404800000, decided_by: 'Owner', approved_as: 'H1-H4 of research/evaluations/2026-10-31-portfolio.md, approved as written on 2026-10-31' };
+const OWNER_DIRECTIVES = {
+  'H1-WAIT-POST-SEAL': { ...OWNER_DIRECTIVES_20261031, id: 'H1', directive: 'WAIT_FOR_POST_SEAL',
+    text: 'Predictive-performance evaluation stays blocked until the evaluation window is entirely after the seal (2026-10-09T21:00Z).' },
+  'H1-STRUCTURAL-ONLY': { ...OWNER_DIRECTIVES_20261031, id: 'H1', directive: 'STRUCTURAL_CHECK_ALLOWED',
+    text: 'Structural checks only (schema, duplicates, labels, temporal integrity), with no predictive conclusion. If a check cannot be isolated from sealed outcomes, it stays blocked.' },
+  'H2-PREREGISTER': { ...OWNER_DIRECTIVES_20261031, id: 'H2', directive: 'PREREGISTER_BEFORE_CLAIM',
+    text: 'A frozen prospective plan (metric, comparison, test, alpha, multiplicity, and a sample size derived from a stated minimum effect and power) is required before any data supports a performance claim. No sample size is invented to unblock the registry; frozen plans are not changed to fit results.' },
+  'H2-PRODUCTION-VALIDATION': { ...OWNER_DIRECTIVES_20261031, id: 'H2', directive: 'PROSPECTIVE_VALIDATION_OF_PRODUCTION_USE',
+    text: 'Priority: the plan validates the existing production use prospectively. The production decision stays as recorded and its weight is not changed by this directive.' },
+  'H2-SCOPE-MARKET-COMPONENT': { ...OWNER_DIRECTIVES_20261031, id: 'H2', directive: 'SCOPE_MARKET_COMPONENT_ONLY',
+    text: 'Only the market component (rrs-v1) is live; the combined GDELT + market signal was never built and is not evaluated as if it were.' },
+  'H3-EVENT-TRIGGER': { ...OWNER_DIRECTIVES_20261031, id: 'H3', directive: 'ADD_EVENT_DETECTION_TRIGGER',
+    text: 'Event Detection gets a second, reliable trigger (Worker hourly cron, GitHub schedule kept as fallback), deduplicated, verified by executed runs and data freshness. Detector logic and production weights unchanged.' },
+  'H4-STAGE7-STAGING': { ...OWNER_DIRECTIVES_20261031, id: 'H4', directive: 'FINISH_IN_STAGING',
+    text: 'Finish Stage 7 in staging against explicit acceptance criteria (staging validation, migration readiness, human approval controls, documented rollback). Production migrations need separate explicit authorization.' },
+  'H4-EXP011-PRS-BLOCKED': { ...OWNER_DIRECTIVES_20261031, id: 'H4', directive: 'PRS_BLOCKED_PENDING_PLAN',
+    text: 'PRs #83/#84 stay blocked until a prospective plan and a seal-safe evidence path exist; they may be reviewed for collection and evidence integrity only.' },
+};
+const OWNER_DIRECTIVE_RECORDS = {
+  'EXP-002': ['H1-WAIT-POST-SEAL', 'H2-PREREGISTER'],
+  'EXP-005': ['H1-WAIT-POST-SEAL'],
+  'EXP-009': ['H1-STRUCTURAL-ONLY'],
+  'EXP-010': ['H1-STRUCTURAL-ONLY'],
+  'EXP-011': ['H1-WAIT-POST-SEAL', 'H2-PREREGISTER', 'H4-EXP011-PRS-BLOCKED'],
+  'EXP-012': ['H4-STAGE7-STAGING'],
+  'EXP-025': ['H2-PREREGISTER', 'H2-PRODUCTION-VALIDATION'],
+  'EXP-027': ['H2-PREREGISTER', 'H2-PRODUCTION-VALIDATION', 'H2-SCOPE-MARKET-COMPONENT'],
+  'EXP-028': ['H2-PREREGISTER'],
+};
+const GLOBAL_OWNER_DIRECTIVES = ['H3-EVENT-TRIGGER'];
 // Portfolio recommendations (review of 2026-10-31). Shown as the `proposal`, never as a decision; the owner decides.
 // Actions: CONTINUE, EVALUATE_NOW, PAUSE, CLOSE_OR_REJECT_PROPOSED, DEFER, BLOCKED.
 const PORTFOLIO_REVIEW = { proposed_ts: 1793404800000, proposed_by: 'Portfolio review 2026-10-31 (read-only evidence)',
@@ -7969,6 +8005,7 @@ function decisionStateFor(e) {
     owner_decision: owner,
     proposal: PROPOSED_DECISION_RECORDS[id] || null,
     production_use: PRODUCTION_USE_RECORDS[id] || null,
+    owner_directives: (OWNER_DIRECTIVE_RECORDS[id] || []).map((k) => ({ key: k, ...OWNER_DIRECTIVES[k] })),
     conflicts: REGISTRY_CONFLICTS[id] || [],
     collection_active: ['ACCUMULATING', 'COLLECTING'].includes(st) || !!COLLECTION_EVIDENCE_RECORDS[id],
     model_version: DECISION_MODEL_VERSION,

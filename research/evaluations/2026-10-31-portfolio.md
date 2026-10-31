@@ -79,11 +79,20 @@ On the registered reading, each row's own `scores_json`, which holds every varia
 - **EXP-005, 009 and 010** are weekly. They are cheap, but they produce data that cannot be evaluated until the seal or
   independence ruling. PAUSE is reasonable for EXP-009 and EXP-010 once their structural milestone is checked.
 
-## Decisions only the owner can make
+## Owner decisions (approved 2026-10-31, as written)
 
-1. **Seal-overlap policy** for EXP-005, 009, 010, 011 and 002: wait for fully post-seal windows, or allow
-   structural-only checks.
-2. **Pre-registration** of sample and test for EXP-002, 011, 025, 027 and 028. EXP-025 and EXP-027 are already in
-   production without one.
-3. **Event Detection trigger:** keep schedule-only (about 5 runs a day), or add a second trigger.
-4. **EXP-012 / PRs #82–#85:** finish Stage 7, or close.
+Served live as `decision.owner_directives` (per experiment) and `decision_model.global_owner_directives` (H3). They
+govern how work proceeds; they do not change any experiment's state and are not REJECTED / IMPLEMENTED decisions.
+
+1. **H1, seal overlap (mixed):** EXP-002, 005 and 011 wait for fully post-seal windows before any predictive
+   evaluation. EXP-009 and 010 may run structural checks only (schema, duplicates, labels, temporal integrity), with no
+   predictive conclusion; a check that cannot be isolated from sealed outcomes stays blocked.
+2. **H2, pre-registration:** EXP-002, 011, 025, 027 and 028 need a frozen prospective plan before any data supports a
+   performance claim. Sample sizes come from a stated minimum effect, power, alpha and multiplicity correction, never
+   invented. Priority: EXP-025 and the EXP-027 market component (prospective validation of existing production use;
+   production decisions and weights unchanged). EXP-027 is scoped to the market component (rrs-v1); the combined
+   signal was never built.
+3. **H3, Event Detection:** add a second, reliable trigger, deduplicated and verified by executed runs and freshness.
+4. **H4, Stage 7 / PRs #82–#85:** finish Stage 7 in staging against explicit acceptance criteria; production
+   migrations need separate authorization. EXP-011 PRs #83/#84 stay blocked until a prospective plan and a seal-safe
+   evidence path exist.

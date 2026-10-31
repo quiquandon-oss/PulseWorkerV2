@@ -7805,8 +7805,78 @@ async function getUnifiedResearchRegistry(env, nowTs = Date.now()) {
   experiments.sort((a, b) => a.experiment_id.localeCompare(b.experiment_id));
   const evalRows = await loadEvaluationRows(env);
   attachEvaluationDimensions(experiments, evalRows);
+  attachDecisionState(experiments);
   return { ok: true, generated_ts: nowTs, experiments,
-    evaluation_dimensions: { tables: evalRows.tables, error: evalRows.error, approved_pool_protocols: [] } };
+    evaluation_dimensions: { tables: evalRows.tables, error: evalRows.error, approved_pool_protocols: [] },
+    decision_model: { version: DECISION_MODEL_VERSION, states: DECISION_STATE_LABELS } };
+}
+
+// ---- Decision state (2026-10-31): one display model for every frontend ----
+// Each registry entry gains `decision`, derived from registry fields and the code records below, so V2 and V3
+// show the same state instead of each re-deriving it. Rules, in order:
+//   1. An owner decision record (OWNER_DECISION_RECORDS) or a registry status of REJECTED/RETIRED is the ONLY
+//      source of REJECTED / IMPLEMENTED_*. A proposal never produces a decided state.
+//   2. Registry PROPOSED / STAGING_ONLY / ON_DEMAND_AUDIT map to their own states.
+//   3. The latest standalone evaluation: BLOCKED -> BLOCKED; a scientific outcome -> EVALUATED_DECISION_PENDING.
+//   4. Sample at or above required_sample -> READY_FOR_EVALUATION (eligibility, never success).
+//   5. Otherwise COLLECTING.
+// Proposals and known production use are attached separately and never change the state.
+const DECISION_MODEL_VERSION = 'decision-state-v1';
+const DECISION_STATE_LABELS = {
+  PROPOSED: 'Proposed, not started', COLLECTING: 'Collecting', READY_FOR_EVALUATION: 'Ready for evaluation',
+  BLOCKED: 'Blocked', EVALUATED_DECISION_PENDING: 'Evaluated, decision pending', REJECTED: 'Rejected',
+  IMPLEMENTED_RESEARCH_ONLY: 'Implemented, research only', IMPLEMENTED_PRODUCTION: 'Implemented, production',
+  STAGING_ONLY: 'Staging only', ON_DEMAND: 'On-demand audit',
+};
+// Owner decisions. Added by a reviewed commit per decision; none is recorded yet.
+// Shape: { decision: 'REJECTED'|'IMPLEMENTED_RESEARCH_ONLY'|'IMPLEMENTED_PRODUCTION', decided_ts, decided_by, rationale, evidence_ref }
+const OWNER_DECISION_RECORDS = {};
+// Proposals from evaluation reports. Displayed as proposals only; the owner decides.
+const PROPOSED_DECISION_RECORDS = {
+  'EXP-003': { proposal: 'REJECT', proposed_ts: 1793404800000, proposed_by: 'Research review 2026-10-31 (read-only)',
+    basis: 'Frozen criterion "momentum LCA ranks above the production choice" held in 7 of 40 post-seal decisions (12h 4/20, 24h 3/20). No statistical rule is registered; daily rows overlap.',
+    evidence_ref: 'research/evaluations/2026-10-31-all-experiments.md' },
+};
+// Production use that exists outside the registry, shown so research and production use are never confused.
+const PRODUCTION_USE_RECORDS = {
+  'EXP-025': { where: 'V1 composite source "hloi" (PulseWorker)', since: '2026-10-11', decision_recorded: false },
+  'EXP-027': { where: 'V1 composite source "riskregime", rule rrs-v1, weight 4 x 0.3 (PulseWorker RISK_REGIME_SHOCK.md)', since: '2026-10-12', decision_recorded: false,
+    note: 'The registry entry says PROPOSED / no production use; this record states the actual V1 use.' },
+};
+
+function decisionStateFor(e) {
+  const id = e && e.experiment_id;
+  const owner = OWNER_DECISION_RECORDS[id] || null;
+  const st = String((e && e.status) || '').toUpperCase();
+  let state, basis;
+  if (owner) { state = owner.decision; basis = 'Owner decision recorded.'; }
+  else if (st === 'REJECTED' || st === 'RETIRED') { state = 'REJECTED'; basis = `Registry status ${st}.`; }
+  else if (st === 'PROPOSED') { state = 'PROPOSED'; basis = 'Registry status PROPOSED: not started.'; }
+  else if (st === 'STAGING_ONLY') { state = 'STAGING_ONLY'; basis = 'Registry status STAGING_ONLY.'; }
+  else if (st === 'ON_DEMAND_AUDIT') { state = 'ON_DEMAND'; basis = 'Descriptive audit run on demand; no hypothesis test.'; }
+  else {
+    const ev = Array.isArray(e.standalone_evaluations) && e.standalone_evaluations.length ? e.standalone_evaluations[e.standalone_evaluations.length - 1] : null;
+    const progress = typeof e.progress_count === 'number' ? e.progress_count : null;
+    const required = typeof e.required_sample === 'number' ? e.required_sample : null;
+    if (ev && String(ev.evaluation_status).toUpperCase() === 'BLOCKED') { state = 'BLOCKED'; basis = ev.reason || 'Latest evaluation is BLOCKED.'; }
+    else if (ev && ev.scientific_outcome) { state = 'EVALUATED_DECISION_PENDING'; basis = `Evaluated (${ev.scientific_outcome}); no owner decision recorded.`; }
+    else if (progress != null && required != null && progress >= required) { state = 'READY_FOR_EVALUATION'; basis = `Sample ${progress} >= required ${required}: eligible for evaluation, not a result.`; }
+    else { state = 'COLLECTING'; basis = required == null ? 'Collecting; no required sample is registered.' : `Collecting: ${progress == null ? 'sample not reported' : progress} of ${required} required.`; }
+  }
+  return {
+    state, label: DECISION_STATE_LABELS[state] || state, basis,
+    owner_decided: !!owner || state === 'REJECTED',
+    owner_decision: owner,
+    proposal: PROPOSED_DECISION_RECORDS[id] || null,
+    production_use: PRODUCTION_USE_RECORDS[id] || null,
+    collection_active: ['ACCUMULATING', 'COLLECTING'].includes(st),
+    model_version: DECISION_MODEL_VERSION,
+  };
+}
+
+function attachDecisionState(experiments) {
+  for (const e of experiments) e.decision = decisionStateFor(e);
+  return experiments;
 }
 
 // ---- EXPERIMENT 5: agentic market evidence (research-lab UI layer) ----

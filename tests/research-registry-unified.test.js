@@ -12,9 +12,10 @@ function load(fetchImpl) {
   return evalInScope(
     extractFunctions('getUnifiedResearchRegistry', 'getResearchLabRegistry', 'computeSnapshotTableLiveFields', 'fetchResearchDataJson', 'computeLoggedTableLiveFields', 'computeExp023LiveFields',
       'computeRiskRegimeForwardLiveFields', 'computeExperiment5RegistryLiveFields', 'registryProgressCount', 'registryEta',
-      'decorateRegistryEntry', 'loadEvaluationRows', 'attachEvaluationDimensions', 'parseJsonColumn') + '\n' +
+      'decorateRegistryEntry', 'loadEvaluationRows', 'attachEvaluationDimensions', 'parseJsonColumn', 'decisionStateFor', 'attachDecisionState') + '\n' +
     extractConstants('RESEARCH_DATA_RAW_BASE', 'CODE_LIVE_METRIC_PROVIDERS', 'CODE_REGISTRY_ENTRIES', 'REGISTRY_DISPLAY_LABELS', 'DAY_MS',
-      'EVAL_RECORDED_TS', 'EVAL_RECORDED_BY', 'CODE_EVALUATION_RECORDS'),
+      'EVAL_RECORDED_TS', 'EVAL_RECORDED_BY', 'CODE_EVALUATION_RECORDS', 'DECISION_MODEL_VERSION', 'DECISION_STATE_LABELS',
+      'OWNER_DECISION_RECORDS', 'PROPOSED_DECISION_RECORDS', 'PRODUCTION_USE_RECORDS'),
     {
       fetch: fetchImpl,
       LIVE_METRIC_PROVIDERS: { fake_table: async () => ({ current_sample_size: 3, current_measured_result: 'x', oos_result: 'NOT_AVAILABLE', confidence_evidence_maturity: 'INSUFFICIENT_SAMPLE', last_updated: NOW - DAY }) },
@@ -122,9 +123,10 @@ describe('EXP-011 status follows the live activation check', () => {
   it('ACCUMULATING once Experiment 5 is activated in production', async () => {
     const scope = evalInScope(
       extractFunctions('getUnifiedResearchRegistry', 'getResearchLabRegistry', 'computeSnapshotTableLiveFields', 'fetchResearchDataJson', 'computeLoggedTableLiveFields',
-        'computeExp023LiveFields', 'computeRiskRegimeForwardLiveFields', 'computeExperiment5RegistryLiveFields', 'registryProgressCount', 'registryEta', 'decorateRegistryEntry', 'loadEvaluationRows', 'attachEvaluationDimensions', 'parseJsonColumn') + '\n' +
+        'computeExp023LiveFields', 'computeRiskRegimeForwardLiveFields', 'computeExperiment5RegistryLiveFields', 'registryProgressCount', 'registryEta', 'decorateRegistryEntry', 'loadEvaluationRows', 'attachEvaluationDimensions', 'parseJsonColumn', 'decisionStateFor', 'attachDecisionState') + '\n' +
       extractConstants('RESEARCH_DATA_RAW_BASE', 'CODE_LIVE_METRIC_PROVIDERS', 'CODE_REGISTRY_ENTRIES', 'REGISTRY_DISPLAY_LABELS', 'DAY_MS',
-      'EVAL_RECORDED_TS', 'EVAL_RECORDED_BY', 'CODE_EVALUATION_RECORDS'),
+      'EVAL_RECORDED_TS', 'EVAL_RECORDED_BY', 'CODE_EVALUATION_RECORDS', 'DECISION_MODEL_VERSION', 'DECISION_STATE_LABELS',
+      'OWNER_DECISION_RECORDS', 'PROPOSED_DECISION_RECORDS', 'PRODUCTION_USE_RECORDS'),
       { fetch: okFetch, LIVE_METRIC_PROVIDERS: {},
         getResearchLabExperiment5Overview: async () => ({ ok: true, activated: true, archive: { latest_archived_ts: NOW - 3600000 }, decisions: { proposed: 4 } }) });
     const out = await scope.getUnifiedResearchRegistry({ DB: db([]) }, NOW);

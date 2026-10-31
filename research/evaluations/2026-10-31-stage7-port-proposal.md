@@ -1,7 +1,8 @@
 # Proposal: port PR #82's remaining Stage 7 safety fixes onto `main`, without the feature switch (H4)
 
-**Status:** proposal only. Nothing here is implemented, merged or deployed. Base: `main` at `0e61c5f`; PR #82 head
-`b3077dd` (merge-base `280d2d5`).
+**Status (updated 2026-10-31):** P1–P6 are implemented on branch `fix/stage7-registration-safety`. The PR is not
+merged and not deployed; see "Implementation" at the end. Base: `main` at `0e61c5f`; PR #82 head `b3077dd`
+(merge-base `280d2d5`, still open; CI green on that head from 2026-10-01).
 
 ## Verified facts (2026-10-31)
 
@@ -31,8 +32,11 @@
      after a dropped response looks like a failure.
    - **D6:** the response `INSERT` and the request status `UPDATE` are separate statements. A failure between them
      leaves a response whose request still shows `PENDING`.
-   - **D7:** `stage7-staging-dispatcher.yml` on `main` still fires the pipeline daily (cron `0 11 * * *`) on the old
-     branch `claude/stage7-research-pipeline`, which #82 identified as unpublishable.
+   - **D7 (corrected):** `stage7-staging-dispatcher.yml` on `main` still *declares* a daily cron (`0 11 * * *`) that
+     dispatches the pipeline on the old branch `claude/stage7-research-pipeline`. **But the workflow is
+     `disabled_manually` (since 2026-10-01)**, as are `stage7-research-pipeline.yml` and `deploy-stage7-staging.yml`
+     (since 2026-10-04). Its last run was 2026-09-30, so the cron is dormant. The earlier "still fires daily" claim was
+     wrong.
 5. Merging #82 into `main` as is fails 8 learning-loop tests (500 instead of 200), because `stage7RoutePreflight`
    refuses everything unless `STAGE7_ENABLED === "true"`, and production never sets it.
 
@@ -41,8 +45,8 @@
 - **A1:** the Workers runtime produces the same JSON parse message as Node's V8. Both use V8, but this was not
   reproduced on workerd.
 - **A2:** nobody depends on the current 409 for an identical retry.
-- **A3:** the daily D7 dispatch writes nothing harmful. #82 observed `events_considered: 0`; today's runs were not
-  inspected.
+- **A3:** withdrawn. There are no recent D7 dispatches, because the workflows are disabled (verified through the
+  GitHub API).
 - **A4:** whether the owner wants #82's full candidate workflow (0017/0018) is undecided. It is out of scope here.
 
 ## Proposed change set (option 1 of the finish-line note)
@@ -102,3 +106,48 @@ with migration 0016:
 Once P1–P6 are on `main`, the only unique value left in #82 is the 0017/0018 workflow. The owner then chooses:
 - close #82 as superseded for production safety; or
 - rebuild the candidate workflow on top of `main` as its own migration-gated proposal.
+
+## Implementation (branch `fix/stage7-registration-safety`)
+
+**Files changed:** `worker.js`, `tests/stage7-routes.test.js` (new), `tests/stage7-research.test.js` and
+`tests/learning-loop.test.js` (harness only: a D1 `batch` method and the new helpers in the extraction list; no
+assertion changed). No migration, workflow, schedule, model, experiment or plan change.
+
+| Item | Implemented as |
+|---|---|
+| P1 | `classifyStage7DbError` and `stage7OverviewSchemaResult`. The existing overview queries are kept unchanged (no extra probe query). Results: a "no such table/column" error on the first query means `NOT_APPLIED`; on the later queries it means `PARTIAL`, with the missing object named. Any other D1 error returns 503 `STAGE7_SCHEMA_CHECK_FAILED` ("not evidence that a migration is missing"). |
+| P2 | The register route parses JSON in its own `try` and returns 400 `INVALID_JSON` without echoing the input. The overview, register and learning routes map unexpected errors to generic codes (`STAGE7_INTERNAL_ERROR`, `STAGE7_SCHEMA_NOT_READY`, `LEARNING_INTERNAL_ERROR`), with the original error only in the Worker log (`console.error`). Error messages no longer echo the caller's `request_id`. |
+| P3 | Concurrency safety comes from migration 0016's own constraints (`response_id` PRIMARY KEY, `UNIQUE(request_id)`), not from the pre-check. A constraint error from the batch re-reads the stored row and returns 200 (identical) or 409 (different). |
+| P4 | `sameStage7Registration` compares `provider`, `submitted_ts`, `findings_json`, `sources_json`, `confidence` and `validation_status`, all 0016 columns. An identical payload returns 200 `already_registered`; any difference returns 409 and nothing is written. Limitation: "identical" means the same JSON serialisation (same key order); a retry with reordered keys is a 409, the safe direction. |
+| P5 | `INSERT` and status `UPDATE` run in one `env.DB.batch`. Cloudflare documents a D1 batch as one SQL transaction that is rolled back if a statement fails (developers.cloudflare.com/d1/worker-api/d1-database/#batch). |
+| P6 | `stage7AuthorizeWrite`: 503 when the token is not configured, 401 when it is missing or wrong. The register route checks it **before** parsing the body or touching D1, and `registerStage7ResearchResponse` still checks it for the learning-loop caller. No `STAGE7_ENABLED`; read routes are not gated. |
+
+**Additional corrections (same route surface):**
+1. **Terminal race:** the `INSERT` is now conditional on the request being non-terminal (`INSERT … SELECT … WHERE
+   EXISTS (… status NOT IN ('INTEGRATED','REJECTED'))`), the same predicate as the `UPDATE`. A request that became
+   terminal between the check and the write previously still received a response row; now it gets 409 and nothing is
+   written.
+2. **Learning routes:** the `/api/learning/*` catch returned `String(err)`. `/api/learning/findings` writes Stage 7
+   responses through the same function, so its D1 errors could reach callers. It now returns a generic
+   `LEARNING_INTERNAL_ERROR`.
+
+**Tests:**
+- `tests/stage7-routes.test.js`: 19 tests through the real `worker.js` fetch handler on real SQLite built from
+  migrations 0005 and 0016. They cover schema present, missing and partial; transient failure; malformed JSON;
+  secret-string leakage; token unset, missing and wrong with zero D1 access; auth before body parsing; success and
+  status transition; identical retry; conflicting retry; a concurrent UNIQUE race (both outcomes); batch rollback when
+  the UPDATE fails; the terminal race; SELECT-only reads; 0016-only columns; no `STAGE7_ENABLED`; generic learning
+  errors.
+- Against unpatched `main`, 13 of the 19 fail, reproducing the defects. The 6 that pass are behaviour `main` already
+  had.
+- **Limit:** SQLite stands in for D1. The suite proves the Worker's logic under documented batch semantics, not D1's
+  production behaviour. The D1 error-message formats ("no such table: …", "UNIQUE constraint failed") are assumed
+  from SQLite and D1 conventions and were not observed on production.
+
+**Dispatcher recommendation (separate PR, owner decision):** the workflows are disabled, so nothing runs today.
+Before anyone re-enables them, change the dispatcher to manual-only (remove the cron) and point it at a reviewed ref,
+because `claude/stage7-research-pipeline` (`08da540`) predates the learning loop.
+- Writes: the pipeline writes to the **staging** D1 only, guarded by `validate_staging_target`, and git-pushes
+  request files.
+- Dependencies: no other workflow or code path depends on the dispatcher.
+- No action is needed while the workflows stay disabled.

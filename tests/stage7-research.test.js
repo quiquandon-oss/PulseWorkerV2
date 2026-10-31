@@ -24,7 +24,8 @@ describe('Stage 7 — AI-assisted research & sentiment recalculation (research-l
       extractConstants('STAGE7_SENTIMENT_ASSESSMENTS') + '\n' +
       extractFunctions(
         'parseStage7JsonField', 'getResearchLabStage7Overview', 'stage7ConstantTimeEqual',
-        'registerStage7ResearchResponse'
+        'registerStage7ResearchResponse', 'classifyStage7DbError', 'stage7OverviewSchemaResult',
+        'stage7SafeError', 'stage7AuthorizeWrite', 'sameStage7Registration'
       )
     );
   });
@@ -38,6 +39,8 @@ describe('Stage 7 — AI-assisted research & sentiment recalculation (research-l
     let callIndex = 0;
     return {
       calls,
+      // D1 batch: runs the already-prepared statements in order, returning each one's scripted run result.
+      async batch(statements) { return Promise.all(statements.map((st) => st.run())); },
       prepare(sql) {
         const thisCallIndex = callIndex++;
         calls.push({ sql, args: null });

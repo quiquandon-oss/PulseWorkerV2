@@ -149,6 +149,18 @@ def load_pipeline(attempts=LOAD_ATTEMPTS, sleep=time.sleep):
     raise RuntimeError(f"could not load {MODEL_ID}: {last}")
 
 
+def resolved_model_revision():
+    """Commit sha of the Hugging Face snapshot actually loaded, read from the local cache (no network call).
+    None when it cannot be determined; the forecast is still recorded."""
+    try:
+        from huggingface_hub import snapshot_download
+        path = snapshot_download(MODEL_ID, revision=os.environ.get("CHRONOS_REVISION") or None, local_files_only=True)
+        sha = Path(path).name
+        return sha if len(sha) == 40 and all(c in "0123456789abcdef" for c in sha) else None
+    except Exception:
+        return None
+
+
 def runtime_versions():
     out = {}
     for name in ("chronos", "torch", "transformers"):
@@ -224,6 +236,7 @@ def make_forecasts(store, d1, pipeline_loader, now_ms, code_sha=None):
         return made, notes, errors
     pipeline = pipeline_loader()
     versions = runtime_versions()
+    resolved_revision = resolved_model_revision()
     history_cache = {}
     for h, a in todo:
         end = int(a["input_end_ts"])
@@ -251,9 +264,10 @@ def make_forecasts(store, d1, pipeline_loader, now_ms, code_sha=None):
                 "predicted_return_pct": ret, "direction": "UP" if ret > 0 else "DOWN",
                 "last_tick_return_pct": last_tick_ret,
                 "persistence_direction": "UP" if last_tick_ret > 0 else "DOWN",
-                "persistence_rule": "provisional: direction of the last deduplicated tick (not pre-registered)",
+                "persistence_rule": "last deduplicated tick (research/plans/2026-11-01-prospective-evaluation-plans.md)",
                 "model_id": MODEL_ID, "model_version": MODEL_VERSION,
                 "model_revision": os.environ.get("CHRONOS_REVISION") or "main (unpinned)",
+                "model_revision_resolved": resolved_revision,
                 "inference_backend": INFERENCE_BACKEND, "runtime": versions, "quantile_levels": QUANTILE_LEVELS,
                 "context_length": len(context), "forecast_horizon_steps": steps, "step_ms": step_ms,
                 "context_sha256": hashlib.sha256(json.dumps(context).encode()).hexdigest(),

@@ -255,3 +255,25 @@ def test_evaluate_pairs_on_origin_and_excludes_mismatches(tmp_path):
     tfm.write_text(json.dumps({"forecasts": [{"horizon_hours": 12, "input_end_ts": T0, "correct": 1, "actual_direction": "DOWN"}]}))
     rep = ev.evaluate(tmp_path, [tfm], knn)["h12"]
     assert rep["n_shared"] == 0 and rep["excluded"][0][1] == "ground truth differs from TimesFM"
+
+
+def test_forecast_records_the_resolved_model_revision(tmp_path, monkeypatch):
+    d1 = FakeD1(); pts = series(); d1.prices(pts)
+    d1.anchor(12, T0, pts[-2][1])
+    monkeypatch.setattr(rx, "resolved_model_revision", lambda: "a" * 40)
+    assert run(tmp_path, d1, FakePipeline(), T0 + H) == 0
+    rec = json.loads(files(tmp_path, "forecasts")[0].read_text())
+    assert rec["model_revision_resolved"] == "a" * 40 and rec["model_revision"] == "main (unpinned)"
+
+
+def test_resolved_model_revision_is_none_without_a_cached_snapshot(monkeypatch, tmp_path):
+    hub = type(sys)("huggingface_hub")
+
+    def missing(*a, **k):
+        assert k.get("local_files_only") is True          # never a network call
+        raise OSError("not cached")
+    hub.snapshot_download = missing
+    monkeypatch.setitem(sys.modules, "huggingface_hub", hub)
+    assert rx.resolved_model_revision() is None
+    hub.snapshot_download = lambda *a, **k: str(tmp_path / "snapshots" / ("b" * 40))
+    assert rx.resolved_model_revision() == "b" * 40

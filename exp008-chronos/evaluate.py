@@ -1,9 +1,10 @@
 """
 EXP-008 descriptive comparison: Chronos-2 vs TimesFM (EXP-004), production k-NN, always-UP and the
-provisional last-tick persistence rule, on the same forecast origins.
+last-tick persistence rule, on the same forecast origins.
 
-DESCRIPTIVE ONLY. EXP-008 has no frozen evaluation plan (see EVALUATION_PLAN.md, status PROPOSED), so
-this script reports counts, hit rates, Wilson 95% intervals and exact McNemar tests, never a verdict.
+DESCRIPTIVE ONLY. The confirmatory analysis follows the frozen EVALUATION_PLAN.md (origins from 2026-11-01,
+checkpoint 100 per horizon); this script reports counts, hit rates, Wilson 95% intervals and exact McNemar
+tests, never a verdict.
 
 Inputs (all read-only):
   --store      checkout of research-data/exp008-chronos (exp008_chronos/)

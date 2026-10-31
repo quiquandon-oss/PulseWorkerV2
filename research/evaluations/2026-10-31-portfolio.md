@@ -94,6 +94,9 @@ govern how work proceeds; they do not change any experiment's state and are not 
    invented. Priority: EXP-025 and the EXP-027 market component (prospective validation of existing production use;
    production decisions and weights unchanged). EXP-027 is scoped to the market component (rrs-v1); the combined
    signal was never built.
+   *Structural check run (2026-10-31, run 41195825460):* EXP-009 7/7 batches valid (6 independent weekly runs),
+   EXP-010 6/6 (6 independent). The structural part of both milestones is met. Label reachability waits for the first
+   fully post-seal window (about 2027-01-07). Recommendation: PAUSE both weekly runs until then (owner's call).
 3. **H3, Event Detection:** add a second, reliable trigger, deduplicated and verified by executed runs and freshness.
 4. **H4, Stage 7 / PRs #82–#85:** finish Stage 7 in staging against explicit acceptance criteria; production
    migrations need separate authorization. EXP-011 PRs #83/#84 stay blocked until a prospective plan and a seal-safe

@@ -46,6 +46,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+      actions: read   # GitHub requires Actions read to see environments; without it the API answers 404
     steps:
       - uses: actions/checkout@v4
         with:

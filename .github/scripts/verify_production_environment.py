@@ -21,21 +21,29 @@ API = "https://api.github.com"
 
 
 def fetch(url, token=None):
-    """GET a GitHub API URL; returns (status, parsed JSON or None). Retries once without auth on 401/403."""
+    """GET a GitHub API URL; returns (status, parsed JSON or None). With a token, a 401/403/404 is retried once without
+    auth: GitHub answers 404 (not 403) when a token lacks permission to see a resource, and this repository is public.
+    Every attempt's status is printed so a failure shows which case it was."""
+    status = 0
     for auth in ([token, None] if token else [None]):
+        label = "token" if auth else "anonymous"
         req = urllib.request.Request(url, headers={"Accept": "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28"})
         if auth:
             req.add_header("Authorization", f"Bearer {auth}")
         try:
             with urllib.request.urlopen(req, timeout=20) as r:
+                print(f"GET {url} ({label}): HTTP {r.status}")
                 return r.status, json.loads(r.read().decode())
         except urllib.error.HTTPError as e:
-            if e.code in (401, 403) and auth:
+            status = e.code
+            print(f"GET {url} ({label}): HTTP {e.code}")
+            if e.code in (401, 403, 404) and auth:
                 continue
             return e.code, None
-        except (urllib.error.URLError, TimeoutError, ValueError):
+        except (urllib.error.URLError, TimeoutError, ValueError) as e:
+            print(f"GET {url} ({label}): {type(e).__name__}")
             return 0, None
-    return 0, None
+    return status, None
 
 
 def check(repo, environment, branch, get=fetch, token=None):

@@ -14,7 +14,7 @@ function scope() {
   return evalInScope(
     extractFunctions('loadEvaluationRows', 'attachEvaluationDimensions', 'parseJsonColumn') + '\n' +
     extractConstants('EVAL_RECORDED_TS', 'EVAL_RECORDED_BY', 'CODE_EVALUATION_RECORDS', 'EVAL_RECORDED_TS_20261031', 'EVAL_RECORDED_BY_20261031',
-      'PLAN_REF', 'PLAN_SHA', 'PLAN_H2_REF', 'PLAN_H2_SHA', 'H2_RECORDED_BY', 'evalRec', 'CODE_EVALUATION_ADDENDA', 'CODE_REGISTRY_ENTRIES'), {});
+      'PLAN_REF', 'PLAN_SHA', 'PLAN_H2_REF', 'PLAN_H2_SHA', 'H2_RECORDED_BY', 'STRUCTURAL_CHECK_RUN', 'STRUCTURAL_CHECK_BY', 'evalRec', 'CODE_EVALUATION_ADDENDA', 'CODE_REGISTRY_ENTRIES'), {});
 }
 
 // A local SQLite database standing in for D1 (same SQL dialect), wrapped in D1's prepare().all() shape.
@@ -89,8 +89,8 @@ describe('registry evaluation dimensions', () => {
     expect(rows).toMatchObject({ tables: 'NOT_PRESENT', error: null });
     const out = attachEvaluationDimensions(entries(), rows);
     const by = Object.fromEntries(out.map(e => [e.experiment_id, e]));
-    // 2026-10-12 record first, then the 2026-10-31 addenda (EXP-004: 2, EXP-005: 1, EXP-009: none).
-    for (const [id, n] of [['EXP-004', 3], ['EXP-005', 2], ['EXP-009', 1]]) {
+    // 2026-10-12 record first, then the 2026-10-31 addenda (EXP-004: 2, EXP-005: 1, EXP-009: 1, the H1 structural check).
+    for (const [id, n] of [['EXP-004', 3], ['EXP-005', 2], ['EXP-009', 2]]) {
       expect(by[id].standalone_evaluations).toHaveLength(n);
       expect(by[id].standalone_evaluations[0]).toMatchObject({ evaluation_status: 'BLOCKED', record_source: 'code' });
     }

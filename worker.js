@@ -7883,8 +7883,8 @@ const PROPOSED_DECISION_RECORDS = {
   'EXP-006': rec('DEFER', 'No hypothesis, baseline or criterion is defined; depends on an EXP-005 candidate that does not yet exist.', 'After EXP-005 produces an evidence-worthy candidate.'),
   'EXP-007': rec('DEFER', 'No protocol; needs V4 signal data that is not federated with the V2 database.', 'When a comparison protocol and data path are defined.'),
   'EXP-008': rec('CONTINUE', 'Research-only collection is live with the real amazon/chronos-2 model (first run 2026-10-31, paired with TimesFM origins). Plan frozen before any confirmatory observation.', 'First analysis at 100 paired origins per horizon from 2026-11-01.'),
-  'EXP-009': rec('BLOCKED', 'Owner decision H1 (2026-10-31): structural checks only (schema, duplicates, labels, temporal integrity), no predictive conclusion; blocked wherever a check cannot be isolated from sealed outcomes.', 'Run the seal-safe structural check; PAUSE the weekly run if the milestone holds.'),
-  'EXP-010': rec('BLOCKED', 'As EXP-009 (owner decision H1: structural checks only); its registry next_action is stale.', 'As EXP-009.'),
+  'EXP-009': rec('PAUSE', 'Owner decision H1 (2026-10-31), structural checks only: the structural part of the milestone is met (7/7 batches valid, 6 independent, run 41195825460). Label reachability cannot be checked until a batch window is fully post-seal (about 2027-01-07), and more weekly runs before then add nothing checkable.', 'Owner: pause the weekly run until about 2027-01-07, then one post-seal run for label reachability.'),
+  'EXP-010': rec('PAUSE', 'As EXP-009 (H1 structural check met: 6/6 runs valid, 6 independent); its registry next_action is stale.', 'As EXP-009.'),
   'EXP-011': rec('BLOCKED', 'Owner decisions H1/H2/H4 (2026-10-31): plan frozen (exact binomial, 210 decisions after production activation), but the pipeline is not active in production and PRs #83/#84 stay blocked until a seal-safe evidence path exists.', 'Owner: activation after a seal-safe evidence path is reviewed.'),
   'EXP-012': rec('CONTINUE', 'Owner decision H4 (2026-10-31): finish Stage 7 against explicit acceptance criteria; production changes need separate authorization. Finding: Stage 7 is already active in production through the learning loop, and PR #82 as written would switch it off (its STAGE7_ENABLED gate fails 8 learning-loop tests on current main).', 'Owner: port #82\'s remaining safety fixes onto main without the production kill switch, or close #82 as superseded (research/evaluations/2026-10-31-stage7-finish-line.md).'),
   'EXP-023': rec('CONTINUE', 'Pre-registered checkpoint 60 events (>= 25 per direction); 4 so far, all DOWN. A small sample is not a reason to reject.', 'Early November: confirm the October Binance funding archive arrives (F3/F4); next count review monthly.'),
@@ -7930,7 +7930,15 @@ const PLAN_H2_SHA = 'ac8c9780730844c1cf22fa0efddf6748ffef8a03c4b107c8a07cf579734
 const H2_RECORDED_BY = 'Prospective plans under owner decision H2 (2026-10-31)';
 const evalRec = (id, n, o) => ({ record_id: `code:${id}:standalone:${n}`, recorded_ts: EVAL_RECORDED_TS_20261031, recorded_by: EVAL_RECORDED_BY_20261031,
   plan_sha256: null, window: null, out_of_sample: null, metrics: null, uncertainty: null, checks: [], limitations: [], evaluator_version: null, ...o });
+const STRUCTURAL_CHECK_RUN = 'https://github.com/quiquandon-oss/PulseWorkerV2/actions/runs/41195825460';
+const STRUCTURAL_CHECK_BY = 'Seal-safe structural check under owner decision H1 (2026-10-31)';
 const CODE_EVALUATION_ADDENDA = {
+  'EXP-009': [evalRec('EXP-009', 2, { recorded_by: STRUCTURAL_CHECK_BY, evaluation_version: 'exp009-structural-v1', spec_ref: '.ai/migrations/0012_exp009_activation.sql (EXP-009 success_criterion)',
+    spec_sha256: 'c09fa284e1397c3ee9a80616c6109a720e2d4fa381db2a2e9208b6f0bf29c1eb', evaluation_status: 'BLOCKED', scientific_outcome: 'NOT_APPLICABLE',
+    reason: 'Structural part of the milestone MET on 2026-10-31: all 7 stored weekly batches pass every structural invariant (schema, no duplicate event/source rows, events inside the window, labels in the declared set, sample size), 6 of them independent weekly runs (one re-run 2 days after another). Label reachability, also part of the registered milestone, is not checked on batches whose windows overlap the seal (H1); no batch is fully post-seal until about 2027-01-07. No predictive conclusion.',
+    sample: { count: 7, required: 4, meaning: 'stored weekly batches (6 independent)' }, baseline: null,
+    metrics: { n_batches: 7, n_valid: 7, n_independent_valid: 6, n_fully_post_seal: 0, structural_part: 'MET', label_reachability: 'NOT_CHECKED_ON_SEAL_OVERLAPPING_BATCHES' },
+    evaluator_version: 'research/structural_check_exp009_010.py structural-v1', evidence_refs: [STRUCTURAL_CHECK_RUN] })],
   'EXP-025': [evalRec('EXP-025', 1, { recorded_by: H2_RECORDED_BY, evaluation_version: 'exp025-prospective-v1', spec_ref: PLAN_H2_REF + ' (A. EXP-025)', spec_sha256: PLAN_H2_SHA, plan_sha256: PLAN_H2_SHA,
     evaluation_status: 'NOT_RUN', scientific_outcome: null,
     reason: 'Prospective validation of existing production use, frozen 2026-10-31 (H2): Spearman partial correlation of the daily 00:00 UTC hloi score with the next 24h BTC log return given the V1 composite, from 2026-11-01; one analysis at 195 daily units (minimum |partial rho| 0.20, power 0.80, alpha 0.05). The production decision and weight are unchanged.',
@@ -7996,7 +8004,13 @@ const CODE_EVALUATION_ADDENDA = {
   'EXP-010': [evalRec('EXP-010', 1, { evaluation_version: 'exp010-standalone-v1', spec_ref: '.ai/migrations/0013_exp010_activation.sql (EXP-010 success_criterion)',
     spec_sha256: '99e97e21030ec6f25128af067f6df2928c0f8b1f1d1f8356233eb0c4eaf902af', evaluation_status: 'BLOCKED', scientific_outcome: 'NOT_APPLICABLE',
     reason: 'Diagnostic milestone (4 well-formed weekly runs) with no hypothesis. It can only be checked on stored batches in research_analyses, whose windows overlap the sealed period. Needs an owner ruling on a structural-only check.',
-    sample: { count: 6, required: 4, meaning: 'stored weekly runs' }, baseline: null, evidence_refs: ['research/evaluations/2026-10-31-portfolio.md'] })],
+    sample: { count: 6, required: 4, meaning: 'stored weekly runs' }, baseline: null, evidence_refs: ['research/evaluations/2026-10-31-portfolio.md'] }),
+    evalRec('EXP-010', 2, { recorded_by: STRUCTURAL_CHECK_BY, evaluation_version: 'exp010-structural-v1', spec_ref: '.ai/migrations/0013_exp010_activation.sql (EXP-010 success_criterion)',
+      spec_sha256: '99e97e21030ec6f25128af067f6df2928c0f8b1f1d1f8356233eb0c4eaf902af', evaluation_status: 'BLOCKED', scientific_outcome: 'NOT_APPLICABLE',
+      reason: 'Structural part checkable on stored output MET on 2026-10-31: all 6 stored weekly runs pass (schema, sample size equals pair observations, relationship and redundancy labels exactly the declared sets with counts summing to n), 6 independent weekly runs. Stored runs keep summaries only, so duplicate pair rows and canonical A/B ordering are covered by the module tests, not by stored data. Label reachability is not checked on seal-overlapping batches (H1); first fully post-seal window about 2027-01-07. No predictive conclusion.',
+      sample: { count: 6, required: 4, meaning: 'stored weekly runs (6 independent)' }, baseline: null,
+      metrics: { n_batches: 6, n_valid: 6, n_independent_valid: 6, n_fully_post_seal: 0, structural_part: 'MET', label_reachability: 'NOT_CHECKED_ON_SEAL_OVERLAPPING_BATCHES' },
+      evaluator_version: 'research/structural_check_exp009_010.py structural-v1', evidence_refs: [STRUCTURAL_CHECK_RUN] })],
   'EXP-011': [evalRec('EXP-011', 1, { evaluation_version: 'exp011-standalone-v1', spec_ref: 'worker.js CODE_REGISTRY_ENTRIES (EXP-011 success_criterion)',
     spec_sha256: '7fdefd01328a79e6a2acbda7d8fa03c67328c971e94f88b8f9e69a41885aa73b', evaluation_status: 'BLOCKED', scientific_outcome: null,
     reason: 'No minimum sample is registered for "hypotheses pass out-of-sample holdout", and /api/research-lab/experiment5-results aggregates every resolved decision since 2026-08-27, including the sealed period.',

@@ -46,15 +46,19 @@ The project has two goals: (1) detect significant up and down moves as early as 
 - **Frontend:** the panel is a separate card. `computeComposite`, `computeCompositeBreakdown`, `COMPOSITE_SOURCES_DEFAULTS` and `COMPOSITE_WEIGHTS_VERSION` (`2026-10-12-riskregime`) are unchanged, and tests assert this.
 - **Unavailable is never neutral:** missing, stale, unconfigured, blocked or immature data is an explicit status, never a zero or a 50.
 
-### Scheduling, and why it is not a Worker cron
-Workers Free limits each invocation to **50 external subrequests** and **50 D1 queries** ([Workers limits](https://developers.cloudflare.com/workers/platform/limits), [D1 limits](https://developers.cloudflare.com/d1/platform/limits)). The account's 5 Cron Triggers are all used.
+### Scheduling
+Workers Free limits each invocation to **50 external subrequests** and **50 D1 queries** ([Workers limits](https://developers.cloudflare.com/workers/platform/limits), [D1 limits](https://developers.cloudflare.com/d1/platform/limits)). The account's 5 Cron Triggers are all used (V1 3, this Worker 2).
 
-Running detection inside the 3-hourly prediction cron, as the first draft of PR #94 did, would have shared those limits with the prediction tick. That was a release-blocking defect, and it is fixed.
+Running detection inside the 3-hourly prediction tick, as the first draft of PR #94 did, would have shared those limits with the prediction tick. That was a release-blocking defect, and it stays fixed: detection never runs in the same invocation as the tick.
 
-**How a run happens now:** each run is its own invocation, through `POST /api/events/run`.
-- **Manual (owner):** a one-time run. It is allowed whatever `EVENT_DETECTION_ENABLED` is set to.
-- **Scheduled:** `.github/workflows/event-detection-schedule.yml` on `main` (installed 2026-10-18 from the reviewed template `events/scheduler/event-detection-schedule.yml`; non-comment content asserted identical), a GitHub schedule at `23 * * * *`. It sends `X-Event-Trigger: schedule`, and the Worker answers 409 `DISABLED` unless `EVENT_DETECTION_ENABLED` is `'1'`.
-- **Overlap:** a run is refused (409) if another started less than 2 minutes earlier.
+**Why the Worker cron was added (owner decision H3, 2026-10-31):** GitHub started only about 5 of the 24 hourly scheduled runs a day (2026-10-24 to 31), so OKX and Deribit read STALE between runs.
+
+**How a run happens now:** each run is its own invocation.
+- **Worker cron (primary):** the former `0 */3 * * *` trigger is now `0 * * * *`, so no trigger is added. In `scheduled()`, hours divisible by 3 (00, 03, ... 21 UTC) run the production tick exactly as before. The other 16 hours call `runAutomaticDetection(env, { trigger: 'cron' })` and nothing else. Expected maximum gap between runs: 2 hours.
+- **GitHub schedule (fallback):** `.github/workflows/event-detection-schedule.yml` on `main` (installed 2026-10-18 from the reviewed template `events/scheduler/event-detection-schedule.yml`; non-comment content asserted identical), at `23 * * * *`, through `POST /api/events/run` with `X-Event-Trigger: schedule`.
+- **Both automatic triggers** require `EVENT_DETECTION_ENABLED` = `'1'` (otherwise the POST answers 409 `DISABLED` and the cron does nothing). They run at most once per 30 minutes, whichever comes first; the other answers 200 `skipped`.
+- **Manual (owner):** a one-time `POST /api/events/run`, allowed whatever `EVENT_DETECTION_ENABLED` is set to. Refused (409) if another run started less than 2 minutes earlier.
+- **Stop all automatic runs:** delete the Worker secret `EVENT_DETECTION_ENABLED`.
 
 **Per-run budget:** 40 fetches and 44 D1 queries, enforced by `makeBudget` / `countedDb`.
 - An adapter that exceeds it fails alone, with `BUDGET_EXHAUSTED`.
@@ -193,7 +197,7 @@ The migration was validated locally on real SQLite, through the tests: it applie
 
 The full run costs about 16–24 fetches typically and **36 in the worst case** (every provider at its page cap: 9 + 10 + 3 + 14). A test pins that count, and the 40-fetch budget leaves 10 subrequests of headroom below Cloudflare's 50. Retries count against the budget too, so a run with many retries ends the last adapter with `BUDGET_EXHAUSTED` instead of breaching the limit. Queries are 15–35 per run, against a budget of 44. D1 writes are under about 60 rows per run, well within the Free plan's daily limits.
 
-**GitHub schedules start late and can skip slots.** On 2026-10-17 the new hourly funding workflow skipped its 06:17–09:17 slots and ran at 10:44. Expect latency of up to an hour or more until runs are proven reliable. The alternative is Workers Paid ($5/month, 250 Cron Triggers, 1000 subrequests per invocation), which is the owner's decision.
+**GitHub schedules start late and can skip slots** (the reason for the Worker cron above). On 2026-10-17 the new hourly funding workflow skipped its 06:17–09:17 slots and ran at 10:44. Expect latency of up to an hour or more until runs are proven reliable. The alternative is Workers Paid ($5/month, 250 Cron Triggers, 1000 subrequests per invocation), which is the owner's decision.
 
 ## 10. Evaluation (leakage-safe) and acceptance criteria
 
@@ -286,7 +290,7 @@ Run every command from a checkout of `main` (so `wrangler.toml` resolves `sentim
 
    `summary.budget.fetches` ≤ 40 and `queries` ≤ 44.
 7. **Inspect:** `/api/events/health` (`last_error`, `coverage`, `details`) and `/api/events?since=0`. Any event must have evidence and a source URL.
-8. **V1 unchanged:** compare against the step 0 baseline. The Sentiment composite and source table must be identical (same weights version `2026-10-12-riskregime`). `/risk-regime` must still answer. `/prediction-freshness` must keep advancing on the existing crons after the next `0 */3 * * *` slot; the `scheduled()` handler is untouched.
+8. **V1 unchanged:** compare against the step 0 baseline. The Sentiment composite and source table must be identical (same weights version `2026-10-12-riskregime`). `/risk-regime` must still answer. `/prediction-freshness` must keep advancing after the next prediction slot (hours divisible by 3 on the hourly `0 * * * *` trigger).
 9. **Frontend:** merge CryptoPulse PR #5 (GitHub Pages). The Sentiment tab shows "Event Detection — Detected Events & Detector Health".
 10. **Only with separate approval, to start recurring runs:**
     - `npx wrangler secret put EVENT_DETECTION_ENABLED` with the value `1`;
@@ -371,5 +375,5 @@ Hourly: ~216 requests, ~480 queries and ~360 row writes a day; storage about 40 
 - Consensus and surprise are unavailable. The calendar is dates only and needs `FRED_API_KEY`.
 - SEC covers US registrants only, 8 tracked companies, and keyword/sentence rules that can miss unusual phrasing. Quoted evidence is always kept.
 - GDELT is research-only.
-- Scheduled cadence depends on GitHub schedules, which start late and skip slots.
+- The Worker cron covers 16 hours a day; the 8 prediction hours rely on the GitHub fallback, so a gap of up to 2 hours remains.
 - No predictive or early-warning value has been evaluated.

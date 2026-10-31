@@ -5,7 +5,7 @@ import { LEARNING_LAB_HTML } from './learning/learning-ui.js';
 import { authorizeWrite, getSessionState, signIn, clearedCookieHeader, SIGNIN_HTML } from './learning/learning-session.js';
 import { listCandidates, getCandidate, createCandidate, updateCandidate, decideCandidate, listVersions } from './learning/learning-candidates.js';
 // Event Detection Layer (separate from V1 scoring): see events/ and EVENT_DETECTION.md.
-import { handleEventRoutes } from './events/event-api.js';
+import { handleEventRoutes, runAutomaticDetection } from './events/event-api.js';
 // ---- BTC k-NN historical analog model ----
 // Feature vector: the 4 headline gauges already computed and logged by the
 // original CryptoPulse pipeline every cycle (sentiment composite, technical
@@ -11057,7 +11057,7 @@ export default {
     });
   },
 
-  // Fires every 3h (see wrangler.toml [triggers]) so predictions get logged
+  // Fires hourly (see wrangler.toml [triggers]); every 3rd hour logs predictions
   // and old ones get resolved regardless of whether anyone opens the page.
   // Same predictAndLog() the /predict route uses — one code path either way.
   // Two crons share this handler (see wrangler.toml): every 3h for
@@ -11100,14 +11100,25 @@ export default {
           ctx.waitUntil(logMomentumSelectionExperiment(env, coin, h).catch(err => console.error(`Momentum experiment ${coin}/${h}h failed:`, err)));
         }
       }
-    } else if (event.cron === '0 */3 * * *') {
-      // ONE shared 3h trigger, all three coins -- see runCoinCronTick's
-      // own comment for why this reverted from three separate triggers
-      // back to this shared-invocation shape (Cron Trigger account
-      // budget on Workers Free).
-      ctx.waitUntil(runCoinCronTick(env).then(
-        () => refreshDailyReportCache(env).catch(err => console.error('Daily report cache refresh failed:', err))
-      ));
+    } else if (event.cron === '0 * * * *') {
+      // ONE hourly trigger (owner decision 2026-10-31, H3): the account's 5 Cron Triggers are all used, so the former
+      // "0 */3 * * *" trigger now fires hourly instead of adding one. Hours divisible by 3 (00, 03, ... 21 UTC) run the
+      // production tick exactly as before; the other 16 hours run Event Detection in their own invocation, so
+      // detection never shares an invocation (or its subrequest/D1 budget) with the prediction tick.
+      const hour = new Date(event.scheduledTime).getUTCHours();
+      if (hour % 3 === 0) {
+        // ONE shared 3h tick, all three coins -- see runCoinCronTick's
+        // own comment for why this reverted from three separate triggers
+        // back to this shared-invocation shape (Cron Trigger account
+        // budget on Workers Free).
+        ctx.waitUntil(runCoinCronTick(env).then(
+          () => refreshDailyReportCache(env).catch(err => console.error('Daily report cache refresh failed:', err))
+        ));
+      } else {
+        ctx.waitUntil(runAutomaticDetection(env, { trigger: 'cron', nowTs: event.scheduledTime })
+          .then(r => console.log('event detection (cron):', JSON.stringify({ ok: r.ok, skipped: r.skipped || false, reason: r.reason || r.error || null })))
+          .catch(err => console.error('Event detection (cron) failed:', err)));
+      }
     }
     // No catch-all else: an unrecognized event.cron does nothing.
     // refreshDailyReportCache runs once per 3h tick, after all three

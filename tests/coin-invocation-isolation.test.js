@@ -88,11 +88,11 @@ describe('runCoinCronTick — all three coins run sequentially in one shared inv
 describe('scheduled() dispatch: the shared 3h cron runs all three coins; the daily cron does not touch production batches', () => {
   const src = readFileSync(new URL('../worker.js', import.meta.url), 'utf8');
 
-  it('the "0 */3 * * *" branch calls runCoinCronTick (all three coins), not any single coin batch directly', () => {
-    const idx = src.indexOf("event.cron === '0 */3 * * *'");
+  it('the hourly branch runs runCoinCronTick (all three coins) only at hours divisible by 3, never a single coin batch directly', () => {
+    const idx = src.indexOf("event.cron === '0 * * * *'");
     expect(idx).toBeGreaterThan(-1);
-    const closeIdx = src.indexOf('\n    }\n', idx);
-    const block = src.slice(idx, closeIdx);
+    const block = src.slice(src.indexOf('if (hour % 3 === 0) {', idx), src.indexOf('} else {', idx));
+    expect(src.slice(idx, idx + 1200)).toContain('const hour = new Date(event.scheduledTime).getUTCHours();');
     expect(block).toContain('runCoinCronTick(env)');
     expect(block).not.toContain('runCoinBatch(env, BTC_BATCH)');
     expect(block).not.toContain('runCoinBatch(env, LINK_BATCH)');
@@ -106,7 +106,7 @@ describe('scheduled() dispatch: the shared 3h cron runs all three coins; the dai
 
   it('the daily (0 7 * * *) branch contains no call to runCoinBatch or runCoinCronTick -- it only runs Gemini analyses, calibration refreshes, and Experiments 2/3', () => {
     const dailyIdx = src.indexOf("event.cron === '0 7 * * *'");
-    const threeHourIdx = src.indexOf("event.cron === '0 */3 * * *'");
+    const threeHourIdx = src.indexOf("event.cron === '0 * * * *'");
     expect(dailyIdx).toBeGreaterThan(-1);
     expect(threeHourIdx).toBeGreaterThan(dailyIdx);
     const dailyBlock = src.slice(dailyIdx, threeHourIdx);
@@ -120,12 +120,12 @@ describe('scheduled() dispatch: the shared 3h cron runs all three coins; the dai
 });
 
 describe('wrangler.toml cron configuration', () => {
-  it('declares exactly 2 Cron Triggers: one shared 3h production cycle, one daily -- fitting the account\'s real Workers Free budget (5 total account-wide; V1 already uses 3)', () => {
+  it('declares exactly 2 Cron Triggers: one hourly (production tick every 3rd hour, Event Detection otherwise), one daily -- fitting the account\'s real Workers Free budget (5 total account-wide; V1 already uses 3)', () => {
     const toml = readFileSync(new URL('../wrangler.toml', import.meta.url), 'utf8');
     const match = toml.match(/crons\s*=\s*\[([^\]]*)\]/);
     expect(match).not.toBeNull();
     const crons = match[1].split(',').map((s) => s.trim().replace(/^"|"$/g, ''));
-    expect(crons).toEqual(['0 */3 * * *', '0 7 * * *']);
+    expect(crons).toEqual(['0 * * * *', '0 7 * * *']);
   });
 });
 

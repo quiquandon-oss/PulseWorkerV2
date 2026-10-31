@@ -44,7 +44,7 @@ database_id = "f91ca980-b886-423a-bd6f-f3baea46d181"
 # full history of why a 4-trigger, fully-isolated-per-coin design was
 # attempted and reverted the same day.
 [triggers]
-crons = ["0 */3 * * *", "0 7 * * *"]
+crons = ["0 * * * *", "0 7 * * *"]   # hourly: production tick at hours divisible by 3, Event Detection otherwise (worker.js scheduled())
 
 # Codifies what was already turned on directly via the dashboard
 # (2026-09-05), so it doesn't silently get reset on the next deploy —

@@ -1,0 +1,21 @@
+{
+ "dataset_id": "rr_forward_store",
+ "files": [
+  {
+   "archive_path": "10_raw/prospective/rr_forward_store/snapshot=2026-10-30_git-66f33b26/risk_regime_forward/index.json",
+   "bytes": 14654,
+   "sha256": "04d3dc20b0051be27864733041b65039971398f9faa7f24322e511ee41c01aa2",
+   "source_path": "risk_regime_forward/index.json"
+  }
+ ],
+ "location": {
+  "commit": "66f33b26d214106b218bfa661ecefb3e5c5cfcc4",
+  "commit_time": "2026-10-30T23:46:44Z",
+  "kind": "git",
+  "ref": "origin/research-data/risk-regime-forward"
+ },
+ "provenance": "research-forward-schedule.yml (daily 10:40 UTC, pinned research commit) writes only to research-data/risk-regime-forward; public APIs",
+ "snapshot_id": "2026-10-30_git-66f33b26",
+ "status": "PROSPECTIVE_APPEND_ONLY",
+ "tool": "research-archive-increment-v1"
+}

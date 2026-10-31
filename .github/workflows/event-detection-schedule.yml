@@ -4,9 +4,10 @@
 # stay identical to the template (asserted in tests/event-detection.test.js). Recurring runs also require the Worker
 # secret EVENT_DETECTION_ENABLED=1; without it the Worker refuses this trigger with 409 and the job fails visibly.
 #
-# Why a GitHub schedule instead of a Worker Cron Trigger: the account's 5 Cron Triggers are all used, and running
-# detection inside the existing 3-hourly prediction cron would share that invocation's Workers Free limits
-# (50 external subrequests, 50 D1 queries) with the prediction tick. Each POST below is its own invocation.
+# Since 2026-10-31 (owner decision H3) this schedule is the FALLBACK. GitHub starts only ~5 of these 24 hourly runs a
+# day, so the Worker's own hourly cron (wrangler.toml "0 * * * *") now runs detection at the 16 hours not divisible by 3,
+# in their own invocations, never inside the prediction tick (Workers Free: 50 subrequests, 50 D1 queries each).
+# Automatic triggers run at most once per 30 min: a run here within 30 min of a cron run returns 200 skipped.
 #
 # Isolation: schedule only (no push/PR/dispatch/workflow_run); `permissions: {}` (the job needs no GitHub token);
 # no checkout; the secret is visible only to the single curl step; the Worker refuses this trigger (409) unless
@@ -38,5 +39,5 @@ jobs:
           code=$(curl -sS -o body.json -w '%{http_code}' -X POST \
             -H "Authorization: Bearer ${EVENT_RUN_TOKEN}" -H 'X-Event-Trigger: schedule' \
             https://pulseworker-v2.quiquandon.workers.dev/api/events/run)
-          python3 -c "import json;d=json.load(open('body.json'));print(json.dumps({k:d.get(k) for k in ('ok','run_id','status','error','summary')})[:4000])"
+          python3 -c "import json;d=json.load(open('body.json'));print(json.dumps({k:d.get(k) for k in ('ok','skipped','reason','run_id','status','error','summary')})[:4000])"
           [ "$code" = "200" ] || { echo "::error::event detection run returned HTTP $code"; exit 1; }

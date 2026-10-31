@@ -61,8 +61,10 @@ On the registered reading, each row's own `scores_json`, which holds every varia
   2026-10-31). (VERIFIED, `/api/events/health`)
 - **Consequence:** fewer watched episodes. Goal A evaluability (≥ 20 watched episodes, ≥ 5 per direction) is still
   not exposed by the API (BLOCKED).
-- **Owner decision:** the approved design is schedule-only. Adding a second trigger (for example after the hourly
-  funding job, which does run hourly) would restore coverage.
+- **Owner decision H3 (2026-10-31): add a second trigger.** The hourly funding job is not a usable anchor: it is also a
+  GitHub schedule and started only 4–6 times a day over 2026-10-24 to 31 (VERIFIED; corrects an earlier note here).
+  Implemented as the Worker's own hourly cron (the former 3h trigger, no new trigger): detection at the 16 hours not
+  divisible by 3, prediction tick unchanged at the other 8.
 
 **V1 shadow weight adaptation:**
 - **Status:** its verdict endpoint (`sentiment-ff75…/weight-adaptation`) is unreachable from this environment
@@ -72,7 +74,7 @@ On the registered reading, each row's own `scores_json`, which holds every varia
 ## Shared dependencies
 
 - **EXP-024's forward store** feeds EXP-023 (funding variants F3/F4), EXP-026 (OI) and the research archive. Keep it.
-- **The hourly funding job** feeds EXP-023 and the forward store. Keep it.
+- **The hourly funding job** feeds EXP-023 and the forward store. Keep it. (It starts only ~5 times a day.)
 - **EXP-008** depends on EXP-004: it forecasts only at TimesFM's origins. **The EXP-004 prospective test** depends on
   EXP-008 for the persistence comparator. Keep both.
 - **`export-learning-data`** feeds the archive and the k-NN baseline used by EXP-004 and EXP-008. Keep it.

@@ -18,6 +18,7 @@ import { fetchDvol, changes24h, evaluateDvol, summarizeOptionsBook, evaluateOpti
 import { parseFredCsv, parseFredApi, evaluateYieldShock, macroAdapter, fredReleaseCalendar, MACRO_CONFIG, FRED_HEADERS } from '../events/adapters/macro.js';
 import { classifyFilingText, htmlToText, recentFilings, secEdgarAdapter, filingUrl } from '../events/adapters/sec-edgar.js';
 import { runEventDetection, DETECTORS } from '../events/event-runner.js';
+import { runAutomaticDetection } from '../events/event-api.js';
 import { listEvents, observationsBefore, insertObservations, insertEvents, processedDocuments, markDocuments } from '../events/event-store.js';
 import worker from '../worker.js';
 
@@ -631,13 +632,54 @@ describe('API routes', () => {
 // ------------------------------------------------------------------ scheduling, budgets and V1 separation
 describe('scheduling: detection never shares the prediction cron invocation', () => {
   const src = readFileSync(join(__dirname, '..', 'worker.js'), 'utf8');
-  it('the scheduled handler does not run event detection at all; wrangler.toml adds no cron and no flag', () => {
-    const sched = src.slice(src.indexOf('async scheduled(event, env, ctx) {'));
-    expect(sched.slice(0, sched.indexOf('\n  },'))).not.toMatch(/runEventDetection|EVENT_DETECTION|events\//);
-    expect(src).not.toMatch(/runEventDetection/);
+  it('one hourly trigger replaces the 3h one (no new trigger): hours divisible by 3 run only the production tick, the others only detection', () => {
     const toml = readFileSync(join(__dirname, '..', 'wrangler.toml'), 'utf8');
-    expect(toml).toMatch(/crons = \["0 \*\/3 \* \* \*", "0 7 \* \* \*"\]/);
+    expect(toml).toMatch(/crons = \["0 \* \* \* \*", "0 7 \* \* \*"\]/);
     expect(toml).not.toMatch(/EVENT_/);
+    const sched = src.slice(src.indexOf('async scheduled(event, env, ctx) {'));
+    const hourly = sched.slice(sched.indexOf("event.cron === '0 * * * *'"), sched.indexOf('// No catch-all else'));
+    const tick = hourly.slice(hourly.indexOf('if (hour % 3 === 0) {'), hourly.indexOf('} else {'));
+    const detect = hourly.slice(hourly.indexOf('} else {'));
+    expect(tick).toContain('runCoinCronTick(env)');
+    expect(tick).not.toMatch(/runAutomaticDetection|runEventDetection|EVENT_DETECTION/);
+    expect(detect).toContain("runAutomaticDetection(env, { trigger: 'cron'");
+    expect(detect).not.toMatch(/runCoinCronTick|runCoinBatch|refreshDailyReportCache/);
+    expect(src).not.toMatch(/runEventDetection/);                     // the Worker only reaches detection through the guarded entry points
+  });
+  it('scheduled() at every non-prediction hour runs one cron detection; prediction hours never start one', async () => {
+    vi.stubGlobal('fetch', async () => new Response('blocked in tests', { status: 404 }));
+    try {
+      for (let hour = 0; hour < 24; hour += 1) {
+        if (hour % 3 === 0) continue;                                  // the production tick is covered structurally above
+        const { env, db } = makeDb();
+        const waits = [];
+        await worker.scheduled({ cron: '0 * * * *', scheduledTime: Date.UTC(2026, 10, 1, hour) }, { ...env, EVENT_DETECTION_ENABLED: '1' }, { waitUntil: (p) => waits.push(p) });
+        await Promise.all(waits);
+        const runs = db.prepare('SELECT trigger, started_ts FROM event_runs').all();
+        expect(runs.map((r) => r.trigger)).toEqual(['cron']);
+        expect(runs[0].started_ts).toBe(Date.UTC(2026, 10, 1, hour));
+      }
+      const { env, db } = makeDb();
+      const waits = [];
+      await worker.scheduled({ cron: '0 * * * *', scheduledTime: Date.UTC(2026, 10, 1, 5) }, env, { waitUntil: (p) => waits.push(p) });
+      await Promise.all(waits);
+      expect(db.prepare('SELECT COUNT(*) n FROM event_runs').get().n).toBe(0);   // EVENT_DETECTION_ENABLED unset: no run
+    } finally { vi.unstubAllGlobals(); }
+  });
+  it('automatic triggers run at most once per 30 min, whichever fires first; the other is skipped, not failed', async () => {
+    const { env, db } = makeDb();
+    const e = { ...env, EVENT_DETECTION_ENABLED: '1' };
+    const calls = [];
+    const run = async (_env, o) => { calls.push(o); db.prepare('INSERT INTO event_runs (run_id, started_ts, trigger, summary_json) VALUES (?,?,?,?)').run('edr_' + calls.length, o.nowTs, o.trigger, '{}'); return { ok: true, summary: { trigger: o.trigger } }; };
+    const t0 = Date.now();
+    expect((await runAutomaticDetection(e, { trigger: 'cron', nowTs: t0, run })).ok).toBe(true);
+    const dup = await runAutomaticDetection(e, { trigger: 'schedule', nowTs: t0 + 23 * 60_000, run });
+    expect(dup).toMatchObject({ ok: true, skipped: true });
+    expect(calls).toHaveLength(1);
+    expect((await runAutomaticDetection(e, { trigger: 'schedule', nowTs: t0 + 31 * 60_000, run })).skipped).toBeUndefined();
+    expect(calls.map((c) => c.trigger)).toEqual(['cron', 'schedule']);
+    expect((await runAutomaticDetection(env, { trigger: 'cron', nowTs: t0 + 2 * H, run })).status).toBe(409);   // flag off
+    expect(calls).toHaveLength(2);
   });
   it('the installed schedule matches the reviewed template, schedule-only, tokenless for GitHub and secret-scoped to one step', () => {
     const strip = (p) => readFileSync(p, 'utf8').split('\n').map((l) => l.replace(/\s+#.*$|^#.*$/, '')).filter((l) => l.trim()).join('\n');
@@ -867,6 +909,9 @@ describe('POST /api/events/run authorisation and the schedule gate', () => {
       const s2 = await post({ ...e, EVENT_DETECTION_ENABLED: '1' }, { Authorization: `Bearer ${TOKEN}`, 'X-Event-Trigger': 'schedule' });
       expect(s2.status).toBe(200);
       expect((await s2.json()).summary.trigger).toBe('schedule');
+      const s3 = await post({ ...e, EVENT_DETECTION_ENABLED: '1' }, { Authorization: `Bearer ${TOKEN}`, 'X-Event-Trigger': 'schedule' });
+      expect(s3.status).toBe(200);                                                               // a cron run already covered this half hour
+      expect(await s3.json()).toMatchObject({ ok: true, skipped: true });
     } finally { vi.unstubAllGlobals(); }
   });
 });

@@ -15,6 +15,25 @@ import { constantTimeEqual } from '../learning/learning-api.js';
 export const SEPARATION_NOTE = 'Derived events from the Event Detection Layer. They are not V1 composite inputs, scores or trading signals; severity, confidence and direction are independent fields.';
 
 export const RUN_MIN_INTERVAL_MS = 2 * 60_000;
+// Automatic triggers (the Worker's hourly cron and the GitHub schedule fallback): at most one run per 30 minutes,
+// whichever fires first; the other is skipped (200, skipped: true), so the two never duplicate work in one hour.
+export const AUTO_RUN_MIN_INTERVAL_MS = 30 * 60_000;
+
+async function runStartedSince(env, sinceTs) {
+  return env.DB.prepare('SELECT run_id, started_ts FROM event_runs WHERE started_ts > ? ORDER BY started_ts DESC LIMIT 1').bind(sinceTs).first();
+}
+
+// One automatic detection run ('cron' from scheduled(), 'schedule' from the GitHub workflow). Refuses unless
+// EVENT_DETECTION_ENABLED is '1'; skips when another run started in the last AUTO_RUN_MIN_INTERVAL_MS.
+export async function runAutomaticDetection(env, { trigger, nowTs = Date.now(), run = runEventDetection } = {}) {
+  if (env.EVENT_DETECTION_ENABLED !== '1') {
+    return { ok: false, status: 409, source_status: SOURCE_STATUS.DISABLED, error: 'Scheduled event detection is off (EVENT_DETECTION_ENABLED is not "1").' };
+  }
+  if (!(await eventTablesPresent(env))) return { ...EVENT_TABLES_MISSING };
+  const recent = await runStartedSince(env, nowTs - AUTO_RUN_MIN_INTERVAL_MS);
+  if (recent) return { ok: true, skipped: true, trigger, reason: `run ${recent.run_id} started less than ${AUTO_RUN_MIN_INTERVAL_MS / 60_000} min ago` };
+  return run(env, { trigger, nowTs });
+}
 
 // Dedicated EVENT_RUN_TOKEN (least privilege: it can only trigger a detection run) or the existing admin token.
 export function runAuthorization(env, request) {
@@ -85,11 +104,13 @@ export async function handleEventRoutes(request, env, url, corsHeaders) {
       const auth = runAuthorization(env, request);
       if (!auth.ok) return json({ ok: false, error: auth.error }, auth.status);
       const trigger = request.headers.get('X-Event-Trigger') === 'schedule' ? 'schedule' : 'manual';
-      if (trigger === 'schedule' && env.EVENT_DETECTION_ENABLED !== '1') {
-        return json({ ok: false, status: SOURCE_STATUS.DISABLED, error: 'Scheduled event detection is off (EVENT_DETECTION_ENABLED is not "1").' }, 409);
+      if (trigger === 'schedule') {
+        const r = await runAutomaticDetection(env, { trigger });
+        if (r.source_status === SOURCE_STATUS.DISABLED) return json({ ok: false, status: SOURCE_STATUS.DISABLED, error: r.error }, 409);
+        return send(r);
       }
       if (!(await eventTablesPresent(env))) return send({ ...EVENT_TABLES_MISSING });
-      const recent = await env.DB.prepare('SELECT run_id, started_ts FROM event_runs WHERE started_ts > ? ORDER BY started_ts DESC LIMIT 1').bind(Date.now() - RUN_MIN_INTERVAL_MS).first();
+      const recent = await runStartedSince(env, Date.now() - RUN_MIN_INTERVAL_MS);
       if (recent) return json({ ok: false, error: `a run started less than ${RUN_MIN_INTERVAL_MS / 60_000} min ago (${recent.run_id})` }, 409);
       return send(await runEventDetection(env, { trigger }));
     }

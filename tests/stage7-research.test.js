@@ -25,7 +25,7 @@ describe('Stage 7 — AI-assisted research & sentiment recalculation (research-l
       extractFunctions(
         'parseStage7JsonField', 'getResearchLabStage7Overview', 'stage7ConstantTimeEqual',
         'registerStage7ResearchResponse', 'classifyStage7DbError', 'stage7OverviewSchemaResult',
-        'stage7SafeError', 'stage7AuthorizeWrite', 'sameStage7Registration'
+        'stage7SafeError', 'stage7AuthorizeWrite', 'sameStage7Registration', 'canonicalStage7Json'
       )
     );
   });

@@ -6860,12 +6860,14 @@ const STAGE7_SENTIMENT_ASSESSMENTS = ['POSITIVE', 'NEGATIVE', 'MIXED', 'INDETERM
 // request content: errors map to stable codes, and the original error goes to the Worker log only. ----
 
 // Classifies a D1 error from a Stage 7 statement. Only "no such table/column" is evidence of a missing schema
-// object; a constraint error is a competing write; everything else is unexpected (including transient failures).
+// object; a uniqueness violation is a competing write; everything else is unexpected (including transient failures).
 function classifyStage7DbError(err) {
   const text = String((err && err.message) || err || '');
   const missing = text.match(/no such (table|column): ([A-Za-z0-9_.]+)/i);
   if (missing) return { kind: 'SCHEMA_MISSING', object_type: missing[1].toLowerCase(), object: missing[2] };
-  if (/UNIQUE constraint failed|SQLITE_CONSTRAINT|constraint failed/i.test(text)) return { kind: 'CONSTRAINT' };
+  // Only a uniqueness violation is a competing registration. FOREIGN KEY, NOT NULL and CHECK failures are not, and
+  // must not be reported as one.
+  if (/UNIQUE constraint failed|PRIMARY KEY constraint failed|SQLITE_CONSTRAINT_(UNIQUE|PRIMARYKEY)/i.test(text)) return { kind: 'UNIQUE' };
   return { kind: 'UNEXPECTED' };
 }
 
@@ -6920,14 +6922,24 @@ function stage7AuthorizeWrite(env, providedToken) {
   return null;
 }
 
-// Identical-retry test on the columns migration 0016 provides. Every content column must match exactly; the
-// original timestamps (registered_ts, validated_ts) are the first registration's and are not compared.
+// JSON text in a canonical form: object keys sorted at every level, array order and values unchanged. Returns null
+// when the text is not valid JSON, so a malformed stored value never compares equal to anything.
+function canonicalStage7Json(text) {
+  const sortKeys = (v) => (Array.isArray(v) ? v.map(sortKeys)
+    : v && typeof v === 'object' ? Object.fromEntries(Object.keys(v).sort().map((k) => [k, sortKeys(v[k])])) : v);
+  try { return JSON.stringify(sortKeys(JSON.parse(text))); } catch (_e) { return null; }
+}
+
+// Identical-retry test on the columns migration 0016 provides. Every content column must match: provider,
+// submitted_ts, confidence and validation_status exactly; findings and sources as JSON, ignoring object key order
+// only. The original timestamps (registered_ts, validated_ts) are the first registration's and are not compared.
 function sameStage7Registration(row, candidate) {
+  const sameJson = (a, b) => { const ca = canonicalStage7Json(a); return ca !== null && ca === canonicalStage7Json(b); };
   return !!row
     && (row.provider ?? null) === candidate.provider
     && (row.submitted_ts ?? null) === candidate.submitted_ts
-    && row.findings_json === candidate.findings_json
-    && row.sources_json === candidate.sources_json
+    && sameJson(row.findings_json, candidate.findings_json)
+    && sameJson(row.sources_json, candidate.sources_json)
     && (row.confidence ?? null) === candidate.confidence
     && row.validation_status === candidate.validation_status;
 }
@@ -7045,11 +7057,12 @@ async function registerStage7ResearchResponse(env, { requestId, provider, submit
   try {
     results = await env.DB.batch([insert, update]);
   } catch (err) {
-    if (classifyStage7DbError(err).kind !== 'CONSTRAINT') throw err;
-    // A concurrent registration won the race. Report it against what is actually stored.
+    if (classifyStage7DbError(err).kind !== 'UNIQUE') throw err;
+    // A concurrent registration won the race. Report it against what is actually stored; if no stored row explains
+    // the violation, fail (500) rather than claim a registration that cannot be shown.
     const winner = await env.DB.prepare(existingSql).bind(requestId).first();
-    if (winner) return settle(winner);
-    return { ok: false, status: 409, error: 'This request was registered concurrently -- never overwritten; reload and review it.' };
+    if (!winner) throw err;
+    return settle(winner);
   }
   const inserted = results && results[0] && results[0].meta ? results[0].meta.changes : undefined;
   if (inserted === 0) {

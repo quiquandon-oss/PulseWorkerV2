@@ -36,7 +36,7 @@ function makeEnv({ schema = 'full', token = TOKEN, requestStatus = 'RESEARCH_REQ
       VALUES (?, 15, 1, 1, 'v1', ?, 'CONFLICTING', '[]', '[]', '[]', 1, '{}', 'fp')`).run(REQ, requestStatus);
   }
   const log = [];
-  const hooks = { failQuery: null, beforeBatch: null, failBatchStatement: null };
+  const hooks = { failQuery: null, beforeBatch: null, failBatchStatement: null, failBatchMessage: null };
   function stmt(sql) {
     let args = [];
     const maybeFail = () => { if (hooks.failQuery && hooks.failQuery.test(sql)) throw new Error(`D1_ERROR: Network connection lost while running ${sql} with ${SECRET}`); };
@@ -56,7 +56,7 @@ function makeEnv({ schema = 'full', token = TOKEN, requestStatus = 'RESEARCH_REQ
     db.exec('BEGIN');
     try {
       const out = statements.map((st, i) => {
-        if (hooks.failBatchStatement === i) { log.push(st.sql); throw new Error(`D1_ERROR: statement ${i} failed near "${SECRET}"`); }
+        if (hooks.failBatchStatement === i) { log.push(st.sql); throw new Error(hooks.failBatchMessage || `D1_ERROR: statement ${i} failed near "${SECRET}"`); }
         return st.runSync();
       });
       db.exec('COMMIT');
@@ -273,6 +273,85 @@ describe('P3-P5: registration, retries, concurrency and atomicity (migration 001
     const r = await register(env, { request_id: REQ, findings: FINDINGS });
     expect(r.status).toBe(409);
     expect(r.json.error).toMatch(/REJECTED/);
+    expect(responses(db)).toEqual([]);
+  });
+});
+
+describe('adversarial review (2026-10-31): retry semantics and constraint classification', () => {
+  it('identical retry with object keys reordered (top level and nested) is idempotent: 200, stored text unchanged', async () => {
+    const { env, db } = makeEnv();
+    const findings = { summary: 'x', sentiment_assessment: 'NEGATIVE', detail: { a: 1, b: [1, 2] } };
+    const sources = [{ url: 'https://x', publisher: 'p' }];
+    expect((await register(env, { request_id: REQ, provider: 'claude', findings, sources })).status).toBe(200);
+    const first = responses(db);
+    const reordered = { detail: { b: [1, 2], a: 1 }, sentiment_assessment: 'NEGATIVE', summary: 'x' };
+    const again = await register(env, { request_id: REQ, provider: 'claude', findings: reordered, sources: [{ publisher: 'p', url: 'https://x' }] });
+    expect(again.status).toBe(200);
+    expect(again.json.already_registered).toBe(true);
+    expect(responses(db)).toEqual(first);
+  });
+
+  it('array order, nested values, value types and provider still count as different content: 409, original kept', async () => {
+    const { env, db } = makeEnv();
+    const base = { request_id: REQ, provider: 'claude', findings: { ...FINDINGS, list: [1, 2], n: 1 } };
+    expect((await register(env, base)).status).toBe(200);
+    const first = responses(db);
+    for (const changed of [
+      { findings: { ...FINDINGS, list: [2, 1], n: 1 } },
+      { findings: { ...FINDINGS, list: [1, 2], n: 2 } },
+      { findings: { ...FINDINGS, list: [1, 2], n: '1' } },
+      { provider: 'Claude' },
+      { provider: null },
+    ]) {
+      const r = await register(env, { ...base, ...changed });
+      expect(r.status).toBe(409);
+    }
+    expect(responses(db)).toEqual(first);
+  });
+
+  it('a stored row with malformed JSON never compares equal to a retry (409, not 200)', async () => {
+    const { env, db } = makeEnv();
+    db.prepare(`INSERT INTO stage7_research_responses (response_id, request_id, provider, submitted_ts, registered_ts, findings_json, sources_json, confidence, validation_status)
+      VALUES (?, ?, NULL, NULL, 5, '{not json', '[]', NULL, 'PENDING')`).run('stage7-resp-' + REQ, REQ);
+    const r = await register(env, { request_id: REQ, findings: FINDINGS });
+    expect(r.status).toBe(409);
+    expect(responses(db)[0].findings_json).toBe('{not json');
+  });
+
+  it('a non-uniqueness constraint failure (e.g. FOREIGN KEY, NOT NULL) is not reported as a concurrent registration: 500, nothing written', async () => {
+    quiet();
+    for (const msg of ['D1_ERROR: FOREIGN KEY constraint failed: SQLITE_CONSTRAINT', 'D1_ERROR: NOT NULL constraint failed: stage7_research_responses.findings_json: SQLITE_CONSTRAINT']) {
+      const { env, db, hooks } = makeEnv();
+      hooks.failBatchStatement = 0;
+      hooks.failBatchMessage = msg;
+      const r = await register(env, { request_id: REQ, findings: FINDINGS });
+      expect(r.status).toBe(500);
+      expect(r.json).toEqual({ ok: false, code: 'STAGE7_INTERNAL_ERROR', error: 'Stage 7 request failed. See the Worker logs.' });
+      expect(r.text).not.toMatch(/constraint|SQLITE|FOREIGN/i);
+      expect(responses(db)).toEqual([]);
+      expect(requestStatus(db)).toBe('RESEARCH_REQUEST_PUBLISHED');
+    }
+  });
+
+  it('a uniqueness violation with no stored row to explain it fails (500) instead of claiming a registration', async () => {
+    quiet();
+    const { env, db, hooks } = makeEnv();
+    hooks.failBatchStatement = 0;
+    hooks.failBatchMessage = 'D1_ERROR: UNIQUE constraint failed: stage7_research_responses.request_id: SQLITE_CONSTRAINT';
+    const r = await register(env, { request_id: REQ, findings: FINDINGS });
+    expect(r.status).toBe(500);
+    expect(r.json.code).toBe('STAGE7_INTERNAL_ERROR');
+    expect(responses(db)).toEqual([]);
+  });
+
+  it('/api/learning/findings: malformed JSON is a 400 without echo; an identical re-confirmation is idempotent', async () => {
+    const { env, db } = makeEnv();
+    const bad = await call(env, '/api/learning/findings', { method: 'POST', rawBody: `{"event_id": 15, "x": "${SECRET}"`, token: TOKEN });
+    expect(bad.status).toBe(400);
+    expect(bad.text).not.toContain(SECRET);
+    const wrong = await call(env, '/api/learning/findings', { method: 'POST', body: { event_id: 15, finding: { explanation: SECRET } }, token: 'wrong-token' });
+    expect(wrong.status).toBe(401);
+    expect(wrong.text).not.toContain(SECRET);
     expect(responses(db)).toEqual([]);
   });
 });

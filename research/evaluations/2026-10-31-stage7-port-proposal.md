@@ -117,8 +117,8 @@ assertion changed). No migration, workflow, schedule, model, experiment or plan 
 |---|---|
 | P1 | `classifyStage7DbError` and `stage7OverviewSchemaResult`. The existing overview queries are kept unchanged (no extra probe query). Results: a "no such table/column" error on the first query means `NOT_APPLIED`; on the later queries it means `PARTIAL`, with the missing object named. Any other D1 error returns 503 `STAGE7_SCHEMA_CHECK_FAILED` ("not evidence that a migration is missing"). |
 | P2 | The register route parses JSON in its own `try` and returns 400 `INVALID_JSON` without echoing the input. The overview, register and learning routes map unexpected errors to generic codes (`STAGE7_INTERNAL_ERROR`, `STAGE7_SCHEMA_NOT_READY`, `LEARNING_INTERNAL_ERROR`), with the original error only in the Worker log (`console.error`). Error messages no longer echo the caller's `request_id`. |
-| P3 | Concurrency safety comes from migration 0016's own constraints (`response_id` PRIMARY KEY, `UNIQUE(request_id)`), not from the pre-check. A constraint error from the batch re-reads the stored row and returns 200 (identical) or 409 (different). |
-| P4 | `sameStage7Registration` compares `provider`, `submitted_ts`, `findings_json`, `sources_json`, `confidence` and `validation_status`, all 0016 columns. An identical payload returns 200 `already_registered`; any difference returns 409 and nothing is written. Limitation: "identical" means the same JSON serialisation (same key order); a retry with reordered keys is a 409, the safe direction. |
+| P3 | Concurrency safety comes from migration 0016's own constraints (`response_id` PRIMARY KEY, `UNIQUE(request_id)`), not from the pre-check. Only a **uniqueness** violation is treated as a competing registration: the stored row is re-read and the result is 200 (identical) or 409 (different). Other constraint failures (FOREIGN KEY, NOT NULL, CHECK), and a uniqueness violation with no stored row to explain it, return a generic 500 with nothing written. |
+| P4 | `sameStage7Registration` compares `provider`, `submitted_ts`, `confidence` and `validation_status` exactly, and `findings_json` / `sources_json` as canonical JSON (object key order ignored; array order, values and types exact; malformed stored JSON never equal). These are all 0016 columns. An identical payload returns 200 `already_registered`; any difference returns 409 and nothing is written. The stored text is the first registration's, verbatim. |
 | P5 | `INSERT` and status `UPDATE` run in one `env.DB.batch`. Cloudflare documents a D1 batch as one SQL transaction that is rolled back if a statement fails (developers.cloudflare.com/d1/worker-api/d1-database/#batch). |
 | P6 | `stage7AuthorizeWrite`: 503 when the token is not configured, 401 when it is missing or wrong. The register route checks it **before** parsing the body or touching D1, and `registerStage7ResearchResponse` still checks it for the learning-loop caller. No `STAGE7_ENABLED`; read routes are not gated. |
 
@@ -151,3 +151,13 @@ because `claude/stage7-research-pipeline` (`08da540`) predates the learning loop
   request files.
 - Dependencies: no other workflow or code path depends on the dispatcher.
 - No action is needed while the workflows stay disabled.
+
+**Adversarial review (2026-10-31), two corrections:**
+1. The constraint classifier matched any constraint failure, so a FOREIGN KEY or NOT NULL error would have been
+   reported as "registered concurrently" (409). It is now limited to UNIQUE/PRIMARY KEY. A uniqueness violation that
+   no stored row explains now fails (500) instead of claiming a registration. Neither path is reachable with current
+   inputs, because the request exists and every NOT NULL column is always set.
+2. An identical retry with reordered object keys returned 409. It is now compared as canonical JSON.
+
+Regression tests: 6 added (25 in `tests/stage7-routes.test.js`). 3 of them fail on the previous head `5280ebb`; the
+other 3 guard behaviour that was already correct.

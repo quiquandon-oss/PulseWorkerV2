@@ -50,7 +50,11 @@ def check(repo, environment, branch, get=fetch, token=None):
     """Returns a list of failures (empty means the environment enforces approval as required)."""
     status, env = get(f"{API}/repos/{repo}/environments/{environment}", token)
     if status != 200 or not isinstance(env, dict):
-        return [f"environment '{environment}' could not be read (HTTP {status}); it may not exist"]
+        # Diagnostic only: name every environment GitHub reports, so a misnamed or missing environment is visible.
+        ls_status, listing = get(f"{API}/repos/{repo}/environments", token)
+        names = [e.get("name") for e in (listing or {}).get("environments") or []] if ls_status == 200 else None
+        seen = f"environments visible: {names}" if names is not None else f"environment list unreadable (HTTP {ls_status})"
+        return [f"environment '{environment}' could not be read (HTTP {status}); {seen}"]
     failures = []
     rules = env.get("protection_rules") or []
     reviewers = [r for rule in rules if rule.get("type") == "required_reviewers" for r in (rule.get("reviewers") or [])]

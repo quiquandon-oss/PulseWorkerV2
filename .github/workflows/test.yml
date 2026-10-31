@@ -26,39 +26,26 @@ on:
         default: ''
 
 jobs:
+  # The full test suite lives in ci-tests.yml so the production deploy workflows can require exactly the same tests.
   test:
+    uses: ./.github/workflows/ci-tests.yml
+
+  # Fail closed unless the `production` environment really enforces approval (required reviewers, main only).
+  # No secrets; runs before any job that holds production credentials.
+  approval-gate:
+    needs: test
+    if: github.event_name == 'workflow_dispatch' && (inputs.job == 'production-learning-setup' || inputs.job == 'production-session-smoke') && github.ref == 'refs/heads/main' && needs.test.result == 'success'
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-      - name: Setup Node
-        uses: actions/setup-node@v4
+      - uses: actions/checkout@v4
         with:
-          node-version: '22'
-          cache: 'npm'
-      - name: Install dependencies
-        run: npm ci
-      - name: Run tests
-        run: npm test
-      - name: Setup Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-      # Only pytest (+ PyYAML) -- NOT torch/timesfm. exp004-timesfm/
-      # run_experiment.py imports those lazily, inside generate_forecasts()
-      # itself, specifically so this test suite (scope/data-integrity/
-      # model-integrity/production-isolation/failure-handling checks) can
-      # run in every CI job without needing the real, large ML
-      # dependencies installed just to verify the surrounding logic.
-      # PyYAML added for research/test_stage7_scheduler_isolation.py's
-      # own static parsing of .github/workflows/*.yml -- ubuntu-latest's
-      # system Python does NOT ship PyYAML by default (unlike some local
-      # dev environments), confirmed by this exact step failing with
-      # "No module named 'yaml'" before this line was added.
-      - name: Install pytest
-        run: pip install pytest pyyaml numpy --break-system-packages   # numpy: exp008-chronos input arrays (no torch/chronos in CI)
-      - name: Run Experiment 4 and research schema tests
-        run: python3 -m pytest exp004-timesfm/ exp008-chronos/ research/ -v
+          persist-credentials: false
+      - name: Verify production approval is configured
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python3 .github/scripts/verify_production_environment.py --repo "${{ github.repository }}" --environment production --branch main
 
   # STAGING ONLY, manual only: deploys this branch's worker.js to pulseworker-v2-staging and sets its
   # STAGE7_ADMIN_TOKEN. Runs only when a human dispatches Test with job=staging-deploy-learning; never on push or PR.
@@ -148,8 +135,9 @@ jobs:
   # Lab with read-only GETs plus one no-write authorization probe. It never deploys code (deploy.yml does that on
   # push to main), never runs D1 commands and never changes V1 weights. Guarded by tests/learning-loop.test.js.
   production-learning-setup:
-    if: github.event_name == 'workflow_dispatch' && inputs.job == 'production-learning-setup' && github.ref == 'refs/heads/main'
-    needs: test
+    if: github.event_name == 'workflow_dispatch' && inputs.job == 'production-learning-setup' && github.ref == 'refs/heads/main' && needs.test.result == 'success' && needs.approval-gate.result == 'success'
+    needs: [test, approval-gate]
+    environment: production   # uses production credentials: same approval gate as the deploy workflows
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -207,8 +195,9 @@ jobs:
   # (authorized, then refused before any write) and checks learning-table state is identical before and after.
   # Never deploys, never sets secrets, never touches D1 directly. Guarded by tests/learning-loop.test.js.
   production-session-smoke:
-    if: github.event_name == 'workflow_dispatch' && inputs.job == 'production-session-smoke' && github.ref == 'refs/heads/main'
-    needs: test
+    if: github.event_name == 'workflow_dispatch' && inputs.job == 'production-session-smoke' && github.ref == 'refs/heads/main' && needs.test.result == 'success' && needs.approval-gate.result == 'success'
+    needs: [test, approval-gate]
+    environment: production   # uses production credentials: same approval gate as the deploy workflows
     runs-on: ubuntu-latest
     permissions:
       contents: read

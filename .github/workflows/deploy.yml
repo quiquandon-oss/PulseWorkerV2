@@ -15,12 +15,53 @@ on:
       - 'package.json'
       - 'package-lock.json'
       - '.github/workflows/deploy.yml'
+  # Manual runs are allowed only from main (see the `if:` guards below); a dispatch from any other branch deploys
+  # nothing.
   workflow_dispatch: {}
 
+# PRODUCTION DEPLOYMENT GATE (2026-10-31): a production deploy needs, on the same commit,
+#   1. the full CI suite (ci-tests.yml, the same tests as the PR check) to have succeeded in this run;
+#   2. the run to be on refs/heads/main (push or manual dispatch);
+#   3. approval through the `production` GitHub Environment. Its required-reviewer rule is a repository setting
+#      that an administrator must configure; declaring the environment here does not create the rule.
+# A failed, cancelled, skipped or missing test result never satisfies `needs.test.result == 'success'`.
+permissions:
+  contents: read
+
+# One production deploy at a time, in order; a newer queued run replaces an older one that has not started.
+concurrency:
+  group: production-deploy-pulseworker-v2
+  cancel-in-progress: false
+
 jobs:
+  test:
+    if: github.ref == 'refs/heads/main'
+    uses: ./.github/workflows/ci-tests.yml
+
+  # Fail closed unless the `production` environment really enforces approval (required reviewers, main only).
+  # No secrets; runs before any job that holds production credentials.
+  approval-gate:
+    needs: test
+    if: github.ref == 'refs/heads/main' && needs.test.result == 'success'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Verify production approval is configured
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python3 .github/scripts/verify_production_environment.py --repo "${{ github.repository }}" --environment production --branch main
+
   deploy:
+    needs: [test, approval-gate]
+    if: github.ref == 'refs/heads/main' && needs.test.result == 'success' && needs.approval-gate.result == 'success'
+    environment: production
     runs-on: ubuntu-latest
     steps:
+      # Default checkout of github.sha: the commit ci-tests.yml just tested in this run.
       - uses: actions/checkout@v4
       - name: Deploy
         uses: cloudflare/wrangler-action@v3

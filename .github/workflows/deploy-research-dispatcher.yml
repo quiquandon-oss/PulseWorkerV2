@@ -15,8 +15,12 @@ on:
     paths:
       - 'dispatcher/**'
       - '.github/workflows/deploy-research-dispatcher.yml'
+  # Manual runs are allowed only from main (see the `if:` guards below).
   workflow_dispatch: {}
 
+# PRODUCTION DEPLOYMENT GATE (2026-10-31), same rules as deploy.yml: the full CI suite (ci-tests.yml) must succeed
+# in this run on the same commit, the run must be on refs/heads/main, and the deploy job waits for approval through
+# the `production` GitHub Environment (required reviewers are an administrator-configured setting).
 permissions:
   contents: read
 
@@ -25,7 +29,31 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  test:
+    if: github.ref == 'refs/heads/main'
+    uses: ./.github/workflows/ci-tests.yml
+
+  # Fail closed unless the `production` environment really enforces approval (required reviewers, main only).
+  # No secrets; runs before any job that holds production credentials.
+  approval-gate:
+    needs: test
+    if: github.ref == 'refs/heads/main' && needs.test.result == 'success'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Verify production approval is configured
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python3 .github/scripts/verify_production_environment.py --repo "${{ github.repository }}" --environment production --branch main
+
   deploy:
+    needs: [test, approval-gate]
+    if: github.ref == 'refs/heads/main' && needs.test.result == 'success' && needs.approval-gate.result == 'success'
+    environment: production
     runs-on: ubuntu-latest
     timeout-minutes: 15
     env:

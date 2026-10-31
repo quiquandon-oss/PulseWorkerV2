@@ -1,0 +1,45 @@
+name: CI tests (reusable)
+
+# The repository's full CI test suite, as one reusable workflow, so that the PR/push check (test.yml) and the
+# production deploy gates (deploy.yml, deploy-research-dispatcher.yml) run exactly the same tests from one
+# definition. It uses no secrets and only reads the repository; it tests the caller's commit (github.sha).
+on:
+  workflow_call: {}
+
+permissions:
+  contents: read
+
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+      - name: Install dependencies
+        run: npm ci
+      - name: Run tests
+        run: npm test
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      # Only pytest (+ PyYAML) -- NOT torch/timesfm. exp004-timesfm/
+      # run_experiment.py imports those lazily, inside generate_forecasts()
+      # itself, specifically so this test suite (scope/data-integrity/
+      # model-integrity/production-isolation/failure-handling checks) can
+      # run in every CI job without needing the real, large ML
+      # dependencies installed just to verify the surrounding logic.
+      # PyYAML added for research/test_stage7_scheduler_isolation.py's
+      # own static parsing of .github/workflows/*.yml -- ubuntu-latest's
+      # system Python does NOT ship PyYAML by default (unlike some local
+      # dev environments), confirmed by this exact step failing with
+      # "No module named 'yaml'" before this line was added.
+      - name: Install pytest
+        run: pip install pytest pyyaml numpy --break-system-packages   # numpy: exp008-chronos input arrays (no torch/chronos in CI)
+      - name: Run Experiment 4 and research schema tests
+        run: python3 -m pytest exp004-timesfm/ exp008-chronos/ research/ -v

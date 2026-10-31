@@ -216,7 +216,7 @@ def test_every_production_workflow_has_a_secret_free_approval_gate_that_runs_the
         text = job_text(gate)
         assert "secrets." not in text, name
         assert "verify_production_environment.py" in text and "--environment production --branch main" in text, name
-        assert gate["permissions"] == {"contents": "read"}, name
+        assert gate["permissions"] == {"contents": "read", "actions": "read"}, name                # read-only, no write
 
 
 def env_api(env=None, env_status=200, policies=None, pol_status=200):
@@ -258,3 +258,36 @@ def test_gate_cli_exits_non_zero_when_not_configured(monkeypatch):
     monkeypatch.setattr(vpe, "fetch", env_api(None, env_status=404))
     monkeypatch.setattr(vpe, "check", lambda repo, env, branch, get=vpe.fetch, token=None: ["missing"])
     assert vpe.main(["--repo", "o/r", "--environment", "production", "--branch", "main"]) == 1
+
+
+def test_fetch_retries_anonymously_when_the_token_gets_404_and_still_fails_closed(monkeypatch):
+    calls = []
+
+    class Resp:
+        def __init__(self, body):
+            self.status, self.body = 200, body
+        def __enter__(self):
+            return self
+        def __exit__(self, *a):
+            return False
+        def read(self):
+            return self.body
+
+    def opener(answers):
+        def urlopen(req, timeout=20):
+            calls.append(bool(req.get_header("Authorization")))
+            code = answers[len(calls) - 1]
+            if code == 200:
+                return Resp(b'{"ok": true}')
+            raise vpe.urllib.error.HTTPError(req.full_url, code, "x", {}, None)
+        return urlopen
+
+    monkeypatch.setattr(vpe.urllib.request, "urlopen", opener([404, 200]))
+    assert vpe.fetch("https://api.github.com/x", token="t") == (200, {"ok": True})
+    assert calls == [True, False]
+    calls.clear()
+    monkeypatch.setattr(vpe.urllib.request, "urlopen", opener([404, 404]))
+    assert vpe.fetch("https://api.github.com/x", token="t") == (404, None)            # truly absent: still fails closed
+    calls.clear()
+    monkeypatch.setattr(vpe.urllib.request, "urlopen", opener([500]))
+    assert vpe.fetch("https://api.github.com/x", token="t") == (500, None)            # server error: no retry, fails closed

@@ -291,3 +291,12 @@ def test_fetch_retries_anonymously_when_the_token_gets_404_and_still_fails_close
     calls.clear()
     monkeypatch.setattr(vpe.urllib.request, "urlopen", opener([500]))
     assert vpe.fetch("https://api.github.com/x", token="t") == (500, None)            # server error: no retry, fails closed
+
+
+def test_a_missing_environment_reports_which_environments_exist():
+    def get(url, token=None):
+        if url.endswith("/environments"):
+            return 200, {"total_count": 2, "environments": [{"name": "staging-collection"}, {"name": "Production "}]}
+        return 404, None
+    failures = vpe.check("o/r", "production", "main", get=get)
+    assert failures and "staging-collection" in failures[0] and "'Production '" in failures[0]

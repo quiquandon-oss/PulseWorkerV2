@@ -146,7 +146,7 @@ function nearestRow(history, targetTs, tolMs = TOL_MS) {
 // CONTEXT_ASOF_MAX_AGE_MS; imputation means and z-score statistics are fitted on rows before the predicted row only.
 // fp-nearest-v0 (knn-core-v1) used nearestRow in either direction, so a historical analog could carry a reading taken
 // up to TOL_MS after its own timestamp -- inside the outcome window it is labelled with.
-const FEATURE_PIPELINE_VERSION = 'fp-asof-v1';
+const FEATURE_PIPELINE_VERSION = 'fp-asof-v2';   // v1: as-of join + train-only fitting; v2: + backfill restamp (bf-restamp-v1)
 const CONTEXT_ASOF_MAX_AGE_MS = TOL_MS;   // same window as before, now one-sided
 
 // The latest row at or before targetTs and no older than maxAgeMs, else null. Never a later row. `rows` must be
@@ -159,6 +159,35 @@ function asOfRow(rows, targetTs, maxAgeMs) {
   }
   if (idx < 0) return null;
   return targetTs - rows[idx].ts <= maxAgeMs ? rows[idx] : null;
+}
+
+// Read-time correction of the Hyperliquid backfill rows (bf-restamp-v1, part of fp-asof-v2). Before the backfill fix
+// these rows were stamped at candle OPEN time but hold the candle CLOSE (and an RSI including it), so each value was
+// available one interval after its stored ts. Verified read-only on 2026-11-01 against independently retrieved
+// candles: 638/638 unsealed exact-hour rows (BTC 260, ETH 64, LINK 314) equal the close of the candle opening at ts,
+// midnight rows being daily candles (+24 h) and other exact-hour rows hourly candles (+1 h). Live rows carry
+// millisecond jitter and new backfill rows are stamped close + 1 ms, so neither is ever exactly on the hour; the
+// cutoffs (last mis-stamped row per table) bound the correction anyway. Stored rows are NOT rewritten.
+// LINK holds 321 duplicated backfill timestamps (320 identical pairs, 1 differing): one row per corrected ts is kept,
+// chosen deterministically (independent of D1 row order) as the one whose JSON is greatest.
+const BACKFILL_RESTAMP_VERSION = 'bf-restamp-v1';
+const BACKFILL_RESTAMP_CUTOFF_TS = { btc_data: 1785718800000, eth_data: 1786924800000, link_data: 1785726000000 };
+function restampBackfillRows(rows, table) {
+  const cutoff = BACKFILL_RESTAMP_CUTOFF_TS[table];
+  const H = 3600000, D = 24 * H;
+  if (!cutoff) return rows;
+  const byTs = new Map();
+  const out = [];
+  for (const r of rows) {
+    if (r.ts <= cutoff && r.ts % H === 0) {
+      const fixed = { ...r, ts: r.ts + (r.ts % D === 0 ? D : H), restamped: true };
+      const prev = byTs.get(fixed.ts);
+      if (!prev || JSON.stringify(fixed) > JSON.stringify(prev)) byTs.set(fixed.ts, fixed);
+    } else {
+      out.push(r);
+    }
+  }
+  return out.concat([...byTs.values()]).sort((a, b) => a.ts - b.ts);
 }
 
 // Trend-strength guardrail. MA-slope based (no external deps, Workers-safe).
@@ -505,9 +534,10 @@ async function runPrediction(env, horizonHours = 24, { persist = true, claimToke
   const lagMs = horizonHours * 60 * 60 * 1000;
   const tolMs = lagMs * 0.2;
 
-  const { results: btcRows } = await env.DB.prepare(
+  const { results: btcRowsStored } = await env.DB.prepare(
     'SELECT ts, btc_price, technical_score FROM btc_data ORDER BY ts ASC'
   ).all();
+  const btcRows = restampBackfillRows(btcRowsStored, 'btc_data');   // bf-restamp-v1: availability-time stamps
   if (btcRows.length < MIN_COMPLETE_ROWS) {
     return { ok: true, status: 'insufficient_data', n_available: btcRows.length, min_required: MIN_COMPLETE_ROWS };
   }
@@ -770,9 +800,10 @@ async function runEthPrediction(env, horizonHours = 24, { persist = true, claimT
   const lagMs = horizonHours * 60 * 60 * 1000;
   const tolMs = lagMs * 0.2;
 
-  const { results: ethRows } = await env.DB.prepare(
+  const { results: ethRowsStored } = await env.DB.prepare(
     'SELECT ts, eth_price, technical_score FROM eth_data ORDER BY ts ASC'
   ).all();
+  const ethRows = restampBackfillRows(ethRowsStored, 'eth_data');   // bf-restamp-v1: availability-time stamps
   if (ethRows.length < ETH_MIN_COMPLETE_ROWS) {
     return { ok: true, status: 'insufficient_data', n_available: ethRows.length, min_required: ETH_MIN_COMPLETE_ROWS };
   }
@@ -5591,9 +5622,10 @@ async function runLinkPrediction(env, horizonHours = 24, { persist = true, claim
 
   const lagMs = horizonHours * 60 * 60 * 1000;
   const tolMs = lagMs * 0.2;
-  const { results: linkRows } = await env.DB.prepare(
+  const { results: linkRowsStored } = await env.DB.prepare(
     'SELECT ts, link_price, technical_score, funding_adj FROM link_data ORDER BY ts ASC'
   ).all();
+  const linkRows = restampBackfillRows(linkRowsStored, 'link_data');   // bf-restamp-v1: availability-time stamps
   if (linkRows.length < LINK_MIN_COMPLETE_ROWS) {
     return { ok: true, status: 'insufficient_data', n_available: linkRows.length, min_required: LINK_MIN_COMPLETE_ROWS };
   }

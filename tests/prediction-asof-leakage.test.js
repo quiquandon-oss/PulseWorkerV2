@@ -13,11 +13,11 @@ function scope() {
     extractFunctions(
       'runPrediction', 'runLinkPrediction', 'nearestRow', 'asOfRow', 'meanStd', 'trendStrength', 'percentileRank',
       'getLatestCalibrationCurve', 'applyCalibratedProbability', 'trailingVolatility', 'weightedQuantile', 'currentGitSha',
-      'historicalClosestDistances', 'computeConditionalCalibration',
+      'historicalClosestDistances', 'computeConditionalCalibration', 'restampBackfillRows',
     ) + '\n\n' + extractConstants(
       'FEATURE_KEYS', 'LINK_FEATURE_KEYS', 'LINK_MIN_COMPLETE_ROWS', 'LINK_MIN_RESOLVED_ANALOGS', 'MODEL_VERSIONS', 'LAG_MS', 'TOL_MS',
       'MIN_COMPLETE_ROWS', 'MIN_RESOLVED_ANALOGS', 'CONTEXT_ASOF_MAX_AGE_MS', 'FEATURE_PIPELINE_VERSION',
-      'CONDITIONAL_CALIB_WEIGHTS', 'CONDITIONAL_CALIB_K', 'CONDITIONAL_CALIB_MIN_NEIGHBORS',
+      'CONDITIONAL_CALIB_WEIGHTS', 'CONDITIONAL_CALIB_K', 'CONDITIONAL_CALIB_MIN_NEIGHBORS', 'BACKFILL_RESTAMP_CUTOFF_TS',
     ),
   );
 }
@@ -135,7 +135,7 @@ describe('BTC core: future context readings cannot change a prediction', () => {
     expect(s.MODEL_VERSIONS.btc_core).toBe('knn-core-v2-asof');
     expect(s.MODEL_VERSIONS.link_core).toBe('knn-core-v2-asof');
     expect(s.MODEL_VERSIONS.eth_core).toBe('knn-core-v2-selfcontained');
-    expect(s.FEATURE_PIPELINE_VERSION).toBe('fp-asof-v1');
+    expect(s.FEATURE_PIPELINE_VERSION).toBe('fp-asof-v2');
   });
 });
 
@@ -196,5 +196,39 @@ describe('Hyperliquid backfill rows are stamped when their price became availabl
       expect(inserts.map((x) => x.args[0])).toEqual([endBefore - 2 * D, endBefore - D]);
       expect(inserts.map((x) => x.args[1])).toEqual([100, 101]);
     } finally { globalThis.fetch = realFetch; }
+  });
+});
+
+
+describe('bf-restamp-v1: stored open-stamped backfill rows are read at their availability time', () => {
+  const s = scope();
+  const D = 24 * H;
+  const cut = s.BACKFILL_RESTAMP_CUTOFF_TS.btc_data;
+  const mid = Math.floor((cut - 30 * D) / D) * D;           // an exact midnight before the cutoff
+  it('midnight rows move +24 h, other exact-hour rows +1 h; jittered, post-cutoff and unknown tables are untouched', () => {
+    const rows = [{ ts: mid, p: 1 }, { ts: mid + 5 * H, p: 2 }, { ts: mid + 5 * H + 37, p: 3 }, { ts: cut + H, p: 4 }];
+    const out = s.restampBackfillRows(rows, 'btc_data');
+    expect(out.map((r) => [r.ts - mid, r.p, !!r.restamped])).toEqual([
+      [5 * H + 37, 3, false], [6 * H, 2, true], [D, 1, true], [cut + H - mid, 4, false]]);
+    expect(s.restampBackfillRows(rows, 'other_table')).toBe(rows);
+  });
+  it('keeps one row per corrected timestamp, the same one whatever the stored order', () => {
+    const a = { ts: mid + 3 * H, p: 10 }, b = { ts: mid + 3 * H, p: 11 }, c = { ts: mid + 3 * H, p: 10 };
+    const x = s.restampBackfillRows([a, b, c], 'link_data');
+    const y = s.restampBackfillRows([b, c, a], 'link_data');
+    expect(x).toEqual(y);
+    expect(x).toHaveLength(1);
+  });
+  it('the BTC core sees mis-stamped daily rows exactly as if they had been stored at close time', async () => {
+    let log = vi.spyOn(console, 'log').mockImplementation(() => {});
+    try {
+      const start = mid - 149 * D;
+      const stored = priceRows(150, 'btc_price', 60000, 24).map((r, i) => ({ ...r, ts: start + i * D }));   // open-stamped
+      const atClose = stored.map((r) => ({ ...r, ts: r.ts + D + 1 }));     // what a correct (close + 1 ms) stamp gives
+      const run = (btc) => s.runPrediction({ DB: fakeDb({ btc, history: [] }) }, 24, { persist: false });
+      const a = await run(stored), b = await run(atClose);
+      expect(a.ok).toBe(true);
+      expect(strip(a)).toEqual(strip(b));
+    } finally { log.mockRestore(); }
   });
 });

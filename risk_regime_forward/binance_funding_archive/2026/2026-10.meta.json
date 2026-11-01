@@ -1,0 +1,19 @@
+{
+ "completeness": "COMPLETE",
+ "expected_slots": 93,
+ "file_sha256": "5564f092b9af2d1f7cb361a636418252fd7cb218a1ed2ef6412f4e0451e93ccf",
+ "fingerprint": "809ff6e5023f850fb7334693e507b1a7439f013faa89992c7eea6254c0d5b738",
+ "first_collected_at": "2026-11-01T16:54:46.364000+00:00",
+ "last_run_id": "41328719878",
+ "last_written_at": "2026-11-01T16:54:46.364000+00:00",
+ "missing_ranges": {},
+ "missing_slots": 0,
+ "observations": 93,
+ "partition": "2026-10",
+ "raw_sha256": "ca63d7014f567efd5c12608eb32ad155df90da637efe4073846ea9a7cecd14a6",
+ "source": "binance_funding_archive",
+ "superseded": [],
+ "units": {
+  "funding_rate": "rate per funding interval (8h)"
+ }
+}

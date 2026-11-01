@@ -107,3 +107,31 @@ sentiment evaluation is sample-limited by browser activity, not by calendar time
    - **Goal A:** 0–1 large-move units; NOT EVALUABLE.
    - **VAL:** the finding that k-NN B is worse than climatology on Brier in 4 of 6 cells rests on 74 units (12 h)
      and 37 units (24 h).
+
+## Why nothing beats climatology: feature information (pre-seal only, 2026-11-01)
+
+**Setup:** `research/feature_information.py`, output in `2026-11-01-feature-information.json`.
+- **Data:** DEV + VAL only; TEST and the seal are untouched.
+- **Units:** non-overlapping; n = 232 at 12 h and 116 at 24 h per coin.
+- **Nature:** pre-declared and descriptive; nothing is tuned or selected.
+
+**Findings:**
+- **No detectable directional information.** All **36** Spearman correlations of `technical_score` and `regime_mag`
+  with the forward return have 95% CIs that include 0. The 36 are 3 coins × 2 horizons × 2 features × (all,
+  low-volatility, high-volatility).
+  - Overall |ρ| ≤ 0.09.
+  - The largest sub-group estimate, ETH 24 h `technical_score` in low volatility, is −0.25 [−0.48, 0.004]. It is not
+    significant, and it is one of 36 tests.
+  - At n = 232 the CIs exclude |ρ| above about 0.13.
+- **Class balance:** the UP share is 0.50–0.54, so imbalance does not explain the results.
+- **Feature drift:** the mean of `technical_score` moved from about 48 (DEV) to about 53 (VAL), with similar spread.
+  `regime_mag` is centred near 0 in both.
+
+**Conclusion.** With these price-derived features, a k-NN or a regularised linear model has no signal to learn at
+12–24 h. That is consistent with every model landing at or above climatology's Brier score.
+
+**Implications:**
+- **Do not add model complexity** on this feature set.
+- **The only untested candidate is sentiment.** It needs the server-side collection (PulseWorker#3) and a prospective
+  sample.
+- **Status: PREDICTIVE IMPROVEMENT NOT DEMONSTRATED**, now with the limiting evidence identified.

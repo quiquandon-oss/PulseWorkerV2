@@ -27,3 +27,10 @@ def test_spec_is_proposed_and_preserves_frozen_experiments():
         assert exp in SPEC
     assert "never filled with a neutral value" in SPEC
     assert "No source is removed for low" in SPEC
+
+
+def test_decision_brief_quotes_the_calculators():
+    brief = (Path(__file__).resolve().parent / "plans" / "2026-11-01-exp029-decision.md").read_text()
+    assert power.n_sign_test(0.65, m=3) == 122 and "**122 days on which the two calls differ, per comparison.**" in brief
+    assert power.n_dependent_correlation_difference(0.20, 0.10, 0.955, m=3) == 95 and "Holm m = 3: **95 days**" in brief
+    assert "unchanged and unregistered" in brief

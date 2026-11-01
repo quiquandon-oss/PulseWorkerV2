@@ -80,3 +80,30 @@ sentiment evaluation is sample-limited by browser activity, not by calendar time
 - **TEST had been seen before.** The post-seal period was already used in the 2026-11-01 sentiment weighting audit
   (composite accuracy). It is therefore not a pristine holdout for sentiment questions. The protocol's next TEST
   window should start 2026-11-01.
+
+## Reproduction and conformance review (2026-11-01)
+
+1. **Re-run:** the same command on the same inputs, with all 7 input sha256 verified, gives a report identical in
+   every metric. Only `generated_at` differs.
+2. **Pinned inputs:**
+   - **Committed:** the post-seal candles and the post-seal sentiment archive are now committed in `pev1-inputs/`,
+     with `MANIFEST.md` and `test_pev1_inputs.py`, which checks the hashes and that no sealed-period row was committed.
+   - **Result:** a re-run on the committed copies is identical in every metric.
+3. **Independent implementation:** `research/pev1_independent_check.py` re-implements the VAL computation for model
+   B and climatology from the protocol text, in NumPy, sharing no code with the harness. It matches the reported
+   `n`, B Brier, climatology Brier, B balanced accuracy and UP share **exactly in all 6 coin × horizon cells**.
+4. **Conformance with the protocol, checked against the code:**
+   - **Seal:** a price is usable iff available ≤ seal start or > seal end; boundary tests are in place.
+   - **Periods:** DEV < 2026-06-15, VAL [2026-06-15, seal start), TEST after the seal.
+   - **Units:** 00:00 UTC (24 h) and 00:00/12:00 UTC (12 h), so labels never overlap between units.
+   - **Analogs:** an analog's label time is ≤ t − 0.2h.
+   - **Common eligible set:** a unit counts only if every model in the block predicted; exclusions are counted by reason.
+   - **Baselines and metrics:** as specified; Goal A is reported at 24 h only and separately.
+   - **No deviation found.**
+5. **Sample-size limits** (unchanged conclusions):
+   - **TEST 12 h:** n = 21 per coin. A balanced-accuracy CI is about ±0.2 wide, so only effects above roughly 0.2
+     could be detected.
+   - **TEST 24 h:** n = 5 per coin; NOT EVALUABLE.
+   - **Goal A:** 0–1 large-move units; NOT EVALUABLE.
+   - **VAL:** the finding that k-NN B is worse than climatology on Brier in 4 of 6 cells rests on 74 units (12 h)
+     and 37 units (24 h).

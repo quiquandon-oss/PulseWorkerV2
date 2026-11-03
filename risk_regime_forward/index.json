@@ -91,12 +91,12 @@
     "2026-10-31": "61e9a20b84604042f481393b94f84e1a266adadcff66d5f9ae5598345644a715",
     "2026-11-01": "4c8459990e6cfa0218b5e3cf961b0325fcec729cd45febee10cfae66ab81f92b",
     "2026-11-02": "9ab493ed63d24f2074cce22797e2e1090179e8590f30115f19f2c81d54f962f6",
-    "2026-11-03": "cda35bb49d22ff40feeea9675fd446935a854ac3342704c4cb43def15b374ffe"
+    "2026-11-03": "cc3283ca1b45f9d22adc917660b9dbe303eeb5aa63a285f0132c3394bb6bd3ce"
    },
    "first": "2026-10-06",
    "last": "2026-11-03",
    "latest_complete": "2026-11-02",
-   "observations": 1342,
+   "observations": 1360,
    "partitions": 29,
    "retention": "fundingHistory: full history",
    "stale": false,
@@ -232,12 +232,12 @@
     "2026-10-31": "ecdbd3bc7cfec575e3c05197f156ea0e04f8320982388f600fa82f26dcff76f7",
     "2026-11-01": "2e4ac405babbf5174177dd6b173e39a29437e19ad54692f8273352e0dba34817",
     "2026-11-02": "525ba39422a819c77a6e9bb61c765ede91a4facefd0e96c5948a33e138531668",
-    "2026-11-03": "03b9f8a6cd061136eef76426c5e1d0f20553f7e5a79fc4ae306848852d56957f"
+    "2026-11-03": "6e23003816d48dcab120e89c6b455faa75c21922910ed6e66412bffeda86aaa6"
    },
    "first": "2026-08-18",
    "last": "2026-11-03",
    "latest_complete": "2026-11-02",
-   "observations": 464,
+   "observations": 466,
    "partitions": 78,
    "retention": "funding-rate-history serves recent months only (provider limit); older days are BEYOND_PROVIDER_HISTORY",
    "stale": false,

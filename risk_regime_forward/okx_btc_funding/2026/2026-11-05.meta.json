@@ -1,18 +1,20 @@
 {
  "completeness": "OPEN",
- "expected_slots": 1,
- "file_sha256": "4e95ba4f844fb1ed5dc62afd26a552d3896ee3e6f503f101102e30aa5617a912",
- "fingerprint": "c3abcbbf17e1ec946175099ebe9de30ad5fced71124e55dfd5c9f320b2802cb6",
+ "expected_slots": 2,
+ "file_sha256": "fd86c637c9a6b5f822797c852804838f91ec9755b1654ca178ba50cba855231d",
+ "fingerprint": "903f599966a977bab09aab8b09a49927e705322546db3a0eda6a3adc774db010",
  "first_collected_at": "2026-11-05T03:29:44.692000+00:00",
- "last_run_id": "41961929946",
- "last_written_at": "2026-11-05T03:29:44.692000+00:00",
+ "last_run_id": "42026371695",
+ "last_written_at": "2026-11-05T12:21:09.400000+00:00",
  "missing_ranges": {},
  "missing_slots": 0,
- "observations": 2,
+ "observations": 4,
  "partition": "2026-11-05",
- "raw_sha256": "5a57fe72c6f1aedf4d23ad0f5104a658ab3e07b1d7e19019586f2ae24a6acec0",
+ "raw_sha256": "033a85de616f32ca4da39d796de6a7916d6912e7ea8b6784fdde94493b4a4957",
  "source": "okx_btc_funding",
- "superseded": [],
+ "superseded": [
+  "c3abcbbf17e1ec946175099ebe9de30ad5fced71124e55dfd5c9f320b2802cb6"
+ ],
  "units": {
   "funding_rate": "rate per funding interval (nominal 8h)",
   "realized_rate": "rate per funding interval"

@@ -193,11 +193,18 @@
    "fingerprint": "65789f8d2bf9d0c325a37dc3d43ec815ee16184225361c6ccf59d850b80079f2",
    "run_id": "42098240511",
    "status": "EVALUATED"
+  },
+  {
+   "at": "2026-11-06T19:21:04Z",
+   "evaluation_status": "INSUFFICIENT_SAMPLE",
+   "fingerprint": "5611ae8f743bd59f072782ba2057e5fefc7123c038eafc0c368c195e2396751d",
+   "run_id": "42278813877",
+   "status": "EVALUATED"
   }
  ],
- "last_evaluated_fingerprint": "65789f8d2bf9d0c325a37dc3d43ec815ee16184225361c6ccf59d850b80079f2",
- "last_report": "reports/65789f8d2bf9d0c3",
- "last_run": "42098240511",
- "last_run_at": "2026-11-05T19:54:03Z",
+ "last_evaluated_fingerprint": "5611ae8f743bd59f072782ba2057e5fefc7123c038eafc0c368c195e2396751d",
+ "last_report": "reports/5611ae8f743bd59f",
+ "last_run": "42278813877",
+ "last_run_at": "2026-11-06T19:21:04Z",
  "last_status": "EVALUATED"
 }

@@ -36,6 +36,11 @@ def test_units(rows, h, now_ts):
     return [u for u in pe.unit_times(rows, h, TEST_START_TS, now_ts) if u["ts"] + h * pe.H <= now_ts]
 
 
+def final_units(rows, h, now_ts):
+    """The frozen confirmatory population: test_units capped at the checkpoint, however late final runs."""
+    return test_units(rows, h, min(now_ts, CHECKPOINT_TS))
+
+
 def models(sent_ts, sentiment):
     base = {"always_up": lambda up, u, h: 1.0, "always_down": lambda up, u, h: 0.0,
             "climatology": pe.climatology, "persistence": lambda up, u, h: pe.persistence(u, h)}
@@ -49,18 +54,19 @@ def models(sent_ts, sentiment):
 
 
 def counts_for_coin(closes, sentiment, now_ts, horizons=pe.HORIZONS_H):
-    """Eligibility counts only. Label VALUES are never read: 'resolved' only checks that a label exists."""
-    rows = pe.build_rows(closes, horizons)
+    """Eligibility counts only. Rows omit labels; 'resolved' checks for a future close by key."""
+    rows = pe.build_rows(closes, horizons=())
     sent_ts = [s[0] for s in sentiment]
     out = {}
     for h in horizons:
         units = test_units(rows, h, now_ts)
+        resolved = lambda u: u["ts"] + h * pe.H in closes
         out[f"{h}h"] = {
             "units_elapsed": len(units),
-            "resolved": sum(1 for u in units if u["labels"][h] is not None),
+            "resolved": sum(1 for u in units if resolved(u)),
             "with_price_features": sum(1 for u in units if pe._has_features(u)),
             "with_asof_sentiment": sum(1 for u in units if pe.asof_reading(sent_ts, sentiment, u["ts"]) is not None),
-            "eligible_all_models": sum(1 for u in units if u["labels"][h] is not None and pe._has_features(u)
+            "eligible_all_models": sum(1 for u in units if resolved(u) and pe._has_features(u)
                                        and pe.asof_reading(sent_ts, sentiment, u["ts"]) is not None),
         }
     return out
@@ -71,7 +77,7 @@ def final_for_coin(closes, sentiment, now_ts, horizons=pe.HORIZONS_H):
     sent_ts = [s[0] for s in sentiment]
     out = {}
     for h in horizons:
-        units = test_units(rows, h, now_ts)
+        units = final_units(rows, h, now_ts)
         ms = models(sent_ts, sentiment)
         preds = pe.predict_all(rows, units, h, ms)
         pairs = [(m, b) for m in ("A", "B", "C", "P4-LR", "P4-KNN-SHRINK")

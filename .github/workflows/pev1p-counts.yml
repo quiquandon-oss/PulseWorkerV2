@@ -1,0 +1,55 @@
+name: PEV-1P prospective window — eligibility counts (no outcomes)
+
+# Protocol research/plans/2026-11-02-pev1p-protocol.md. Weekly, read-only: fetches public Hyperliquid candles and the
+# public V1 sentiment archive, then reports ONLY how many prospective units exist / are resolved / are eligible per
+# model. It never computes a label value, prediction or metric (the confirmatory `final` mode refuses to run before
+# 2027-05-01T00:00Z and is not invoked here). No secrets, no writes: the counts go to the job summary and an artifact.
+on:
+  schedule:
+    - cron: '17 7 * * 1'      # Mondays 07:17 UTC
+  workflow_dispatch: {}
+
+concurrency:
+  group: pev1p-counts
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  counts:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Pre-seal candles (research-data/market-moves branch)
+        run: |
+          git fetch --depth=1 origin research-data/market-moves
+          mkdir -p mm && git archive FETCH_HEAD market_moves | tar -x -C mm
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Harness tests (never report from a red harness)
+        run: pip install pytest --break-system-packages -q && python3 -m pytest -q research/test_prospective_pev.py research/test_prediction_eval.py
+      - name: Fetch post-seal candles (public API)
+        run: python3 research/prospective_pev.py fetch --out post
+      - name: Fetch the V1 sentiment archive (public read-only endpoint)
+        run: curl -fsS -m 60 -A "cryptopulse-research/1.0" -o sentiment.json https://pulseworker-v2.quiquandon.workers.dev/api/research-lab/experiment5-sentiment
+      - name: Counts only
+        run: |
+          python3 research/prospective_pev.py counts --candles mm/market_moves/hourly post --sentiment sentiment.json --out pev1p-counts.json
+          python3 - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          import json
+          r = json.load(open("pev1p-counts.json"))
+          print("### PEV-1P eligibility counts (no outcomes)\n")
+          print("| coin | horizon | elapsed | resolved | features | as-of sentiment | eligible (all models) |")
+          print("|---|---|---|---|---|---|---|")
+          for c, v in r["coins"].items():
+              for h, x in v.items():
+                  print(f"| {c} | {h} | {x['units_elapsed']} | {x['resolved']} | {x['with_price_features']} | {x['with_asof_sentiment']} | {x['eligible_all_models']} |")
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pev1p-counts
+          path: pev1p-counts.json
+          retention-days: 90

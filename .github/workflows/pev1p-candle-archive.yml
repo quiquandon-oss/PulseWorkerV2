@@ -1,0 +1,44 @@
+name: PEV-1P post-seal candle archive (append-only data branch)
+
+# Hyperliquid serves only the most recent ~5,000 hourly candles (208.5 days, measured 2026-11-02). This job appends
+# newly closed post-seal candles to the research-data/pev1p-candles branch every week (168 h, far inside that
+# window), keeping first-seen values and recording any upstream revision separately, so PEV-1P and any later re-run
+# stay reproducible. Public data only, no secrets; it writes ONLY to that data branch (never main, never production).
+on:
+  schedule:
+    - cron: '41 7 * * 1'      # Mondays 07:41 UTC
+  workflow_dispatch: {}
+
+concurrency:
+  group: pev1p-candle-archive
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  archive:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          ref: research-data/pev1p-candles
+          path: archive
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Archive tests (never write from a red writer)
+        run: pip install pytest --break-system-packages -q && python3 -m pytest -q research/test_candle_archive.py
+      - name: Append newly closed candles
+        run: python3 research/candle_archive.py update --dir archive/candles_post_seal
+      - name: Commit to the data branch only
+        working-directory: archive
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add candles_post_seal
+          git diff --cached --quiet && { echo "nothing new"; exit 0; }
+          git commit -q -m "pev1p candle archive: $(date -u +%FT%TZ)"
+          git push origin HEAD:research-data/pev1p-candles

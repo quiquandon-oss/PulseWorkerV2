@@ -62,7 +62,7 @@ def d1_execute(sql):
 
 def main():
     now_ts = int(time.time() * 1000)
-    summary = ep.run_pipeline(d1_query, d1_execute, now_ts)
+    summary = ep.run_pipeline_recorded(d1_query, d1_execute, now_ts)
 
     print("=== Experiment 5 agent pipeline — execution summary ===")
     print(json.dumps(summary, indent=2, default=str))
@@ -71,7 +71,16 @@ def main():
     print(f"btc_data rows read: {summary['btc_rows_read']}")
     print(f"newly archived observations: {summary['newly_archived']}")
     print(f"decisions created this run: {summary['decisions_created']}")
+    print(f"decisions skipped as duplicates: {summary['decisions_skipped_duplicate']}")
     print(f"decisions evaluated this run: {summary['decisions_evaluated']}")
+    print(f"operational run record: {summary['run_record']}")
+    if summary["run_record"] != "WRITTEN":
+        # Unrecorded runs are never presented as recorded. In GitHub Actions this is a visible annotation.
+        reason = summary.get("run_record_error") or "migration 0019 (experiment5_pipeline_runs) is not applied"
+        print(f"::warning title=Experiment 5 run not recorded::{summary['run_record']}: {reason}")
+    if summary["observations_rejected_malformed"]:
+        print(f"WARNING: {summary['observations_rejected_malformed']} observation(s) had malformed sources_json and were excluded "
+              f"(sample ts: {summary['rejected_observation_ts_sample']})")
 
     step_summary_path = os.environ.get("GITHUB_STEP_SUMMARY")
     if step_summary_path:
@@ -81,7 +90,10 @@ def main():
             f.write(f"- btc_data rows read: {summary['btc_rows_read']}\n")
             f.write(f"- newly archived observations: {summary['newly_archived']}\n")
             f.write(f"- decisions created this run: {summary['decisions_created']}\n")
+            f.write(f"- decisions skipped as duplicates (same subject and anchor already persisted): {summary['decisions_skipped_duplicate']}\n")
             f.write(f"- decisions evaluated this run: {summary['decisions_evaluated']}\n")
+            f.write(f"- observations excluded (malformed sources_json): {summary['observations_rejected_malformed']}\n")
+            f.write(f"- operational run record: {summary['run_record']}\n")
             f.write(f"- candidate new sources observed: {summary['agent_cycle'].get('candidate_new_sources')}\n")
 
 

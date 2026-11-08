@@ -6,9 +6,9 @@
   "claude/sweet-meitner-66ntx8": "720f6fb891866d430be850314ee16d8e7f2df0aa",
   "main": "793aa566b1373d983b45dbc3e18a868f90cbe71d",
   "research-data/market-moves": "0eb5be03764aede986d6b696fbc2c619e27971f1",
-  "research-data/risk-regime-forward": "3abf78f54d56ac733f43a8b32dab77fc2f4f143b"
+  "research-data/risk-regime-forward": "751077a7f75213071ba812c9bc0e7e3ea9466258"
  },
- "feed_seq": 9,
+ "feed_seq": 10,
  "files": [
   {
    "dataset": "prereg_market_moves",
@@ -54964,10 +54964,230 @@
    "size": 529368,
    "snapshot": null,
    "url": "https://raw.githubusercontent.com/quiquandon-oss/PulseWorkerV2/refs/heads/archive-feed/blobs/1217b627ebb96ffe865de553925a80efd12ce7d06e254c1571cc61c1564f9b18"
+  },
+  {
+   "dataset": "rr_forward_store",
+   "kind": "raw",
+   "md5": "4637167c3aa2bb0e4b9e68ef4c08d2b3",
+   "origin": "git",
+   "path": "10_raw/prospective/rr_forward_store/partitions/risk_regime_forward/binance_oi_archive/2026/2026-11-07.jsonl.gz",
+   "sha256": "fd34c48a7e11b243ad0905f3b5f0897105fa5ba02c3327abb02491804595aa7a",
+   "size": 31903,
+   "snapshot": "partitions",
+   "url": "https://raw.githubusercontent.com/quiquandon-oss/PulseWorkerV2/751077a7f75213071ba812c9bc0e7e3ea9466258/risk_regime_forward/binance_oi_archive/2026/2026-11-07.jsonl.gz"
+  },
+  {
+   "dataset": "rr_forward_store",
+   "kind": "raw",
+   "md5": "1e09c5310227212c939f2773a9a1c3f1",
+   "origin": "git",
+   "path": "10_raw/prospective/rr_forward_store/partitions/risk_regime_forward/binance_oi_archive/2026/2026-11-07.meta.json",
+   "sha256": "349d5a0c63933f2d5d6319f5d1422af1a214110ee5e44b0c167c573d3420fa89",
+   "size": 670,
+   "snapshot": "partitions",
+   "url": "https://raw.githubusercontent.com/quiquandon-oss/PulseWorkerV2/751077a7f75213071ba812c9bc0e7e3ea9466258/risk_regime_forward/binance_oi_archive/2026/2026-11-07.meta.json"
+  },
+  {
+   "dataset": "rr_forward_store",
+   "kind": "raw",
+   "md5": "8d17c982c8dc8c933710c689e4ed83f8",
+   "origin": "git",
+   "path": "10_raw/prospective/rr_forward_store/partitions/risk_regime_forward/hyperliquid_btc_funding/2026/2026-11-07.jsonl.gz",
+   "sha256": "7e700f5c7c84846e88ccd97a939c2258c9f5e342c5068e72d24db6ea011c5a39",
+   "size": 1192,
+   "snapshot": "partitions",
+   "url": "https://raw.githubusercontent.com/quiquandon-oss/PulseWorkerV2/751077a7f75213071ba812c9bc0e7e3ea9466258/risk_regime_forward/hyperliquid_btc_funding/2026/2026-11-07.jsonl.gz"
+  },
+  {
+   "dataset": "rr_forward_store",
+   "kind": "raw",
+   "md5": "b8dd5072d682e1abaaf113e79cad2ba0",
+   "origin": "git",
+   "path": "10_raw/prospective/rr_forward_store/partitions/risk_regime_forward/hyperliquid_btc_funding/2026/2026-11-07.meta.json",
+   "sha256": "d974dd7614a3c555d1195e5e9b68815814ee4ecc92829515c3efae7415b1db85",
+   "size": 952,
+   "snapshot": "partitions",
+   "url": "https://raw.githubusercontent.com/quiquandon-oss/PulseWorkerV2/751077a7f75213071ba812c9bc0e7e3ea9466258/risk_regime_forward/hyperliquid_btc_funding/2026/2026-11-07.meta.json"
+  },
+  {
+   "dataset": "rr_forward_store",
+   "kind": "raw",
+   "md5": "7cb2119a96354416af9a7ddef5702ea8",
+   "origin": "git",
+   "path": "10_raw/prospective/rr_forward_store/partitions/risk_regime_forward/hyperliquid_hip3/2026/2026-11-07.jsonl.gz",
+   "sha256": "f3630e5e53d13b363574b13aff8fb195fad426a5421716e072c2a6aa568531c4",
+   "size": 11068,
+   "snapshot": "partitions",
+   "url": "https://raw.githubusercontent.com/quiquandon-oss/PulseWorkerV2/751077a7f75213071ba812c9bc0e7e3ea9466258/risk_regime_forward/hyperliquid_hip3/2026/2026-11-07.jsonl.gz"
+  },
+  {
+   "dataset": "rr_forward_store",
+   "kind": "raw",
+   "md5": "29c4543a4bc1d58509c7a9090cb2fe39",
+   "origin": "git",
+   "path": "10_raw/prospective/rr_forward_store/partitions/risk_regime_forward/hyperliquid_hip3/2026/2026-11-07.meta.json",
+   "sha256": "bd92a790fb43bbf0f88c193b3f6fe0401ac0fb911b10e90998e5f324a58a68f6",
+   "size": 658,
+   "snapshot": "partitions",
+   "url": "https://raw.githubusercontent.com/quiquandon-oss/PulseWorkerV2/751077a7f75213071ba812c9bc0e7e3ea9466258/risk_regime_forward/hyperliquid_hip3/2026/2026-11-07.meta.json"
+  },
+  {
+   "dataset": "rr_forward_store",
+   "kind": "raw",
+   "md5": "c5e305d9e2c650411c2d9c5618793e5f",
+   "origin": "git",
+   "path": "10_raw/prospective/rr_forward_store/partitions/risk_regime_forward/okx_btc_funding/2026/2026-11-07.jsonl.gz",
+   "sha256": "489496575ee9d2b57b8e8479a49da9b64d74f31e09aae1950ceddd39344ead61",
+   "size": 592,
+   "snapshot": "partitions",
+   "url": "https://raw.githubusercontent.com/quiquandon-oss/PulseWorkerV2/751077a7f75213071ba812c9bc0e7e3ea9466258/risk_regime_forward/okx_btc_funding/2026/2026-11-07.jsonl.gz"
+  },
+  {
+   "dataset": "rr_forward_store",
+   "kind": "raw",
+   "md5": "b81e1ebe71583e5e113563194148b1b1",
+   "origin": "git",
+   "path": "10_raw/prospective/rr_forward_store/partitions/risk_regime_forward/okx_btc_funding/2026/2026-11-07.meta.json",
+   "sha256": "8b1c7c3ce81cffcf93d20de8816f799af3f8f32be730c8ebb88a0343f7331ee1",
+   "size": 856,
+   "snapshot": "partitions",
+   "url": "https://raw.githubusercontent.com/quiquandon-oss/PulseWorkerV2/751077a7f75213071ba812c9bc0e7e3ea9466258/risk_regime_forward/okx_btc_funding/2026/2026-11-07.meta.json"
+  },
+  {
+   "dataset": "rr_forward_store",
+   "kind": "raw",
+   "md5": "f95431f3fe0895fec74c08375a0c4a75",
+   "origin": "git",
+   "path": "10_raw/prospective/rr_forward_store/partitions/risk_regime_forward/raw/binance_oi_archive/2026/2026-11-07.jsonl.gz",
+   "sha256": "8b2a708617d852f882e95d2e683dafbed02cd7f163e89083ca0a6d4a8d7e1a82",
+   "size": 11173,
+   "snapshot": "partitions",
+   "url": "https://raw.githubusercontent.com/quiquandon-oss/PulseWorkerV2/751077a7f75213071ba812c9bc0e7e3ea9466258/risk_regime_forward/raw/binance_oi_archive/2026/2026-11-07.jsonl.gz"
+  },
+  {
+   "dataset": "rr_forward_store",
+   "kind": "raw",
+   "md5": "267e76b4ce73d366ae983f8424a4665d",
+   "origin": "git",
+   "path": "10_raw/prospective/rr_forward_store/partitions/risk_regime_forward/raw/hyperliquid_btc_funding/2026/2026-11-07.jsonl.gz",
+   "sha256": "bb1e371c2322781dea5ebc24f4ae60aa3288bab86332d6f4b81adae2ce0f213c",
+   "size": 392,
+   "snapshot": "partitions",
+   "url": "https://raw.githubusercontent.com/quiquandon-oss/PulseWorkerV2/751077a7f75213071ba812c9bc0e7e3ea9466258/risk_regime_forward/raw/hyperliquid_btc_funding/2026/2026-11-07.jsonl.gz"
+  },
+  {
+   "dataset": "rr_forward_store",
+   "kind": "raw",
+   "md5": "a93b0102e197fe4cd70f0dc747403a9c",
+   "origin": "git",
+   "path": "10_raw/prospective/rr_forward_store/partitions/risk_regime_forward/raw/hyperliquid_hip3/2026/2026-11-07.jsonl.gz",
+   "sha256": "e2519b98930a403ab12064f854402bc3a456df7cdcf66a3f37d394a5d880d118",
+   "size": 5503,
+   "snapshot": "partitions",
+   "url": "https://raw.githubusercontent.com/quiquandon-oss/PulseWorkerV2/751077a7f75213071ba812c9bc0e7e3ea9466258/risk_regime_forward/raw/hyperliquid_hip3/2026/2026-11-07.jsonl.gz"
+  },
+  {
+   "dataset": "rr_forward_store",
+   "kind": "raw",
+   "md5": "03a2f64c1e6041f390d9ff2e24069510",
+   "origin": "git",
+   "path": "10_raw/prospective/rr_forward_store/partitions/risk_regime_forward/raw/okx_btc_funding/2026/2026-11-07.jsonl.gz",
+   "sha256": "13d090fafabc60d797e8c4a72622950a1f4b670fe36919cf6b6e5b58f8344d55",
+   "size": 270,
+   "snapshot": "partitions",
+   "url": "https://raw.githubusercontent.com/quiquandon-oss/PulseWorkerV2/751077a7f75213071ba812c9bc0e7e3ea9466258/risk_regime_forward/raw/okx_btc_funding/2026/2026-11-07.jsonl.gz"
+  },
+  {
+   "dataset": "rr_forward_store",
+   "kind": "raw",
+   "md5": "4f2323a791d7a0568cf13e5981c3daa6",
+   "origin": "git",
+   "path": "10_raw/prospective/rr_forward_store/partitions/risk_regime_forward/runs/20261107T205254Z_42413153302.json",
+   "sha256": "bd3836bae3cb88b09fadcdff0d11de2a1665be84e4f8a972cdfe25e1582f0a23",
+   "size": 1591,
+   "snapshot": "partitions",
+   "url": "https://raw.githubusercontent.com/quiquandon-oss/PulseWorkerV2/751077a7f75213071ba812c9bc0e7e3ea9466258/risk_regime_forward/runs/20261107T205254Z_42413153302.json"
+  },
+  {
+   "dataset": "rr_forward_store",
+   "kind": "raw",
+   "md5": "a410cb8a74acab2341ec1994fcf4f0d9",
+   "origin": "git",
+   "path": "10_raw/prospective/rr_forward_store/partitions/risk_regime_forward/runs/20261108T003557Z_42430464060.json",
+   "sha256": "c4dc2773cec6de9ac3589efc6be984e835778cb1a1760b3a7c638b4b93a5b7c0",
+   "size": 2614,
+   "snapshot": "partitions",
+   "url": "https://raw.githubusercontent.com/quiquandon-oss/PulseWorkerV2/751077a7f75213071ba812c9bc0e7e3ea9466258/risk_regime_forward/runs/20261108T003557Z_42430464060.json"
+  },
+  {
+   "dataset": "rr_forward_store",
+   "kind": "raw",
+   "md5": "52f0e4192b7ee23a1bc3821197344f67",
+   "origin": "git",
+   "path": "10_raw/prospective/rr_forward_store/partitions/risk_regime_forward/runs/20261108T072034Z_42458386307.json",
+   "sha256": "6f7226c0e1cf17fd751913e09e10c12ba4db761bee1d39afde70ff3e2318ea69",
+   "size": 2089,
+   "snapshot": "partitions",
+   "url": "https://raw.githubusercontent.com/quiquandon-oss/PulseWorkerV2/751077a7f75213071ba812c9bc0e7e3ea9466258/risk_regime_forward/runs/20261108T072034Z_42458386307.json"
+  },
+  {
+   "dataset": "rr_forward_store",
+   "kind": "raw",
+   "md5": "e454fed7c9ed5ff0a3a9257705df5b12",
+   "origin": "git",
+   "path": "10_raw/prospective/rr_forward_store/partitions/risk_regime_forward/runs/20261108T151251Z_42493651889.json",
+   "sha256": "279b4987225f5e69b28a9eec5fcae039ea1a7f1d99f29c2473fcb933b784aaef",
+   "size": 2177,
+   "snapshot": "partitions",
+   "url": "https://raw.githubusercontent.com/quiquandon-oss/PulseWorkerV2/751077a7f75213071ba812c9bc0e7e3ea9466258/risk_regime_forward/runs/20261108T151251Z_42493651889.json"
+  },
+  {
+   "dataset": "rr_forward_store",
+   "kind": "raw",
+   "md5": "568b481436fb8f85d614f1f8eb023c11",
+   "origin": "git",
+   "path": "10_raw/prospective/rr_forward_store/partitions/risk_regime_forward/runs/20261108T164612Z_42501557239.json",
+   "sha256": "310b90e2137680b904fcc8a063fdbeb86a1111aac33bd7c58f0c8e3b18eab628",
+   "size": 1982,
+   "snapshot": "partitions",
+   "url": "https://raw.githubusercontent.com/quiquandon-oss/PulseWorkerV2/751077a7f75213071ba812c9bc0e7e3ea9466258/risk_regime_forward/runs/20261108T164612Z_42501557239.json"
+  },
+  {
+   "dataset": "rr_forward_store",
+   "kind": "raw",
+   "md5": "af587e7ae35b181cad8d546433f208d6",
+   "origin": "git",
+   "path": "10_raw/prospective/rr_forward_store/snapshot=2026-11-08_git-751077a7/risk_regime_forward/index.json",
+   "sha256": "1ff1f138f996240f9b5f47d473c630e9119a2d8f405aa981903a59a65c5db29a",
+   "size": 17852,
+   "snapshot": "2026-11-08_git-751077a7",
+   "url": "https://raw.githubusercontent.com/quiquandon-oss/PulseWorkerV2/751077a7f75213071ba812c9bc0e7e3ea9466258/risk_regime_forward/index.json"
+  },
+  {
+   "dataset": null,
+   "kind": "manifest",
+   "md5": "a1fe09c1636b4321b8b25dbfa94d84a2",
+   "origin": "feed_blob",
+   "path": "90_manifests/rr_forward_store__2026-11-08_git-751077a7.json",
+   "sha256": "c4327c7954080abcafa39f10ad409105fe4545842b7468f7801dcda0afea50fe",
+   "size": 795,
+   "snapshot": null,
+   "url": "https://raw.githubusercontent.com/quiquandon-oss/PulseWorkerV2/refs/heads/archive-feed/blobs/c4327c7954080abcafa39f10ad409105fe4545842b7468f7801dcda0afea50fe"
+  },
+  {
+   "dataset": null,
+   "kind": "code_bundle",
+   "md5": "a5a2d8180afbb98a2d409b23004dee80",
+   "origin": "feed_blob",
+   "path": "05_code/increments/PulseWorkerV2-2026-11-08-48b6bb1e9242.bundle",
+   "sha256": "f3ba8bee396369354550c749a160b697ea482e3cef5cb14a7e6755951fd36e80",
+   "size": 84591,
+   "snapshot": null,
+   "url": "https://raw.githubusercontent.com/quiquandon-oss/PulseWorkerV2/refs/heads/archive-feed/blobs/f3ba8bee396369354550c749a160b697ea482e3cef5cb14a7e6755951fd36e80"
   }
  ],
- "files_sha256": "baba6f80e03bd7490a67e3d7bb6ca981a0ad5843bb2b586d1b72e1408e968189",
+ "files_sha256": "80c69b91b19b8e92af6ff552904ea2db39d3670c1770ac30558b853bdb4ecfbd",
  "format": "cryptopulse-archive-feed-v1",
- "generated_utc": "2026-11-07T18:12:57Z",
+ "generated_utc": "2026-11-08T18:26:17Z",
  "repository": "quiquandon-oss/PulseWorkerV2"
 }

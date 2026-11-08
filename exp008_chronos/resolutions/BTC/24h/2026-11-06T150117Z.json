@@ -1,0 +1,16 @@
+{
+ "absolute_error": 0.6015528752533443,
+ "actual_direction": "UP",
+ "actual_price": 75821.2,
+ "actual_return_pct": 0.44006411530156325,
+ "correct": 0,
+ "format": "exp008-chronos-store-v1",
+ "horizon_hours": 24,
+ "id": "BTC_24h_2026-11-06T150117Z",
+ "input_end_ts": 1793977277718,
+ "persistence_correct": 0,
+ "resolution_price_ts": 1794074461783,
+ "resolved_ts": 1794099282016,
+ "signed_error": -0.6015528752533443,
+ "target_ts": 1794063677718
+}

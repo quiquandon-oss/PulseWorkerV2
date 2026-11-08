@@ -1,0 +1,12 @@
+{
+ "code_sha": "793aa566b1373d983b45dbc3e18a868f90cbe71d",
+ "errors": [
+  "CalledProcessError: Command '['wrangler', 'd1', 'execute', 'sentiment-history', '--remote', '--json', '--command', \"SELECT ts, input_end_ts, target_ts, price_at_prediction FROM experiment_4_timesfm WHERE coin='BTC' AND horizon_hours=12 ORDER BY ts DESC LIMIT 1\"]' returned non-zero exit status 1."
+ ],
+ "forecasts": [],
+ "format": "exp008-chronos-store-v1",
+ "notes": [],
+ "resolve_error": "CalledProcessError: Command '['wrangler', 'd1', 'execute', 'sentiment-history', '--remote', '--json', '--command', \"SELECT ts, btc_price FROM btc_data WHERE ts >= 1794139267670 AND typeof(ts) IN ('integer', 'real') AND btc_price IS NOT NULL ORDER BY ts ASC LIMIT 1\"]' returned non-zero exit status 1.",
+ "run_id": "42489818193",
+ "run_ts": 1794148051599
+}

@@ -1,0 +1,95 @@
+{
+ "artifact": "risk-regime-forward-run",
+ "attempts": [
+  {
+   "completeness": "COMPLETE",
+   "duplicates_dropped": 0,
+   "expected_slots": 48,
+   "internal_conflicts": {},
+   "missing_ranges": {},
+   "missing_slots": 0,
+   "observations": 48,
+   "partition": "2026-11-07",
+   "source": "hyperliquid_btc_funding",
+   "status": "UNCHANGED"
+  },
+  {
+   "partition": null,
+   "requests": {
+    "fundingHistory_FETCHED": 2,
+    "fundingHistory_page_max_rows": 24
+   },
+   "source": "hyperliquid",
+   "status": "REQUEST_LOG"
+  },
+  {
+   "completeness": "OPEN",
+   "duplicates_dropped": 0,
+   "expected_slots": 16,
+   "fingerprint": "133e9f161d08b59d360fdb77cfaa150ad42c791dc3edb8fc0494c5d04d858e29",
+   "internal_conflicts": {},
+   "missing_ranges": {},
+   "missing_slots": 0,
+   "observations": 16,
+   "partition": "2026-11-08",
+   "source": "hyperliquid_btc_funding",
+   "status": "SUPERSEDED"
+  },
+  {
+   "partition": null,
+   "requests": {
+    "fundingHistory_FETCHED": 2,
+    "fundingHistory_page_max_rows": 8
+   },
+   "source": "hyperliquid",
+   "status": "REQUEST_LOG"
+  },
+  {
+   "completeness": "OPEN",
+   "duplicates_dropped": 0,
+   "expected_slots": 1,
+   "internal_conflicts": {},
+   "missing_ranges": {},
+   "missing_slots": 0,
+   "observations": 2,
+   "partition": "2026-11-08",
+   "source": "okx_btc_funding",
+   "status": "UNCHANGED"
+  },
+  {
+   "irregular_spacing_ms": [],
+   "pages": 1,
+   "partition": null,
+   "requests": {
+    "http_200": 1
+   },
+   "source": "okx",
+   "status": "REQUEST_LOG"
+  }
+ ],
+ "errors": [],
+ "finished_at": "2026-11-08T07:20:37.524000+00:00",
+ "location": {
+  "checked_at": "2026-11-08T07:20:35.418000+00:00",
+  "colo": "MSP",
+  "ip_sha256_prefix": "7e4df53980ca",
+  "loc": "US",
+  "source": "https://www.cloudflare.com/cdn-cgi/trace",
+  "status": 200
+ },
+ "open_day": true,
+ "run_id": "42458386307",
+ "sources": [
+  "hyperliquid_btc_funding",
+  "okx_btc_funding"
+ ],
+ "stale_sources": [
+  "binance_funding_archive"
+ ],
+ "started_at": "2026-11-08T07:20:34.497000+00:00",
+ "summary": {
+  "REQUEST_LOG": 3,
+  "SUPERSEDED": 1,
+  "UNCHANGED": 2
+ }
+}

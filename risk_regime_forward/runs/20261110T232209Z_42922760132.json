@@ -1,0 +1,74 @@
+{
+ "artifact": "risk-regime-forward-run",
+ "attempts": [
+  {
+   "completeness": "OPEN",
+   "duplicates_dropped": 0,
+   "expected_slots": 48,
+   "fingerprint": "38b714280dea652b831054a1197a4ef5366361c493c6b9f4caa56b8e4832fd1d",
+   "internal_conflicts": {},
+   "missing_ranges": {},
+   "missing_slots": 0,
+   "observations": 48,
+   "partition": "2026-11-10",
+   "source": "hyperliquid_btc_funding",
+   "status": "SUPERSEDED"
+  },
+  {
+   "partition": null,
+   "requests": {
+    "fundingHistory_FETCHED": 2,
+    "fundingHistory_page_max_rows": 24
+   },
+   "source": "hyperliquid",
+   "status": "REQUEST_LOG"
+  },
+  {
+   "completeness": "OPEN",
+   "duplicates_dropped": 0,
+   "expected_slots": 3,
+   "internal_conflicts": {},
+   "missing_ranges": {},
+   "missing_slots": 0,
+   "observations": 6,
+   "partition": "2026-11-10",
+   "source": "okx_btc_funding",
+   "status": "UNCHANGED"
+  },
+  {
+   "irregular_spacing_ms": [],
+   "pages": 1,
+   "partition": null,
+   "requests": {
+    "http_200": 1
+   },
+   "source": "okx",
+   "status": "REQUEST_LOG"
+  }
+ ],
+ "errors": [],
+ "finished_at": "2026-11-10T23:22:12.100000+00:00",
+ "location": {
+  "checked_at": "2026-11-10T23:22:11.012000+00:00",
+  "colo": "ORD",
+  "ip_sha256_prefix": "a4a3d0bf3106",
+  "loc": "US",
+  "source": "https://www.cloudflare.com/cdn-cgi/trace",
+  "status": 200
+ },
+ "open_day": true,
+ "run_id": "42922760132",
+ "sources": [
+  "hyperliquid_btc_funding",
+  "okx_btc_funding"
+ ],
+ "stale_sources": [
+  "binance_funding_archive"
+ ],
+ "started_at": "2026-11-10T23:22:09.474000+00:00",
+ "summary": {
+  "REQUEST_LOG": 2,
+  "SUPERSEDED": 1,
+  "UNCHANGED": 1
+ }
+}

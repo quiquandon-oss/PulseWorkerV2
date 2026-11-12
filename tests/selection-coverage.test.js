@@ -29,52 +29,49 @@ function extractRouteBlock(pathname) {
   return WORKER_SRC.slice(markerIdx, i);
 }
 
-describe('Selection coverage fix (H1) — /predict, /link-predict, /eth-predict now pair with selectBestVariant', () => {
-  it('/predict calls selectBestVariant for BTC after predictAndLog', () => {
-    const block = extractRouteBlock('/predict');
-    const predictIdx = block.indexOf('predictAndLog(');
-    const selectIdx = block.indexOf('selectBestVariant(');
-    expect(predictIdx).toBeGreaterThan(-1);
-    expect(selectIdx).toBeGreaterThan(-1);
-    expect(selectIdx).toBeGreaterThan(predictIdx); // selection happens AFTER prediction, not before
-    expect(block).toMatch(/selectBestVariant\(env,\s*'BTC'/);
-  });
+// 2026-11 update. The routes used to call selectBestVariant directly, which inserted a
+// selection_decisions row on every dashboard load, including loads that persisted no new
+// prediction (measured: 277 of 2,093 cycles with duplicate rows). They now go through
+// selectionForServedPrediction, which keeps the H1 guarantee -- every prediction a GET
+// persists is paired with a selection -- and otherwise returns the stored decision.
+// Behavioural coverage is in tests/served-predictions.test.js.
+describe('Selection coverage (H1) — /predict, /link-predict, /eth-predict pair a persisted prediction with a selection', () => {
+  const ROUTES = [['/predict', 'predictAndLog(', 'BTC'], ['/link-predict', 'linkPredictAndLog(', 'LINK'], ['/eth-predict', 'ethPredictAndLog(', 'ETH']];
 
-  it('/link-predict calls selectBestVariant for LINK after linkPredictAndLog', () => {
-    const block = extractRouteBlock('/link-predict');
-    const predictIdx = block.indexOf('linkPredictAndLog(');
-    const selectIdx = block.indexOf('selectBestVariant(');
-    expect(predictIdx).toBeGreaterThan(-1);
-    expect(selectIdx).toBeGreaterThan(-1);
-    expect(selectIdx).toBeGreaterThan(predictIdx);
-    expect(block).toMatch(/selectBestVariant\(env,\s*'LINK'/);
-  });
+  for (const [pathname, predictCall, coin] of ROUTES) {
+    it(`${pathname} resolves the selection for ${coin} after the prediction`, () => {
+      const block = extractRouteBlock(pathname);
+      const predictIdx = block.indexOf(predictCall);
+      const selectIdx = block.indexOf('selectionForServedPrediction(');
+      expect(predictIdx).toBeGreaterThan(-1);
+      expect(selectIdx).toBeGreaterThan(predictIdx); // selection happens AFTER prediction, not before
+      expect(block).toMatch(new RegExp(`selectionForServedPrediction\\(env,\\s*'${coin}',\\s*horizon,\\s*result\\)`));
+    });
 
-  it('/eth-predict calls selectBestVariant for ETH after ethPredictAndLog', () => {
-    const block = extractRouteBlock('/eth-predict');
-    const predictIdx = block.indexOf('ethPredictAndLog(');
-    const selectIdx = block.indexOf('selectBestVariant(');
-    expect(predictIdx).toBeGreaterThan(-1);
-    expect(selectIdx).toBeGreaterThan(-1);
-    expect(selectIdx).toBeGreaterThan(predictIdx);
-    expect(block).toMatch(/selectBestVariant\(env,\s*'ETH'/);
+    it(`${pathname} no longer inserts a selection row unconditionally`, () => {
+      expect(extractRouteBlock(pathname)).not.toContain('selectBestVariant(');
+    });
+  }
+
+  it('selectionForServedPrediction runs selectBestVariant exactly when the prediction was persisted', () => {
+    const start = WORKER_SRC.indexOf('async function selectionForServedPrediction(');
+    expect(start).toBeGreaterThan(-1);
+    const body = WORKER_SRC.slice(start, WORKER_SRC.indexOf('\n}\n', start));
+    expect(body).toMatch(/if \(predictResult && predictResult\.persisted === true\) \{\s*return selectBestVariant\(env, coin, horizon\);/);
+    expect(body).toContain('getLatestSelection(env, coin, horizon)');
   });
 
   it('each route wraps the selection call in its own try/catch, so a selection failure cannot break the prediction response', () => {
-    for (const pathname of ['/predict', '/link-predict', '/eth-predict']) {
+    for (const [pathname] of ROUTES) {
       const block = extractRouteBlock(pathname);
-      // The selection call must be inside a nested try that catches into
-      // result.selection, separate from the outer try that would 500 the
-      // whole response.
-      expect(block).toMatch(/try\s*\{\s*result\.selection\s*=\s*await selectBestVariant/);
+      expect(block).toMatch(/try\s*\{\s*result\.selection\s*=\s*await selectionForServedPrediction/);
       expect(block).toMatch(/catch\s*\(selErr\)\s*\{\s*result\.selection\s*=\s*\{\s*ok:\s*false/);
     }
   });
 
-  it('the outer route try/catch (500 on failure) is unchanged and still wraps everything, including the new selection call', () => {
-    for (const pathname of ['/predict', '/link-predict', '/eth-predict']) {
-      const block = extractRouteBlock(pathname);
-      expect(block).toContain('status: 500');
+  it('the outer route try/catch (500 on failure) still wraps everything', () => {
+    for (const [pathname] of ROUTES) {
+      expect(extractRouteBlock(pathname)).toContain('status: 500');
     }
   });
 });

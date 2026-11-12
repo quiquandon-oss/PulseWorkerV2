@@ -6022,6 +6022,91 @@ async function getLinkGeminiHistory(env, limit) {
 // per 3h tick, ~144/day system-wide, not a high-volume logging system.
 // =====================================================================
 
+// =====================================================================
+// ---- Served predictions: snapshots and selection pairing (2026-11) ----
+//
+// Why: every dashboard GET /predict (and the LINK/ETH equivalents) used to
+// re-run the whole prediction path and insert a selection_decisions row,
+// even when it persisted no new prediction. Measured effect: 277 of 2,093
+// prediction cycles carried more than one selection row (one carried 45),
+// and each request cost ~20 full-table reads against the shared D1.
+// See research/evaluations/2026-11-09-selection-integrity-a7.md.
+//
+// What changes, and what does not:
+// - The scheduled tick is unchanged: same predict -> select sequence, same
+//   rows. After it, the tick stores the exact response it produced.
+// - A GET serves that stored response while it is fresh. It runs no
+//   prediction, no backfill and no selection, and writes nothing.
+// - With no fresh snapshot (cron stalled, table not migrated yet, or the
+//   feature disabled) the previous live path runs, including the
+//   stale-refresh claim, so self-healing is preserved.
+// - A selection row is written from a GET only when that GET persisted a
+//   new prediction (the pairing the H1 coverage fix requires). Otherwise
+//   the stored decision is returned as-is.
+// selectBestVariant itself is not modified.
+// =====================================================================
+const PREDICTION_SNAPSHOT_MAX_AGE_MS = 6 * 60 * 60 * 1000; // same bound isRecentDataStale uses to call the cron stalled
+const PREDICTION_SNAPSHOT_RETRY_MS = 10 * 60 * 1000;
+let predictionSnapshotsUnavailableUntil = 0; // set when the table is missing, so requests do not retry a failing statement
+
+function predictionSnapshotsEnabled(env) {
+  return !(env && env.PREDICT_SNAPSHOTS === '0') && Date.now() >= predictionSnapshotsUnavailableUntil;
+}
+
+function notePredictionSnapshotError(err, where) {
+  if (/no such table/i.test(String(err && err.message || err))) {
+    predictionSnapshotsUnavailableUntil = Date.now() + PREDICTION_SNAPSHOT_RETRY_MS;
+  }
+  console.error(JSON.stringify({ evt: 'prediction_snapshot_error', where, error_message: String(err && err.message || err) }));
+}
+
+// Called by the scheduled tick only. Stores what the tick produced, for a
+// prediction it actually persisted. Never throws.
+async function savePredictionSnapshot(env, coin, horizon, predictResult, selectionResult) {
+  if (!predictionSnapshotsEnabled(env)) return false;
+  if (!predictResult || predictResult.status !== 'ok' || predictResult.persisted !== true) return false;
+  try {
+    const body = JSON.stringify({ ...predictResult, selection: selectionResult });
+    await env.DB.prepare(
+      `INSERT INTO prediction_snapshots (coin, horizon_hours, computed_ts, prediction_ts, body_json) VALUES (?,?,?,?,?)
+       ON CONFLICT(coin, horizon_hours) DO UPDATE SET computed_ts = excluded.computed_ts, prediction_ts = excluded.prediction_ts, body_json = excluded.body_json`
+    ).bind(coin, horizon, Date.now(), predictResult.ts != null ? predictResult.ts : null, body).run();
+    return true;
+  } catch (err) {
+    notePredictionSnapshotError(err, 'save');
+    return false;
+  }
+}
+
+// Returns the response body to serve, or null when there is no fresh
+// snapshot. One primary-key read. Never throws.
+async function readFreshPredictionSnapshot(env, coin, horizon) {
+  if (!predictionSnapshotsEnabled(env)) return null;
+  try {
+    const row = await env.DB.prepare(
+      'SELECT computed_ts, body_json FROM prediction_snapshots WHERE coin = ? AND horizon_hours = ?'
+    ).bind(coin, horizon).first();
+    if (!row || !row.body_json) return null;
+    const ageMs = Date.now() - row.computed_ts;
+    if (!(ageMs >= 0 && ageMs <= PREDICTION_SNAPSHOT_MAX_AGE_MS)) return null;
+    const body = JSON.parse(row.body_json);
+    return JSON.stringify({ ...body, served_from: 'snapshot', snapshot_computed_ts: row.computed_ts });
+  } catch (err) {
+    notePredictionSnapshotError(err, 'read');
+    return null;
+  }
+}
+
+// The selection attached to a prediction served by a GET.
+// A new row is written only alongside a prediction this request persisted.
+async function selectionForServedPrediction(env, coin, horizon, predictResult) {
+  if (predictResult && predictResult.persisted === true) {
+    return selectBestVariant(env, coin, horizon);
+  }
+  const stored = await getLatestSelection(env, coin, horizon);
+  return { ...stored, served_from: 'stored_selection' };
+}
+
 // One coin/horizon's full predict -> Challenger -> select sequence.
 // Behaviorally identical to the inline closure this replaces (same
 // predictFn call with the same arguments, same selectBestVariant call
@@ -6057,9 +6142,11 @@ async function runCoinHorizonChain(env, predictFn, coin, horizon) {
   }
 
   const selectionStart = Date.now();
+  let selectionForSnapshot = { ok: false, error: 'selection did not complete' };
   console.log(JSON.stringify({ evt: 'selection_start', coin, horizon, ts: selectionStart }));
   try {
     const selectionResult = await selectBestVariant(env, coin, horizon);
+    selectionForSnapshot = selectionResult;
     console.log(JSON.stringify({
       evt: 'selection_done', coin, horizon,
       selection_status: selectionResult ? selectionResult.status : null,
@@ -6072,6 +6159,15 @@ async function runCoinHorizonChain(env, predictFn, coin, horizon) {
       error_type: e && e.name, error_message: e && e.message,
       elapsed_ms: Date.now() - selectionStart, total_elapsed_ms: Date.now() - chainStart,
     }));
+    selectionForSnapshot = { ok: false, error: String(e) };
+  }
+
+  // Store what this tick produced so GET requests can serve it without
+  // recomputing. Isolated: a snapshot failure never affects the chain.
+  try {
+    await savePredictionSnapshot(env, coin, horizon, predictResult, selectionForSnapshot);
+  } catch (e) {
+    console.error(JSON.stringify({ evt: 'prediction_snapshot_error', where: 'chain', error_message: e && e.message }));
   }
 }
 
@@ -10220,7 +10316,7 @@ const RESEARCH_LAB_HTML = `<!DOCTYPE html>
 </html>
 `;
 
-export default {
+const pulseWorkerHandlers = {
   async fetch(request, env) {
     const url = new URL(request.url);
     const corsHeaders = {
@@ -10333,9 +10429,13 @@ export default {
     if (url.pathname === '/predict' && request.method === 'GET') {
       try {
         const horizon = [12, 24].includes(parseInt(url.searchParams.get('horizon'), 10)) ? parseInt(url.searchParams.get('horizon'), 10) : 24;
+        const snapshotBody = await readFreshPredictionSnapshot(env, 'BTC', horizon);
+        if (snapshotBody) {
+          return new Response(snapshotBody, { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+        }
         const result = await predictAndLog(env, horizon);
         try {
-          result.selection = await selectBestVariant(env, 'BTC', horizon);
+          result.selection = await selectionForServedPrediction(env, 'BTC', horizon, result);
         } catch (selErr) {
           result.selection = { ok: false, error: String(selErr) };
         }
@@ -10386,9 +10486,13 @@ export default {
     if (url.pathname === '/eth-predict' && request.method === 'GET') {
       try {
         const horizon = [12, 24].includes(parseInt(url.searchParams.get('horizon'), 10)) ? parseInt(url.searchParams.get('horizon'), 10) : 24;
+        const snapshotBody = await readFreshPredictionSnapshot(env, 'ETH', horizon);
+        if (snapshotBody) {
+          return new Response(snapshotBody, { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+        }
         const result = await ethPredictAndLog(env, horizon);
         try {
-          result.selection = await selectBestVariant(env, 'ETH', horizon);
+          result.selection = await selectionForServedPrediction(env, 'ETH', horizon, result);
         } catch (selErr) {
           result.selection = { ok: false, error: String(selErr) };
         }
@@ -10879,9 +10983,13 @@ export default {
     if (url.pathname === '/link-predict' && request.method === 'GET') {
       try {
         const horizon = [12, 24].includes(parseInt(url.searchParams.get('horizon'), 10)) ? parseInt(url.searchParams.get('horizon'), 10) : 24;
+        const snapshotBody = await readFreshPredictionSnapshot(env, 'LINK', horizon);
+        if (snapshotBody) {
+          return new Response(snapshotBody, { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+        }
         const result = await linkPredictAndLog(env, horizon);
         try {
-          result.selection = await selectBestVariant(env, 'LINK', horizon);
+          result.selection = await selectionForServedPrediction(env, 'LINK', horizon, result);
         } catch (selErr) {
           result.selection = { ok: false, error: String(selErr) };
         }
@@ -11329,5 +11437,109 @@ export default {
     // refreshDailyReportCache runs once per 3h tick, after all three
     // coins' batches have settled (back to the original, pre-2026-09-05
     // shape now that dispatch is single-invocation again).
+  },
+};
+
+// =====================================================================
+// ---- D1 usage accounting (2026-11) ----
+//
+// Why: the account exhausted D1's daily rows-read allowance on 2026-11-08
+// and nothing recorded which route or cron run consumed it. Every
+// invocation now logs one line with the statements it ran and the rows D1
+// reports as read and written (`meta.rows_read` / `meta.rows_written`).
+//
+// The wrapper only observes: each call is passed to the real binding
+// unchanged and its result returned unchanged. `first()` returns no meta,
+// so those calls are counted but their rows are not (`first_calls`).
+// It runs no extra query and stores nothing. Set D1_USAGE_LOG = "0" to
+// turn it off.
+// =====================================================================
+function newD1Usage() {
+  return { statements: 0, rows_read: 0, rows_written: 0, first_calls: 0, without_meta: 0 };
+}
+
+function noteD1Result(usage, result) {
+  usage.statements++;
+  const meta = result && result.meta;
+  if (meta && (meta.rows_read != null || meta.rows_written != null)) {
+    usage.rows_read += Number(meta.rows_read) || 0;
+    usage.rows_written += Number(meta.rows_written) || 0;
+  } else {
+    usage.without_meta++;
+  }
+}
+
+function instrumentD1Statement(stmt, usage) {
+  return {
+    __d1Statement: stmt,
+    bind: (...args) => instrumentD1Statement(stmt.bind(...args), usage),
+    first: async (...args) => { usage.statements++; usage.first_calls++; return stmt.first(...args); },
+    all: async (...args) => { const r = await stmt.all(...args); noteD1Result(usage, r); return r; },
+    run: async (...args) => { const r = await stmt.run(...args); noteD1Result(usage, r); return r; },
+    raw: async (...args) => { usage.statements++; usage.without_meta++; return stmt.raw(...args); },
+  };
+}
+
+function instrumentD1(db, usage) {
+  return new Proxy(db, {
+    get(target, prop) {
+      if (prop === 'prepare') return (sql) => instrumentD1Statement(target.prepare(sql), usage);
+      if (prop === 'batch') {
+        return async (statements) => {
+          const results = await target.batch(statements.map((s) => (s && s.__d1Statement ? s.__d1Statement : s)));
+          for (const r of results || []) noteD1Result(usage, r);
+          return results;
+        };
+      }
+      const value = target[prop];
+      return typeof value === 'function' ? value.bind(target) : value;
+    },
+  });
+}
+
+function withD1Usage(env, usage) {
+  if (!env || !env.DB || env.D1_USAGE_LOG === '0') return env;
+  return { ...env, DB: instrumentD1(env.DB, usage) };
+}
+
+function logD1Usage(usage, fields) {
+  try {
+    if (!usage.statements) return;
+    console.log(JSON.stringify({ evt: 'd1_usage', ...fields, ...usage }));
+  } catch { /* accounting must never affect the invocation */ }
+}
+
+export default {
+  async fetch(request, env, ctx) {
+    const usage = newD1Usage();
+    const started = Date.now();
+    let status = null;
+    try {
+      const response = await pulseWorkerHandlers.fetch(request, withD1Usage(env, usage), ctx);
+      status = response && response.status;
+      return response;
+    } finally {
+      let path = null;
+      try { path = new URL(request.url).pathname; } catch { /* leave null */ }
+      logD1Usage(usage, { kind: 'fetch', method: request.method, path, status, elapsed_ms: Date.now() - started });
+    }
+  },
+
+  async scheduled(event, env, ctx) {
+    const usage = newD1Usage();
+    const started = Date.now();
+    const pending = [];
+    const trackingCtx = {
+      waitUntil(promise) { pending.push(promise); return ctx.waitUntil(promise); },
+      passThroughOnException() { return ctx.passThroughOnException && ctx.passThroughOnException(); },
+    };
+    try {
+      return await pulseWorkerHandlers.scheduled(event, withD1Usage(env, usage), trackingCtx);
+    } finally {
+      // The tick's work runs inside waitUntil; report once it has all settled.
+      ctx.waitUntil(Promise.allSettled(pending).then(() => {
+        logD1Usage(usage, { kind: 'scheduled', cron: event && event.cron, elapsed_ms: Date.now() - started });
+      }));
+    }
   },
 };

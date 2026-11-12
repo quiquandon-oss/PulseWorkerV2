@@ -62,6 +62,19 @@ PLAN_TABLE = {
 }
 
 
+def n_dependent_correlation_difference(r1, r2, r12, alpha=0.05, power=0.80, m=1):
+    """Days needed to detect corr(x1,y)=r1 vs corr(x2,y)=r2 when x1 and x2 correlate r12 (same y, same days):
+    Steiger (1980) Z on Fisher-transformed correlations, two-sided, Holm-sized at alpha/m.
+    n = 3 + (z_{1-a/2m} + z_power)^2 * 2(1-r12)h / (atanh r1 - atanh r2)^2,
+    h = (1 - f rm^2)/(1 - rm^2), f = min(1, (1-r12)/(2(1-rm^2))), rm = (r1+r2)/2."""
+    a = alpha / m
+    rm = (r1 + r2) / 2
+    f = min(1.0, (1 - r12) / (2 * (1 - rm ** 2)))
+    h = (1 - f * rm ** 2) / (1 - rm ** 2)
+    dz = atanh(r1) - atanh(r2)
+    return ceil(3 + (_Z(1 - a / 2) + _Z(power)) ** 2 * 2 * (1 - r12) * h / dz ** 2)
+
+
 def plan_table(alpha=0.05, power=0.80):
     out = {}
     for name, (kind, eff, m, k) in PLAN_TABLE.items():

@@ -16,7 +16,7 @@ const realRandom = Math.random;
 const realUuid = crypto.randomUUID.bind(crypto);
 const realFetch = globalThis.fetch;
 
-export async function makeWorld({ root = '.', t0, warmupTicks = 72, omitTables = [], workerPath = null } = {}) {
+export async function makeWorld({ root = '.', t0, warmupTicks = 72, omitTables = [], workerPath = null, env: envOverrides = {} } = {}) {
   root = resolve(root);
   const clock = { now: t0 };
   globalThis.Date = class extends RealDate { constructor(...a) { super(...(a.length ? a : [clock.now])); } static now() { return clock.now; } };
@@ -38,7 +38,7 @@ export async function makeWorld({ root = '.', t0, warmupTicks = 72, omitTables =
   setup.push(...ddl(tables), 'CREATE UNIQUE INDEX IF NOT EXISTS u_src_coin ON stale_refresh_claim(coin);');
   const d1 = makeD1(setup);
   seed(d1.db, t0 - warmupTicks * 3 * H);
-  const env = { DB: d1.binding, ENVIRONMENT: 'replay' };
+  const env = { DB: d1.binding, ENVIRONMENT: 'replay', ...envOverrides };
   const mod = await import(pathToFileURL(workerPath ? resolve(workerPath) : join(root, 'worker.js')).href + `?world=${++worldSeq}`);
   const worker = mod.default;
 
@@ -57,7 +57,9 @@ export async function makeWorld({ root = '.', t0, warmupTicks = 72, omitTables =
   d1.log.length = 0;
   const count = (table) => Number(d1.db.prepare(`SELECT COUNT(*) AS n FROM ${table}`).get().n);
   const close = () => { globalThis.Date = RealDate; globalThis.setTimeout = realSetTimeout; Math.random = realRandom; crypto.randomUUID = realUuid; globalThis.fetch = realFetch; };
-  return { env, d1, worker, clock, cronTick, get, count, close };
+  const tableHashes = () => Object.fromEntries(d1.db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name").all()
+    .map(({ name }) => [name, JSON.stringify(d1.db.prepare(`SELECT * FROM ${name} ORDER BY rowid`).all())]));
+  return { env, d1, worker, clock, cronTick, get, count, close, tableHashes };
 }
 
 export function summarise(log) {

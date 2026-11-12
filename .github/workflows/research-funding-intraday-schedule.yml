@@ -8,7 +8,8 @@
 # Scope: Hyperliquid BTC and OKX BTC-USDT-SWAP funding only (`--sources`), with `--open-day` so the current UTC day
 # is observed close to settlement (OPEN partitions, spec v0.5.0 section 4). Candles, Binance OI and Binance funding
 # are not touched. Same isolation as research-forward-schedule.yml:
-# - trigger: schedule only (no push, no pull_request, no dispatch, no workflow_run) -> a push cannot start it;
+# - trigger: schedule, plus workflow_dispatch from the Worker's hourly cron (no push, no pull_request, no
+#   workflow_run) -> a push cannot start it;
 # - permissions: contents: write only; no secrets referenced; GITHUB_TOKEN pushes never start other workflows;
 # - writes: only refs/heads/research-data/risk-regime-forward, only paths under risk_regime_forward/;
 # - concurrency group shared with the daily collector: never two writers to the data branch at once.
@@ -17,6 +18,11 @@ name: research-funding-intraday-schedule
 on:
   schedule:
     - cron: '17 * * * *'       # hourly at :17 (off the :00 peak); lateness is measured from run records, not assumed
+  # 2026-11: GitHub fired the schedule above 118 times in 624 hours (19%). The PulseWorkerV2 Worker's hourly
+  # Cloudflare cron now dispatches this workflow (worker.js "Reliable trigger for the hourly research funding
+  # collector"); the schedule stays as a fallback. Dispatch starts exactly the job below: same pinned code, same
+  # single write target, same concurrency group. It needs Actions: write on this repository.
+  workflow_dispatch: {}
 
 permissions:
   contents: write          # only to push to research-data/risk-regime-forward; no actions/deployments/id-token/packages

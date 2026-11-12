@@ -57,7 +57,7 @@ describe('Selection coverage (H1) — /predict, /link-predict, /eth-predict pair
     const start = WORKER_SRC.indexOf('async function selectionForServedPrediction(');
     expect(start).toBeGreaterThan(-1);
     const body = WORKER_SRC.slice(start, WORKER_SRC.indexOf('\n}\n', start));
-    expect(body).toMatch(/if \(predictResult && predictResult\.persisted === true\) \{\s*return selectBestVariant\(env, coin, horizon\);/);
+    expect(body).toMatch(/if \(predictResult && predictResult\.persisted === true\) \{\s*const selection = await selectBestVariant\(env, coin, horizon\);[\s\S]*?return selection;/);
     expect(body).toContain('getLatestSelection(env, coin, horizon)');
   });
 

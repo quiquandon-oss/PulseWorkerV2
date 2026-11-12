@@ -37,14 +37,14 @@ describe('instrumentD1 (unit)', () => {
     expect(all).toEqual({ results: [{ a: 1 }, { a: 2 }], meta: { rows_read: 40, rows_written: 0 } });
     expect(run.meta.changes).toBe(1);
     expect(db.calls).toEqual([['all', 'SELECT 1', [7]], ['run', 'UPDATE t SET x=?', [1]]]);
-    expect(usage).toEqual({ statements: 2, rows_read: 43, rows_written: 2, first_calls: 0, without_meta: 0 });
+    expect(usage).toEqual({ statements: 2, rows_read: 43, rows_written: 2, writes: 1, first_calls: 0, without_meta: 0 });
   });
 
   it('counts first() and raw() without inventing row figures', async () => {
     const db = fakeDb(); const usage = scope.newD1Usage(); const w = scope.instrumentD1(db, usage);
     expect(await w.prepare('SELECT n').first()).toEqual({ n: 1 });
     expect(await w.prepare('SELECT n').raw()).toEqual([[1]]);
-    expect(usage).toEqual({ statements: 2, rows_read: 0, rows_written: 0, first_calls: 1, without_meta: 1 });
+    expect(usage).toEqual({ statements: 2, rows_read: 0, rows_written: 0, writes: 0, first_calls: 1, without_meta: 1 });
   });
 
   it('batch() hands the real statements to D1 and accounts for each result', async () => {
@@ -60,11 +60,13 @@ describe('instrumentD1 (unit)', () => {
     expect(await w.exec('PRAGMA x')).toEqual({ count: 1 });
   });
 
-  it('withD1Usage leaves env alone when there is no DB or accounting is off', () => {
+  it('withD1Usage leaves env alone without a DB, and still wraps when the log is silenced (writes must be seen)', async () => {
     const usage = scope.newD1Usage();
-    const noDb = { A: 1 }; const off = { DB: fakeDb(), D1_USAGE_LOG: '0' };
+    const noDb = { A: 1 };
     expect(scope.withD1Usage(noDb, usage)).toBe(noDb);
-    expect(scope.withD1Usage(off, usage)).toBe(off);
+    const off = scope.withD1Usage({ DB: fakeDb(), D1_USAGE_LOG: '0' }, usage);
+    await off.DB.prepare('DELETE FROM t').run();
+    expect(usage.writes).toBe(1);
     const on = { DB: fakeDb(), OTHER: 'kept' };
     const wrapped = scope.withD1Usage(on, usage);
     expect(wrapped).not.toBe(on);

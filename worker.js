@@ -1142,6 +1142,81 @@ async function fetchVariantRowsByTable(env, defs, coin, horizonHours) {
   return rowsByVariant;
 }
 
+// =====================================================================
+// ---- Selection provenance (2026-11) ----
+//
+// selection_decisions.chosen_p_up (and chosen_p_up_anomaly) store the
+// chosen variant's p_up on its latest RESOLVED prediction at selection
+// time, not the prediction of the cycle named by prediction_ts. This has
+// been the behaviour since the selection layer was introduced (60729d8,
+// 2026-08-17) and is documented in research/README.md (PR5a). Whether it
+// is intended is an open owner decision; see
+// research/evaluations/2026-11-09-chosen-p-up-semantics.md.
+//
+// Nothing about selection changes here. Each selection row gets one row in
+// selection_provenance recording, without recalculating anything:
+//   - which resolved prediction chosen_p_up came from (source_ts);
+//   - the chosen variant's p_up for the cycle itself (cycle_p_up), read
+//     from the row written for that cycle;
+//   - what triggered the selection (scheduled tick, daily shadow job, or a
+//     request that persisted a prediction).
+// Existing tables and rows are untouched. Without the table (migration
+// 0025 not applied) the recording is skipped. The cycle value is also
+// added to the returned selection (cycle_p_up, cycle_p_up_ts). Never throws.
+// =====================================================================
+const SELECTION_SEMANTICS_VERSION = 'sel-v1: chosen_p_up = chosen variant p_up on its latest resolved prediction at selection time';
+const SELECTION_PROVENANCE_RETRY_MS = 10 * 60 * 1000;
+const CHALLENGER_CYCLE_WINDOW_MS = 15 * 60 * 1000; // challenger rows are written in the same chain, seconds after the core row
+let selectionProvenanceUnavailableUntil = 0;
+
+async function cycleValueForVariant(env, coin, horizonHours, predictionTs, variantKey) {
+  const def = (SELECTION_VARIANTS[coin] || []).find((v) => v.key === variantKey);
+  if (!def || predictionTs == null) return { p: null, ts: null };
+  const row = def.coinFilter
+    ? await env.DB.prepare(
+      `SELECT ts, ${def.field} AS p FROM ${def.table} WHERE coin = ? AND horizon_hours = ? AND ts >= ? AND ts <= ? ORDER BY ts ASC LIMIT 1`
+    ).bind(coin, horizonHours, predictionTs - 60000, predictionTs + CHALLENGER_CYCLE_WINDOW_MS).first()
+    : await env.DB.prepare(
+      `SELECT ts, ${def.field} AS p FROM ${def.table} WHERE horizon_hours = ? AND ts = ? LIMIT 1`
+    ).bind(horizonHours, predictionTs).first();
+  return row ? { p: row.p == null ? null : row.p, ts: row.ts } : { p: null, ts: null };
+}
+
+async function recordSelectionProvenance(env, selection_table, coin, horizonHours, result, trigger) {
+  if (!env || !env.DB || env.SELECTION_PROVENANCE === '0') return false;
+  if (!result || result.selection_row_id == null) return false; // nothing was inserted (early return or failure)
+  const chosenVariant = selection_table === 'selection_decisions' ? result.chosen_variant : result.chosen_variant_anomaly;
+  const predictionTs = result.prediction_ts;
+  let cycle;
+  try {
+    // Also returned to the caller (additive response fields), so the dashboard can show the chosen
+    // variant's prediction for this cycle without a further request.
+    cycle = await cycleValueForVariant(env, coin, horizonHours, predictionTs, chosenVariant);
+    result.cycle_p_up = cycle.p;
+    result.cycle_p_up_ts = cycle.ts;
+  } catch (err) {
+    console.error(JSON.stringify({ evt: 'selection_provenance_error', selection_table, where: 'cycle_value', error_message: String(err && err.message || err) }));
+    return false;
+  }
+  if (Date.now() < selectionProvenanceUnavailableUntil) return false;
+  try {
+    const rowId = result.selection_row_id;
+    await env.DB.prepare(
+      `INSERT INTO selection_provenance (selection_table, selection_row_id, recorded_ts, coin, horizon_hours, prediction_ts, chosen_variant,
+        chosen_p_up_source_ts, cycle_p_up, cycle_p_up_ts, selection_trigger, semantics_version)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`
+    ).bind(
+      selection_table, rowId, Date.now(), coin, horizonHours, predictionTs, chosenVariant,
+      result.chosen_p_up_source_ts != null ? result.chosen_p_up_source_ts : null, cycle.p, cycle.ts, trigger, SELECTION_SEMANTICS_VERSION
+    ).run();
+    return true;
+  } catch (err) {
+    if (/no such table/i.test(String(err && err.message || err))) selectionProvenanceUnavailableUntil = Date.now() + SELECTION_PROVENANCE_RETRY_MS;
+    console.error(JSON.stringify({ evt: 'selection_provenance_error', selection_table, error_message: String(err && err.message || err) }));
+    return false;
+  }
+}
+
 async function selectBestVariant(env, coin, horizonHours) {
   const variantDefs = SELECTION_VARIANTS[coin];
   if (!variantDefs) return { ok: false, error: 'unknown coin' };
@@ -1223,7 +1298,7 @@ async function selectBestVariant(env, coin, horizonHours) {
     const latestVariantRow = variantRows[variantRows.length - 1];
     const todaysCallUp = latestVariantRow.p_up >= 0.5;
     const scored = computeLcaScore(variantRows, neighborhood, todaysCallUp, TOL_MS_META);
-    if (scored) scores.push({ variant: v.key, p_up: latestVariantRow.p_up, ...scored });
+    if (scored) scores.push({ variant: v.key, p_up: latestVariantRow.p_up, source_ts: latestVariantRow.ts, ...scored });
   }
   if (!scores.length) {
     return { ok: true, status: 'no_scorable_variants', chosen_variant: 'original', cleared_gate: false, reason: `No eligible variant had ${SELECTION_MIN_MATCHED}+ same-direction matches in the neighborhood -- defaulting to Original k-NN.` };
@@ -1240,7 +1315,7 @@ async function selectBestVariant(env, coin, horizonHours) {
 
   const ts = Date.now();
   const scoresJson = JSON.stringify(scores.map(s => ({ variant: s.variant, p_up: Number(s.p_up.toFixed(3)), lca: Number(s.lca.toFixed(3)), n_matched: s.n_matched })));
-  await env.DB.prepare(
+  const selectionInsert = await env.DB.prepare(
     `INSERT INTO selection_decisions (ts, coin, horizon_hours, chosen_variant, chosen_p_up, lca_score, comparison_count, corrected_alpha, cleared_gate, k_sel, neighborhood_json, reason, prediction_ts, scores_json)
      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
   ).bind(
@@ -1256,6 +1331,10 @@ async function selectBestVariant(env, coin, horizonHours) {
     cleared_gate: decision.clearedGate, comparison_count: decision.m, k_sel: kSel,
     scores: scores.map(s => ({ variant: s.variant, p_up: Number(s.p_up.toFixed(3)), lca: Number(s.lca.toFixed(3)), n_matched: s.n_matched })),
     reason,
+    // Additive provenance fields (2026-11); see "Selection provenance".
+    selection_row_id: selectionInsert && selectionInsert.meta ? selectionInsert.meta.last_row_id : null,
+    prediction_ts: latestCore.ts,
+    chosen_p_up_source_ts: chosenScore && chosenScore.source_ts != null ? chosenScore.source_ts : null,
   };
 }
 
@@ -1423,7 +1502,7 @@ async function logAnomalyGateExperiment(env, coin, horizonHours) {
     const latestVariantRow = variantRows[variantRows.length - 1];
     const todaysCallUp = latestVariantRow.p_up >= 0.5;
     const scored = computeLcaScore(variantRows, neighborhood, todaysCallUp, TOL_MS_META);
-    if (scored) scores.push({ variant: v.key, p_up: latestVariantRow.p_up, ...scored });
+    if (scored) scores.push({ variant: v.key, p_up: latestVariantRow.p_up, source_ts: latestVariantRow.ts, ...scored });
   }
   if (!scores.length) {
     return { ok: true, status: 'no_scorable_variants', logged: false };
@@ -1437,7 +1516,7 @@ async function logAnomalyGateExperiment(env, coin, horizonHours) {
     : `[SOFTENED x${ANOMALY_GATE_MARGIN_FACTOR}] No variant cleared even the softened bar (needed >${(decision.requiredMargin * 100).toFixed(1)}pts, base bar was >${(decision.baseRequiredMargin * 100).toFixed(1)}pts, best was ${decision.winner.variant} at +${((decision.winner.lca - 0.5) * 100).toFixed(1)}pts on n=${decision.winner.n_matched}).`;
 
   const anomalyTs = Date.now();
-  await env.DB.prepare(
+  const anomalyInsert = await env.DB.prepare(
     `INSERT INTO selection_decisions_anomaly
      (ts, coin, horizon_hours, prediction_ts, is_regime_anomaly, margin_factor, chosen_variant_anomaly, chosen_p_up_anomaly, lca_score_anomaly, comparison_count_anomaly, base_required_margin, required_margin_anomaly, cleared_gate_anomaly, k_sel_anomaly, reason_anomaly, scores_json_anomaly)
      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
@@ -1451,6 +1530,10 @@ async function logAnomalyGateExperiment(env, coin, horizonHours) {
     ok: true, status: 'logged', logged: true, coin, horizon_hours: horizonHours,
     chosen_variant_anomaly: decision.chosen, cleared_gate_anomaly: decision.clearedGate,
     margin_factor: ANOMALY_GATE_MARGIN_FACTOR, reason,
+    // Additive provenance fields (2026-11); see "Selection provenance".
+    selection_row_id: anomalyInsert && anomalyInsert.meta ? anomalyInsert.meta.last_row_id : null,
+    prediction_ts: latestCore.ts,
+    chosen_p_up_source_ts: chosenScore && chosenScore.source_ts != null ? chosenScore.source_ts : null,
   };
 }
 
@@ -6101,7 +6184,9 @@ async function readFreshPredictionSnapshot(env, coin, horizon) {
 // A new row is written only alongside a prediction this request persisted.
 async function selectionForServedPrediction(env, coin, horizon, predictResult) {
   if (predictResult && predictResult.persisted === true) {
-    return selectBestVariant(env, coin, horizon);
+    const selection = await selectBestVariant(env, coin, horizon);
+    await recordSelectionProvenance(env, 'selection_decisions', coin, horizon, selection, 'request_refresh');
+    return selection;
   }
   const stored = await getLatestSelection(env, coin, horizon);
   return { ...stored, served_from: 'stored_selection' };
@@ -6147,6 +6232,7 @@ async function runCoinHorizonChain(env, predictFn, coin, horizon) {
   try {
     const selectionResult = await selectBestVariant(env, coin, horizon);
     selectionForSnapshot = selectionResult;
+    await recordSelectionProvenance(env, 'selection_decisions', coin, horizon, selectionResult, 'cron');
     console.log(JSON.stringify({
       evt: 'selection_done', coin, horizon,
       selection_status: selectionResult ? selectionResult.status : null,
@@ -11409,7 +11495,7 @@ const pulseWorkerHandlers = {
           // D1 access, for LINK and ETH. Independently caught exactly as
           // before -- a failure here has never been able to affect
           // production selection and still can't.
-          ctx.waitUntil(logAnomalyGateExperiment(env, coin, h).catch(err => console.error(`Anomaly-gate experiment ${coin}/${h}h failed:`, err)));
+          ctx.waitUntil(logAnomalyGateExperiment(env, coin, h).then(r => recordSelectionProvenance(env, 'selection_decisions_anomaly', coin, h, r, 'cron_daily')).catch(err => console.error(`Anomaly-gate experiment ${coin}/${h}h failed:`, err)));
           ctx.waitUntil(logMomentumSelectionExperiment(env, coin, h).catch(err => console.error(`Momentum experiment ${coin}/${h}h failed:`, err)));
         }
       }
@@ -11452,10 +11538,10 @@ const pulseWorkerHandlers = {
 // unchanged and its result returned unchanged. `first()` returns no meta,
 // so those calls are counted but their rows are not (`first_calls`).
 // It runs no extra query and stores nothing. Set D1_USAGE_LOG = "0" to
-// turn it off.
+// silence the log line.
 // =====================================================================
 function newD1Usage() {
-  return { statements: 0, rows_read: 0, rows_written: 0, first_calls: 0, without_meta: 0 };
+  return { statements: 0, rows_read: 0, rows_written: 0, writes: 0, first_calls: 0, without_meta: 0 };
 }
 
 function noteD1Result(usage, result) {
@@ -11475,7 +11561,7 @@ function instrumentD1Statement(stmt, usage) {
     bind: (...args) => instrumentD1Statement(stmt.bind(...args), usage),
     first: async (...args) => { usage.statements++; usage.first_calls++; return stmt.first(...args); },
     all: async (...args) => { const r = await stmt.all(...args); noteD1Result(usage, r); return r; },
-    run: async (...args) => { const r = await stmt.run(...args); noteD1Result(usage, r); return r; },
+    run: async (...args) => { const r = await stmt.run(...args); usage.writes++; noteD1Result(usage, r); return r; },
     raw: async (...args) => { usage.statements++; usage.without_meta++; return stmt.raw(...args); },
   };
 }
@@ -11487,6 +11573,7 @@ function instrumentD1(db, usage) {
       if (prop === 'batch') {
         return async (statements) => {
           const results = await target.batch(statements.map((s) => (s && s.__d1Statement ? s.__d1Statement : s)));
+          usage.writes += statements.length;
           for (const r of results || []) noteD1Result(usage, r);
           return results;
         };
@@ -11497,16 +11584,242 @@ function instrumentD1(db, usage) {
   });
 }
 
+// Always wraps when there is a DB: the counts also tell the read-route cache
+// whether an invocation wrote. D1_USAGE_LOG = "0" only silences the log line.
 function withD1Usage(env, usage) {
-  if (!env || !env.DB || env.D1_USAGE_LOG === '0') return env;
+  if (!env || !env.DB) return env;
   return { ...env, DB: instrumentD1(env.DB, usage) };
 }
 
-function logD1Usage(usage, fields) {
+function logD1Usage(usage, fields, env) {
   try {
-    if (!usage.statements) return;
+    if (!usage.statements || (env && env.D1_USAGE_LOG === '0')) return;
     console.log(JSON.stringify({ evt: 'd1_usage', ...fields, ...usage }));
   } catch { /* accounting must never affect the invocation */ }
+}
+
+// =====================================================================
+// ---- Read-route cache (2026-11) ----
+//
+// The dashboard polls a set of read-only routes that each scan whole
+// tables (chart data, calibration, selection history, ...). Their data
+// changes only when something writes: the scheduled tick, the stalled-
+// cron refresh, the daily job or an operator route. Responses are kept in
+// this isolate's memory, keyed by the full request URL and a data epoch.
+//
+// Epoch = newest prediction_snapshots.computed_ts (written by every tick;
+// one read of at most 6 rows) plus the current hour. A tick therefore
+// invalidates every entry at once, and anything written outside a tick
+// (daily calibration refresh, operator routes) is visible within the hour.
+// Any invocation in this isolate that writes to D1 clears the cache.
+//
+// Only routes verified write-free and repeatable are listed. Responses are
+// stored byte-for-byte with their headers; the only addition is the
+// X-Route-Cache header. ROUTE_CACHE = "0" disables it.
+// =====================================================================
+const ROUTE_CACHE_PATHS = new Set([
+  '/chart-data', '/eth-chart-data', '/link-chart-data',
+  '/calibration', '/eth-calibration', '/link-calibration',
+  '/calibration-history', '/eth-calibration-history', '/link-calibration-history',
+  '/challenger-calibration', '/challenger-calibration-history', '/variant-calibration',
+  '/selection-history', '/select-variant', '/challenger-recent',
+  '/backtest-history', '/backtest-regime-split-history', '/calibration-curve',
+]);
+const ROUTE_CACHE_MAX_ENTRIES = 64;
+const ROUTE_CACHE_MAX_BYTES = 1024 * 1024;
+const ROUTE_CACHE_EPOCH_BUCKET_MS = 60 * 60 * 1000;
+const routeCache = new Map(); // key -> { status, headers, body }
+
+function routeCacheKey(url, epoch) {
+  const params = [...url.searchParams.entries()].sort((a, b) => (a[0] === b[0] ? (a[1] < b[1] ? -1 : 1) : (a[0] < b[0] ? -1 : 1)));
+  return `${url.pathname}?${new URLSearchParams(params).toString()}#${epoch}`;
+}
+
+async function routeCacheEpoch(env) {
+  let snapshotEpoch = 'none';
+  if (predictionSnapshotsEnabled(env)) {
+    try {
+      const row = await env.DB.prepare('SELECT MAX(computed_ts) AS e FROM prediction_snapshots').first();
+      if (row && row.e != null) snapshotEpoch = String(row.e);
+    } catch (err) {
+      notePredictionSnapshotError(err, 'route_cache_epoch');
+    }
+  }
+  return `${snapshotEpoch}:${Math.floor(Date.now() / ROUTE_CACHE_EPOCH_BUCKET_MS)}`;
+}
+
+function routeCacheGet(key) {
+  const hit = routeCache.get(key);
+  if (!hit) return null;
+  routeCache.delete(key); routeCache.set(key, hit); // most recently used last
+  return hit;
+}
+
+function routeCachePut(key, entry) {
+  if (entry.body.length > ROUTE_CACHE_MAX_BYTES) return;
+  routeCache.set(key, entry);
+  while (routeCache.size > ROUTE_CACHE_MAX_ENTRIES) routeCache.delete(routeCache.keys().next().value);
+}
+
+function routeCacheClear() { routeCache.clear(); }
+
+async function serveWithRouteCache(request, env, ctx, handle) {
+  let url;
+  try { url = new URL(request.url); } catch { return handle(); }
+  if (request.method !== 'GET' || !ROUTE_CACHE_PATHS.has(url.pathname) || (env && env.ROUTE_CACHE === '0')) return handle();
+  const key = routeCacheKey(url, await routeCacheEpoch(env));
+  const hit = routeCacheGet(key);
+  if (hit) {
+    const headers = new Headers(hit.headers);
+    headers.set('X-Route-Cache', 'hit');
+    return new Response(hit.body, { status: hit.status, headers });
+  }
+  const response = await handle();
+  if (!response || response.status !== 200) return response;
+  const body = await response.text();
+  const headers = [...response.headers.entries()];
+  routeCachePut(key, { status: response.status, headers, body });
+  const out = new Headers(headers);
+  out.set('X-Route-Cache', 'miss');
+  return new Response(body, { status: response.status, headers: out });
+}
+
+// =====================================================================
+// ---- Read-once per scheduled run (2026-11) ----
+//
+// One 3-hourly tick runs predictions, backfills, challengers and
+// selection for 3 coins x 2 horizons, and several of those re-read the
+// same full price series. Measured in the local replay: 122 SELECTs, of
+// which 78 repeat an earlier statement.
+//
+// Within one scheduled invocation, a SELECT whose exact SQL and bound
+// values were already read returns the earlier result. It is invalidated
+// by any write to a table it reads; a write whose target table cannot be
+// determined clears everything. A result is stored only if no write to
+// its tables happened while it was in flight, so overlapping chains see
+// what they would have seen without it. Results are stored as JSON and
+// re-parsed on every hit, so callers that mutate a result (e.g. reverse())
+// cannot affect another caller. TICK_READ_MEMO = "0" disables it.
+// =====================================================================
+const SQL_TABLE_RE = /\b(?:FROM|JOIN)\s+([A-Za-z_][A-Za-z0-9_]*)/gi;
+const SQL_WRITE_TARGET_RE = /^\s*(?:INSERT(?:\s+OR\s+\w+)?\s+INTO|REPLACE\s+INTO|UPDATE(?:\s+OR\s+\w+)?|DELETE\s+FROM)\s+([A-Za-z_][A-Za-z0-9_]*)/i;
+
+function sqlReadTables(sql) {
+  const out = new Set();
+  for (const m of String(sql).matchAll(SQL_TABLE_RE)) out.add(m[1].toLowerCase());
+  return out;
+}
+
+function isReadOnlySql(sql) {
+  return /^\s*(SELECT|WITH)\b/i.test(String(sql)) && !/\b(INSERT|UPDATE|DELETE|REPLACE)\b/i.test(String(sql));
+}
+
+function makeTickReadMemo(db) {
+  const entries = new Map();      // key -> { tables: Set, json, kind }
+  const generation = new Map();   // table -> write counter
+  let globalGen = 0;
+  const stats = { hits: 0, misses: 0, invalidations: 0 };
+  const genOf = (tables) => [...tables].map((t) => `${t}:${generation.get(t) || 0}`).join(',') + `|${globalGen}`;
+
+  function noteWrite(sql) {
+    const m = String(sql).match(SQL_WRITE_TARGET_RE);
+    if (!m) { globalGen++; entries.clear(); stats.invalidations++; return; }
+    const table = m[1].toLowerCase();
+    generation.set(table, (generation.get(table) || 0) + 1);
+    for (const [k, e] of entries) if (e.tables.has(table)) { entries.delete(k); stats.invalidations++; }
+  }
+
+  async function memoRead(sql, args, kind, exec) {
+    const tables = sqlReadTables(sql);
+    const key = `${kind}\u0000${sql}\u0000${JSON.stringify(args)}`;
+    const hit = entries.get(key);
+    if (hit) { stats.hits++; return JSON.parse(hit.json); }
+    stats.misses++;
+    const before = genOf(tables);
+    const result = await exec();
+    if (genOf(tables) === before) {
+      try { entries.set(key, { tables, json: JSON.stringify(result === undefined ? null : result) }); } catch { /* unserialisable: not stored */ }
+    }
+    return result;
+  }
+
+  function wrap(stmt, sql, args) {
+    return {
+      __d1Statement: stmt && stmt.__d1Statement ? stmt.__d1Statement : stmt,
+      __memoSql: sql,
+      bind: (...a) => wrap(stmt.bind(...a), sql, a),
+      all: (...a) => (isReadOnlySql(sql) && !a.length ? memoRead(sql, args, 'all', () => stmt.all()) : stmt.all(...a)),
+      first: (...a) => (isReadOnlySql(sql) ? memoRead(sql, args, `first:${a.length ? a[0] : ''}`, () => stmt.first(...a)) : stmt.first(...a)),
+      raw: (...a) => stmt.raw(...a),
+      run: async (...a) => { noteWrite(sql); try { return await stmt.run(...a); } finally { noteWrite(sql); } },
+    };
+  }
+
+  const memoDb = new Proxy(db, {
+    get(target, prop) {
+      if (prop === 'prepare') return (sql) => wrap(target.prepare(sql), sql, []);
+      if (prop === 'batch') {
+        return async (statements) => {
+          const sqls = statements.map((st) => (st && st.__memoSql) || null);
+          const inner = statements.map((st) => (st && st.__memoSql ? st.__d1Statement : st));
+          for (const q of sqls) if (q == null || !isReadOnlySql(q)) noteWrite(q || '');
+          try { return await target.batch(inner); } finally { for (const q of sqls) if (q == null || !isReadOnlySql(q)) noteWrite(q || ''); }
+        };
+      }
+      if (prop === 'exec') return async (...a) => { noteWrite(''); try { return await target.exec(...a); } finally { noteWrite(''); } };
+      const value = target[prop];
+      return typeof value === 'function' ? value.bind(target) : value;
+    },
+  });
+  return { db: memoDb, stats };
+}
+
+// =====================================================================
+// ---- Reliable trigger for the hourly research funding collector (2026-11) ----
+//
+// research-funding-intraday-schedule.yml (EXP-23 v0.5.0 source variants)
+// is scheduled hourly on GitHub Actions, but GitHub fired it 118 times in
+// 624 hours (19%; median gap 5.2 h, measured 2026-11-12 from the run
+// history). EXP-23's 2026-11-11 run reports the Hyperliquid variant not
+// evaluable at 738 of 771 eligible hours (median first-observation lag
+// 4.1 h). Cloudflare crons fire on time, so the hourly Worker cron asks
+// GitHub to start that workflow. The collector, its pinned code and its
+// data rules are unchanged; GitHub's own schedule stays as a fallback and
+// the collector is idempotent. Runs only when RESEARCH_DISPATCH_TOKEN is
+// set (fine-grained token: this repository, Actions: write). Never throws.
+// =====================================================================
+const RESEARCH_DISPATCH = {
+  url: 'https://api.github.com/repos/quiquandon-oss/PulseWorkerV2/actions/workflows/research-funding-intraday-schedule.yml/dispatches',
+  ref: 'main',
+  timeoutMs: 10000,
+};
+
+async function dispatchResearchCollection(env, fetchImpl = fetch) {
+  if (!env || !env.RESEARCH_DISPATCH_TOKEN) return { dispatched: false, reason: 'no_token' };
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), RESEARCH_DISPATCH.timeoutMs);
+  try {
+    const res = await fetchImpl(RESEARCH_DISPATCH.url, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${env.RESEARCH_DISPATCH_TOKEN}`,
+        Accept: 'application/vnd.github+json',
+        'X-GitHub-Api-Version': '2022-11-28',
+        'User-Agent': 'pulseworker-v2-research-dispatch',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ ref: RESEARCH_DISPATCH.ref }),
+      signal: controller.signal,
+    });
+    const ok = res.status === 204;
+    console.log(JSON.stringify({ evt: 'research_dispatch', workflow: 'research-funding-intraday-schedule.yml', status: res.status, ok }));
+    return { dispatched: ok, status: res.status };
+  } catch (err) {
+    console.error(JSON.stringify({ evt: 'research_dispatch', ok: false, error_message: String(err && err.message || err) }));
+    return { dispatched: false, reason: 'error' };
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 export default {
@@ -11515,13 +11828,15 @@ export default {
     const started = Date.now();
     let status = null;
     try {
-      const response = await pulseWorkerHandlers.fetch(request, withD1Usage(env, usage), ctx);
+      const wrappedEnv = withD1Usage(env, usage);
+      const response = await serveWithRouteCache(request, wrappedEnv, ctx, () => pulseWorkerHandlers.fetch(request, wrappedEnv, ctx));
       status = response && response.status;
       return response;
     } finally {
+      if (usage.rows_written > 0 || usage.writes > 0) routeCacheClear();
       let path = null;
       try { path = new URL(request.url).pathname; } catch { /* leave null */ }
-      logD1Usage(usage, { kind: 'fetch', method: request.method, path, status, elapsed_ms: Date.now() - started });
+      logD1Usage(usage, { kind: 'fetch', method: request.method, path, status, elapsed_ms: Date.now() - started }, env);
     }
   },
 
@@ -11533,12 +11848,22 @@ export default {
       waitUntil(promise) { pending.push(promise); return ctx.waitUntil(promise); },
       passThroughOnException() { return ctx.passThroughOnException && ctx.passThroughOnException(); },
     };
+    if (event && event.cron === '0 * * * *') {
+      ctx.waitUntil(dispatchResearchCollection(env)); // independent of the tick's work; never throws
+    }
+    let scheduledEnv = withD1Usage(env, usage);
+    let memo = null;
+    if (scheduledEnv && scheduledEnv.DB && env.TICK_READ_MEMO !== '0') {
+      memo = makeTickReadMemo(scheduledEnv.DB);
+      scheduledEnv = { ...scheduledEnv, DB: memo.db };
+    }
     try {
-      return await pulseWorkerHandlers.scheduled(event, withD1Usage(env, usage), trackingCtx);
+      return await pulseWorkerHandlers.scheduled(event, scheduledEnv, trackingCtx);
     } finally {
       // The tick's work runs inside waitUntil; report once it has all settled.
       ctx.waitUntil(Promise.allSettled(pending).then(() => {
-        logD1Usage(usage, { kind: 'scheduled', cron: event && event.cron, elapsed_ms: Date.now() - started });
+        routeCacheClear();
+        logD1Usage(usage, { kind: 'scheduled', cron: event && event.cron, elapsed_ms: Date.now() - started, ...(memo ? { memo_hits: memo.stats.hits, memo_misses: memo.stats.misses, memo_invalidations: memo.stats.invalidations } : {}) }, env);
       }));
     }
   },

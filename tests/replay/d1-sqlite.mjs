@@ -8,6 +8,7 @@ export function makeD1(setupSql) {
   const db = new DatabaseSync(':memory:');
   for (const s of setupSql) { try { db.exec(s); } catch (e) { /* additive migrations may not apply to the inferred schema */ } }
   const log = [];
+  let batchQueue = Promise.resolve();
   const planCache = new Map();
   const plan = (sql) => {
     if (!/^\s*(SELECT|WITH)/i.test(sql)) return null;
@@ -43,7 +44,18 @@ export function makeD1(setupSql) {
     db, log,
     binding: {
       prepare: (sql) => stmt(sql),
-      batch: async (stmts) => { const out = []; db.exec('BEGIN'); try { for (const s of stmts) out.push(/^\s*(SELECT|WITH)/i.test(s.sql) ? await s.all() : await s.run()); db.exec('COMMIT'); } catch (e) { db.exec('ROLLBACK'); throw e; } return out; },
+      // D1 runs each batch as one transaction and never interleaves two; overlapping calls are queued here.
+      batch: (stmts) => {
+        const run = async () => {
+          const out = []; db.exec('BEGIN');
+          try { for (const s of stmts) out.push(/^\s*(SELECT|WITH)/i.test(s.sql) ? await s.all() : await s.run()); db.exec('COMMIT'); }
+          catch (e) { db.exec('ROLLBACK'); throw e; }
+          return out;
+        };
+        const result = batchQueue.then(run, run);
+        batchQueue = result.catch(() => {});
+        return result;
+      },
       exec: async (sql) => { db.exec(sql); return { count: 1 }; },
     },
   };

@@ -31,9 +31,9 @@ const MIN_RESOLVED_ANALOGS = 5;     // below this among the k neighbors, refuse 
 // decision logic changes (feature set, K rule, calibration method, etc.),
 // not for unrelated infra work.
 const MODEL_VERSIONS = {
-  btc_core: 'knn-core-v1',
-  link_core: 'knn-core-v1',
-  eth_core: 'knn-core-v1-selfcontained', // distinct tag: self-contained feature set, deliberately not sharing BTC's borrowed-context pattern
+  btc_core: 'knn-core-v2-asof',   // v1 (knn-core-v1) joined V1 context in either direction; see FEATURE_PIPELINE_VERSION
+  link_core: 'knn-core-v2-asof',
+  eth_core: 'knn-core-v2-selfcontained', // v2: scaling fitted without the predicted row; distinct tag: self-contained feature set, deliberately not sharing BTC's borrowed-context pattern
   challenger: 'regime-trend-v1',
 };
 
@@ -139,6 +139,55 @@ function nearestRow(history, targetTs, tolMs = TOL_MS) {
     if (diff <= tolMs && diff < bestDiff) { bestDiff = diff; best = r; }
   }
   return best;
+}
+
+// Feature pipeline for the V1 context features (sentiment score, regime_mag, bottom_score) of the BTC and LINK cores.
+// fp-asof-v1 (2026-11-01): a context value is the latest V1 reading at or before the row's timestamp, no older than
+// CONTEXT_ASOF_MAX_AGE_MS; imputation means and z-score statistics are fitted on rows before the predicted row only.
+// fp-nearest-v0 (knn-core-v1) used nearestRow in either direction, so a historical analog could carry a reading taken
+// up to TOL_MS after its own timestamp -- inside the outcome window it is labelled with.
+const FEATURE_PIPELINE_VERSION = 'fp-asof-v2';   // v1: as-of join + train-only fitting; v2: + backfill restamp (bf-restamp-v1)
+const CONTEXT_ASOF_MAX_AGE_MS = TOL_MS;   // same window as before, now one-sided
+
+// The latest row at or before targetTs and no older than maxAgeMs, else null. Never a later row. `rows` must be
+// sorted by ts ascending; among equal timestamps the last one in that order wins (deterministic for a fixed order).
+function asOfRow(rows, targetTs, maxAgeMs) {
+  let lo = 0, hi = rows.length - 1, idx = -1;
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1;
+    if (rows[mid].ts <= targetTs) { idx = mid; lo = mid + 1; } else hi = mid - 1;
+  }
+  if (idx < 0) return null;
+  return targetTs - rows[idx].ts <= maxAgeMs ? rows[idx] : null;
+}
+
+// Read-time correction of the Hyperliquid backfill rows (bf-restamp-v1, part of fp-asof-v2). Before the backfill fix
+// these rows were stamped at candle OPEN time but hold the candle CLOSE (and an RSI including it), so each value was
+// available one interval after its stored ts. Verified read-only on 2026-11-01 against independently retrieved
+// candles: 638/638 unsealed exact-hour rows (BTC 260, ETH 64, LINK 314) equal the close of the candle opening at ts,
+// midnight rows being daily candles (+24 h) and other exact-hour rows hourly candles (+1 h). Live rows carry
+// millisecond jitter and new backfill rows are stamped close + 1 ms, so neither is ever exactly on the hour; the
+// cutoffs (last mis-stamped row per table) bound the correction anyway. Stored rows are NOT rewritten.
+// LINK holds 321 duplicated backfill timestamps (320 identical pairs, 1 differing): one row per corrected ts is kept,
+// chosen deterministically (independent of D1 row order) as the one whose JSON is greatest.
+const BACKFILL_RESTAMP_VERSION = 'bf-restamp-v1';
+const BACKFILL_RESTAMP_CUTOFF_TS = { btc_data: 1785718800000, eth_data: 1786924800000, link_data: 1785726000000 };
+function restampBackfillRows(rows, table) {
+  const cutoff = BACKFILL_RESTAMP_CUTOFF_TS[table];
+  const H = 3600000, D = 24 * H;
+  if (!cutoff) return rows;
+  const byTs = new Map();
+  const out = [];
+  for (const r of rows) {
+    if (r.ts <= cutoff && r.ts % H === 0) {
+      const fixed = { ...r, ts: r.ts + (r.ts % D === 0 ? D : H), restamped: true };
+      const prev = byTs.get(fixed.ts);
+      if (!prev || JSON.stringify(fixed) > JSON.stringify(prev)) byTs.set(fixed.ts, fixed);
+    } else {
+      out.push(r);
+    }
+  }
+  return out.concat([...byTs.values()]).sort((a, b) => a.ts - b.ts);
 }
 
 // Trend-strength guardrail. MA-slope based (no external deps, Workers-safe).
@@ -299,7 +348,6 @@ async function refreshChallengerCalibrationCurve(env, coin, horizonHours) {
   return { ok: true, coin, horizon_hours: horizonHours, status: 'ok', n_resolved: results.length, n_buckets: curve.length, computed_ts: computedTs };
 }
 
-const HISTORY_FRESHNESS_MS = 48 * 60 * 60 * 1000; // beyond this, a "history" match is too stale to trust as real, falls back to imputed
 
 // Evidence-based per-feature weights for BTC's conditional calibration.
 // Derived from a real audit, not chosen a priori: checked each feature's
@@ -486,9 +534,10 @@ async function runPrediction(env, horizonHours = 24, { persist = true, claimToke
   const lagMs = horizonHours * 60 * 60 * 1000;
   const tolMs = lagMs * 0.2;
 
-  const { results: btcRows } = await env.DB.prepare(
+  const { results: btcRowsStored } = await env.DB.prepare(
     'SELECT ts, btc_price, technical_score FROM btc_data ORDER BY ts ASC'
   ).all();
+  const btcRows = restampBackfillRows(btcRowsStored, 'btc_data');   // bf-restamp-v1: availability-time stamps
   if (btcRows.length < MIN_COMPLETE_ROWS) {
     return { ok: true, status: 'insufficient_data', n_available: btcRows.length, min_required: MIN_COMPLETE_ROWS };
   }
@@ -502,31 +551,28 @@ async function runPrediction(env, horizonHours = 24, { persist = true, claimToke
   // mean when missing or too old, same technique already proven for LINK's
   // borrowed BTC context.
   const { results: history } = await env.DB.prepare(
-    'SELECT ts, score, regime_mag, bottom_score FROM history ORDER BY ts ASC'
+    'SELECT ts, score, regime_mag, bottom_score FROM history ORDER BY ts ASC, id ASC'
   ).all();
 
+  // As-of join (FEATURE_PIPELINE_VERSION): only a reading available at the row's own timestamp.
   const rawRows = [];
-  const realScoreVals = [], realRegimeVals = [], realBottomVals = [];
   for (const r of btcRows) {
     if (r.technical_score == null) continue;
-    const nearestHist = nearestRow(history, r.ts);
-    const fresh = nearestHist && Math.abs(nearestHist.ts - r.ts) <= HISTORY_FRESHNESS_MS;
+    const ctx = asOfRow(history, r.ts, CONTEXT_ASOF_MAX_AGE_MS);
     rawRows.push({
       ts: r.ts, btc_price: r.btc_price, technical_score: r.technical_score,
-      score: fresh ? nearestHist.score : null,
-      regime_mag: fresh ? nearestHist.regime_mag : null,
-      bottom_score: fresh ? nearestHist.bottom_score : null,
+      score: ctx ? ctx.score : null,
+      regime_mag: ctx ? ctx.regime_mag : null,
+      bottom_score: ctx ? ctx.bottom_score : null,
     });
-    if (fresh) {
-      if (nearestHist.score != null) realScoreVals.push(nearestHist.score);
-      if (nearestHist.regime_mag != null) realRegimeVals.push(nearestHist.regime_mag);
-      if (nearestHist.bottom_score != null) realBottomVals.push(nearestHist.bottom_score);
-    }
   }
+  // Imputation means come from the rows before the predicted (last) row only -- never from the row being predicted.
   const meanOf = (arr, fallback) => arr.length ? arr.reduce((a, b) => a + b, 0) / arr.length : fallback;
-  const meanScore = meanOf(realScoreVals, 50);
-  const meanRegime = meanOf(realRegimeVals, 0);
-  const meanBottom = meanOf(realBottomVals, 25);
+  const trainRaw = rawRows.slice(0, -1);
+  const realOf = (k) => trainRaw.map(r => r[k]).filter(v => v != null);
+  const meanScore = meanOf(realOf('score'), 50);
+  const meanRegime = meanOf(realOf('regime_mag'), 0);
+  const meanBottom = meanOf(realOf('bottom_score'), 25);
   const complete = rawRows.map(r => ({
     ts: r.ts, btc_price: r.btc_price, technical_score: r.technical_score,
     score: r.score ?? meanScore,
@@ -538,8 +584,9 @@ async function runPrediction(env, horizonHours = 24, { persist = true, claimToke
     return { ok: true, status: 'insufficient_data', n_available: complete.length, min_required: MIN_COMPLETE_ROWS };
   }
 
+  // z-score statistics fitted on the rows before the predicted row (the predicted row is the query, not training data).
   const stats = {};
-  for (const k of FEATURE_KEYS) stats[k] = meanStd(complete.map(r => r[k]));
+  for (const k of FEATURE_KEYS) stats[k] = meanStd(complete.slice(0, -1).map(r => r[k]));
 
   const today = complete[complete.length - 1];
   // Exclude candidates too recent to possibly have a resolved forward
@@ -753,9 +800,10 @@ async function runEthPrediction(env, horizonHours = 24, { persist = true, claimT
   const lagMs = horizonHours * 60 * 60 * 1000;
   const tolMs = lagMs * 0.2;
 
-  const { results: ethRows } = await env.DB.prepare(
+  const { results: ethRowsStored } = await env.DB.prepare(
     'SELECT ts, eth_price, technical_score FROM eth_data ORDER BY ts ASC'
   ).all();
+  const ethRows = restampBackfillRows(ethRowsStored, 'eth_data');   // bf-restamp-v1: availability-time stamps
   if (ethRows.length < ETH_MIN_COMPLETE_ROWS) {
     return { ok: true, status: 'insufficient_data', n_available: ethRows.length, min_required: ETH_MIN_COMPLETE_ROWS };
   }
@@ -771,7 +819,8 @@ async function runEthPrediction(env, horizonHours = 24, { persist = true, claimT
   }
 
   const stats = {};
-  for (const k of ETH_FEATURE_KEYS) stats[k] = meanStd(complete.map(r => r[k]));
+  // z-score statistics fitted on the rows before the predicted row only (FEATURE_PIPELINE_VERSION).
+  for (const k of ETH_FEATURE_KEYS) stats[k] = meanStd(complete.slice(0, -1).map(r => r[k]));
 
   const today = complete[complete.length - 1];
   const candidates = complete.slice(0, -1).filter(r => r.ts <= today.ts - (lagMs + tolMs));
@@ -5074,6 +5123,16 @@ function computeSimpleTechnicalScore(prices) {
   return Math.round(rsi);
 }
 
+const CANDLE_INTERVAL_MS = { '1h': 3600000, '1d': 86400000 };
+// Availability time of a Hyperliquid candle: its close time T is the last millisecond of the candle, so the close
+// price exists from T + 1. Falls back to open time + interval; null if neither can be determined.
+function candleAvailableTs(c, interval) {
+  const T = Number(c?.T);
+  if (Number.isFinite(T) && c?.T != null) return T + 1;
+  const t = Number(c?.t), iv = CANDLE_INTERVAL_MS[interval];
+  return c?.t != null && Number.isFinite(t) && iv ? t + iv : null;
+}
+
 // One-time (safe to re-run) historical backfill using Hyperliquid's
 // candleSnapshot endpoint — the exact same pattern V1 already proved works
 // for gold/USD history. Gives the chart and the model real history
@@ -5097,9 +5156,12 @@ async function backfillCoinHistory(env, { coin, table, priceCol, days = 90, inte
   const candles = await res.json();
   if (!Array.isArray(candles) || !candles.length) throw new Error('No candle data returned');
 
+  // A candle's close price is only known when the candle closes, so the row is stamped at its availability time
+  // (close time), not its open time c.t, and the still-open candle is skipped (its "close" is a moving price).
+  // Before fp-asof-v1 rows were stamped at c.t: price and technical_score were available one interval after their ts.
   const sorted = candles
-    .map(c => ({ ts: c.t, price: parseFloat(c.c) }))
-    .filter(c => Number.isFinite(c.price))
+    .map(c => ({ ts: candleAvailableTs(c, interval), price: parseFloat(c.c) }))
+    .filter(c => Number.isFinite(c.price) && c.ts != null && c.ts <= endTime)
     .sort((a, b) => a.ts - b.ts);
 
   const { results: existing } = await env.DB.prepare(`SELECT ts FROM ${table} ORDER BY ts ASC`).all();
@@ -5643,9 +5705,10 @@ async function runLinkPrediction(env, horizonHours = 24, { persist = true, claim
 
   const lagMs = horizonHours * 60 * 60 * 1000;
   const tolMs = lagMs * 0.2;
-  const { results: linkRows } = await env.DB.prepare(
+  const { results: linkRowsStored } = await env.DB.prepare(
     'SELECT ts, link_price, technical_score, funding_adj FROM link_data ORDER BY ts ASC'
   ).all();
+  const linkRows = restampBackfillRows(linkRowsStored, 'link_data');   // bf-restamp-v1: availability-time stamps
   if (linkRows.length < LINK_MIN_COMPLETE_ROWS) {
     return { ok: true, status: 'insufficient_data', n_available: linkRows.length, min_required: LINK_MIN_COMPLETE_ROWS };
   }
@@ -5664,20 +5727,23 @@ async function runLinkPrediction(env, horizonHours = 24, { persist = true, claim
   // letting the full technical_score history do its job for the analog
   // match. Flagged per-row so this is auditable, not silently smoothed over.
   const { results: btcHistory } = await env.DB.prepare(
-    'SELECT ts, score, regime_mag FROM history WHERE regime_mag IS NOT NULL ORDER BY ts ASC'
+    'SELECT ts, score, regime_mag FROM history WHERE regime_mag IS NOT NULL ORDER BY ts ASC, id ASC'
   ).all();
   __checkpoint('LINK_HISTORY_READ_DONE');
+  // As-of join (FEATURE_PIPELINE_VERSION), same rule as the BTC core.
   const rawRows = [];
-  const realRegimeVals = [], realSentimentVals = [];
   for (const r of linkRows) {
     if (r.technical_score == null) continue;
-    const nearestBtc = nearestRow(btcHistory, r.ts);
+    const ctx = asOfRow(btcHistory, r.ts, CONTEXT_ASOF_MAX_AGE_MS);
     rawRows.push({
       ts: r.ts, link_price: r.link_price, technical_score: r.technical_score,
-      btc_regime_mag: nearestBtc?.regime_mag ?? null, sentiment_score: nearestBtc?.score ?? null,
+      btc_regime_mag: ctx?.regime_mag ?? null, sentiment_score: ctx?.score ?? null,
     });
-    if (nearestBtc) { realRegimeVals.push(nearestBtc.regime_mag); realSentimentVals.push(nearestBtc.score); }
   }
+  // Imputation means from the rows before the predicted (last) row only.
+  const trainRaw = rawRows.slice(0, -1);
+  const realRegimeVals = trainRaw.map(r => r.btc_regime_mag).filter(v => v != null);
+  const realSentimentVals = trainRaw.map(r => r.sentiment_score).filter(v => v != null);
   const meanRegime = realRegimeVals.length ? realRegimeVals.reduce((a, b) => a + b, 0) / realRegimeVals.length : 0;
   const meanSentiment = realSentimentVals.length ? realSentimentVals.reduce((a, b) => a + b, 0) / realSentimentVals.length : 50;
   const complete = rawRows.map(r => ({
@@ -5692,7 +5758,7 @@ async function runLinkPrediction(env, horizonHours = 24, { persist = true, claim
   __checkpoint('LINK_FEATURE_BUILD_DONE');
 
   const stats = {};
-  for (const k of LINK_FEATURE_KEYS) stats[k] = meanStd(complete.map(r => r[k]));
+  for (const k of LINK_FEATURE_KEYS) stats[k] = meanStd(complete.slice(0, -1).map(r => r[k]));
 
   const today = complete[complete.length - 1];
   // Same fix as BTC's model: exclude candidates too recent to possibly have

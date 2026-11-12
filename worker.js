@@ -10402,6 +10402,28 @@ const RESEARCH_LAB_HTML = `<!DOCTYPE html>
 </html>
 `;
 
+// ═══ Operational write routes: owner-only (sec-v2-ops, 2026-11-01) ═══
+// These GET routes write to production D1 (price backfills, calibration curves) or spend Gemini quota, and no
+// frontend, workflow or script calls them (re-checked 2026-11-12 against the live dashboard and every workflow).
+// They require `Authorization: Bearer <OPS_ADMIN_TOKEN>` and are disabled (503) while that secret is unset: nothing
+// user-facing depends on them, so failing closed is safe. /predict and the cron paths are unaffected (their writes
+// are already fenced by resolveWriteAuthorization).
+// POST /analyst-relay/submit is NOT in this list: the live dashboard's Analyst Relay panel calls it without
+// credentials, so gating it here would break that panel. It stays public until it gets its own sign-in.
+const V2_OPS_ROUTES = new Set([
+  'GET:/btc-backfill', 'GET:/btc-backfill-hourly', 'GET:/link-backfill', 'GET:/link-backfill-hourly', 'GET:/eth-backfill-history',
+  'GET:/recalibrate-refresh', 'GET:/recalibrate-refresh-challenger', 'GET:/run-link-analysis',
+]);
+function v2OpsAuth(request, url, env) {
+  if (!V2_OPS_ROUTES.has(`${request.method}:${url.pathname}`)) return 'public';
+  if (!env.OPS_ADMIN_TOKEN) return 'disabled';
+  const h = request.headers.get('Authorization') || '';
+  const given = h.startsWith('Bearer ') ? h.slice(7) : '';
+  let diff = given.length ^ env.OPS_ADMIN_TOKEN.length;
+  for (let i = 0; i < Math.max(given.length, env.OPS_ADMIN_TOKEN.length); i++) diff |= (given.charCodeAt(i) || 0) ^ (env.OPS_ADMIN_TOKEN.charCodeAt(i) || 0);
+  return diff === 0 ? 'ok' : 'rejected';
+}
+
 const pulseWorkerHandlers = {
   async fetch(request, env) {
     const url = new URL(request.url);
@@ -10411,6 +10433,13 @@ const pulseWorkerHandlers = {
       'Access-Control-Allow-Headers': 'Content-Type',
     };
     if (request.method === 'OPTIONS') return new Response(null, { headers: corsHeaders });
+    {
+      const ops = v2OpsAuth(request, url, env);
+      if (ops === 'disabled' || ops === 'rejected') {
+        return new Response(JSON.stringify({ ok: false, error: ops === 'disabled' ? 'operational route disabled: OPS_ADMIN_TOKEN is not configured' : 'unauthorized' }),
+          { status: ops === 'disabled' ? 503 : 401, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+      }
+    }
 
     // ---- Event Detection Layer API (/api/events, /api/events/health, /api/event, POST /api/events/run) ----
     const eventRoute = await handleEventRoutes(request, env, url, corsHeaders);

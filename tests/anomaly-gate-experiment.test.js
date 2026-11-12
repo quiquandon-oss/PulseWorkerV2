@@ -230,7 +230,9 @@ describe('cron dispatch wiring', () => {
     const elseIfIdx = src.indexOf('} else if (event.cron', dailyIdx);
     expect(elseIfIdx).toBeGreaterThan(dailyIdx);
     const dailyBlock = src.slice(dailyIdx, elseIfIdx);
-    expect(dailyBlock).toContain("ctx.waitUntil(logAnomalyGateExperiment(env, coin, h).catch(err => console.error(`Anomaly-gate experiment ${coin}/${h}h failed:`, err)));");
+    // 2026-11: the result is also passed to recordSelectionProvenance (additive table, never throws);
+    // the call stays independently caught, which is what this assertion protects.
+    expect(dailyBlock).toContain("ctx.waitUntil(logAnomalyGateExperiment(env, coin, h).then(r => recordSelectionProvenance(env, 'selection_decisions_anomaly', coin, h, r, 'cron_daily')).catch(err => console.error(`Anomaly-gate experiment ${coin}/${h}h failed:`, err)));");
     expect(dailyBlock).toContain("ctx.waitUntil(logMomentumSelectionExperiment(env, coin, h).catch(err => console.error(`Momentum experiment ${coin}/${h}h failed:`, err)));");
     // Same coins/horizons loop the existing calibration refreshes already use.
     expect(dailyBlock).toContain("for (const coin of ['BTC', 'LINK', 'ETH']) {");

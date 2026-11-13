@@ -5542,13 +5542,32 @@ async function getRegimeSplitHistory(env, limit = 50) {
   return { ok: true, runs: results };
 }
 
+// ---- One price row per scheduled run (prepared 2026-11-13; OFF by default) ----
+// Each scheduled run processes a coin's 24h and 12h horizons side by side, and each horizon logs a price row,
+// so the price tables hold two rows per run, seconds apart (production: all 90 runs from 2026-11-01 to
+// 2026-11-12, for BTC, ETH and LINK; in 15 of 90 BTC runs the two prices differ). The models read these tables
+// row by row, so every look-back counted in rows covers half the intended time and each analog appears twice.
+//
+// With PRICE_ROW_PER_TICK = "1" the scheduled path inserts a row only when none was written in the last
+// PRICE_ROW_TICK_WINDOW_MS. The check is inside the INSERT, so two horizons racing still produce one row.
+// Existing rows are never touched. This changes model inputs from the moment it is enabled: it is a
+// methodology change, to be enabled only by owner decision and recorded with its effective date.
+// The stale-refresh path (claimToken set) is unchanged.
+const PRICE_ROW_TICK_WINDOW_MS = 10 * 60 * 1000;
+
 async function logLinkData(env, claimToken = null) {
   const snap = await fetchLinkSnapshot();
   const { results: recent } = await env.DB.prepare(
     'SELECT link_price FROM link_data ORDER BY ts DESC LIMIT 30'
   ).all();
   const technicalScore = computeSimpleTechnicalScore(recent.reverse().map(r => r.link_price));
-  if (claimToken === null) {
+  if (claimToken === null && env && env.PRICE_ROW_PER_TICK === '1') {
+    const nowTs = Date.now();
+    await env.DB.prepare(
+      `INSERT INTO link_data (ts, link_price, technical_score, funding_adj)
+       SELECT ?, ?, ?, ? WHERE NOT EXISTS (SELECT 1 FROM link_data WHERE ts > ?)`
+    ).bind(nowTs, snap.price, technicalScore, snap.fundingAdj, nowTs - PRICE_ROW_TICK_WINDOW_MS).run();
+  } else if (claimToken === null) {
     await env.DB.prepare(
       'INSERT INTO link_data (ts, link_price, technical_score, funding_adj) VALUES (?,?,?,?)'
     ).bind(Date.now(), snap.price, technicalScore, snap.fundingAdj).run();
@@ -5574,7 +5593,13 @@ async function logBtcData(env, claimToken = null) {
     'SELECT btc_price FROM btc_data ORDER BY ts DESC LIMIT 30'
   ).all();
   const technicalScore = computeSimpleTechnicalScore(recent.reverse().map(r => r.btc_price));
-  if (claimToken === null) {
+  if (claimToken === null && env && env.PRICE_ROW_PER_TICK === '1') {
+    const nowTs = Date.now();
+    await env.DB.prepare(
+      `INSERT INTO btc_data (ts, btc_price, technical_score)
+       SELECT ?, ?, ? WHERE NOT EXISTS (SELECT 1 FROM btc_data WHERE ts > ?)`
+    ).bind(nowTs, snap.price, technicalScore, nowTs - PRICE_ROW_TICK_WINDOW_MS).run();
+  } else if (claimToken === null) {
     await env.DB.prepare(
       'INSERT INTO btc_data (ts, btc_price, technical_score) VALUES (?,?,?)'
     ).bind(Date.now(), snap.price, technicalScore).run();
@@ -5601,7 +5626,13 @@ async function logEthData(env, claimToken = null) {
     'SELECT eth_price FROM eth_data ORDER BY ts DESC LIMIT 30'
   ).all();
   const technicalScore = computeSimpleTechnicalScore(recent.reverse().map(r => r.eth_price));
-  if (claimToken === null) {
+  if (claimToken === null && env && env.PRICE_ROW_PER_TICK === '1') {
+    const nowTs = Date.now();
+    await env.DB.prepare(
+      `INSERT INTO eth_data (ts, eth_price, technical_score)
+       SELECT ?, ?, ? WHERE NOT EXISTS (SELECT 1 FROM eth_data WHERE ts > ?)`
+    ).bind(nowTs, snap.price, technicalScore, nowTs - PRICE_ROW_TICK_WINDOW_MS).run();
+  } else if (claimToken === null) {
     await env.DB.prepare(
       'INSERT INTO eth_data (ts, eth_price, technical_score) VALUES (?,?,?)'
     ).bind(Date.now(), snap.price, technicalScore).run();

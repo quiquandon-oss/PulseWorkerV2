@@ -53,6 +53,42 @@ def trailing_vol(prices, end, lookback=VOL_LOOKBACK_ROWS):
     return statistics.pstdev(rets)
 
 
+def simple_technical_score(prices):
+    """Port of worker.js computeSimpleTechnicalScore (RSI-style, 0-100)."""
+    if len(prices) < 6:
+        return 50
+    ch = [prices[i] - prices[i - 1] for i in range(1, len(prices))]
+    gain = sum(c for c in ch if c > 0) / len(ch)
+    loss = sum(-c for c in ch if c < 0) / len(ch)
+    if gain + loss == 0:
+        return 50
+    if loss == 0:
+        return 100
+    return int(100 - 100 / (1 + gain / loss) + 0.5)
+
+
+def technical_score_comparison(runs):
+    """For each run: the score the worker would compute from the 30 rows before the run, on the stored series
+    and on the one-row-per-run series. Only runs from the first multi-row run onward are compared."""
+    stored, coll, diffs, side = [], [], [], 0
+    started = False
+    for g in runs:
+        started = started or len(g) > 1
+        if started and len(coll) >= TECH_LOOKBACK_ROWS:
+            a = simple_technical_score(stored[-TECH_LOOKBACK_ROWS:])
+            b = simple_technical_score(coll[-TECH_LOOKBACK_ROWS:])
+            diffs.append(abs(a - b))
+            side += (a >= 50) != (b >= 50)
+        stored.extend(r["price"] for r in g)
+        coll.append(g[0]["price"])
+    if not diffs:
+        return {"n": 0}
+    d = sorted(diffs)
+    return {"n": len(d), "median_abs_difference": statistics.median(d), "p90_abs_difference": d[int(0.9 * (len(d) - 1))],
+            "max_abs_difference": d[-1], "share_differing_by_10_or_more": round(sum(1 for x in d if x >= 10) / len(d), 4),
+            "share_on_opposite_sides_of_50": round(side / len(d), 4)}
+
+
 def median_span_hours(ts, lookback):
     spans = [(ts[i] - ts[i - lookback + 1]) / H for i in range(lookback - 1, len(ts))]
     return statistics.median(spans) if spans else None
@@ -97,6 +133,7 @@ def analyse(rows):
             f"technical_lookback_{TECH_LOOKBACK_ROWS}_rows": {"stored": median_span_hours([r["ts"] for r in rows], TECH_LOOKBACK_ROWS),
                                                                "one_row_per_run": median_span_hours([r["ts"] for r in collapsed], TECH_LOOKBACK_ROWS)},
         },
+        "technical_score_stored_series_vs_one_row_per_run": technical_score_comparison(runs),
         "trailing_volatility_stored_over_one_row_per_run": {
             "n": len(pairs), "median_ratio": round(statistics.median(pairs), 4) if pairs else None,
             "p10": round(sorted(pairs)[int(0.1 * (len(pairs) - 1))], 4) if pairs else None,

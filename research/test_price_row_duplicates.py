@@ -55,3 +55,16 @@ def test_main_reads_exported_csvs_and_reports_missing_files(tmp_path, capsys):
     import json
     d = json.loads((tmp_path / "o.json").read_text())
     assert d["series"]["BTC"]["runs"] == 20 and "missing" in d["series"]["ETH"]
+
+
+def test_technical_score_port_matches_the_worker_formula():
+    assert prd.simple_technical_score([1, 2, 3]) == 50
+    assert prd.simple_technical_score([1, 2, 3, 4, 5, 6]) == 100
+    assert prd.simple_technical_score([5, 5, 5, 5, 5, 5]) == 50
+    assert prd.simple_technical_score([10, 11, 10, 11, 10, 12, 11]) == 57  # gains 4, losses 3 -> 100*4/7
+
+
+def test_technical_score_comparison_is_zero_without_duplicates_and_reported_with_them():
+    assert prd.analyse(_rows(80, 1))["technical_score_stored_series_vs_one_row_per_run"] == {"n": 0}
+    r = prd.analyse(_rows(80, 2))["technical_score_stored_series_vs_one_row_per_run"]
+    assert r["n"] == 50 and r["max_abs_difference"] >= 0

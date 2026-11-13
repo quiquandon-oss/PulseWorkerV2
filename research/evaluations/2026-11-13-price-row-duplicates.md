@@ -21,6 +21,16 @@ read by `research/price_row_duplicates.py`. A "run" groups rows written within 1
 | Median time covered by the 30-row technical look-back: stored / one row per run | 29.0 h / 57.0 h | 42.0 h / 59.1 h | 17.0 h / 54.0 h |
 | Trailing volatility, stored ÷ one row per run: median (10th–90th percentile) | 0.84 (0.27–1.00) | 1.00 (0.50–1.00) | 0.73 (0.29–1.00) |
 
+**Technical score (a direct model feature), recomputed offline with the worker's own formula** from the 30 rows
+before each run, on the stored series and on the one-row-per-run series, for runs since duplicates began:
+
+| | BTC | ETH | LINK |
+|---|---|---|---|
+| Runs compared | 935 | 471 | 1,062 |
+| Absolute difference, median / 90th percentile / maximum (points, 0–100 scale) | 9 / 28 / 65 | 7 / 18 / 45 | 8 / 21 / 49 |
+| Differ by 10 points or more | 49.3% | 36.7% | 41.1% |
+| On opposite sides of 50 | 29.4% | 21.0% | 25.2% |
+
 - In November 2026 every run of every coin has exactly two rows (94 runs each).
 - Runs with three or more rows (BTC up to 37) occur in August–October only.
 
@@ -62,9 +72,9 @@ concurrent chains cannot both insert. Predictions, selection and all other write
 
 ## 5. Evaluation design before any activation
 
-1. Offline, on the exported series only: recompute volatility and technical score on the one-row-per-run series
-   for every stored prediction time, and report how many of the core model's inputs and calls (p_up ≥ 0.5) would
-   differ. No stored value is rewritten.
+1. Offline, on the exported series only: recompute volatility and technical score on the one-row-per-run series.
+   **Done for the inputs** (section 1). Still to do: how many of the core model's calls (p_up ≥ 0.5) would differ,
+   which needs the model replayed on both series. No stored value is rewritten.
 2. Report accuracy of both versions on resolved history as a description, with the count of independent windows.
    It is retrospective and cannot support a claim of improvement.
 3. If activation is chosen: record the effective timestamp, add a version marker to predictions written after it, and

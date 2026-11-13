@@ -4595,38 +4595,70 @@ function summarizeFreshness(rows, latestTs, nowTs) {
   };
 }
 
+// Query shape (2026-11): every statement is driven by an existing index -- (horizon_hours, ts) on the core
+// tables, (coin, horizon_hours, ts) on challenger_predictions, (ts) on the price tables -- so a call reads the
+// rows of the last 48 h (about 200) instead of scanning the four prediction tables twice (about 14,750 rows per
+// call, measured 2026-11-13). The all-time latest row of a series is the newest row of that window; only a
+// series with no row in 48 h needs one extra indexed single-row lookup. Same response as before.
+const FRESHNESS_HORIZONS = [12, 24];
+
 async function getPredictionFreshness(env, nowTs = Date.now()) {
   const since = nowTs - 48 * 60 * 60 * 1000;
   const out = { ok: true, generated_ts: nowTs, expected_cron_ticks_24h: 8, cron_grid_slack_minutes: CRON_GRID_SLACK_MS / 60000, coins: {} };
+  const latestOf = (rows) => (rows.length ? rows.reduce((m, r) => (r.ts > m ? r.ts : m), rows[0].ts) : null);
   const challengerRows = (await env.DB.prepare(
-    'SELECT coin, horizon_hours, ts, git_commit_sha FROM challenger_predictions WHERE ts >= ?'
+    `SELECT coin, horizon_hours, ts, git_commit_sha FROM challenger_predictions
+     WHERE coin IN ('BTC', 'ETH', 'LINK') AND horizon_hours IN (12, 24) AND ts >= ?`
   ).bind(since).all()).results;
-  const challengerLatest = (await env.DB.prepare(
-    'SELECT coin, horizon_hours, MAX(ts) AS latest FROM challenger_predictions GROUP BY coin, horizon_hours'
-  ).all()).results;
   for (const { coin, core, price } of FRESHNESS_COINS) {
     const coreRows = (await env.DB.prepare(
-      `SELECT horizon_hours, ts, git_commit_sha FROM ${core} WHERE ts >= ?`
+      `SELECT horizon_hours, ts, git_commit_sha FROM ${core} WHERE horizon_hours IN (12, 24) AND ts >= ?`
     ).bind(since).all()).results;
-    const coreLatest = (await env.DB.prepare(
-      `SELECT horizon_hours, MAX(ts) AS latest FROM ${core} GROUP BY horizon_hours`
-    ).all()).results;
     const priceRow = await env.DB.prepare(`SELECT MAX(ts) AS latest FROM ${price}`).first();
     const coinOut = {
       price_data: { table: price, latest_ts: priceRow ? priceRow.latest : null,
         latest_age_hours: priceRow && priceRow.latest != null ? Number(((nowTs - priceRow.latest) / 3600000).toFixed(2)) : null },
       horizons: {},
     };
-    for (const h of [12, 24]) {
-      const cl = coreLatest.find(r => r.horizon_hours === h);
-      const ch = challengerLatest.find(r => r.coin === coin && r.horizon_hours === h);
-      const core24 = summarizeFreshness(coreRows.filter(r => r.horizon_hours === h), cl ? cl.latest : null, nowTs);
-      const chal24 = summarizeFreshness(challengerRows.filter(r => r.coin === coin && r.horizon_hours === h), ch ? ch.latest : null, nowTs);
-      coinOut.horizons[h] = { core: core24, challenger: chal24 };
+    for (const h of FRESHNESS_HORIZONS) {
+      const coreSeries = coreRows.filter(r => r.horizon_hours === h);
+      const chalSeries = challengerRows.filter(r => r.coin === coin && r.horizon_hours === h);
+      let coreLatest = latestOf(coreSeries);
+      if (coreLatest == null) {
+        const row = await env.DB.prepare(`SELECT ts AS latest FROM ${core} WHERE horizon_hours = ? ORDER BY ts DESC LIMIT 1`).bind(h).first();
+        coreLatest = row ? row.latest : null;
+      }
+      let chalLatest = latestOf(chalSeries);
+      if (chalLatest == null) {
+        const row = await env.DB.prepare('SELECT ts AS latest FROM challenger_predictions WHERE coin = ? AND horizon_hours = ? ORDER BY ts DESC LIMIT 1').bind(coin, h).first();
+        chalLatest = row ? row.latest : null;
+      }
+      coinOut.horizons[h] = { core: summarizeFreshness(coreSeries, coreLatest, nowTs), challenger: summarizeFreshness(chalSeries, chalLatest, nowTs) };
     }
     out.coins[coin] = coinOut;
   }
   return out;
+}
+
+// Short-lived copy of the freshness report, per isolate. The dashboard and the alert workflow both read this
+// route; within FRESHNESS_CACHE_TTL_MS they get the report computed for the first of them (its generated_ts and
+// ages are those of that computation, so a reader can always see how old the report is). An entry past its TTL is
+// never served: the report is recomputed, and if that fails the caller gets the error, not old data. A scheduled
+// run clears the entry so its new rows show at once. FRESHNESS_CACHE = "0" disables the cache.
+const FRESHNESS_CACHE_TTL_MS = 60 * 1000;
+let freshnessCacheEntry = null; // { ts, result }
+
+function freshnessCacheClear() { freshnessCacheEntry = null; }
+
+async function getPredictionFreshnessCached(env, nowTs = Date.now()) {
+  const enabled = !(env && env.FRESHNESS_CACHE === '0');
+  if (enabled && freshnessCacheEntry && nowTs >= freshnessCacheEntry.ts && nowTs - freshnessCacheEntry.ts < FRESHNESS_CACHE_TTL_MS) {
+    return { result: freshnessCacheEntry.result, cache: 'hit', age_ms: nowTs - freshnessCacheEntry.ts };
+  }
+  freshnessCacheEntry = null;
+  const result = await getPredictionFreshness(env, nowTs); // a failure propagates; nothing stale is served
+  if (enabled) freshnessCacheEntry = { ts: nowTs, result };
+  return { result, cache: enabled ? 'miss' : 'off', age_ms: 0 };
 }
 
 async function getChallengerRecent(env, limit = 20) {
@@ -10840,8 +10872,9 @@ const pulseWorkerHandlers = {
     // ---- GET /prediction-freshness -- read-only persistence monitor (see getPredictionFreshness)
     if (url.pathname === '/prediction-freshness' && request.method === 'GET') {
       try {
-        const result = await getPredictionFreshness(env);
-        return new Response(JSON.stringify(result), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+        const { result, cache, age_ms } = await getPredictionFreshnessCached(env);
+        return new Response(JSON.stringify(result), { headers: { ...corsHeaders, 'Content-Type': 'application/json',
+          'X-Freshness-Cache': cache, 'X-Freshness-Cache-Age': String(Math.floor(age_ms / 1000)), 'Cache-Control': 'no-store' } });
       } catch (err) {
         return new Response(JSON.stringify({ ok: false, error: String(err) }), { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
       }
@@ -11961,7 +11994,7 @@ export default {
       status = response && response.status;
       return response;
     } finally {
-      if (usage.rows_written > 0 || usage.writes > 0) routeCacheClear();
+      if (usage.rows_written > 0 || usage.writes > 0) { routeCacheClear(); freshnessCacheClear(); }
       let path = null;
       try { path = new URL(request.url).pathname; } catch { /* leave null */ }
       logD1Usage(usage, { kind: 'fetch', method: request.method, path, status, elapsed_ms: Date.now() - started }, env);
@@ -11994,6 +12027,7 @@ export default {
       // The tick's work runs inside waitUntil; report once it has all settled.
       ctx.waitUntil(Promise.allSettled(pending).then(() => {
         routeCacheClear();
+        freshnessCacheClear();
         logD1Usage(usage, { kind: 'scheduled', cron: event && event.cron, elapsed_ms: Date.now() - started, ...(memo ? { memo_hits: memo.stats.hits, memo_misses: memo.stats.misses, memo_invalidations: memo.stats.invalidations } : {}) }, env);
         return recordD1UsageDaily(env, usage, 'scheduled', event && event.cron);
       }));

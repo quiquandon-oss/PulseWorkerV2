@@ -10827,6 +10827,16 @@ const pulseWorkerHandlers = {
     }
 
     // ---- GET /challenger-recent?limit=20 ----
+    // ---- GET /d1-usage?days=7 -- recorded D1 rows read/written per day, route and cron (see getD1UsageSummary)
+    if (url.pathname === '/d1-usage' && request.method === 'GET') {
+      try {
+        const result = await getD1UsageSummary(env, parseInt(url.searchParams.get('days') || '7', 10));
+        return new Response(JSON.stringify(result), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+      } catch (err) {
+        return new Response(JSON.stringify({ ok: false, error: String(err) }), { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+      }
+    }
+
     // ---- GET /prediction-freshness -- read-only persistence monitor (see getPredictionFreshness)
     if (url.pathname === '/prediction-freshness' && request.method === 'GET') {
       try {
@@ -11666,6 +11676,41 @@ async function recordD1UsageDaily(env, usage, kind, key, now = Date.now()) {
   }
 }
 
+// Read side of d1_usage_daily for GET /d1-usage: per-day totals and the per-route / per-cron rows behind them.
+// The totals are a lower bound on billed rows read: requests under D1_USAGE_RECORD_MIN_ROWS rows are not
+// recorded, and the upserts into this table are not counted. Read-only; at most `days` days of a small table.
+const D1_USAGE_DAILY_READ_LIMIT = 5000000; // D1 free plan: rows read per day (UTC)
+
+async function getD1UsageSummary(env, days = 7, now = Date.now()) {
+  const n = Math.max(1, Math.min(31, Number.isFinite(days) ? Math.floor(days) : 7));
+  const since = new Date(now - (n - 1) * 86400000).toISOString().slice(0, 10);
+  let results;
+  try {
+    ({ results } = await env.DB.prepare(
+      `SELECT day, kind, key, invocations, statements, rows_read, rows_written, max_rows_read, last_ts
+       FROM d1_usage_daily WHERE day >= ? ORDER BY day DESC, rows_read DESC LIMIT 4000`
+    ).bind(since).all());
+  } catch (err) {
+    if (/no such table/i.test(String(err && err.message || err))) return { ok: true, recording: false, days: [] };
+    throw err;
+  }
+  const byDay = new Map();
+  for (const r of results || []) {
+    if (!byDay.has(r.day)) byDay.set(r.day, { day: r.day, rows_read: 0, rows_written: 0, invocations: 0, pct_of_daily_read_limit: 0, entries: [] });
+    const d = byDay.get(r.day);
+    d.rows_read += r.rows_read; d.rows_written += r.rows_written; d.invocations += r.invocations;
+    d.entries.push({ kind: r.kind, key: r.key, invocations: r.invocations, statements: r.statements, rows_read: r.rows_read,
+      rows_written: r.rows_written, max_rows_read: r.max_rows_read, last_ts: r.last_ts });
+  }
+  const out = [...byDay.values()];
+  for (const d of out) d.pct_of_daily_read_limit = Math.round((d.rows_read / D1_USAGE_DAILY_READ_LIMIT) * 1000) / 10;
+  return {
+    ok: true, recording: true, today: new Date(now).toISOString().slice(0, 10), daily_read_limit: D1_USAGE_DAILY_READ_LIMIT,
+    note: `Lower bound: requests reading fewer than ${D1_USAGE_RECORD_MIN_ROWS} rows are not recorded.`,
+    days: out,
+  };
+}
+
 // =====================================================================
 // ---- Read-route cache (2026-11) ----
 //
@@ -11855,19 +11900,34 @@ function makeTickReadMemo(db) {
 // data rules are unchanged; GitHub's own schedule stays as a fallback and
 // the collector is idempotent. Runs only when RESEARCH_DISPATCH_TOKEN is
 // set (fine-grained token: this repository, Actions: write). Never throws.
+//
+// The same token also starts prediction-staleness-alert.yml one hour after
+// each production tick (hours 1, 4, 7, ... UTC): GitHub did not fire that
+// workflow's own 3-hourly schedule once in its first 8 hours. The alert
+// only reads public data. Its GitHub schedule stays, and remains the only
+// check that still runs if this Worker's cron itself stops.
 // =====================================================================
 const RESEARCH_DISPATCH = {
   url: 'https://api.github.com/repos/quiquandon-oss/PulseWorkerV2/actions/workflows/research-funding-intraday-schedule.yml/dispatches',
+  alertUrl: 'https://api.github.com/repos/quiquandon-oss/PulseWorkerV2/actions/workflows/prediction-staleness-alert.yml/dispatches',
   ref: 'main',
   timeoutMs: 10000,
 };
 
-async function dispatchResearchCollection(env, fetchImpl = fetch) {
+function stalenessAlertDue(scheduledTime) {
+  return Number.isFinite(scheduledTime) && new Date(scheduledTime).getUTCHours() % 3 === 1;
+}
+
+async function dispatchStalenessAlert(env, fetchImpl = fetch) {
+  return dispatchResearchCollection(env, fetchImpl, RESEARCH_DISPATCH.alertUrl);
+}
+
+async function dispatchResearchCollection(env, fetchImpl = fetch, url = RESEARCH_DISPATCH.url) {
   if (!env || !env.RESEARCH_DISPATCH_TOKEN) return { dispatched: false, reason: 'no_token' };
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), RESEARCH_DISPATCH.timeoutMs);
   try {
-    const res = await fetchImpl(RESEARCH_DISPATCH.url, {
+    const res = await fetchImpl(url, {
       method: 'POST',
       headers: {
         Authorization: `Bearer ${env.RESEARCH_DISPATCH_TOKEN}`,
@@ -11880,7 +11940,7 @@ async function dispatchResearchCollection(env, fetchImpl = fetch) {
       signal: controller.signal,
     });
     const ok = res.status === 204;
-    console.log(JSON.stringify({ evt: 'research_dispatch', workflow: 'research-funding-intraday-schedule.yml', status: res.status, ok }));
+    console.log(JSON.stringify({ evt: 'research_dispatch', workflow: url.split('/').slice(-2)[0], status: res.status, ok }));
     return { dispatched: ok, status: res.status };
   } catch (err) {
     console.error(JSON.stringify({ evt: 'research_dispatch', ok: false, error_message: String(err && err.message || err) }));
@@ -11920,6 +11980,7 @@ export default {
     };
     if (event && event.cron === '0 * * * *') {
       ctx.waitUntil(dispatchResearchCollection(env)); // independent of the tick's work; never throws
+      if (stalenessAlertDue(event.scheduledTime)) ctx.waitUntil(dispatchStalenessAlert(env));
     }
     let scheduledEnv = withD1Usage(env, usage);
     let memo = null;

@@ -7,7 +7,7 @@ import { extractFunctions, extractConstants, evalInScope } from './helpers/extra
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const SRC = readFileSync(join(ROOT, 'worker.js'), 'utf8');
-const scope = evalInScope(extractConstants('RESEARCH_DISPATCH') + '\n' + extractFunctions('dispatchResearchCollection'), {});
+const scope = evalInScope(extractConstants('RESEARCH_DISPATCH') + '\n' + extractFunctions('dispatchResearchCollection', 'dispatchStalenessAlert', 'stalenessAlertDue'), {});
 const quiet = () => { const l = console.log, e = console.error; console.log = () => {}; console.error = () => {}; return () => { console.log = l; console.error = e; }; };
 
 describe('dispatchResearchCollection', () => {
@@ -39,10 +39,25 @@ describe('dispatchResearchCollection', () => {
     } finally { restore(); }
   });
 
+  it('the staleness alert goes to its own workflow with the same token, one hour after each tick', async () => {
+    const restore = quiet(); let seen;
+    try {
+      const r = await scope.dispatchStalenessAlert({ RESEARCH_DISPATCH_TOKEN: 't0k' }, async (url, init) => { seen = { url, init }; return { status: 204 }; });
+      expect(r).toEqual({ dispatched: true, status: 204 });
+      expect(await scope.dispatchStalenessAlert({}, async () => { throw new Error('must not be called'); })).toEqual({ dispatched: false, reason: 'no_token' });
+    } finally { restore(); }
+    expect(seen.url).toBe('https://api.github.com/repos/quiquandon-oss/PulseWorkerV2/actions/workflows/prediction-staleness-alert.yml/dispatches');
+    expect(JSON.parse(seen.init.body)).toEqual({ ref: 'main' });
+    const due = [];
+    for (let h = 0; h < 24; h++) if (scope.stalenessAlertDue(Date.UTC(2026, 10, 13, h, 0, 0))) due.push(h);
+    expect(due).toEqual([1, 4, 7, 10, 13, 16, 19, 22]);
+    expect(scope.stalenessAlertDue(undefined)).toBe(false);
+  });
+
   it('is wired to the hourly cron only, outside the tick handlers', () => {
     const start = SRC.indexOf('async scheduled(event, env, ctx) {', SRC.indexOf('export default {'));
     const body = SRC.slice(start, SRC.indexOf('\n  },\n', start));
-    expect(body).toMatch(/if \(event && event\.cron === '0 \* \* \* \*'\) \{\s*ctx\.waitUntil\(dispatchResearchCollection\(env\)\);/);
+    expect(body).toMatch(/if \(event && event\.cron === '0 \* \* \* \*'\) \{\s*ctx\.waitUntil\(dispatchResearchCollection\(env\)\);[^\n]*\n\s*if \(stalenessAlertDue\(event\.scheduledTime\)\) ctx\.waitUntil\(dispatchStalenessAlert\(env\)\);\s*\}/);
   });
 });
 

@@ -45,6 +45,29 @@ describe('d1_usage_daily, table present', () => {
     expect(JSON.stringify(rows(w))).toBe(before);
   });
 
+  it('GET /d1-usage returns per-day totals that match the table, and writes nothing', async () => {
+    const table = rows(w);
+    w.d1.log.length = 0;
+    const res = await w.get('/d1-usage?days=31', T0 - 2 * H); await settle();
+    expect(res.status).toBe(200);
+    const body = JSON.parse(res.body);
+    expect(body).toMatchObject({ ok: true, recording: true, daily_read_limit: 5000000 });
+    expect(body.days.map((d) => d.day)).toEqual([...new Set(table.map((r) => r.day))].sort().reverse());
+    for (const d of body.days) {
+      const mine = table.filter((r) => r.day === d.day);
+      expect(d.rows_read).toBe(mine.reduce((a, r) => a + r.rows_read, 0));
+      expect(d.rows_written).toBe(mine.reduce((a, r) => a + r.rows_written, 0));
+      expect(d.entries).toHaveLength(mine.length);
+      expect(d.pct_of_daily_read_limit).toBeCloseTo((d.rows_read / 5000000) * 100, 1);
+    }
+    expect(w.d1.log.filter((l) => !l.plan && !/^\s*SELECT/i.test(l.sql))).toHaveLength(0);
+  });
+
+  it('GET /d1-usage limits the window to the days asked for', async () => {
+    const one = JSON.parse((await w.get('/d1-usage?days=1', T0 - 2 * H)).body);
+    expect(one.days.every((d) => d.day === '2026-10-31')).toBe(true);
+  });
+
   it('D1_USAGE_TABLE="0" stops recording', async () => {
     const before = JSON.stringify(rows(w));
     w.env.D1_USAGE_TABLE = '0'; w.env.ROUTE_CACHE = '0';
@@ -61,6 +84,7 @@ describe('d1_usage_daily, table not migrated', () => {
       const res = await w.get('/chart-data?horizon=24', T0 - 2 * H); await settle();
       expect(res.status).toBe(200);
       expect(w.count('predictions')).toBe(8);
+      expect(JSON.parse((await w.get('/d1-usage', T0 - 2 * H)).body)).toEqual({ ok: true, recording: false, days: [] });
     } finally { vi.restoreAllMocks(); w.close(); }
   }, 120000);
 });

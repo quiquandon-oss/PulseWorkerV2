@@ -42,4 +42,4 @@ jobs:
       - name: Install pytest
         run: pip install pytest pyyaml numpy --break-system-packages   # numpy: exp008-chronos input arrays (no torch/chronos in CI)
       - name: Run Experiment 4 and research schema tests
-        run: python3 -m pytest exp004-timesfm/ exp008-chronos/ research/ -v
+        run: python3 -m pytest exp004-timesfm/ exp008-chronos/ research/ ops/ -v

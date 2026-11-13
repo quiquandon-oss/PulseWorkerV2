@@ -11637,6 +11637,35 @@ function logD1Usage(usage, fields, env) {
   } catch { /* accounting must never affect the invocation */ }
 }
 
+// Daily totals per route and cron, in D1 (table d1_usage_daily, migration 0026), so consumption can be read
+// back without access to Workers Logs. One upsert per recorded invocation, on the raw binding so it is not
+// itself counted. Only invocations that matter are recorded: every scheduled run, and requests that read at
+// least D1_USAGE_RECORD_MIN_ROWS rows (cheap cached or snapshot reads are left out, so this adds no write to
+// them). Without the table the recording is skipped. D1_USAGE_TABLE = "0" disables it. Never throws.
+const D1_USAGE_RECORD_MIN_ROWS = 50;
+const D1_USAGE_TABLE_RETRY_MS = 10 * 60 * 1000;
+let d1UsageTableUnavailableUntil = 0;
+
+async function recordD1UsageDaily(env, usage, kind, key, now = Date.now()) {
+  try {
+    if (!env || !env.DB || env.D1_USAGE_TABLE === '0' || now < d1UsageTableUnavailableUntil) return false;
+    if (!usage.statements) return false;
+    if (kind !== 'scheduled' && usage.rows_read < D1_USAGE_RECORD_MIN_ROWS) return false;
+    const day = new Date(now).toISOString().slice(0, 10);
+    await env.DB.prepare(
+      `INSERT INTO d1_usage_daily (day, kind, key, invocations, statements, rows_read, rows_written, max_rows_read, last_ts)
+       VALUES (?,?,?,1,?,?,?,?,?)
+       ON CONFLICT(day, kind, key) DO UPDATE SET invocations = invocations + 1, statements = statements + excluded.statements,
+         rows_read = rows_read + excluded.rows_read, rows_written = rows_written + excluded.rows_written,
+         max_rows_read = MAX(max_rows_read, excluded.max_rows_read), last_ts = excluded.last_ts`
+    ).bind(day, kind, String(key || 'unknown').slice(0, 120), usage.statements, usage.rows_read, usage.rows_written, usage.rows_read, now).run();
+    return true;
+  } catch (err) {
+    if (/no such table/i.test(String(err && err.message || err))) d1UsageTableUnavailableUntil = Date.now() + D1_USAGE_TABLE_RETRY_MS;
+    return false;
+  }
+}
+
 // =====================================================================
 // ---- Read-route cache (2026-11) ----
 //
@@ -11876,6 +11905,8 @@ export default {
       let path = null;
       try { path = new URL(request.url).pathname; } catch { /* leave null */ }
       logD1Usage(usage, { kind: 'fetch', method: request.method, path, status, elapsed_ms: Date.now() - started }, env);
+      const recording = recordD1UsageDaily(env, usage, 'fetch', `${request.method} ${path}`);
+      if (ctx && typeof ctx.waitUntil === 'function') ctx.waitUntil(recording);
     }
   },
 
@@ -11903,6 +11934,7 @@ export default {
       ctx.waitUntil(Promise.allSettled(pending).then(() => {
         routeCacheClear();
         logD1Usage(usage, { kind: 'scheduled', cron: event && event.cron, elapsed_ms: Date.now() - started, ...(memo ? { memo_hits: memo.stats.hits, memo_misses: memo.stats.misses, memo_invalidations: memo.stats.invalidations } : {}) }, env);
+        return recordD1UsageDaily(env, usage, 'scheduled', event && event.cron);
       }));
     }
   },

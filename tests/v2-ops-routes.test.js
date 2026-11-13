@@ -4,7 +4,8 @@ import worker from '../worker.js';
 
 const OPS = [['GET', '/btc-backfill'], ['GET', '/btc-backfill-hourly'], ['GET', '/link-backfill'], ['GET', '/link-backfill-hourly'],
   ['GET', '/eth-backfill-history'], ['GET', '/recalibrate-refresh'], ['GET', '/recalibrate-refresh-challenger'],
-  ['GET', '/run-link-analysis']];
+  ['GET', '/run-link-analysis'], ['GET', '/run-analysis'], ['GET', '/backtest-technical'], ['GET', '/backtest-feature'],
+  ['GET', '/backtest-combined'], ['GET', '/backtest-regime-split'], ['POST', '/analyst-relay/submit']];
 const T = 'ops-token-0123456789abcdef';
 function trapDb() {
   const used = [];
@@ -31,9 +32,24 @@ describe('operational write routes', () => {
       expect([401, 503]).not.toContain(r.status);
     });
   }
-  it('POST /analyst-relay/submit stays public: the live dashboard calls it without credentials', async () => {
-    const r = await call('POST', '/analyst-relay/submit', {}, { DB: trapDb() });
-    expect([401, 503]).not.toContain(r.status);
+  it('the Research Lab admin secret works when OPS_ADMIN_TOKEN is not set, and OPS_ADMIN_TOKEN takes precedence when it is', async () => {
+    const S7 = 'stage7-admin-abcdef'; const p = '/recalibrate-refresh';
+    expect((await call('GET', p, { Authorization: 'Bearer wrong' }, { DB: trapDb(), STAGE7_ADMIN_TOKEN: S7 })).status).toBe(401);
+    expect([401, 503]).not.toContain((await call('GET', p, { Authorization: 'Bearer ' + S7 }, { DB: trapDb(), STAGE7_ADMIN_TOKEN: S7 })).status);
+    expect((await call('GET', p, { Authorization: 'Bearer ' + S7 }, { DB: trapDb(), STAGE7_ADMIN_TOKEN: S7, OPS_ADMIN_TOKEN: T })).status).toBe(401);
+    expect([401, 503]).not.toContain((await call('GET', p, { Authorization: 'Bearer ' + T }, { DB: trapDb(), STAGE7_ADMIN_TOKEN: S7, OPS_ADMIN_TOKEN: T })).status);
+  });
+  it('POST /analyst-relay/submit: an authorised request records, an oversized one is refused, and the preflight allows the Authorization header', async () => {
+    const env = { DB: trapDb(), OPS_ADMIN_TOKEN: T };
+    const post = (body, h = { Authorization: 'Bearer ' + T }) => worker.fetch(new Request('https://w/analyst-relay/submit', { method: 'POST', headers: { 'Content-Type': 'application/json', ...h }, body: JSON.stringify(body) }), env);
+    expect((await post({ rawResponseText: 'x'.repeat(200 * 1024 + 1) })).status).toBe(413);
+    expect((await post({ rawResponseText: '' })).status).toBe(400);
+    expect(env.DB.used).toEqual([]);
+    const ok = await post({ rawResponseText: 'an analyst answer', candidateId: 'c1', assets: ['BTC'] });
+    expect([401, 403, 413, 503]).not.toContain(ok.status);
+    expect(env.DB.used.length).toBeGreaterThan(0);
+    const pre = await worker.fetch(new Request('https://w/analyst-relay/submit', { method: 'OPTIONS' }), {});
+    expect(pre.headers.get('Access-Control-Allow-Headers')).toContain('Authorization');
   });
   it('read routes and /predict are not affected', async () => {
     for (const p of ['/chart-data', '/prediction-freshness', '/calibration-history']) {

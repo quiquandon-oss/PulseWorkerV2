@@ -10402,25 +10402,32 @@ const RESEARCH_LAB_HTML = `<!DOCTYPE html>
 </html>
 `;
 
-// ═══ Operational write routes: owner-only (sec-v2-ops, 2026-11-01) ═══
-// These GET routes write to production D1 (price backfills, calibration curves) or spend Gemini quota, and no
-// frontend, workflow or script calls them (re-checked 2026-11-12 against the live dashboard and every workflow).
-// They require `Authorization: Bearer <OPS_ADMIN_TOKEN>` and are disabled (503) while that secret is unset: nothing
-// user-facing depends on them, so failing closed is safe. /predict and the cron paths are unaffected (their writes
-// are already fenced by resolveWriteAuthorization).
-// POST /analyst-relay/submit is NOT in this list: the live dashboard's Analyst Relay panel calls it without
-// credentials, so gating it here would break that panel. It stays public until it gets its own sign-in.
+// ═══ Owner-only write routes (sec-v2-ops, 2026-11-01; extended 2026-11-12) ═══
+// Every route here writes to production D1 or spends Gemini quota. They require
+// `Authorization: Bearer <admin token>` and answer 503 while no admin token is configured (fail closed).
+// The admin token is OPS_ADMIN_TOKEN when that secret is set, otherwise STAGE7_ADMIN_TOKEN (the Research Lab's
+// existing admin secret), so no new secret is needed to use them.
+// - Maintenance routes: called by nothing (checked 2026-11-12 against the deployed dashboard, the V1 page,
+//   CryptoPulseV4 and every workflow and script in this repository).
+// - POST /analyst-relay/submit: called by the dashboard's Analyst Relay panel, which now sends the bearer token
+//   the owner enters there. A cross-site page cannot make a browser attach this header, so no CSRF defence is
+//   needed beyond the token itself.
+// /predict and the cron paths are unaffected (their writes are fenced by resolveWriteAuthorization).
 const V2_OPS_ROUTES = new Set([
   'GET:/btc-backfill', 'GET:/btc-backfill-hourly', 'GET:/link-backfill', 'GET:/link-backfill-hourly', 'GET:/eth-backfill-history',
-  'GET:/recalibrate-refresh', 'GET:/recalibrate-refresh-challenger', 'GET:/run-link-analysis',
+  'GET:/recalibrate-refresh', 'GET:/recalibrate-refresh-challenger', 'GET:/run-link-analysis', 'GET:/run-analysis',
+  'GET:/backtest-technical', 'GET:/backtest-feature', 'GET:/backtest-combined', 'GET:/backtest-regime-split',
+  'POST:/analyst-relay/submit',
 ]);
+const ANALYST_RELAY_MAX_BYTES = 200 * 1024;
 function v2OpsAuth(request, url, env) {
   if (!V2_OPS_ROUTES.has(`${request.method}:${url.pathname}`)) return 'public';
-  if (!env.OPS_ADMIN_TOKEN) return 'disabled';
+  const expected = env.OPS_ADMIN_TOKEN || env.STAGE7_ADMIN_TOKEN;
+  if (!expected) return 'disabled';
   const h = request.headers.get('Authorization') || '';
   const given = h.startsWith('Bearer ') ? h.slice(7) : '';
-  let diff = given.length ^ env.OPS_ADMIN_TOKEN.length;
-  for (let i = 0; i < Math.max(given.length, env.OPS_ADMIN_TOKEN.length); i++) diff |= (given.charCodeAt(i) || 0) ^ (env.OPS_ADMIN_TOKEN.charCodeAt(i) || 0);
+  let diff = given.length ^ expected.length;
+  for (let i = 0; i < Math.max(given.length, expected.length); i++) diff |= (given.charCodeAt(i) || 0) ^ (expected.charCodeAt(i) || 0);
   return diff === 0 ? 'ok' : 'rejected';
 }
 
@@ -10430,13 +10437,13 @@ const pulseWorkerHandlers = {
     const corsHeaders = {
       'Access-Control-Allow-Origin': '*',
       'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
-      'Access-Control-Allow-Headers': 'Content-Type',
+      'Access-Control-Allow-Headers': 'Content-Type, Authorization',
     };
     if (request.method === 'OPTIONS') return new Response(null, { headers: corsHeaders });
     {
       const ops = v2OpsAuth(request, url, env);
       if (ops === 'disabled' || ops === 'rejected') {
-        return new Response(JSON.stringify({ ok: false, error: ops === 'disabled' ? 'operational route disabled: OPS_ADMIN_TOKEN is not configured' : 'unauthorized' }),
+        return new Response(JSON.stringify({ ok: false, error: ops === 'disabled' ? 'owner-only route disabled: no admin token is configured' : 'unauthorized' }),
           { status: ops === 'disabled' ? 503 : 401, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
       }
     }
@@ -10950,6 +10957,9 @@ const pulseWorkerHandlers = {
     if (url.pathname === '/analyst-relay/submit' && request.method === 'POST') {
       try {
         const body = await request.json();
+        if (body && typeof body.rawResponseText === 'string' && body.rawResponseText.length > ANALYST_RELAY_MAX_BYTES) {
+          return new Response(JSON.stringify({ ok: false, error: 'rawResponseText is too large' }), { status: 413, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+        }
         if (!body || typeof body.rawResponseText !== 'string' || !body.rawResponseText.trim()) {
           return new Response(JSON.stringify({ ok: false, error: 'rawResponseText is required' }), { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
         }

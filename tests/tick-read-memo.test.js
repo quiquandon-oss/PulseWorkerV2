@@ -85,6 +85,8 @@ describe('read memo in the real scheduled tick (integration)', () => {
     const hashesOn = on.tableHashes(); on.d1.log.length = 0; await on.cronTick(T0); const stmtsOn = on.d1.log.length; const afterOn = on.tableHashes(); on.close();
     const off = await makeWorld({ root: ROOT, t0: T0, warmupTicks: 24, env: { TICK_READ_MEMO: '0' } });
     const hashesOff = off.tableHashes(); off.d1.log.length = 0; await off.cronTick(T0); const stmtsOff = off.d1.log.length; const afterOff = off.tableHashes(); off.close();
+    // d1_usage_daily records how many rows each run read, which is exactly what the memo changes.
+    for (const t of [hashesOn, hashesOff, afterOn, afterOff]) delete t.d1_usage_daily;
     expect(hashesOn).toEqual(hashesOff);
     expect(afterOn).toEqual(afterOff);
     expect(stmtsOn).toBeLessThan(stmtsOff);

@@ -2,7 +2,11 @@ name: Prediction staleness alert
 
 # Fails when the prediction pipeline has stalled, so a missed scheduled run shows as a red run instead of going
 # unnoticed, and when a scheduled collection or evaluation workflow has stopped running or keeps failing.
-# Read-only: one GET of the public /prediction-freshness route and a listing of workflow runs. No writes, no deploy.
+# The `usage` job fails when the D1 rows read recorded today exceed 60% of the daily limit, or 85% projected to
+# the end of the day (ops/d1_usage_alert.py); reaching the limit stalled predictions on 2026-11-11.
+# Read-only: GETs of the public /prediction-freshness and /d1-usage routes and a listing of workflow runs. No
+# writes, no deploy. Started by the Worker's cron one hour after each prediction run, and by the schedule below.
+# Delivery: a failing job makes the run red; GitHub's own notification for failed runs is the only channel.
 on:
   schedule:
     - cron: '25 */3 * * *'
@@ -32,3 +36,13 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: python3 ops/workflow_health.py "${{ github.repository }}" | tee -a "$GITHUB_STEP_SUMMARY"; exit "${PIPESTATUS[0]}"
+
+  usage:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Read /d1-usage
+        run: curl -sS --fail --max-time 60 --retry 2 "https://pulseworker-v2.quiquandon.workers.dev/d1-usage?days=2" -o usage.json
+      - name: Fail if D1 reads are heading for the daily limit
+        run: python3 ops/d1_usage_alert.py usage.json | tee -a "$GITHUB_STEP_SUMMARY"; exit "${PIPESTATUS[0]}"

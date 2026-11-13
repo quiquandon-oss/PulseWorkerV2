@@ -1,48 +1,46 @@
 name: Prediction staleness alert
 
-# Fails when the prediction pipeline has stalled, so a missed scheduled run shows as a red run instead of going
-# unnoticed, and when a scheduled collection or evaluation workflow has stopped running or keeps failing.
-# The `usage` job fails when the D1 rows read recorded today exceed 60% of the daily limit, or 85% projected to
-# the end of the day (ops/d1_usage_alert.py); reaching the limit stalled predictions on 2026-11-11.
-# Read-only: GETs of the public /prediction-freshness and /d1-usage routes and a listing of workflow runs. No
-# writes, no deploy. Started by the Worker's cron one hour after each prediction run, and by the schedule below.
-# Delivery: a failing job makes the run red; GitHub's own notification for failed runs is the only channel.
+# Three checks, reported once (ops/ALERTING.md):
+#   predictions  the prediction pipeline has stalled or missed scheduled runs (/prediction-freshness)
+#   workflows    a scheduled collection or evaluation workflow stopped running or keeps failing
+#   usage        D1 rows read today are heading for the daily limit (/d1-usage); reaching it stalled
+#                predictions on 2026-11-11
+# De-duplication: findings are kept in one issue labelled `ops-alert`. The run is red only when an alert is new
+# or its set of problems changed; while the same alert lasts the run is green and says so, and the issue is
+# closed automatically on recovery. A check that cannot read its source counts as a finding.
+# Read-only apart from that issue: GETs of two public Worker routes and a listing of workflow runs. No deploy.
+# Started by the Worker's cron one hour after each prediction run, and by the schedule below as fallback.
 on:
   schedule:
     - cron: '25 */3 * * *'
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      simulate:
+        description: 'Test only: run a fixed scenario against the label ops-alert-test (healthy, usage_warning, usage_critical, usage_stale, predictions_stale, fetch_failure). Empty = real checks.'
+        required: false
+        default: ''
 
 permissions:
   contents: read
   actions: read
+  issues: write     # only to open, update and close the alert issue
+
+concurrency:
+  group: prediction-staleness-alert     # one writer to the alert issue at a time
+  cancel-in-progress: false
 
 jobs:
-  check:
+  alert:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
-      - name: Read /prediction-freshness
-        run: curl -sS --fail --max-time 60 --retry 2 https://pulseworker-v2.quiquandon.workers.dev/prediction-freshness -o fresh.json
-      - name: Fail if predictions are stale or scheduled runs were missed
-        run: python3 ops/prediction_staleness.py fresh.json | tee -a "$GITHUB_STEP_SUMMARY"; exit "${PIPESTATUS[0]}"
-
-  workflows:
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    steps:
-      - uses: actions/checkout@v4
-      - name: Fail if a scheduled workflow stopped running or keeps failing
+      - name: Run the checks and report once
         env:
           GITHUB_TOKEN: ${{ github.token }}
-        run: python3 ops/workflow_health.py "${{ github.repository }}" | tee -a "$GITHUB_STEP_SUMMARY"; exit "${PIPESTATUS[0]}"
-
-  usage:
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    steps:
-      - uses: actions/checkout@v4
-      - name: Read /d1-usage
-        run: curl -sS --fail --max-time 60 --retry 2 "https://pulseworker-v2.quiquandon.workers.dev/d1-usage?days=2" -o usage.json
-      - name: Fail if D1 reads are heading for the daily limit
-        run: python3 ops/d1_usage_alert.py usage.json | tee -a "$GITHUB_STEP_SUMMARY"; exit "${PIPESTATUS[0]}"
+          ALERT_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          SIMULATE: ${{ inputs.simulate }}
+        run: |
+          if [ -n "$SIMULATE" ]; then set -- --simulate "$SIMULATE"; else set --; fi
+          python3 ops/alert_run.py "${{ github.repository }}" "$@" | tee -a "$GITHUB_STEP_SUMMARY"
+          exit "${PIPESTATUS[0]}"

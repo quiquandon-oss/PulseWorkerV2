@@ -16,6 +16,9 @@ README describes the schema, not today's data.
 | `challenger_predictions.csv` | Challenger model (flat + Foufi-tilted + momentum variants), all 3 coins together, distinguished by `coin` column |
 | `selection_decisions.csv` | The meta-layer: which variant (original/experimental/calibrated/challenger_*) was actually chosen live for each coin/horizon/cycle, and why |
 | `selection_decisions_momentum.csv` | Learning Roadmap §3 Experiment 3's evidence store — `challenger_momentum` scored in parallel against the same neighborhood as the 6 production variants. Logged-only: momentum is NOT in `selection_decisions` and cannot be `chosen_variant` there |
+| `selection_decisions_anomaly.csv` | Experiment 2's logged-only shadow decisions (softened gate under anomaly). One row per daily log; the same cycle can appear more than once |
+| `selection_provenance.csv` | For each selection row written from 2026-11-12 on: which resolved prediction `chosen_p_up` came from (`chosen_p_up_source_ts`), the chosen variant's own value for the cycle (`cycle_p_up`), and what triggered the selection. Earlier rows have no provenance |
+| `btc_data.csv`, `eth_data.csv`, `link_data.csv` | The price series the k-NN models read, exactly as stored. Each scheduled run currently writes two rows per coin, seconds apart; they are exported as they are |
 | `STATUS.md` | Auto-generated on every run: exact refresh timestamp, row counts, earliest/latest `ts` per file |
 
 ## Column notes (non-obvious ones)

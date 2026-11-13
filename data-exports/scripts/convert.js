@@ -23,6 +23,11 @@ const TABLES = [
   { raw: 'challenger_predictions.json', csv: 'challenger_predictions.csv', label: 'Challenger predictions (all coins)' },
   { raw: 'selection_decisions.json', csv: 'selection_decisions.csv', label: 'Selection decisions' },
   { raw: 'selection_decisions_momentum.json', csv: 'selection_decisions_momentum.csv', label: 'Momentum experiment (Learning Roadmap §3 Experiment 3, logged-only)' },
+  { raw: 'selection_decisions_anomaly.json', csv: 'selection_decisions_anomaly.csv', label: 'Anomaly-gate shadow decisions (Experiment 2, logged-only)' },
+  { raw: 'selection_provenance.json', csv: 'selection_provenance.csv', label: 'Selection provenance (rows from 2026-11-12 onward)' },
+  { raw: 'btc_data.json', csv: 'btc_data.csv', label: 'BTC price series read by the models' },
+  { raw: 'eth_data.json', csv: 'eth_data.csv', label: 'ETH price series read by the models' },
+  { raw: 'link_data.json', csv: 'link_data.csv', label: 'LINK price series read by the models' },
 ];
 
 function extractRows(parsed) {

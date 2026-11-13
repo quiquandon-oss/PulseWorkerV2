@@ -1,0 +1,22 @@
+name: Prediction staleness alert
+
+# Fails when the prediction pipeline has stalled, so a missed scheduled run shows as a red run instead of going
+# unnoticed. Read-only: one GET of the public /prediction-freshness route. No secrets, no writes, no deploy.
+on:
+  schedule:
+    - cron: '25 */3 * * *'
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Read /prediction-freshness
+        run: curl -sS --fail --max-time 60 --retry 2 https://pulseworker-v2.quiquandon.workers.dev/prediction-freshness -o fresh.json
+      - name: Fail if predictions are stale or scheduled runs were missed
+        run: python3 ops/prediction_staleness.py fresh.json | tee -a "$GITHUB_STEP_SUMMARY"; exit "${PIPESTATUS[0]}"

@@ -20,6 +20,9 @@ import time
 import urllib.request
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import pev1p_window  # noqa: E402  PEV-1P no-peeking boundary: no window outcome before 2027-05-01T00:00Z
+
 PROTOCOL = "PEV-1"
 H = 3600000
 STEP_MS = 3 * H
@@ -92,7 +95,7 @@ def load_candles(paths, coin):
             avail = int(c["close_ts"]) + 1
             if not price_usable(avail):
                 continue                    # sealed: never parsed further
-            closes.setdefault(avail, float(c["c"]))
+            closes.setdefault(avail, pev1p_window.Price(float(c["c"]), avail))   # keeps its availability time
     return closes
 
 
@@ -113,6 +116,7 @@ def build_rows(closes, horizons=HORIZONS_H):
     """One row per 3-hourly grid time with a close. Features use closes at or before t only."""
     if not closes:
         return []
+    pev1p_window.check_prices(closes)       # no shifted or re-filed close, for labels, prev_ret and features alike
     start = min(closes) // STEP_MS * STEP_MS
     end = max(closes)
     rows, hist = [], []
@@ -130,7 +134,9 @@ def build_rows(closes, horizons=HORIZONS_H):
             row["regime_mag"] = regime_mag(hist)
         for h in horizons:
             fut = closes.get(t + h * H)
-            row["labels"][h] = None if fut is None else fut / p - 1
+            if fut is not None:
+                pev1p_window.check_label(t, p, fut, t + h * H)
+            row["labels"][h] = None if fut is None else pev1p_window.Label(fut / p - 1, t)
             past = closes.get(t - h * H)
             row["prev_ret"][h] = None if past is None else p / past - 1
         rows.append(row)
@@ -192,12 +198,15 @@ def _has_features(r):
 def _candidates(rows_upto, t, h):
     """Rows resolved early enough to be analogs at t (production: ts <= t - (h + 0.2h))."""
     cutoff = t - int(h * H * 1.2)
-    return [r for r in rows_upto if r["ts"] <= cutoff and r["labels"].get(h) is not None
-            and r["technical_score"] is not None and r["regime_mag"] is not None]
+    cands = [r for r in rows_upto if r["ts"] <= cutoff and r["labels"].get(h) is not None
+             and r["technical_score"] is not None and r["regime_mag"] is not None]
+    pev1p_window.check_rows(cands)          # every model reads labels only through here: no window or re-filed label
+    return cands
 
 
 def model_a(rows_upto, query, h, sent_ts, sent):
     """Legacy: symmetric join (among readings existing at t), imputation/scaling over all rows INCLUDING the query."""
+    pev1p_window.check_query(query)
     if not _has_features(query):
         return None                         # warm-up or gap: the model abstains (counted)
     t = query["ts"]
@@ -215,6 +224,7 @@ def model_a(rows_upto, query, h, sent_ts, sent):
 
 def model_corrected(rows_upto, query, h, sent_ts=None, sent=None, k_override=None):
     """B (sent_ts None) or C: as-of join, imputation and scaling fitted on rows before the query."""
+    pev1p_window.check_query(query)
     if not _has_features(query):
         return None                         # warm-up or gap: the model abstains (counted)
     t = query["ts"]
@@ -276,6 +286,7 @@ def _solve(a, b):
 
 
 def model_lr(rows_upto, query, h, lam):
+    pev1p_window.check_query(query)
     if not _has_features(query):
         return None                         # warm-up or gap: the model abstains (counted)
     t = query["ts"]
@@ -292,6 +303,7 @@ def model_lr(rows_upto, query, h, lam):
 
 
 def model_shrink(rows_upto, query, h, m):
+    pev1p_window.check_query(query)
     p = model_corrected(rows_upto, query, h, k_override=SHRINK_K)
     if p is None:
         return None
@@ -300,6 +312,7 @@ def model_shrink(rows_upto, query, h, m):
 
 
 def climatology(rows_upto, query, h):
+    pev1p_window.check_query(query)
     train = _candidates(rows_upto, query["ts"], h)
     if not train:
         return None
@@ -307,6 +320,7 @@ def climatology(rows_upto, query, h):
 
 
 def persistence(query, h):
+    pev1p_window.check_query(query)
     r = query["prev_ret"].get(h)
     return None if r is None else (1.0 if r > 0 else 0.0)
 
@@ -375,9 +389,16 @@ def unit_times(rows, h, lo, hi):
 
 def predict_all(rows, units, h, models):
     """{model: [p or None per unit]}. rows_upto contains only rows at or before the unit (no future rows)."""
+    pev1p_window.check_rows(rows)
+    pev1p_window.check_rows(units)
     ts_index = [r["ts"] for r in rows]
     out = {name: [] for name in models}
+    before = pev1p_window.before_checkpoint()
     for u in units:
+        if before and pev1p_window.is_window_unit(u):
+            for name in models:                 # PEV-1P window: no prediction before the checkpoint. Such units are
+                out[name].append(None)          # unresolved then (build_rows refuses their labels), so every metric
+            continue                            # already excludes them as "unresolved"
         upto = rows[:bisect.bisect_right(ts_index, u["ts"])]
         for name, fn in models.items():
             out[name].append(fn(upto, u, h))
@@ -386,6 +407,7 @@ def predict_all(rows, units, h, models):
 
 def score_block(names, preds, units, h, compare_to=None):
     """Metrics on the common eligible set: units where every model in `names` predicted and the label resolved."""
+    pev1p_window.check_rows(units)
     excluded = {"unresolved": 0, "model_abstained": 0}
     keep = []
     for i, u in enumerate(units):
@@ -427,6 +449,7 @@ def score_block(names, preds, units, h, compare_to=None):
 
 
 def goal_a(names, preds, units, keep, h):
+    pev1p_window.check_rows(units)
     big = [i for i in keep if abs(units[i]["labels"][h]) > LARGE_MOVE]
     out = {"threshold_abs_return": LARGE_MOVE, "n_large": len(big),
            "n_large_up": sum(1 for i in big if units[i]["labels"][h] > 0),

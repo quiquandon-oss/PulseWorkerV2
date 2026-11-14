@@ -30,7 +30,7 @@ jobs:
         with:
           python-version: '3.12'
       - name: Harness tests (never report from a red harness)
-        run: pip install pytest --break-system-packages -q && python3 -m pytest -q research/test_prospective_pev.py research/test_prediction_eval.py
+        run: pip install pytest --break-system-packages -q && python3 -m pytest -q research/test_prospective_pev.py research/test_prediction_eval.py research/test_pev1p_guard.py
       - name: Fetch post-seal candles (public API)
         run: python3 research/prospective_pev.py fetch --out post
       - name: Fetch the V1 sentiment archive (public read-only endpoint)

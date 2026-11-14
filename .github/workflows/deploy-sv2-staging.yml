@@ -38,23 +38,42 @@ jobs:
           ref: ${{ inputs.ref }}
           persist-credentials: false
 
-      # The deploy configuration never comes from the ref being deployed: a ref could add a [build] command (Wrangler
-      # runs it during deploy, with the deploy token in its environment) or other settings. The reviewed
-      # wrangler.staging.toml from this workflow's own commit (on main) replaces the ref's copy.
-      - name: Use the reviewed wrangler.staging.toml from the workflow's commit, not from the ref
-        env:
-          WF_SHA: ${{ github.sha }}
+      # The deploy configuration never comes from the ref being deployed, nor from the dispatching branch: a ref could
+      # add a build command (Wrangler runs it during deploy, with the deploy token in its environment). The run must be
+      # dispatched from main, and the staging config is taken from origin/main and validated against an allowlist.
+      - name: Refuse dispatches from anything but main
+        run: |
+          if [ "$GITHUB_REF" != "refs/heads/main" ]; then echo "::error::dispatch this workflow from main (got $GITHUB_REF); the ref to deploy is the input"; exit 1; fi
+
+      - name: Use the reviewed wrangler.staging.toml from origin/main, not from the ref
         run: |
           set -euo pipefail
-          git -c protocol.version=2 fetch -q --depth=1 "https://github.com/${GITHUB_REPOSITORY}.git" "$WF_SHA"
+          git -c protocol.version=2 fetch -q --depth=1 "https://github.com/${GITHUB_REPOSITORY}.git" refs/heads/main
           git show "FETCH_HEAD:wrangler.staging.toml" > wrangler.staging.toml
-          echo "using wrangler.staging.toml from workflow commit $WF_SHA"
+          echo "using wrangler.staging.toml from origin/main $(git rev-parse FETCH_HEAD)"
 
-      - name: Validate wrangler.staging.toml targets only the staging Worker and database, with no build step
+      - name: Validate the staging config (parsed TOML, allowlisted keys only, staging targets only)
+        run: |
+          python3 - <<'PYEOF'
+          import tomllib, sys
+          c = tomllib.load(open('wrangler.staging.toml', 'rb'))
+          allowed = {'name', 'main', 'compatibility_date', 'account_id', 'vars', 'd1_databases', 'ai', 'observability', 'workers_dev'}
+          extra = set(c) - allowed
+          if extra: sys.exit(f"::error::keys not allowed in the staging config: {sorted(extra)} (no build, env, triggers, routes, services)")
+          if c.get('name') != 'pulseworker-v2-staging': sys.exit('::error::not the staging Worker name')
+          if c.get('main') != 'worker.js': sys.exit('::error::main must be worker.js')
+          dbs = c.get('d1_databases') or []
+          if len(dbs) != 1 or dbs[0].get('database_id') != '5458d504-2778-49ae-bd25-7751f1c49d50' or dbs[0].get('database_name') != 'pulseworker-v2-staging':
+              sys.exit('::error::the only D1 binding must be the staging database')
+          if set(c.get('ai') or {}) - {'binding'}: sys.exit('::error::unexpected [ai] keys')
+          if any(not isinstance(v, str) for v in (c.get('vars') or {}).values()): sys.exit('::error::vars must be plain strings')
+          print('staging config validated:', sorted(c))
+          PYEOF
+
+      - name: Validate wrangler.staging.toml targets only the staging Worker and database
         run: |
           set -e
           grep -qx 'name = "pulseworker-v2-staging"' wrangler.staging.toml || { echo "::error::not the staging Worker name"; exit 1; }
-          if grep -qiE '^\s*\[(build|\[?env)|^\s*command\s*=' wrangler.staging.toml; then echo "::error::build commands or env sections are not allowed in the staging config"; exit 1; fi
           grep -qx 'database_id = "5458d504-2778-49ae-bd25-7751f1c49d50"' wrangler.staging.toml || { echo "::error::not the staging D1 id"; exit 1; }
           if grep -qE '^name = "pulseworker-v2"$|^database_name = "sentiment-history"|f91ca980-b886-423a-bd6f-f3baea46d181' wrangler.staging.toml; then
             echo "::error::production identifier in wrangler.staging.toml"; exit 1; fi

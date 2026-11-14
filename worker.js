@@ -10870,6 +10870,29 @@ const pulseWorkerHandlers = {
     }
 
     // ---- GET /prediction-freshness -- read-only persistence monitor (see getPredictionFreshness)
+    if (url.pathname === '/api/sentiment-v2/comparison' && request.method === 'GET') {
+      const period = String(url.searchParams.get('period') || '7d').toLowerCase();
+      if (!Object.prototype.hasOwnProperty.call(SV2_PERIODS_MS, period)) {
+        return new Response(JSON.stringify({ ok: false, error: 'period must be one of 24h, 7d, 30d, 90d, all' }), { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+      }
+      try {
+        // Cache API (free, shared across isolates in a location) first, then the in-isolate cache, then D1.
+        const edge = typeof caches !== 'undefined' && caches.default ? caches.default : null;
+        const cacheKey = new Request(`${url.origin}/api/sentiment-v2/comparison?period=${period}`, { method: 'GET' });
+        if (edge) {
+          const hit = await edge.match(cacheKey);
+          if (hit) return new Response(hit.body, { headers: { ...corsHeaders, 'Content-Type': 'application/json', 'Cache-Control': 'public, max-age=300', 'X-SV2-Cache': 'edge' } });
+        }
+        const { result, cache } = await getSentimentV2ComparisonCached(env, period, Date.now());
+        const body = JSON.stringify(result);
+        if (edge) ctx.waitUntil(edge.put(cacheKey, new Response(body, { headers: { 'Content-Type': 'application/json', 'Cache-Control': 'public, max-age=300' } })));
+        return new Response(body, { headers: { ...corsHeaders, 'Content-Type': 'application/json',
+          'Cache-Control': 'public, max-age=300', 'X-SV2-Cache': cache } });
+      } catch (err) {
+        return new Response(JSON.stringify({ ok: false, error: String(err) }), { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+      }
+    }
+
     if (url.pathname === '/prediction-freshness' && request.method === 'GET') {
       try {
         const { result, cache, age_ms } = await getPredictionFreshnessCached(env);
@@ -11596,9 +11619,14 @@ const pulseWorkerHandlers = {
           () => refreshDailyReportCache(env).catch(err => console.error('Daily report cache refresh failed:', err))
         ));
       } else {
+        // Sentiment V2 runs after detection, in the same non-tick invocation (never alongside the prediction tick), so
+        // detection's writes complete first and a V2 failure cannot affect them. V2 is idempotent per V1 observation.
         ctx.waitUntil(runAutomaticDetection(env, { trigger: 'cron', nowTs: event.scheduledTime })
           .then(r => console.log('event detection (cron):', JSON.stringify({ ok: r.ok, skipped: r.skipped || false, reason: r.reason || r.error || null })))
-          .catch(err => console.error('Event detection (cron) failed:', err)));
+          .catch(err => console.error('Event detection (cron) failed:', err))
+          .then(() => runSentimentV2Cycle(env, { nowTs: event.scheduledTime }))
+          .then(r => console.log('sentiment v2 (cron):', JSON.stringify({ ok: r.ok, skipped: r.skipped || false, written: r.written || 0, reason: r.reason || null })))
+          .catch(err => console.error('Sentiment V2 (cron) failed:', err)));
       }
     }
     // No catch-all else: an unrecognized event.cron does nothing.
@@ -11981,6 +12009,670 @@ async function dispatchResearchCollection(env, fetchImpl = fetch, url = RESEARCH
   } finally {
     clearTimeout(timer);
   }
+}
+
+// ============================================================================================================
+// Sentiment V2 (docs/SENTIMENT_V2_BUILD_SPEC.md; design and hypotheses: docs/SENTIMENT_V2_IMPLEMENTATION.md)
+//
+// Runs in parallel with V1 and never writes, rewrites or re-weights anything V1 owns. Inputs, read only:
+// research_sentiment_archive (V1's archived observations: V1 score, BTC price, the 21 V1 source readings) and
+// event_ledger (Event Detection). Output: sentiment_v2_results only. Each V2 decision is a V1 observation_ts, so
+// V1, V2 and BTC share exact timestamps. Point-in-time: a decision at t uses only archive rows with
+// observation_ts <= t and events with detected_ts <= t. No historical V2 is fabricated: the first cycle evaluates
+// only the newest V1 observation, later cycles catch up on observations newer than the last V2 result.
+// Deterministic core; AI is an optional, schema-validated annotation that never sets a number, and it is disabled
+// unless a verified-free Workers AI model and a daily ceiling are configured. There is no other AI provider and no
+// paid fallback.
+// ============================================================================================================
+const SENTIMENT_V2_VERSION = 'sv2-1.0.0';
+
+function sv2Config() {
+  return {
+    version: SENTIMENT_V2_VERSION,
+    // Spec §4.2 information families, filled only with sources V1 actually archives. `global` appears in V1's list of
+    // known sources but not in current observations; a family with no observed source is reported, never imputed.
+    families: {
+      market_sentiment_news: ['fng', 'cryptonews', 'foufi'],
+      derivatives_positioning: ['funding', 'longshort', 'hypefunding', 'hloi'],
+      institutional_flows_etf: ['etfflows', 'sosovalue'],
+      onchain_activity: ['onchain'],
+      macroeconomic: ['macrogeo', 'yield10y', 'usd', 'oil', 'gold'],
+      cross_asset_equities: ['nasdaq', 'sp500', 'ninemag'],
+      market_structure_breadth: ['global'],
+      regulation_geopolitics: ['regulatory', 'geopolitics'],
+      corporate_treasury_catalysts: ['strc'],
+    },
+    staleAfterUnchanged: 10,                 // EXP-005 research/source_intelligence.py STALE_AFTER_N_OBSERVATIONS
+    redundancyR: 0.9, redundancyMinN: 30, redundancyWindow: 120,
+    eventLookbackMs: 72 * 3600000, eventHalfLifeMs: 24 * 3600000, eventMaxAdjust: 10, overlapFactor: 0.5,
+    severityWeight: { LOW: 0.25, MEDIUM: 0.5, HIGH: 0.75, CRITICAL: 1 },
+    roleWindowMs: 6 * 3600000, consequenceMove: 0.02, coincidentMove: 0.01,
+    reactionLookbackMs: 30 * 86400000, horizonMs: 24 * 3600000,
+    analogueK: 20, analogueMinN: 10, analogueMinFamilies: 5,
+    historyMs: 31 * 86400000, maxCatchUp: 3, minCoverageOk: 0.5, priceToleranceMs: 3 * 3600000,
+    maxIds: 20,
+  };
+}
+
+function sv2Finite(x) {
+  const n = typeof x === 'number' ? x : (x === null || x === undefined || x === '' ? NaN : Number(x));
+  return Number.isFinite(n) ? n : null;
+}
+
+function sv2ParseSources(json) {
+  let obj = json;
+  if (typeof json === 'string') { try { obj = JSON.parse(json); } catch (e) { return {}; } }
+  const out = {};
+  if (!obj || typeof obj !== 'object' || Array.isArray(obj)) return out;
+  for (const [k, v] of Object.entries(obj)) {
+    const n = sv2Finite(v);
+    if (n !== null && n >= 0 && n <= 100) out[k] = n;     // V1 readings are 0-100; anything else is not a reading
+  }
+  return out;
+}
+
+function sv2History(rows) {
+  // A price stored on the archive row belongs to that observation, so its timestamp is the row's own.
+  return (rows || []).map(r => {
+    const ts = Number(r.observation_ts), btc = sv2Finite(r.btc_price);
+    return { ts, v1: sv2Finite(r.score), btc: btc !== null && btc > 0 ? btc : null, btc_ts: btc !== null && btc > 0 ? ts : null,
+      src: sv2ParseSources(r.sources_json) };
+  }).filter(r => Number.isFinite(r.ts)).sort((a, b) => a.ts - b.ts);
+}
+
+function sv2AttachPrices(hist, prices, toleranceMs) {
+  // V1's archive rows carry no BTC price, so each observation gets the last btc_data price at or before its own
+  // timestamp (never a later one), within the tolerance; otherwise none. Returns how many observations got a price.
+  const ps = (prices || []).map(r => ({ ts: Number(r.ts), price: sv2Finite(r.btc_price) }))
+    .filter(r => Number.isFinite(r.ts) && r.price !== null && r.price > 0).sort((a, b) => a.ts - b.ts);
+  // Keep the dense price series (plus any archive-row prices) for point-in-time lookups at arbitrary times.
+  const merged = ps.concat(hist.filter(h => h.btc !== null && h.btc_ts !== null && h.btc_ts !== undefined).map(h => ({ ts: h.btc_ts, price: h.btc })))
+    .sort((a, b) => a.ts - b.ts);
+  Object.defineProperty(hist, 'prices', { value: merged, enumerable: false, configurable: true, writable: true });
+  let j = -1, n = 0;
+  for (const h of hist) {
+    while (j + 1 < ps.length && ps[j + 1].ts <= h.ts) j++;
+    if (h.btc === null && j >= 0 && h.ts - ps[j].ts <= toleranceMs) { h.btc = ps[j].price; h.btc_ts = ps[j].ts; }
+    if (h.btc !== null) n++;
+  }
+  return n;
+}
+
+function sv2IndexAtOrBefore(hist, ts) {
+  let lo = 0, hi = hist.length - 1, ans = -1;
+  while (lo <= hi) { const mid = (lo + hi) >> 1; if (hist[mid].ts <= ts) { ans = mid; lo = mid + 1; } else hi = mid - 1; }
+  return ans;
+}
+
+function sv2PriceAt(hist, ts, toleranceMs = 3 * 3600000) {
+  // The last price observed at or before ts, and no older than the tolerance; otherwise none (never a stale price).
+  if (hist.prices && hist.prices.length) {
+    const ps = hist.prices;
+    let lo = 0, hi = ps.length - 1, k = -1;
+    while (lo <= hi) { const mid = (lo + hi) >> 1; if (ps[mid].ts <= ts) { k = mid; lo = mid + 1; } else hi = mid - 1; }
+    return k >= 0 && ts - ps[k].ts <= toleranceMs ? { ts: ps[k].ts, price: ps[k].price } : null;
+  }
+  for (let j = sv2IndexAtOrBefore(hist, ts); j >= 0 && hist[j].ts >= ts - toleranceMs; j--) {
+    const h = hist[j];
+    const pts = h.btc_ts !== undefined && h.btc_ts !== null ? h.btc_ts : h.ts;
+    if (h.btc !== null && pts <= ts && ts - pts <= toleranceMs) return { ts: pts, price: h.btc };
+  }
+  return null;
+}
+
+function sv2SourceStatus(hist, i, cfg) {
+  const known = new Set();
+  for (let j = 0; j <= i; j++) for (const k of Object.keys(hist[j].src)) known.add(k);
+  const cur = hist[i].src, out = {};
+  for (const k of [...known].sort()) {
+    if (!(k in cur)) { out[k] = { state: 'missing' }; continue; }
+    let same = 1;
+    for (let j = i - 1; j >= 0 && same < cfg.staleAfterUnchanged; j--) {
+      if (!(k in hist[j].src)) continue;
+      if (hist[j].src[k] === cur[k]) same++; else break;
+    }
+    out[k] = { state: same >= cfg.staleAfterUnchanged ? 'stale' : 'fresh', value: cur[k], unchanged_obs: same };
+  }
+  return out;
+}
+
+function sv2Pearson(xs, ys) {
+  const n = xs.length;
+  if (n < 2) return null;
+  let mx = 0, my = 0;
+  for (let i = 0; i < n; i++) { mx += xs[i]; my += ys[i]; }
+  mx /= n; my /= n;
+  let sxy = 0, sxx = 0, syy = 0;
+  for (let i = 0; i < n; i++) { const a = xs[i] - mx, b = ys[i] - my; sxy += a * b; sxx += a * a; syy += b * b; }
+  if (sxx === 0 || syy === 0) return null;
+  return sxy / Math.sqrt(sxx * syy);
+}
+
+function sv2FamilyOf(key, cfg) {
+  for (const [fam, keys] of Object.entries(cfg.families)) if (keys.includes(key)) return fam;
+  return null;
+}
+
+function sv2Redundancy(hist, i, keys, cfg) {
+  // Highly correlated sources over the recent window (point-in-time: rows <= i). Within one family they are merged
+  // into one group so the family is not counted twice; across families they are reported as overlap only.
+  const lo = Math.max(0, i - cfg.redundancyWindow + 1);
+  const pairs = [];
+  const parent = {};
+  const find = k => (parent[k] === k ? k : (parent[k] = find(parent[k])));
+  for (const k of keys) parent[k] = k;
+  for (let a = 0; a < keys.length; a++) {
+    for (let b = a + 1; b < keys.length; b++) {
+      const xs = [], ys = [];
+      for (let j = lo; j <= i; j++) {
+        const s = hist[j].src;
+        if (keys[a] in s && keys[b] in s) { xs.push(s[keys[a]]); ys.push(s[keys[b]]); }
+      }
+      if (xs.length < cfg.redundancyMinN) continue;
+      const r = sv2Pearson(xs, ys);
+      if (r === null || r < cfg.redundancyR) continue;
+      const fa = sv2FamilyOf(keys[a], cfg), fb = sv2FamilyOf(keys[b], cfg);
+      pairs.push({ a: keys[a], b: keys[b], r: Math.round(r * 1000) / 1000, n: xs.length, same_family: fa !== null && fa === fb });
+      if (fa !== null && fa === fb) parent[find(keys[a])] = find(keys[b]);
+    }
+  }
+  const group = {};
+  for (const k of keys) group[k] = find(k);
+  return { pairs, group };
+}
+
+function sv2Families(status, redundancy, cfg) {
+  const out = {};
+  for (const [fam, keys] of Object.entries(cfg.families)) {
+    const observed = keys.filter(k => k in status);
+    const fresh = observed.filter(k => status[k].state === 'fresh');
+    const groups = {};
+    for (const k of fresh) (groups[redundancy.group[k] || k] = groups[redundancy.group[k] || k] || []).push(status[k].value);
+    const groupMeans = Object.values(groups).map(v => v.reduce((s, x) => s + x, 0) / v.length);
+    out[fam] = {
+      score: groupMeans.length ? groupMeans.reduce((s, x) => s + x, 0) / groupMeans.length : null,
+      sources_fresh: fresh, sources_stale: observed.filter(k => status[k].state === 'stale'),
+      sources_missing: observed.filter(k => status[k].state === 'missing'),
+      sources_never_observed: keys.filter(k => !(k in status)),
+      independent_groups: groupMeans.length,
+    };
+  }
+  return out;
+}
+
+function sv2EventFamily(type, rule) {
+  const s = `${type || ''} ${rule || ''}`.toLowerCase();
+  if (/(price|move|volatil|drawdown|breakout|candle|return)/.test(s)) return 'market_structure_breadth';
+  if (/(fund|open.?interest|\boi\b|liquidat|longshort|long.?short|basis|perp)/.test(s)) return 'derivatives_positioning';
+  if (/(etf|flow|institution)/.test(s)) return 'institutional_flows_etf';
+  if (/(onchain|on-chain|whale|exchange.?(in|out)flow|hack|exploit|stablecoin)/.test(s)) return 'onchain_activity';
+  if (/(regulat|\bsec\b|law|legal|ban|geopolit|war|sanction|tariff)/.test(s)) return 'regulation_geopolitics';
+  if (/(macro|cpi|fomc|fed|rate|yield|usd|dollar|oil|gold|inflation|jobs)/.test(s)) return 'macroeconomic';
+  if (/(equit|nasdaq|s&p|sp500|stock|mag)/.test(s)) return 'cross_asset_equities';
+  if (/(treasury|strategy|mstr|corporate|strc)/.test(s)) return 'corporate_treasury_catalysts';
+  if (/(news|sentiment|fear|greed)/.test(s)) return 'market_sentiment_news';
+  return 'unclassified';
+}
+
+function sv2EventReactions(events, hist, decisionTs, cfg) {
+  // Event reaction / priced-in prior: realised BTC return over the horizon after earlier detections whose outcome was
+  // already observable at decisionTs. Informational (a candidate input), never part of the sentiment score.
+  const by = {};
+  for (const e of events) {
+    const d = Number(e.detected_ts);
+    if (!(d >= decisionTs - cfg.reactionLookbackMs && d + cfg.horizonMs <= decisionTs)) continue;
+    const p0 = sv2PriceAt(hist, d);
+    let p1 = null;
+    for (let j = Math.max(0, sv2IndexAtOrBefore(hist, d + cfg.horizonMs)); j < hist.length && hist[j].ts <= decisionTs; j++) {
+      if (hist[j].ts >= d + cfg.horizonMs && hist[j].btc !== null) { p1 = hist[j].btc; break; }
+    }
+    if (!p0 || p1 === null) continue;
+    const t = e.event_type || 'unknown';
+    const r = p1 / p0.price - 1;
+    const b = (by[t] = by[t] || { n: 0, sum: 0, up: 0 });
+    b.n++; b.sum += r; if (r > 0) b.up++;
+  }
+  const out = {};
+  for (const [t, b] of Object.entries(by)) out[t] = { n: b.n, mean_return: Math.round((b.sum / b.n) * 1e5) / 1e5, up_share: Math.round((b.up / b.n) * 1000) / 1000 };
+  return out;
+}
+
+function sv2Events(events, hist, i, freshFamilies, cfg) {
+  const t = hist[i].ts;
+  const relevant = [], excluded = { other_asset: 0, expired: 0 };
+  for (const e of events) {
+    const d = Number(e.detected_ts);
+    if (!(d <= t && d >= t - cfg.eventLookbackMs)) continue;
+    if (e.expires_ts !== null && e.expires_ts !== undefined && Number(e.expires_ts) <= t) { excluded.expired++; continue; }
+    const asset = String(e.asset || '').toUpperCase();
+    if (asset && !['BTC', 'CRYPTO', 'MARKET', 'ALL', 'GLOBAL'].includes(asset)) { excluded.other_asset++; continue; }
+    relevant.push(e);
+  }
+  const groups = {};
+  for (const e of relevant) (groups[e.correlation_key || e.dedup_key || e.event_id] = groups[e.correlation_key || e.dedup_key || e.event_id] || []).push(e);
+  const sevRank = { LOW: 1, MEDIUM: 2, HIGH: 3, CRITICAL: 4 };
+  const reactions = sv2EventReactions(events, hist, t, cfg);
+  const assessed = [];
+  let keep = 1, wsum = 0, dsum = 0;
+  for (const [key, list] of Object.entries(groups)) {
+    list.sort((a, b) => (sevRank[b.severity] || 0) - (sevRank[a.severity] || 0) || Number(a.detected_ts) - Number(b.detected_ts));
+    const rep = list[0];
+    const first = Math.min(...list.map(e => Number(e.detected_ts)));
+    const dirs = new Set(list.map(e => e.direction));
+    const direction = dirs.size === 1 ? rep.direction : 'MIXED';
+    const dir = direction === 'UP' ? 1 : direction === 'DOWN' ? -1 : 0;
+    const novelty = Math.exp(-Math.LN2 * (t - first) / cfg.eventHalfLifeMs);
+    const conf = sv2Finite(rep.confidence);
+    const weight = (cfg.severityWeight[rep.severity] || 0) * novelty * (conf === null ? 1 : conf);
+    const family = sv2EventFamily(rep.event_type, rep.rule_id);
+    const p0 = sv2PriceAt(hist, first - cfg.roleWindowMs), p1 = sv2PriceAt(hist, first);
+    const move = p0 && p1 ? p1.price / p0.price - 1 : null;
+    let role = 'cause_candidate';
+    if (family === 'market_structure_breadth') role = 'consequence';
+    else if (move !== null && Math.abs(move) >= cfg.consequenceMove && Math.sign(move) === dir) role = 'consequence';
+    else if (move !== null && Math.abs(move) >= cfg.coincidentMove) role = 'coincident';
+    const overlaps = freshFamilies.has(family);
+    keep *= 1 - Math.min(1, weight);
+    wsum += weight;
+    dsum += dir * weight * (overlaps ? cfg.overlapFactor : 1);
+    assessed.push({ id: rep.event_id, group: key, type: rep.event_type, source: rep.source, severity: rep.severity,
+      direction, first_detected_ts: first, source_ts: Number(rep.source_ts), persistence: list.length,
+      novelty: Math.round(novelty * 1000) / 1000, weight: Math.round(weight * 1000) / 1000, family, role,
+      overlaps_fresh_family: overlaps, prior_move_6h: move === null ? null : Math.round(move * 1e4) / 1e4,
+      reaction_prior: reactions[rep.event_type] || null });
+  }
+  const intensity = Math.round((1 - keep) * 1000) / 1000;
+  const balance = wsum > 0 ? dsum / wsum : 0;
+  return { intensity, direction_balance: Math.round(balance * 1000) / 1000,
+    adjustment: Math.round(cfg.eventMaxAdjust * intensity * balance * 100) / 100,
+    events: assessed.sort((a, b) => b.weight - a.weight), excluded, n_raw: relevant.length, reactions };
+}
+
+function sv2Regime(hist, i) {
+  // Transparent rule classifier (live). An HMM remains a research challenger (implementation doc, H5).
+  const t = hist[i].ts, p = hist[i].btc;
+  const at = d => sv2PriceAt(hist, t - d);
+  const p24 = at(86400000), p7 = at(7 * 86400000), p30 = at(30 * 86400000);
+  const vol = days => {
+    const rs = [];
+    for (let j = i; j > 0 && hist[j].ts >= t - days * 86400000; j--) {
+      const a = hist[j - 1], b = hist[j];
+      if (a.btc && b.btc && b.ts > a.ts) rs.push(Math.log(b.btc / a.btc) / Math.sqrt((b.ts - a.ts) / 3600000));
+    }
+    if (rs.length < 5) return null;
+    const m = rs.reduce((s, x) => s + x, 0) / rs.length;
+    return Math.sqrt(rs.reduce((s, x) => s + (x - m) ** 2, 0) / (rs.length - 1)) * Math.sqrt(24);
+  };
+  const r = q => (q && p ? p / q.price - 1 : null);
+  const ret24 = r(p24), ret7 = r(p7), ret30 = r(p30), vol7 = vol(7), vol30 = vol(30);
+  const out = { ret_24h: ret24, ret_7d: ret7, ret_30d: ret30, vol_7d: vol7, vol_30d: vol30 };
+  for (const k of Object.keys(out)) if (out[k] !== null) out[k] = Math.round(out[k] * 1e5) / 1e5;
+  if (p === null || ret7 === null || !p7 || p7.ts > t - 6.5 * 86400000) return { regime: 'insufficient_history', ...out };
+  if ((vol7 !== null && vol30 !== null && vol30 > 0 && vol7 > 1.5 * vol30) || (ret24 !== null && Math.abs(ret24) >= 0.05)) return { regime: 'stress_high_volatility', ...out };
+  const longRet = ret30 !== null ? ret30 : ret7;
+  if (longRet >= 0.05 && ret7 >= 0) return { regime: 'bullish', ...out };
+  if (longRet <= -0.05 && ret7 <= 0) return { regime: 'bearish', ...out };
+  return { regime: 'sideways', ...out };
+}
+
+function sv2Profile(src, cfg) {
+  const out = {};
+  for (const [fam, keys] of Object.entries(cfg.families)) {
+    const v = keys.filter(k => k in src).map(k => src[k]);
+    if (v.length) out[fam] = v.reduce((s, x) => s + x, 0) / v.length;
+  }
+  return out;
+}
+
+function sv2Analogues(hist, i, cfg) {
+  // Candidate predictive signal, kept apart from sentiment: the share of the k most similar earlier family profiles
+  // whose BTC price rose over the horizon. Only analogues whose outcome was observable at the decision time count.
+  const t = hist[i].ts, cur = sv2Profile(hist[i].src, cfg);
+  const cands = [];
+  for (let j = 0; j < i; j++) {
+    if (hist[j].ts + cfg.horizonMs > t || hist[j].btc === null) continue;
+    let p1 = null;
+    for (let m = j + 1; m <= i; m++) if (hist[m].ts >= hist[j].ts + cfg.horizonMs && hist[m].btc !== null) { p1 = hist[m].btc; break; }
+    if (p1 === null) continue;
+    const prof = sv2Profile(hist[j].src, cfg);
+    const common = Object.keys(cur).filter(f => f in prof);
+    if (common.length < cfg.analogueMinFamilies) continue;
+    const dist = Math.sqrt(common.reduce((s, f) => s + (cur[f] - prof[f]) ** 2, 0) / common.length);
+    cands.push({ dist, up: p1 > hist[j].btc });
+  }
+  cands.sort((a, b) => a.dist - b.dist);
+  const top = cands.slice(0, cfg.analogueK);
+  const base = { method: 'family_profile_analogues', horizon_h: cfg.horizonMs / 3600000, validation: 'candidate_unvalidated', n: top.length };
+  if (top.length < cfg.analogueMinN) return { ...base, status: 'insufficient_history', p_up: null };
+  return { ...base, status: 'ok', p_up: Math.round((top.filter(c => c.up).length / top.length) * 1000) / 1000,
+    mean_distance: Math.round((top.reduce((s, c) => s + c.dist, 0) / top.length) * 100) / 100 };
+}
+
+function sv2Classify(score) {
+  if (score === null || score === undefined) return null;
+  if (score < 25) return 'strongly_bearish';
+  if (score < 45) return 'bearish';
+  if (score <= 55) return 'neutral';
+  if (score <= 75) return 'bullish';
+  return 'strongly_bullish';
+}
+
+function sv2Compute(hist, i, events, cfg) {
+  const row = hist[i], t = row.ts;
+  const status = sv2SourceStatus(hist, i, cfg);
+  const keys = Object.keys(status);
+  const redundancy = sv2Redundancy(hist, i, keys.filter(k => status[k].state !== 'missing'), cfg);
+  const families = sv2Families(status, redundancy, cfg);
+  const scored = Object.entries(families).filter(([, f]) => f.score !== null);
+  const fresh = keys.filter(k => status[k].state === 'fresh');
+  const coverage = keys.length ? fresh.length / keys.length : 0;
+  const unmapped = keys.filter(k => sv2FamilyOf(k, cfg) === null);
+  const freshFamilies = new Set(scored.map(([f]) => f));
+  const ev = sv2Events(events, hist, i, freshFamilies, cfg);
+  const regime = sv2Regime(hist, i);
+  const predictive = sv2Analogues(hist, i, cfg);
+  const missing = { missing: keys.filter(k => status[k].state === 'missing'), stale: keys.filter(k => status[k].state === 'stale'),
+    unmapped, families_without_sources: Object.entries(families).filter(([, f]) => !f.sources_fresh.length && !f.sources_stale.length && !f.sources_missing.length).map(([k]) => k),
+    families_without_fresh_sources: Object.entries(families).filter(([, f]) => f.score === null).map(([k]) => k) };
+  const base = { asset: 'BTC', decision_ts: t, calc_version: cfg.version, evidence_coverage: Math.round(coverage * 1000) / 1000,
+    market_regime: regime.regime, regime, event_intensity: ev.intensity, events: ev, predictive, missing,
+    redundancy: redundancy.pairs };
+  if (!scored.length) {
+    return { ...base, status: 'FAILED', degraded_reason: 'no_fresh_sources', sentiment_score: null, sentiment_class: null,
+      confidence: 0, families: {}, supporting_ids: [], contradicting_ids: [] };
+  }
+  const composite = scored.reduce((s, [, f]) => s + f.score, 0) / scored.length;          // H1: equal family weights
+  const score = Math.max(0, Math.min(100, composite + ev.adjustment));
+  const famScores = scored.map(([, f]) => f.score);
+  const mean = famScores.reduce((s, x) => s + x, 0) / famScores.length;
+  const sd = famScores.length > 1 ? Math.sqrt(famScores.reduce((s, x) => s + (x - mean) ** 2, 0) / (famScores.length - 1)) : 0;
+  const agreement = Math.max(0, 1 - sd / 25);
+  const confidence = Math.round(Math.min(1, 0.6 * coverage + 0.4 * agreement) * 1000) / 1000;
+  const famOut = {};
+  for (const [fam, f] of Object.entries(families)) {
+    famOut[fam] = { ...f, score: f.score === null ? null : Math.round(f.score * 100) / 100,
+      contribution: f.score === null ? 0 : Math.round(((f.score - 50) / scored.length) * 100) / 100 };
+  }
+  const sign = Math.sign(score - 50);
+  const supporting = [], contradicting = [];
+  for (const k of fresh) {
+    const s = Math.sign(status[k].value - 50);
+    if (s === 0 || sign === 0) continue;
+    (s === sign ? supporting : contradicting).push(`v1:${k}@${t}`);
+  }
+  for (const e of ev.events) {
+    const s = e.direction === 'UP' ? 1 : e.direction === 'DOWN' ? -1 : 0;
+    if (s === 0 || sign === 0) continue;
+    (s === sign ? supporting : contradicting).push(`event:${e.id}`);
+  }
+  const lowCoverage = coverage < cfg.minCoverageOk;
+  return { ...base, status: lowCoverage ? 'DEGRADED' : 'OK', degraded_reason: lowCoverage ? 'low_evidence_coverage' : null,
+    sentiment_score: Math.round(score * 100) / 100, sentiment_class: sv2Classify(score), confidence,
+    composite_before_events: Math.round(composite * 100) / 100, families: famOut,
+    supporting_ids: supporting.slice(0, cfg.maxIds), contradicting_ids: contradicting.slice(0, cfg.maxIds) };
+}
+
+function sv2AiPackage(result) {
+  // Compact, timestamped evidence package; every item carries the identifier the AI must cite.
+  const ids = [];
+  const fams = {};
+  for (const [f, v] of Object.entries(result.families || {})) {
+    if (v.score === null) continue;
+    fams[f] = { score: v.score, sources: v.sources_fresh.map(k => { ids.push(`v1:${k}@${result.decision_ts}`); return `v1:${k}@${result.decision_ts}`; }) };
+  }
+  const events = (result.events.events || []).slice(0, 10).map(e => {
+    ids.push(`event:${e.id}`);
+    return { id: `event:${e.id}`, type: e.type, severity: e.severity, direction: e.direction, role: e.role, family: e.family,
+      first_detected_ts: e.first_detected_ts, overlaps_fresh_family: e.overlaps_fresh_family };
+  });
+  return { pkg: { decision_ts: result.decision_ts, regime: result.market_regime, families: fams, events,
+    stale: result.missing.stale, missing: result.missing.missing }, allowedIds: ids };
+}
+
+function sv2ValidateAiOutput(obj, allowedIds) {
+  const errors = [];
+  const allowed = new Set(allowedIds || []);
+  const isStr = (x, max) => typeof x === 'string' && x.trim().length > 0 && x.length <= max;
+  if (!obj || typeof obj !== 'object' || Array.isArray(obj)) return { ok: false, errors: ['not an object'] };
+  const extra = Object.keys(obj).filter(k => !['summary', 'cited_ids', 'contradictions', 'event_relevance', 'uncertainty'].includes(k));
+  if (extra.length) errors.push(`unexpected fields: ${extra.join(',')}`);      // e.g. a numeric score the AI may not set
+  if (!isStr(obj.summary, 800)) errors.push('summary must be a non-empty string <= 800 chars');
+  if (!isStr(obj.uncertainty, 400)) errors.push('uncertainty must be a non-empty string <= 400 chars');
+  if (!Array.isArray(obj.cited_ids) || !obj.cited_ids.length) errors.push('cited_ids must be a non-empty array');
+  else for (const id of obj.cited_ids) if (!allowed.has(id)) errors.push(`cited id not in the evidence package: ${String(id).slice(0, 60)}`);
+  if (!Array.isArray(obj.contradictions)) errors.push('contradictions must be an array');
+  else for (const c of obj.contradictions) {
+    if (!c || !Array.isArray(c.ids) || !c.ids.every(id => allowed.has(id)) || !isStr(c.note, 300)) { errors.push('invalid contradiction entry'); break; }
+  }
+  if (!Array.isArray(obj.event_relevance)) errors.push('event_relevance must be an array');
+  else for (const e of obj.event_relevance) {
+    if (!e || !allowed.has(e.id) || !String(e.id).startsWith('event:') || !['low', 'medium', 'high'].includes(e.relevance)
+        || !['none', 'partial', 'full'].includes(e.overlap)) { errors.push('invalid event_relevance entry'); break; }
+  }
+  return errors.length ? { ok: false, errors } : { ok: true, value: {
+    summary: obj.summary, cited_ids: obj.cited_ids, contradictions: obj.contradictions, event_relevance: obj.event_relevance,
+    uncertainty: obj.uncertainty } };
+}
+
+async function sv2RunAi(env, pkg, allowedIds, reserve) {
+  // The only AI route: the account's Workers AI binding, and only when a model verified as free for this account and a
+  // daily ceiling below the free allowance are configured. No other provider, no paid fallback, no retries.
+  const model = String(env.SENTIMENT_V2_AI_MODEL || '').trim();
+  const ceiling = Math.max(0, parseInt(env.SENTIMENT_V2_AI_DAILY_CALLS || '0', 10) || 0);
+  if (!model || ceiling === 0) return { status: 'disabled', model: model || null, counted: false, reason: 'no verified free Workers AI model and ceiling configured' };
+  if (!env.AI || typeof env.AI.run !== 'function') return { status: 'unavailable', model, counted: false, reason: 'Workers AI binding unavailable' };
+  // Reserve a slot of today's ceiling atomically before calling; no slot, no call.
+  if (!(await reserve(ceiling))) return { status: 'quota_guard', model, counted: false, reason: `daily ceiling ${ceiling} reached` };
+  const system = 'You annotate a crypto sentiment evidence package. Return ONLY a JSON object with keys summary, cited_ids, ' +
+    'contradictions (array of {ids, note}), event_relevance (array of {id, relevance: low|medium|high, overlap: none|partial|full}), ' +
+    'uncertainty. Cite only identifiers present in the package. Separate observed facts from inference. Do not output any score.';
+  let raw;
+  try {
+    raw = await env.AI.run(model, { messages: [{ role: 'system', content: system }, { role: 'user', content: JSON.stringify(pkg) }], max_tokens: 700 });
+  } catch (err) {
+    return { status: 'error', model, counted: true, reason: String((err && err.message) || err).slice(0, 200) };
+  }
+  let obj = raw && typeof raw === 'object' && 'response' in raw ? raw.response : raw;
+  if (typeof obj === 'string') {
+    try { obj = JSON.parse(obj.trim().replace(/^```(?:json)?\s*/, '').replace(/```$/, '').trim()); }
+    catch (e) { return { status: 'invalid_output', model, counted: true, reason: 'output is not JSON' }; }
+  }
+  const v = sv2ValidateAiOutput(obj, allowedIds);
+  if (!v.ok) return { status: 'invalid_output', model, counted: true, reason: v.errors.slice(0, 3).join('; ') };
+  return { status: 'ok', model, counted: true, output: v.value };
+}
+
+function sv2Row(result, ai, usage, nowTs) {
+  let status = result.status, reason = result.degraded_reason;
+  if (status === 'OK' && ai && !['disabled', 'ok'].includes(ai.status)) { status = 'DEGRADED'; reason = `ai_${ai.status}`; }
+  return [result.asset, result.decision_ts, result.calc_version, status, reason, result.sentiment_score, result.sentiment_class,
+    result.confidence, result.evidence_coverage, result.market_regime, JSON.stringify(result.regime), result.event_intensity,
+    JSON.stringify({ direction_balance: result.events.direction_balance, adjustment: result.events.adjustment,
+      events: result.events.events, excluded: result.events.excluded, n_raw: result.events.n_raw }),
+    JSON.stringify(result.predictive), JSON.stringify({ families: result.families, composite_before_events: result.composite_before_events ?? null,
+      redundancy: result.redundancy }),
+    JSON.stringify(result.supporting_ids), JSON.stringify(result.contradicting_ids), JSON.stringify(result.missing),
+    ai ? ai.model : null, ai ? ai.status : 'disabled', JSON.stringify(ai ? { reason: ai.reason || null, output: ai.output || null } : {}),
+    JSON.stringify(usage), nowTs];
+}
+
+const SV2_INSERT_SQL = 'INSERT OR IGNORE INTO sentiment_v2_results (asset, decision_ts, calc_version, status, degraded_reason, ' +
+  'sentiment_score, sentiment_class, confidence, evidence_coverage, market_regime, regime_json, event_intensity, event_json, ' +
+  'predictive_json, family_json, supporting_ids_json, contradicting_ids_json, missing_json, ai_model, ai_status, ai_json, ' +
+  'usage_json, created_ts) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)';
+
+async function runSentimentV2Cycle(env, { nowTs } = {}) {
+  if (String(env.SENTIMENT_V2_ENABLED || '0') !== '1') return { ok: true, skipped: true, reason: 'disabled' };
+  const cfg = sv2Config();
+  const now = nowTs || Date.now();
+  const asset = 'BTC';
+  let rowsRead = 0;
+  // Fail closed until migration 0027 is applied: no V2 query runs and nothing errors before the table exists.
+  const table = await env.DB.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'sentiment_v2_results' LIMIT 1").first();
+  if (!table) return { ok: true, skipped: true, reason: 'migration 0027 not applied (sentiment_v2_results missing)' };
+  const last = await env.DB.prepare('SELECT MAX(decision_ts) AS t FROM sentiment_v2_results WHERE asset = ? AND calc_version = ?')
+    .bind(asset, cfg.version).first();
+  const lastTs = last && last.t !== null && last.t !== undefined ? Number(last.t) : null;
+  const pend = await env.DB.prepare('SELECT observation_ts FROM research_sentiment_archive WHERE observation_ts > ? AND observation_ts <= ? ORDER BY observation_ts DESC LIMIT ?')
+    .bind(lastTs === null ? 0 : lastTs, now, lastTs === null ? 1 : cfg.maxCatchUp).all();
+  const pending = (pend.results || []).map(r => Number(r.observation_ts)).sort((a, b) => a - b);
+  rowsRead += pending.length + 1;
+  if (!pending.length) return { ok: true, written: 0, reason: 'no new V1 observation' };
+  const lo = pending[0] - cfg.historyMs, hi = pending[pending.length - 1];
+  const histRes = await env.DB.prepare('SELECT observation_ts, score, btc_price, sources_json FROM research_sentiment_archive WHERE observation_ts >= ? AND observation_ts <= ? ORDER BY observation_ts ASC')
+    .bind(lo, hi).all();
+  const hist = sv2History(histRes.results);
+  rowsRead += hist.length;
+  // Newest first, so a cap can only cut the oldest context; reaching a cap is recorded and degrades the result.
+  const PRICE_CAP = 20000, EVENT_CAP = 2000;
+  const priceRes = await env.DB.prepare('SELECT ts, btc_price FROM btc_data WHERE ts >= ? AND ts <= ? ORDER BY ts DESC LIMIT ?')
+    .bind(lo - cfg.priceToleranceMs, hi, PRICE_CAP).all();
+  const priceRows = (priceRes.results || []).slice().reverse();
+  rowsRead += priceRows.length;
+  const truncatedInputs = [];
+  if (priceRows.length >= PRICE_CAP) truncatedInputs.push(`btc_data from ${priceRows[0].ts}`);
+  sv2AttachPrices(hist, priceRows, cfg.priceToleranceMs);
+  let events = [], eventsError = null;
+  try {
+    const evRes = await env.DB.prepare('SELECT event_id, dedup_key, correlation_key, event_type, asset, source, source_ts, detected_ts, direction, severity, confidence, rule_id, expires_ts FROM event_ledger WHERE detected_ts >= ? AND detected_ts <= ? ORDER BY detected_ts DESC LIMIT ?')
+      .bind(lo, hi, EVENT_CAP).all();
+    events = (evRes.results || []).slice().reverse();
+    rowsRead += events.length;
+    if (events.length >= EVENT_CAP) truncatedInputs.push(`event_ledger from ${events[0].detected_ts}`);
+  } catch (err) {
+    eventsError = String((err && err.message) || err).slice(0, 160);
+  }
+  const day = new Date(now).toISOString().slice(0, 10);
+  let aiReserved = 0;
+  const reserve = async ceiling => {
+    const r = await env.DB.prepare('INSERT INTO sentiment_v2_ai_calls (day, slot, reserved_ts) SELECT ?, COALESCE(MAX(slot), 0) + 1, ? FROM sentiment_v2_ai_calls WHERE day = ? HAVING COALESCE(MAX(slot), 0) < ?')
+      .bind(day, now, day, ceiling).run();
+    const ok = !!(r && r.meta && Number(r.meta.changes) > 0);
+    if (ok) aiReserved++;
+    return ok;
+  };
+  let written = 0;
+  const decisions = [];
+  for (const ts of pending) {
+    const i = sv2IndexAtOrBefore(hist, ts);
+    if (i < 0 || hist[i].ts !== ts) continue;
+    const result = sv2Compute(hist, i, events, cfg);
+    if (eventsError) { result.events.error = eventsError; if (result.status === 'OK') { result.status = 'DEGRADED'; result.degraded_reason = 'event_ledger_unavailable'; } }
+    if (truncatedInputs.length) {
+      result.missing.truncated_inputs = truncatedInputs;
+      if (result.status === 'OK') { result.status = 'DEGRADED'; result.degraded_reason = 'inputs_truncated'; }
+    }
+    let ai = { status: 'disabled', model: null, counted: false };
+    if (result.sentiment_score !== null) {
+      const { pkg, allowedIds } = sv2AiPackage(result);
+      ai = await sv2RunAi(env, pkg, allowedIds, reserve);
+    }
+    const usage = { d1_rows_read_cycle: rowsRead, ai_slots_reserved_this_cycle: aiReserved,
+      ai_daily_ceiling: Math.max(0, parseInt(env.SENTIMENT_V2_AI_DAILY_CALLS || '0', 10) || 0) };
+    const res = await env.DB.prepare(SV2_INSERT_SQL).bind(...sv2Row(result, ai, usage, now)).run();
+    const changes = res && res.meta ? Number(res.meta.changes || 0) : 0;
+    written += changes;
+    decisions.push({ decision_ts: ts, status: result.status, score: result.sentiment_score, inserted: changes > 0 });
+  }
+  return { ok: true, written, decisions, rows_read: rowsRead };
+}
+
+const SV2_PERIODS_MS = { '24h': 86400000, '7d': 7 * 86400000, '30d': 30 * 86400000, '90d': 90 * 86400000, all: null };
+const SV2_MAX_POINTS = 500;
+const SV2_MAX_ROWS = 2000;               // per archive / V2 query
+const SV2_MAX_PRICE_ROWS = 6000;         // btc_data is ~2.3x denser than V1 observations; an uncached request therefore
+                                         // reads at most 2,000 + 2,000 + 6,000 rows plus two single-row lookups
+const SV2_STALE_MS = 6 * 3600000;
+const sv2ComparisonCache = new Map();
+
+function sv2AlignSeries(v1Rows, v2Rows, maxPoints) {
+  // V1 and BTC come from the same archived V1 observation; V2 joins on its decision_ts, which is that observation's
+  // timestamp. Values are passed through exactly as stored. Downsampling keeps actual observations (never averages).
+  const v2By = new Map((v2Rows || []).map(r => [Number(r.decision_ts), r]));
+  const seen = new Set();
+  const pts = (v1Rows || []).map(r => {
+    const ts = Number(r.observation_ts);
+    seen.add(ts);
+    const v2 = v2By.get(ts);
+    const pt = { ts, v1: sv2Finite(r.score), btc: sv2Finite(r.btc_price),
+      v2: v2 ? sv2Finite(v2.sentiment_score) : null, v2_status: v2 ? v2.status : null };
+    if (r.btc_ts !== undefined) pt.btc_ts = r.btc_ts;
+    return pt;
+  });
+  for (const [ts, v2] of v2By) if (!seen.has(ts)) pts.push({ ts, v1: null, btc: null, v2: sv2Finite(v2.sentiment_score), v2_status: v2.status });
+  pts.sort((a, b) => a.ts - b.ts);
+  if (pts.length <= maxPoints) return { points: pts, downsampled: false };
+  const step = Math.ceil(pts.length / maxPoints);
+  const kept = pts.filter((p, idx) => idx % step === 0 || idx === pts.length - 1);
+  return { points: kept, downsampled: true, step };
+}
+
+function sv2SeriesStatus(points, v2Meta, nowTs) {
+  const lastOf = key => { for (let j = points.length - 1; j >= 0; j--) if (points[j][key] !== null) return points[j].ts; return null; };
+  const v1Last = lastOf('v1'), btcLast = lastOf('btc'), v2Last = v2Meta.last_ts;
+  const v2InPeriod = points.filter(p => p.v2 !== null).length;
+  return {
+    v1: { last_ts: v1Last, stale: v1Last === null || nowTs - v1Last > SV2_STALE_MS },
+    btc: { last_ts: btcLast, stale: btcLast === null || nowTs - btcLast > SV2_STALE_MS },
+    v2: { first_ts: v2Meta.first_ts, last_ts: v2Last, points_in_period: v2InPeriod,
+      available: v2Meta.n > 0, stale: v2Last === null || nowTs - v2Last > SV2_STALE_MS,
+      insufficient_history: v2InPeriod < 2 },
+  };
+}
+
+async function getSentimentV2Comparison(env, period, nowTs) {
+  const span = SV2_PERIODS_MS[period];
+  const from = span === null ? 0 : nowTs - span;
+  // Newest rows first with a hard LIMIT, so every period (including `all`) reads at most SV2_MAX_ROWS rows per query.
+  const v1 = await env.DB.prepare('SELECT observation_ts, score, btc_price FROM research_sentiment_archive WHERE observation_ts >= ? AND observation_ts <= ? ORDER BY observation_ts DESC LIMIT ?')
+    .bind(from, nowTs, SV2_MAX_ROWS).all();
+  const v1Rows = (v1.results || []).slice().reverse();
+  const truncated = v1Rows.length >= SV2_MAX_ROWS;
+  let v2Rows = [], meta = { n: 0, first_ts: null, last_ts: null }, latest = null, v2Error = null;
+  try {
+    const v2From = truncated ? Number(v1Rows[0].observation_ts) : from;
+    const v2 = await env.DB.prepare("SELECT decision_ts, sentiment_score, status FROM sentiment_v2_results WHERE asset = 'BTC' AND calc_version = ? AND decision_ts >= ? AND decision_ts <= ? ORDER BY decision_ts DESC LIMIT ?")
+      .bind(SENTIMENT_V2_VERSION, v2From, nowTs, SV2_MAX_ROWS).all();
+    v2Rows = (v2.results || []).slice().reverse();
+    // Two indexed single-row lookups (asset, decision_ts): cost stays constant as V2 history grows.
+    const firstRow = await env.DB.prepare("SELECT decision_ts FROM sentiment_v2_results WHERE asset = 'BTC' AND calc_version = ? ORDER BY decision_ts ASC LIMIT 1")
+      .bind(SENTIMENT_V2_VERSION).first();
+    const lastRow = await env.DB.prepare("SELECT decision_ts FROM sentiment_v2_results WHERE asset = 'BTC' AND calc_version = ? ORDER BY decision_ts DESC LIMIT 1")
+      .bind(SENTIMENT_V2_VERSION).first();
+    meta = { n: lastRow ? 1 : 0, first_ts: firstRow ? Number(firstRow.decision_ts) : null, last_ts: lastRow ? Number(lastRow.decision_ts) : null };
+    if (meta.last_ts !== null) {
+      latest = await env.DB.prepare("SELECT decision_ts, status, degraded_reason, sentiment_score, sentiment_class, confidence, evidence_coverage, market_regime, event_intensity, ai_status, ai_model FROM sentiment_v2_results WHERE asset = 'BTC' AND calc_version = ? AND decision_ts = ?")
+        .bind(SENTIMENT_V2_VERSION, meta.last_ts).first();
+    }
+  } catch (err) {
+    v2Error = String((err && err.message) || err).slice(0, 160);
+  }
+  let btcTruncated = false, btcFrom = null;
+  if (v1Rows.some(r => sv2Finite(r.btc_price) === null)) {
+    const tol = sv2Config().priceToleranceMs;
+    const pr = await env.DB.prepare('SELECT ts, btc_price FROM btc_data WHERE ts >= ? AND ts <= ? ORDER BY ts DESC LIMIT ?')
+      .bind(Math.max(0, (v1Rows.length ? Number(v1Rows[0].observation_ts) : from) - tol), nowTs, SV2_MAX_PRICE_ROWS).all();
+    const prs = pr.results || [];
+    btcTruncated = prs.length >= SV2_MAX_PRICE_ROWS;                 // older points then have no price: said, not hidden
+    btcFrom = prs.length ? Number(prs[prs.length - 1].ts) : null;
+    const tmp = v1Rows.map(r => ({ ts: Number(r.observation_ts), btc: sv2Finite(r.btc_price) }));
+    sv2AttachPrices(tmp, (pr.results || []).slice().reverse(), tol);
+    v1Rows.forEach((r, k) => { if (sv2Finite(r.btc_price) === null && tmp[k].btc !== null) { r.btc_price = tmp[k].btc; r.btc_ts = tmp[k].btc_ts; } });
+  }
+  const aligned = sv2AlignSeries(v1Rows, v2Rows, SV2_MAX_POINTS);
+  return { ok: true, period, generated_at: nowTs, from_ts: from || null, to_ts: nowTs, calc_version: SENTIMENT_V2_VERSION,
+    points: aligned.points, downsampled: aligned.downsampled, max_points: SV2_MAX_POINTS,
+    truncated, truncated_from_ts: truncated ? Number(v1Rows[0].observation_ts) : null,
+    btc_truncated: btcTruncated, btc_from_ts: btcTruncated ? btcFrom : null,
+    series_status: sv2SeriesStatus(aligned.points, meta, nowTs), v2_latest: latest, v2_error: v2Error };
+}
+
+async function getSentimentV2ComparisonCached(env, period, nowTs) {
+  const hit = sv2ComparisonCache.get(period);
+  if (hit && nowTs - hit.at < 300000) return { result: hit.result, cache: 'hit' };
+  const result = await getSentimentV2Comparison(env, period, nowTs);
+  sv2ComparisonCache.set(period, { at: nowTs, result });
+  return { result, cache: 'miss' };
 }
 
 export default {

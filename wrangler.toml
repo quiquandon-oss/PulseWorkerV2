@@ -18,6 +18,12 @@ binding = "AI"
 # see the MODEL_VERSIONS constant.
 [vars]
 GIT_COMMIT_SHA = "unknown"
+# Sentiment V2 (docs/SENTIMENT_V2_IMPLEMENTATION.md). "0" stops V2 cycles; V1 is unaffected either way.
+SENTIMENT_V2_ENABLED = "1"
+# Workers AI annotation stays OFF until a model's availability, licence and free quota are verified for this account
+# (spec section 3). Set both a model id and a daily call ceiling below the free allowance to enable it.
+SENTIMENT_V2_AI_MODEL = ""
+SENTIMENT_V2_AI_DAILY_CALLS = "0"
 
 # Deliberately the SAME database as the original PulseWorker (sentiment-ff75) —
 # gives this Worker read access to the existing history/technical_eval tables

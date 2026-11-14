@@ -7,9 +7,9 @@ documentation. This map describes what exists before any Sentiment V2 work.
 
 The owner's mandate names `CryptoPulse_Sentiment_V2_Build_Spec.md` as the authoritative specification and asks for it
 to be preserved as `docs/SENTIMENT_V2_BUILD_SPEC.md` in both repositories. As of this map it was not found in either
-repository (any branch), the Codespace file system, the owner's Google Drive or their Claude artifacts. The V2
-calculation (inputs, source families and weights, the score definition) is defined only there, so no V2 calculation
-has been written. This map, the inspection below and the PEV-1P protection (PR #130) do not depend on it.
+repository (any branch), the Codespace file system, the owner's Google Drive or their Claude artifacts. The owner
+then supplied it; it is now `docs/SENTIMENT_V2_BUILD_SPEC.md`, and the implementation is described in
+`docs/SENTIMENT_V2_IMPLEMENTATION.md`. This map records the system as it was before that implementation.
 
 ## Systems
 

@@ -69,6 +69,10 @@ describe('bounded fetch', () => {
     const loop = await run(async () => new Response(null, { status: 302, headers: { location: 'https://feeds.example.org/a.xml' } }));
     expect(loop.status).toBe('TOO_MANY_REDIRECTS');
   });
+  it('a malformed Location is BAD_REDIRECT, never a throw (Codex P2)', async () => {
+    const r = await run(async () => new Response(null, { status: 302, headers: { location: 'https://[unclosed/feed.xml' } }));
+    expect(r).toMatchObject({ ok: false, status: 'BAD_REDIRECT' });
+  });
   it('requests with redirect: manual, a timeout signal and the collector User-Agent', async () => {
     let init;
     await run(async (u, i) => { init = i; return resp(rss([])); });
@@ -237,6 +241,17 @@ describe('collection run (real SQLite, migration 0029)', () => {
     expect(r.sources.map(x => x.status)).toContain('STORE_ERROR');
     expect(r.sources.length).toBe(2);
     expect(d1.db.prepare("SELECT COUNT(*) AS n FROM sv2_source_state WHERE last_status = 'STORE_ERROR'").get().n).toBe(1);
+  });
+  it('a source whose fetch throws is recorded and the later due feeds and the run record still proceed (Codex P2)', async () => {
+    const d1 = makeD1(DDL);
+    const f = async (u) => { if (u.includes('feeds.example.org')) throw Object.assign(new TypeError('Invalid URL'), { name: 'TypeError' }); return resp(rss(items('b', 2))); };
+    // A thrown fetch is already caught as NETWORK_ERROR; force a throw from inside sv2SafeFetch via a getter that explodes.
+    const exploding = async (u, init) => (u.includes('feeds.example.org') ? { status: 302, headers: { get: () => { throw new Error('boom'); } } } : f(u, init));
+    const r = await C.sv2CollectEvidence({ DB: d1.binding, SV2_COLLECTOR_ENABLED: '1' }, { nowTs: NOW, fetchImpl: exploding, registry: REG, sleep: noSleep });
+    expect(r.sources.map(x => x.status).sort()).toEqual(['FETCH_ERROR', 'OK']);
+    expect(r.items_new).toBe(2);
+    expect(d1.db.prepare('SELECT COUNT(*) AS n FROM sv2_collection_runs').get().n).toBe(1);
+    expect(d1.db.prepare("SELECT COUNT(*) AS n FROM sv2_source_state WHERE last_status = 'FETCH_ERROR'").get().n).toBe(1);
   });
   it('writes only to sv2_* tables and reads no V1 table', () => {
     const src = readFileSync(join(ROOT, 'sentiment-v2/collector.js'), 'utf8');

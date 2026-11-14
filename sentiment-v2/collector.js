@@ -114,7 +114,8 @@ export async function sv2SafeFetch(url, { allowedHosts, budget, fetchImpl = fetc
       if (!loc) return { ok: false, status: 'BAD_REDIRECT', error: `HTTP ${res.status} without Location`, redirects };
       if (redirects >= limits.maxRedirects) return { ok: false, status: 'TOO_MANY_REDIRECTS', error: `more than ${limits.maxRedirects} redirects`, redirects };
       redirects++;
-      current = new URL(loc, chk.url).toString();
+      try { current = new URL(loc, chk.url).toString(); }
+      catch (_e) { return { ok: false, status: 'BAD_REDIRECT', error: `malformed Location: ${String(loc).slice(0, 80)}`, redirects }; }
       continue;                                     // re-validated at the top of the loop
     }
     if (res.status === 304) return { ok: true, status: 'NOT_MODIFIED', notModified: true, finalUrl: chk.url.toString(), redirects, bytes: 0 };
@@ -296,7 +297,10 @@ export async function sv2CollectEvidence(env, { nowTs, fetchImpl, registry = SV2
     if (!out.status) {
       if (st.etag) headers['If-None-Match'] = st.etag;
       if (st.last_modified) headers['If-Modified-Since'] = st.last_modified;
-      const res = await sv2SafeFetch(s.url, { allowedHosts, budget, fetchImpl, headers, limits, sleep });
+      // Any unexpected throw stays with this source (recorded as FETCH_ERROR) so later due feeds and the run record proceed.
+      let res;
+      try { res = await sv2SafeFetch(s.url, { allowedHosts, budget, fetchImpl, headers, limits, sleep }); }
+      catch (e) { res = { ok: false, status: 'FETCH_ERROR', error: String((e && e.message) || e).slice(0, 160) }; }
       out.bytes = res.bytes || 0;
       if (!res.ok) { out.status = res.status; out.error = res.error; }
       else if (res.notModified) out.status = 'NOT_MODIFIED';

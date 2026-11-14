@@ -10885,7 +10885,11 @@ const pulseWorkerHandlers = {
         }
         const { result, cache } = await getSentimentV2ComparisonCached(env, period, Date.now());
         const body = JSON.stringify(result);
-        if (edge) ctx.waitUntil(edge.put(cacheKey, new Response(body, { headers: { 'Content-Type': 'application/json', 'Cache-Control': 'public, max-age=300' } })));
+        // This inner handler receives no execution context (see its signature), so the cache write is awaited; a failed write never fails the request.
+        if (edge) {
+          try { await edge.put(cacheKey, new Response(body, { headers: { 'Content-Type': 'application/json', 'Cache-Control': 'public, max-age=300' } })); }
+          catch (cacheErr) { console.error('sentiment v2 cache put failed:', String(cacheErr)); }
+        }
         return new Response(body, { headers: { ...corsHeaders, 'Content-Type': 'application/json',
           'Cache-Control': 'public, max-age=300', 'X-SV2-Cache': cache } });
       } catch (err) {

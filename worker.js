@@ -12544,7 +12544,7 @@ function v1ArchivePyJson(v) {
     const n = Number(e);
     return m + 'e' + (n < 0 ? '-' : '+') + String(Math.abs(n)).padStart(2, '0');
   }
-  return JSON.stringify(String(v)).replace(/[\u007f-￿]/g, c => '\\u' + c.charCodeAt(0).toString(16).padStart(4, '0'));
+  return JSON.stringify(String(v)).replace(/[\u007f-\uffff]/g, c => '\\u' + c.charCodeAt(0).toString(16).padStart(4, '0'));
 }
 
 async function v1ArchiveContentHash(observationTs, sourcesText, score, technicalScore, btcPrice, goldRegime) {

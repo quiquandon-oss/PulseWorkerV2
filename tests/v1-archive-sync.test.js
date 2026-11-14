@@ -26,7 +26,7 @@ const EVENTS_DDL = `CREATE TABLE event_ledger (event_id TEXT, dedup_key TEXT, co
 
 const SYNC = ['v1ArchivePyJson', 'v1ArchiveContentHash', 'v1ArchiveInvalidReason', 'syncV1ArchiveFromHistory'];
 const SYNC_CONSTS = ['V1_ARCHIVE_SYNC_WINDOW_MS', 'V1_ARCHIVE_SYNC_MAX_ROWS', 'V1_ARCHIVE_WRITTEN_BY', 'V1_ARCHIVE_SOURCE_WEIGHTS_VERSION',
-  'V1_ARCHIVE_SCHEMA_VERSION', 'V1_ARCHIVE_FUTURE_SKEW_MS', 'V1_ARCHIVE_INSERT_SQL'];
+  'V1_ARCHIVE_SCHEMA_VERSION', 'V1_ARCHIVE_FUTURE_SKEW_MS', 'V1_ARCHIVE_INSERT_SQL', 'V1_ARCHIVE_FALLBACK_MAX_ROWS'];
 const V2 = ['sv2Config', 'sv2Finite', 'sv2ParseSources', 'sv2History', 'sv2AttachPrices', 'sv2IndexAtOrBefore', 'sv2PriceAt',
   'sv2SourceStatus', 'sv2Pearson', 'sv2FamilyOf', 'sv2Redundancy', 'sv2Families', 'sv2EventFamily', 'sv2EventReactions',
   'sv2Events', 'sv2Regime', 'sv2Profile', 'sv2Analogues', 'sv2Classify', 'sv2Compute', 'sv2AiPackage',
@@ -141,6 +141,30 @@ describe('successful collection, idempotency and the regression itself', () => {
     const r = await S.syncV1ArchiveFromHistory({ DB: counted }, { nowTs: NOW });
     expect(r.copied).toBe(6);
     expect(top).toBe(3);                       // history read, archive read, one batch
+  });
+  it('a failed batch retries row by row only within the remaining D1 query budget; the rest are deferred (Codex P2)', async () => {
+    const d1 = setup({ history: Array.from({ length: 20 }, (_, i) => ({ ts: NOW - (i + 1) * H, score: 30 + i, sources_json: '{}' })) });
+    let runs = 0;
+    const b = d1.binding;
+    const failing = { ...b, batch: async () => { throw new Error('batch rejected'); },
+      prepare: (sql) => { const st = b.prepare(sql); const w = (o) => ({ ...o, bind: (...a) => w(o.bind(...a)),
+        run: (...x) => { runs++; return o.run(...x); } }); return w(st); } };
+    const tight = await S.syncV1ArchiveFromHistory({ DB: failing }, { nowTs: NOW, queryBudget: 5 });
+    expect(runs).toBe(2);                      // budget 5 - (2 reads + 1 failed batch)
+    expect(tight).toMatchObject({ ok: false, copied: 2, deferred: 18 });
+    expect(tight.errors.join(' ')).toMatch(/deferred/);
+    runs = 0;
+    const roomy = await S.syncV1ArchiveFromHistory({ DB: failing }, { nowTs: NOW, queryBudget: 1000 });
+    expect(runs).toBe(S.V1_ARCHIVE_FALLBACK_MAX_ROWS);   // hard cap even with headroom
+    expect(roomy.copied).toBe(S.V1_ARCHIVE_FALLBACK_MAX_ROWS);
+    runs = 0;
+    const none = await S.syncV1ArchiveFromHistory({ DB: failing }, { nowTs: NOW, queryBudget: 2 });
+    expect(runs).toBe(0);
+    expect(none.deferred).toBe(13);
+    expect(archiveRows(d1).length).toBe(7);    // deferred rows stay in history for a later run; nothing invented
+  });
+  it('the cron and owner-run calls pass a budget that keeps the V2 cycle headroom', () => {
+    expect(WORKER.match(/syncV1ArchiveFromHistory\((env|renv), \{ nowTs: [^}]*queryBudget: SV2_D1_QUERIES_PER_INVOCATION - SV2_D1_QUERY_RESERVE - SV2_CYCLE_QUERY_HEADROOM - (sv2Q|q)\.n \}\)/g)).toHaveLength(2);
   });
   it('a row archived concurrently by the GitHub job is counted as already present, never duplicated', async () => {
     const d1 = setup({ history: [{ ts: NOW - H, score: 30, sources_json: '{}' }] });

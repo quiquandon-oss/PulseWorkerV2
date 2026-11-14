@@ -10885,7 +10885,8 @@ const pulseWorkerHandlers = {
       const q = { n: 0 };
       const renv = { ...env, DB: sv2CountingDb(env.DB, q) };
       try {
-        if (steps.includes('sync')) out.sync = await syncV1ArchiveFromHistory(renv, { nowTs: now });
+        if (steps.includes('sync')) out.sync = await syncV1ArchiveFromHistory(renv, { nowTs: now,
+          queryBudget: SV2_D1_QUERIES_PER_INVOCATION - SV2_D1_QUERY_RESERVE - SV2_CYCLE_QUERY_HEADROOM - q.n });
         if (steps.includes('v2')) out.v2 = await runSentimentV2Cycle(renv, { nowTs: now });
         if (steps.includes('collect')) out.collect = await sv2CollectEvidence(renv, { nowTs: now, queryBudget: SV2_D1_QUERIES_PER_INVOCATION - SV2_D1_QUERY_RESERVE - q.n });
         if (steps.includes('glm_probe')) out.glm_probe = await sv2GlmProbe(renv, now);
@@ -11684,8 +11685,9 @@ const pulseWorkerHandlers = {
           .catch(err => console.error('Event detection (cron) failed:', err))
           // Copy new V1 readings from `history` into the archive V2 reads. A failure is logged as an error and V2 still
           // runs on what the archive already holds (it never invents a missing reading).
-          .then(() => syncV1ArchiveFromHistory(env, { nowTs: event.scheduledTime }))
-          .then(r => { const line = JSON.stringify({ ok: r.ok, skipped: r.skipped || false, copied: r.copied || 0, already_present: r.already_present || 0, history_last_ts: r.history_last_ts || null, invalid: r.invalid || [], errors: r.errors || [], truncated: r.truncated || false });
+          .then(() => syncV1ArchiveFromHistory(env, { nowTs: event.scheduledTime,
+            queryBudget: SV2_D1_QUERIES_PER_INVOCATION - SV2_D1_QUERY_RESERVE - SV2_CYCLE_QUERY_HEADROOM - sv2Q.n }))
+          .then(r => { const line = JSON.stringify({ ok: r.ok, skipped: r.skipped || false, copied: r.copied || 0, already_present: r.already_present || 0, history_last_ts: r.history_last_ts || null, invalid: r.invalid || [], errors: r.errors || [], deferred: r.deferred || 0, truncated: r.truncated || false });
             if (r.ok) console.log('v1 archive sync (cron):', line); else console.error('v1 archive sync (cron) FAILED:', line); })
           .catch(err => console.error('V1 archive sync (cron) failed:', err))
           .then(() => runSentimentV2Cycle(env, { nowTs: event.scheduledTime }))
@@ -12758,7 +12760,10 @@ function v1ArchiveInvalidReason(row, now) {
   return null;
 }
 
-async function syncV1ArchiveFromHistory(env, { nowTs } = {}) {
+// Row-by-row fallback when the archive batch fails: each retry is one D1 query, so it is capped and bounded by the
+// invocation's remaining budget. Rows not retried stay in `history` and are copied by a later run (INSERT OR IGNORE).
+const V1_ARCHIVE_FALLBACK_MAX_ROWS = 5;
+async function syncV1ArchiveFromHistory(env, { nowTs, queryBudget = Infinity } = {}) {
   if (String(env.V1_ARCHIVE_SYNC_ENABLED === undefined ? '1' : env.V1_ARCHIVE_SYNC_ENABLED) !== '1') {
     return { ok: true, skipped: true, reason: 'disabled' };
   }
@@ -12803,10 +12808,15 @@ async function syncV1ArchiveFromHistory(env, { nowTs } = {}) {
     }
     if (batched) batched.forEach(count);
     else {
-      for (const p of prepared) {
+      // Reads (2) and the failed batch (1) are already spent from queryBudget.
+      const spent = typeof env.DB.batch === 'function' ? 3 : 2;
+      const allowed = Math.max(0, Math.min(V1_ARCHIVE_FALLBACK_MAX_ROWS, Math.floor(queryBudget - spent)));
+      for (const p of prepared.slice(0, allowed)) {
         try { count(await p.stmt().run()); }
         catch (err) { out.errors.push(`insert ${p.ts} failed: ` + String((err && err.message) || err).slice(0, 200)); }
       }
+      out.deferred = Math.max(0, prepared.length - allowed);
+      if (out.deferred) out.errors.push(`batch failed; ${out.deferred} row(s) deferred to a later run (D1 query budget)`);
     }
   }
   out.ok = out.errors.length === 0;
@@ -12817,6 +12827,9 @@ async function syncV1ArchiveFromHistory(env, { nowTs } = {}) {
 // its top-level D1 calls so the last step (the evidence collector) only uses the remaining headroom.
 const SV2_D1_QUERIES_PER_INVOCATION = 50;
 const SV2_D1_QUERY_RESERVE = 3;                  // d1_usage_daily recording and slack
+// Worst-case top-level D1 calls of one V2 cycle: 6 reads + 1 grouped and up to 8 per-source evidence reads + 5 per
+// pending reading (AI reserve, slot, settle, limit check, insert) x maxCatchUp 3 = 30. Kept free for V2 by the sync.
+const SV2_CYCLE_QUERY_HEADROOM = 30;
 function sv2CountingDb(db, counter) {
   if (!db) return db;
   const wrapStmt = (st) => ({ ...st, __d1Statement: st.__d1Statement || st,

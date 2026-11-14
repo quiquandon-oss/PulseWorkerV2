@@ -610,3 +610,18 @@ describe('cycle input caps', () => {
     expect(body).toMatch(/FROM event_ledger WHERE detected_ts >= \? AND detected_ts <= \? ORDER BY detected_ts DESC LIMIT \?/);
   });
 });
+
+
+describe('comparison route wiring', () => {
+  it('the route only uses identifiers its enclosing handler defines (regression: ctx is not a parameter there)', () => {
+    const src = readFileSync(join(dirname(fileURLToPath(import.meta.url)), '..', 'worker.js'), 'utf8');
+    const start = src.indexOf("url.pathname === '/api/sentiment-v2/comparison'");
+    const end = src.indexOf("url.pathname === '/prediction-freshness'", start);
+    expect(start).toBeGreaterThan(0);
+    const block = src.slice(start, end);
+    const head = src.lastIndexOf('async fetch(', start);
+    const signature = src.slice(head, src.indexOf(')', head) + 1);
+    if (!/\bctx\b/.test(signature)) expect(block).not.toMatch(/\bctx\b/);
+    expect(block).toMatch(/await edge\.put\(/);
+  });
+});

@@ -300,7 +300,7 @@ const FUNCS = ['sv2Config', 'sv2Finite', 'sv2ParseSources', 'sv2History', 'sv2At
   'sv2AiEstimateNeurons', 'sv2UngroundedNumbers', 'sv2RunAi', 'sv2Row', 'runSentimentV2Cycle', 'sv2AlignSeries', 'sv2SeriesStatus', 'sv2LatestView',
   'getSentimentV2Comparison', 'getSentimentV2Status', 'getSentimentV2Evidence', 'sv2GlmProbe'];
 const CONSTS = ['SENTIMENT_V2_VERSION', 'SV2_VERSIONS_SHOWN', 'SV2_INSERT_SQL', 'SV2_PERIODS_MS', 'SV2_MAX_POINTS', 'SV2_MAX_ROWS', 'SV2_MAX_PRICE_ROWS',
-  'SV2_STALE_MS', 'SV2_AI_PRICING', 'SV2_AI_MAX_OUTPUT_TOKENS', 'SV2_AI_RESERVE_SQL', 'SV2_AI_TEMPLATE_TOKENS'];
+  'SV2_STALE_MS', 'SV2_AI_PRICING', 'SV2_AI_MAX_OUTPUT_TOKENS', 'SV2_AI_RESERVE_SQL', 'SV2_AI_TEMPLATE_TOKENS', 'SV2_CYCLE_QUERIES_FIXED', 'SV2_CYCLE_QUERIES_PER_READING'];
 const S = evalInScope(extractConstants(...CONSTS) + '\n' + extractFunctions(...FUNCS), {
   SV2_SOURCE_REGISTRY: C.SV2_SOURCE_REGISTRY, SV2_COLLECTOR_LIMITS: C.SV2_COLLECTOR_LIMITS, SV2_COLLECTOR_VERSION: C.SV2_COLLECTOR_VERSION,
   sv2EvidenceReadings: E.sv2EvidenceReadings, sv2ScoreHeadline: E.sv2ScoreHeadline, SV2_EVIDENCE_RULES: E.SV2_EVIDENCE_RULES, SV2_LEXICON_SOURCE: E.SV2_LEXICON_SOURCE });

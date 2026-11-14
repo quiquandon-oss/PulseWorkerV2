@@ -10887,7 +10887,7 @@ const pulseWorkerHandlers = {
       try {
         if (steps.includes('sync')) out.sync = await syncV1ArchiveFromHistory(renv, { nowTs: now,
           queryBudget: SV2_D1_QUERIES_PER_INVOCATION - SV2_D1_QUERY_RESERVE - SV2_CYCLE_QUERY_HEADROOM - q.n });
-        if (steps.includes('v2')) out.v2 = await runSentimentV2Cycle(renv, { nowTs: now });
+        if (steps.includes('v2')) out.v2 = await runSentimentV2Cycle(renv, { nowTs: now, queryBudget: SV2_D1_QUERIES_PER_INVOCATION - SV2_D1_QUERY_RESERVE - q.n });
         if (steps.includes('collect')) out.collect = await sv2CollectEvidence(renv, { nowTs: now, queryBudget: SV2_D1_QUERIES_PER_INVOCATION - SV2_D1_QUERY_RESERVE - q.n });
         if (steps.includes('glm_probe')) out.glm_probe = await sv2GlmProbe(renv, now);
         out.d1_queries = q.n;
@@ -11690,8 +11690,9 @@ const pulseWorkerHandlers = {
           .then(r => { const line = JSON.stringify({ ok: r.ok, skipped: r.skipped || false, copied: r.copied || 0, already_present: r.already_present || 0, history_last_ts: r.history_last_ts || null, invalid: r.invalid || [], errors: r.errors || [], deferred: r.deferred || 0, truncated: r.truncated || false });
             if (r.ok) console.log('v1 archive sync (cron):', line); else console.error('v1 archive sync (cron) FAILED:', line); })
           .catch(err => console.error('V1 archive sync (cron) failed:', err))
-          .then(() => runSentimentV2Cycle(env, { nowTs: event.scheduledTime }))
-          .then(r => console.log('sentiment v2 (cron):', JSON.stringify({ ok: r.ok, skipped: r.skipped || false, written: r.written || 0, reason: r.reason || null })))
+          .then(() => runSentimentV2Cycle(env, { nowTs: event.scheduledTime, queryBudget: SV2_D1_QUERIES_PER_INVOCATION - SV2_D1_QUERY_RESERVE - sv2Q.n }))
+          .then(r => { const line = JSON.stringify({ ok: r.ok, skipped: r.skipped || false, written: r.written || 0, reason: r.reason || null, deferred_readings: r.deferred_readings || [] });
+            if (r.deferred_d1_budget) console.warn('sentiment v2 (cron) DEFERRED (D1 budget):', line); else console.log('sentiment v2 (cron):', line); })
           .catch(err => console.error('Sentiment V2 (cron) failed:', err))
           // Independent evidence last: V2 decisions are past V1 timestamps, so evidence retrieved now could not count for them
           // anyway (point-in-time), and V2 gets the D1 query headroom first. The collector spends only what is left.
@@ -12827,9 +12828,12 @@ async function syncV1ArchiveFromHistory(env, { nowTs, queryBudget = Infinity } =
 // its top-level D1 calls so the last step (the evidence collector) only uses the remaining headroom.
 const SV2_D1_QUERIES_PER_INVOCATION = 50;
 const SV2_D1_QUERY_RESERVE = 3;                  // d1_usage_daily recording and slack
-// Worst-case top-level D1 calls of one V2 cycle: 6 reads + 1 grouped and up to 8 per-source evidence reads + 5 per
-// pending reading (AI reserve, slot, settle, limit check, insert) x maxCatchUp 3 = 30. Kept free for V2 by the sync.
-const SV2_CYCLE_QUERY_HEADROOM = 30;
+// Worst-case top-level D1 calls of one V2 cycle: 6 reads + 1 grouped and up to 8 per-source evidence reads (15 fixed)
+// + 5 per pending reading (AI reserve, slot, settle, limit check, insert) x maxCatchUp 3 = 30. Kept free for V2 by the
+// sync; the cycle itself checks the budget it is given and defers readings it could not finish (never a partial write).
+const SV2_CYCLE_QUERIES_FIXED = 15;
+const SV2_CYCLE_QUERIES_PER_READING = 5;
+const SV2_CYCLE_QUERY_HEADROOM = SV2_CYCLE_QUERIES_FIXED + 3 * SV2_CYCLE_QUERIES_PER_READING;
 function sv2CountingDb(db, counter) {
   if (!db) return db;
   const wrapStmt = (st) => ({ ...st, __d1Statement: st.__d1Statement || st,
@@ -12843,8 +12847,13 @@ function sv2CountingDb(db, counter) {
     exec: (...x) => { counter.n++; return db.exec(...x); } };
 }
 
-async function runSentimentV2Cycle(env, { nowTs } = {}) {
+async function runSentimentV2Cycle(env, { nowTs, queryBudget = Infinity } = {}) {
   if (String(env.SENTIMENT_V2_ENABLED || '0') !== '1') return { ok: true, skipped: true, reason: 'disabled' };
+  // Not enough D1 queries left in this invocation (shared with event detection) for even one reading: defer the whole
+  // cycle before any query. Pending readings stay in the archive and a later run computes them.
+  if (queryBudget < SV2_CYCLE_QUERIES_FIXED + SV2_CYCLE_QUERIES_PER_READING) {
+    return { ok: true, skipped: true, deferred_d1_budget: true, reason: `deferred: D1 query budget (${Math.max(0, queryBudget)} left in this invocation)` };
+  }
   const cfg = sv2Config();
   const now = nowTs || Date.now();
   const asset = 'BTC';
@@ -12860,6 +12869,9 @@ async function runSentimentV2Cycle(env, { nowTs } = {}) {
   const pending = (pend.results || []).map(r => Number(r.observation_ts)).sort((a, b) => a - b);
   rowsRead += pending.length + 1;
   if (!pending.length) return { ok: true, written: 0, reason: 'no new V1 observation' };
+  // Oldest first, as many as the remaining D1 budget allows; the rest stay pending (> the new MAX(decision_ts)).
+  const fitReadings = Math.floor((queryBudget - SV2_CYCLE_QUERIES_FIXED) / SV2_CYCLE_QUERIES_PER_READING);
+  const deferredReadings = pending.length > fitReadings ? pending.splice(fitReadings) : [];
   const lo = pending[0] - cfg.historyMs, hi = pending[pending.length - 1];
   const histRes = await env.DB.prepare('SELECT observation_ts, score, btc_price, sources_json FROM research_sentiment_archive WHERE observation_ts >= ? AND observation_ts <= ? ORDER BY observation_ts ASC')
     .bind(lo, hi).all();
@@ -12960,7 +12972,8 @@ async function runSentimentV2Cycle(env, { nowTs } = {}) {
     written += changes;
     decisions.push({ decision_ts: ts, status: result.status, score: result.sentiment_score, inserted: changes > 0 });
   }
-  return { ok: true, written, decisions, rows_read: rowsRead };
+  return { ok: true, written, decisions, rows_read: rowsRead,
+    ...(deferredReadings.length ? { deferred_d1_budget: true, deferred_readings: deferredReadings } : {}) };
 }
 
 const SV2_PERIODS_MS = { '24h': 86400000, '7d': 7 * 86400000, '30d': 30 * 86400000, '90d': 90 * 86400000, all: null };

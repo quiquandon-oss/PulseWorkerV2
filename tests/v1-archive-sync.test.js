@@ -33,7 +33,7 @@ const V2 = ['sv2Config', 'sv2Finite', 'sv2ParseSources', 'sv2History', 'sv2Attac
   'sv2ValidateAiOutput', 'sv2RunAi', 'sv2Row', 'runSentimentV2Cycle', 'sv2AlignSeries', 'sv2SeriesStatus', 'getSentimentV2Comparison',
   'sv2EvidenceSummary', 'sv2EvidenceItemsForAi', 'sv2AiBudget', 'sv2AiEstimateNeurons', 'sv2UngroundedNumbers', 'sv2LatestView'];
 const V2_CONSTS = ['SENTIMENT_V2_VERSION', 'SV2_VERSIONS_SHOWN', 'SV2_INSERT_SQL', 'SV2_PERIODS_MS', 'SV2_MAX_POINTS', 'SV2_MAX_ROWS', 'SV2_MAX_PRICE_ROWS', 'SV2_STALE_MS',
-  'SV2_AI_PRICING', 'SV2_AI_MAX_OUTPUT_TOKENS', 'SV2_AI_RESERVE_SQL', 'SV2_AI_TEMPLATE_TOKENS'];
+  'SV2_AI_PRICING', 'SV2_AI_MAX_OUTPUT_TOKENS', 'SV2_AI_RESERVE_SQL', 'SV2_AI_TEMPLATE_TOKENS', 'SV2_CYCLE_QUERIES_FIXED', 'SV2_CYCLE_QUERIES_PER_READING'];
 const S = evalInScope(extractConstants(...SYNC_CONSTS, ...V2_CONSTS) + '\n' + extractFunctions(...SYNC, ...V2),
   { SV2_SOURCE_REGISTRY, sv2EvidenceReadings, sv2ScoreHeadline, SV2_EVIDENCE_RULES });
 
@@ -92,6 +92,33 @@ describe('row format: identical to the Python Experiment 5 job', () => {
 });
 
 describe('successful collection, idempotency and the regression itself', () => {
+  it('V2 spends only the D1 budget it is given: defers the cycle or the newest readings, then catches up (Codex P2)', async () => {
+    const history = []; const archive = [];
+    const t0 = NOW - 100 * H;
+    for (let i = 0; i < 40; i++) archive.push({ observation_ts: t0 + i * 2 * H, score: 40, sources_json: sources(i) });
+    const d1 = setup({ history, archive });
+    await S.runSentimentV2Cycle(env(d1), { nowTs: t0 + 36 * 2 * H });      // first cycle: newest only (36)
+    let q = 0;
+    const b = d1.binding;
+    const counted = { ...b, prepare: (sql) => { const st = b.prepare(sql); const w = (o) => ({ ...o, bind: (...a) => w(o.bind(...a)),
+      all: (...x) => { q++; return o.all(...x); }, first: (...x) => { q++; return o.first(...x); }, run: (...x) => { q++; return o.run(...x); } }); return w(st); } };
+    const none = await S.runSentimentV2Cycle({ DB: counted, SENTIMENT_V2_ENABLED: '1' }, { nowTs: NOW, queryBudget: S.SV2_CYCLE_QUERIES_FIXED + S.SV2_CYCLE_QUERIES_PER_READING - 1 });
+    expect(none).toMatchObject({ ok: true, skipped: true, deferred_d1_budget: true });
+    expect(q).toBe(0);                                                       // not a single query spent
+    const budget = S.SV2_CYCLE_QUERIES_FIXED + S.SV2_CYCLE_QUERIES_PER_READING;
+    const one = await S.runSentimentV2Cycle({ DB: counted, SENTIMENT_V2_ENABLED: '1' }, { nowTs: NOW, queryBudget: budget });
+    expect(one.written).toBe(1);
+    expect(q).toBeLessThanOrEqual(budget);
+    const at = (k) => t0 + k * 2 * H;
+    expect(one.decisions[0].decision_ts).toBe(at(37));                       // oldest pending first
+    expect(one.deferred_readings).toEqual([at(38), at(39)]);
+    const rest = await S.runSentimentV2Cycle(env(d1), { nowTs: NOW });       // ample budget: the deferred ones follow
+    expect(rest.decisions.map(d => d.decision_ts)).toEqual([at(38), at(39)]);
+    expect(rest.deferred_readings).toBeUndefined();
+  });
+  it('the cron and owner-run V2 calls pass the shared remaining D1 budget', () => {
+    expect(WORKER.match(/runSentimentV2Cycle\((env|renv), \{ nowTs: [^}]*queryBudget: SV2_D1_QUERIES_PER_INVOCATION - SV2_D1_QUERY_RESERVE - (sv2Q|q)\.n \}\)/g)).toHaveLength(2);
+  });
   it('a reading in history but not in the archive reaches V2 in the same cron chain (the 2026-11-14 gap)', async () => {
     const t1123 = NOW - 9 * H + 23 * 60000, t1830 = NOW - 2 * H + 30 * 60000;
     const history = []; const archive = [];

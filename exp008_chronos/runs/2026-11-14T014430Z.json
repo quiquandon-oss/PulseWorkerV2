@@ -1,0 +1,14 @@
+{
+ "code_sha": "df10186dd9e207768b3fab035ee22fcdebd7bc0b",
+ "errors": [],
+ "forecasts": [],
+ "format": "exp008-chronos-store-v1",
+ "notes": [
+  "12h: origin 2026-11-13T150105Z already forecast",
+  "24h: origin 2026-11-13T150105Z already forecast"
+ ],
+ "pending": 2,
+ "resolved": 1,
+ "run_id": "43542267986",
+ "run_ts": 1794620670446
+}

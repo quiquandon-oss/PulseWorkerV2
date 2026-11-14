@@ -29,7 +29,7 @@ concurrency:
 
 env:
   DATA_BRANCH: research-data/exp008-chronos
-  CHRONOS_REVISION: ''         # pin a Hugging Face revision here once the first live run records one
+  CHRONOS_REVISION: '29ec3766d36d6f73f0696f85560a422f50e8498c'   # every live run so far resolved to this snapshot (model_revision_resolved, 28/28)
 
 jobs:
   exp008:
@@ -64,8 +64,10 @@ jobs:
           python-version: '3.11'
       - name: Install Chronos-2 (CPU) and pytest
         run: |
-          pip install torch --index-url https://download.pytorch.org/whl/cpu
-          pip install -r code/exp008-chronos/requirements.txt pytest
+          # Pinned (2026-11-14) to what the scheduled runs installed (run 43604731370), so a transitive release
+          # (transformers, accelerate, numpy) cannot change forecasts mid-experiment.
+          pip install torch==2.15.0 --index-url https://download.pytorch.org/whl/cpu
+          pip install -r code/exp008-chronos/requirements.txt pytest transformers==5.23.0 accelerate==1.15.0 numpy==2.4.6 pandas==3.1.1 huggingface_hub==2.4.0 safetensors==0.8.0
 
       - name: Cache the Chronos-2 weights
         uses: actions/cache@v4
@@ -83,8 +85,21 @@ jobs:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
         run: |
           set +e
-          python exp008-chronos/run_experiment.py --store ../data/exp008_chronos
+          /usr/bin/time -v -o "$RUNNER_TEMP/exp008-time.txt" python exp008-chronos/run_experiment.py --store ../data/exp008_chronos
           echo "rc=$?" >> "$GITHUB_OUTPUT"
+
+      # Free-allowance measurement (no effect on the experiment).
+      - name: Resource and version report
+        if: always()
+        run: |
+          {
+            echo "### EXP-008 resources"
+            echo "- peak memory: $(grep 'Maximum resident' "$RUNNER_TEMP/exp008-time.txt" 2>/dev/null | awk '{print $6}') KB"
+            echo "- run wall time: $(grep 'Elapsed (wall' "$RUNNER_TEMP/exp008-time.txt" 2>/dev/null | awk '{print $8}')"
+            echo "- versions: $(pip freeze 2>/dev/null | grep -iE '^(chronos-forecasting|torch|transformers|accelerate|numpy)==' | tr '\n' ' ')"
+            echo "- HF cache size (Actions cache entry): $(du -sh ~/.cache/huggingface 2>/dev/null | cut -f1)"
+            echo "- data branch size: $(du -sh data/exp008_chronos 2>/dev/null | cut -f1)"
+          } | tee -a "$GITHUB_STEP_SUMMARY"
 
       - name: "Commit to the data branch only"
         if: always() && steps.run.outcome != 'skipped'

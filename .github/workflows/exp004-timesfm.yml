@@ -47,12 +47,29 @@ jobs:
       # CPU-only torch explicitly -- GitHub-hosted runners have no GPU,
       # and the default `pip install torch` would otherwise pull a much
       # larger CUDA-enabled build for no benefit here.
-      - name: Install TimesFM (CPU)
+      # Pinned (2026-11-14) to exactly what the scheduled runs installed (run 43604646261): the timesfm 3.0.2 package
+      # loads the TimesFM 2.5 checkpoint google/timesfm-2.5-200m-pytorch (MODEL_VERSION timesfm-2.5-200m). Unpinned, a
+      # new timesfm/torch/numpy release could change forecasts mid-experiment without any code change.
+      - name: Install TimesFM (CPU, pinned)
         run: |
-          pip install torch --index-url https://download.pytorch.org/whl/cpu
-          pip install timesfm[torch]
+          pip install torch==2.15.0 --index-url https://download.pytorch.org/whl/cpu
+          pip install "timesfm[torch]==3.0.2" numpy==2.4.6 huggingface_hub==2.4.0 safetensors==0.8.0
 
       - name: Run Experiment 4 (forecast + resolve)
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-        run: python exp004-timesfm/run_experiment.py
+        run: /usr/bin/time -v -o "$RUNNER_TEMP/exp004-time.txt" python exp004-timesfm/run_experiment.py
+
+      # Free-allowance measurement (no effect on the experiment): runner time, peak memory, installed versions and the
+      # Hugging Face snapshot actually loaded, in the run's step summary.
+      - name: Resource and version report
+        if: always()
+        run: |
+          {
+            echo "### EXP-004 resources"
+            echo "- peak memory: $(grep 'Maximum resident' "$RUNNER_TEMP/exp004-time.txt" 2>/dev/null | awk '{print $6}') KB"
+            echo "- run wall time: $(grep 'Elapsed (wall' "$RUNNER_TEMP/exp004-time.txt" 2>/dev/null | awk '{print $8}')"
+            echo "- versions: $(pip freeze 2>/dev/null | grep -iE '^(timesfm|torch|numpy|huggingface.hub|safetensors)==' | tr '\n' ' ')"
+            echo "- HF snapshot: $(python -c "from huggingface_hub import scan_cache_dir; print(' '.join(f'{r.repo_id}@{v.commit_hash}' for r in scan_cache_dir().repos for v in r.revisions))" 2>/dev/null)"
+            echo "- HF cache size: $(du -sh ~/.cache/huggingface 2>/dev/null | cut -f1)"
+          } | tee -a "$GITHUB_STEP_SUMMARY"

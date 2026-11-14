@@ -5,12 +5,23 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import pev1p_window as pw  # noqa: E402
 import prediction_eval as pe  # noqa: E402
 import prospective_pev as pp  # noqa: E402
 
 H = pe.H
 ms = lambda s: int(datetime.fromisoformat(s).replace(tzinfo=timezone.utc).timestamp() * 1000)
+
+
+@pytest.fixture(autouse=True)
+def synthetic_clock_after_checkpoint(monkeypatch):
+    """These tests check the PEV-1P computations on synthetic prices, so they run with the wall clock after the
+    checkpoint. The no-peeking guard itself, on the real clock and before the checkpoint, is tested in
+    test_pev1p_guard.py."""
+    monkeypatch.setattr(pw, "wall_clock_ms", lambda: pw.CHECKPOINT_TS + 60 * 24 * H)
 
 
 def test_frozen_dates_and_hyperparameters_match_the_protocol():

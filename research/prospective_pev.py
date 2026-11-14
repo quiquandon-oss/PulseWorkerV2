@@ -23,10 +23,11 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import prediction_eval as pe  # noqa: E402
+import pev1p_window as pw  # noqa: E402  no-peeking boundary, enforced in prediction_eval too
 
 PROTOCOL = "PEV-1P"
-TEST_START_TS = 1793491200000          # 2026-11-01T00:00:00Z
-CHECKPOINT_TS = 1809129600000          # 2027-05-01T00:00:00Z: the one confirmatory analysis
+TEST_START_TS = pw.TEST_START_TS        # 2026-11-01T00:00:00Z
+CHECKPOINT_TS = pw.CHECKPOINT_TS        # 2027-05-01T00:00:00Z: the one confirmatory analysis
 FROZEN = {"P4-LR_lambda": 10.0, "P4-KNN-SHRINK_m": 30}   # PEV-1 VAL selection, identical in all 6 cells
 CANDLE_PAGE_HOURS = 4000                # below Hyperliquid's 5000-candle response cap
 
@@ -41,16 +42,25 @@ def final_units(rows, h, now_ts):
     return test_units(rows, h, min(now_ts, CHECKPOINT_TS))
 
 
+def _guarded(fn):
+    """Every model callable refuses a PEV-1P window query before the checkpoint, constant baselines included."""
+    def model(up, u, h):
+        pw.check_query(u)
+        return fn(up, u, h)
+    return model
+
+
 def models(sent_ts, sentiment):
     base = {"always_up": lambda up, u, h: 1.0, "always_down": lambda up, u, h: 0.0,
             "climatology": pe.climatology, "persistence": lambda up, u, h: pe.persistence(u, h)}
-    return dict(base,
+    ms = dict(base,
                 A=lambda up, u, h: pe.model_a(up, u, h, sent_ts, sentiment),
                 B=lambda up, u, h: pe.model_corrected(up, u, h),
                 C=lambda up, u, h: (pe.model_corrected(up, u, h, sent_ts, sentiment)
                                     if pe.asof_reading(sent_ts, sentiment, u["ts"]) is not None else None),
                 **{"P4-LR": lambda up, u, h: pe.model_lr(up, u, h, FROZEN["P4-LR_lambda"]),
                    "P4-KNN-SHRINK": lambda up, u, h: pe.model_shrink(up, u, h, FROZEN["P4-KNN-SHRINK_m"])})
+    return {name: _guarded(fn) for name, fn in ms.items()}
 
 
 def counts_for_coin(closes, sentiment, now_ts, horizons=pe.HORIZONS_H):
@@ -73,6 +83,7 @@ def counts_for_coin(closes, sentiment, now_ts, horizons=pe.HORIZONS_H):
 
 
 def final_for_coin(closes, sentiment, now_ts, horizons=pe.HORIZONS_H):
+    pw.check_final()                    # wall clock, not now_ts: a caller cannot unlock the final analysis
     rows = pe.build_rows(closes, horizons)
     sent_ts = [s[0] for s in sentiment]
     out = {}
@@ -139,7 +150,7 @@ def main(argv=None, now_ts=None):
     if a.cmd == "fetch":
         fetch(a.out)
         return 0
-    if a.cmd == "final" and now_ts < CHECKPOINT_TS:
+    if a.cmd == "final" and (now_ts < CHECKPOINT_TS or pw.before_checkpoint()):
         print(f"refusing: the confirmatory analysis runs once, at or after {CHECKPOINT_TS} (2027-05-01T00:00Z)", file=sys.stderr)
         return 2
     sentiment = pe.load_sentiment(a.sentiment)

@@ -259,9 +259,13 @@ export function sv2DueSources(registry, stateById, now, limits = SV2_COLLECTOR_L
 // ---- One collection run --------------------------------------------------------------------------------------------
 // Fetches due sources, stores new items (INSERT OR IGNORE on evidence_id = sha256(canonical URL)), marks cross-source
 // duplicates by normalised-title hash, updates per-source reliability state and records the run with its budget use.
-export async function sv2CollectEvidence(env, { nowTs, fetchImpl, registry = SV2_SOURCE_REGISTRY, limits = SV2_COLLECTOR_LIMITS, sleep } = {}) {
+// queryBudget: D1 queries this run may still issue (D1 counts each top-level call, a db.batch() as one, against a
+// per-invocation limit shared with the rest of the cron chain). The run needs 2 fixed queries (state read, run record)
+// and at most 3 per feed; it starts no feed it could not finish, and skips entirely when even that is not available.
+export async function sv2CollectEvidence(env, { nowTs, fetchImpl, registry = SV2_SOURCE_REGISTRY, limits = SV2_COLLECTOR_LIMITS, sleep, queryBudget = Infinity } = {}) {
   if (String(env.SV2_COLLECTOR_ENABLED === undefined ? '0' : env.SV2_COLLECTOR_ENABLED) !== '1') return { ok: true, skipped: true, reason: 'disabled' };
   const now = nowTs || Date.now();
+  if (queryBudget < 2 + 3) return { ok: true, skipped: true, reason: `D1 query headroom too small for one feed (${queryBudget} left)` };
   const disabled = new Set(String(env.SV2_SOURCES_DISABLED || '').split(',').map(x => x.trim()).filter(Boolean));
   const allowedHosts = sv2RegistryHosts(registry);
   const budget = { subrequests: 0, bytes: 0 };
@@ -274,7 +278,11 @@ export async function sv2CollectEvidence(env, { nowTs, fetchImpl, registry = SV2
     return { ...run, ok: false, errors: ['state read failed: ' + String((err && err.message) || err).slice(0, 160)] };
   }
   const stateById = Object.fromEntries(stateRows.map(r => [r.source_id, r]));
-  const due = sv2DueSources(registry, stateById, now, limits, disabled);
+  const dueAll = sv2DueSources(registry, stateById, now, limits, disabled);
+  // State read used 1 query and the run record needs 1; each feed needs up to 3.
+  const feedsAffordable = Math.max(0, Math.floor((queryBudget - 2) / 3));
+  const due = dueAll.slice(0, feedsAffordable);
+  if (due.length < dueAll.length) run.deferred_for_d1_budget = dueAll.slice(due.length).map(x => x.id);
   for (const s of due) {
     const st = stateById[s.id] || {};
     const out = { id: s.id, status: null, items: 0, new: 0, duplicate: 0, bytes: 0, error: null };

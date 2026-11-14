@@ -215,6 +215,19 @@ describe('collection run (real SQLite, migration 0029)', () => {
     expect(d1.db.prepare('SELECT COUNT(*) AS n FROM sv2_evidence').get().n).toBe(75);
     expect(d1.db.prepare('SELECT COUNT(*) AS n FROM sv2_source_state').get().n).toBe(3);
   });
+  it('spends only the D1 headroom it is given: defers feeds it could not finish, skips when none fits (Codex P2)', async () => {
+    const d1 = makeD1(DDL);
+    const reg3 = [...REG, { ...REG[0], id: 'c', url: 'https://feeds.example.org/c.xml' }];
+    const f = async (u) => resp(rss(items(new URL(u).pathname.slice(1, 2), 3)));
+    let calls = 0;
+    const counted = async (u) => { calls++; return f(u); };
+    const skip = await C.sv2CollectEvidence({ DB: d1.binding, SV2_COLLECTOR_ENABLED: '1' }, { nowTs: NOW, fetchImpl: counted, registry: reg3, sleep: noSleep, queryBudget: 4 });
+    expect(skip).toMatchObject({ skipped: true });
+    expect(calls).toBe(0);
+    const part = await C.sv2CollectEvidence({ DB: d1.binding, SV2_COLLECTOR_ENABLED: '1' }, { nowTs: NOW, fetchImpl: counted, registry: reg3, sleep: noSleep, queryBudget: 8 });
+    expect(part.sources.length).toBe(2);                        // (8 - 2) / 3 = 2 feeds
+    expect(part.deferred_for_d1_budget.length).toBe(1);
+  });
   it('a failed batch write records STORE_ERROR state for that source and the run continues', async () => {
     const d1 = makeD1(DDL);
     let calls = 0;
@@ -395,6 +408,12 @@ describe('GLM Neuron ledger on real SQLite', () => {
     const worstTokens = bytes + S.SV2_AI_TEMPLATE_TOKENS;                // ≥ any byte-level tokenisation
     expect(est).toBeGreaterThanOrEqual((worstTokens * p.neurons_per_m_input + S.SV2_AI_MAX_OUTPUT_TOKENS * p.neurons_per_m_output) / 1e6 - 0.01);
   });
+  it('grounding matches whole numbers only, never fragments of longer values (Codex P2)', () => {
+    const pkg = JSON.stringify({ decision_ts: 1794655417334, score: 14.5, n: 2, price: 66989 });
+    expect(S.sv2UngroundedNumbers(['Family at 14.5 from 2 sources; BTC 66,989'], pkg)).toEqual([]);
+    expect(S.sv2UngroundedNumbers(['Support near 179 and 655'], pkg)).toEqual(['179', '655']);   // fragments of decision_ts
+    expect(S.sv2UngroundedNumbers(['Score 14'], pkg)).toEqual(['14']);                                // not 14.5
+  });
   it('the number-grounding check rejects figures absent from the package', () => {
     expect(S.sv2UngroundedNumbers(['Regulatory family at 14.5 with 2 sources'], '{"score":14.5,"n":2}')).toEqual([]);
     expect(S.sv2UngroundedNumbers(['BTC to 150,000 by Friday'], '{"score":14.5}')).toEqual(['150,000']);
@@ -403,8 +422,9 @@ describe('GLM Neuron ledger on real SQLite', () => {
 
 describe('wiring', () => {
   const sched = WORKER.slice(WORKER.indexOf("} else if (event.cron === '0 * * * *') {"), WORKER.indexOf('// No catch-all else'));
-  it('non-tick cron order: detection → V1 archive copy → evidence collection → V2, each failure logged and non-blocking', () => {
-    const order = ['runAutomaticDetection', 'syncV1ArchiveFromHistory', 'sv2CollectEvidence', 'runSentimentV2Cycle'].map(f => sched.indexOf(f));
+  it('non-tick cron order: detection → V1 archive copy → V2 → evidence collection (last, on the remaining D1 headroom), each failure logged', () => {
+    const order = ['runAutomaticDetection', 'syncV1ArchiveFromHistory', 'runSentimentV2Cycle', 'sv2CollectEvidence'].map(f => sched.indexOf(f));
+    expect(sched).toMatch(/queryBudget: SV2_D1_QUERIES_PER_INVOCATION - SV2_D1_QUERY_RESERVE - sv2Q\.n/);
     expect(order.every((x, i) => x > 0 && (i === 0 || x > order[i - 1]))).toBe(true);
     expect(sched).toMatch(/console\.error\('sv2 evidence \(cron\) FAILED:'/);
     expect(sched).toMatch(/\.catch\(err => console\.error\('SV2 evidence \(cron\) failed:'/);

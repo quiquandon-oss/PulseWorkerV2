@@ -10878,14 +10878,18 @@ const pulseWorkerHandlers = {
     // steps: any of 'sync', 'collect', 'v2', 'glm_probe'. The GLM probe sends one tiny fixed package through the same
     // Neuron ledger to verify model availability and real Neuron use; it writes no V2 result.
     if (url.pathname === '/api/sentiment-v2/run' && request.method === 'POST') {
-      let steps = ['sync', 'collect', 'v2'];
+      let steps = ['sync', 'v2', 'collect'];
       try { const b = await request.json(); if (b && Array.isArray(b.steps)) steps = b.steps.filter(x => ['sync', 'collect', 'v2', 'glm_probe'].includes(x)); } catch (_e) { /* defaults */ }
       const now = Date.now(), out = { ok: true, ran_at: now, steps };
+      // Same order and D1 query budget as the cron chain.
+      const q = { n: 0 };
+      const renv = { ...env, DB: sv2CountingDb(env.DB, q) };
       try {
-        if (steps.includes('sync')) out.sync = await syncV1ArchiveFromHistory(env, { nowTs: now });
-        if (steps.includes('collect')) out.collect = await sv2CollectEvidence(env, { nowTs: now });
-        if (steps.includes('v2')) out.v2 = await runSentimentV2Cycle(env, { nowTs: now });
-        if (steps.includes('glm_probe')) out.glm_probe = await sv2GlmProbe(env, now);
+        if (steps.includes('sync')) out.sync = await syncV1ArchiveFromHistory(renv, { nowTs: now });
+        if (steps.includes('v2')) out.v2 = await runSentimentV2Cycle(renv, { nowTs: now });
+        if (steps.includes('collect')) out.collect = await sv2CollectEvidence(renv, { nowTs: now, queryBudget: SV2_D1_QUERIES_PER_INVOCATION - SV2_D1_QUERY_RESERVE - q.n });
+        if (steps.includes('glm_probe')) out.glm_probe = await sv2GlmProbe(renv, now);
+        out.d1_queries = q.n;
       } catch (err) {
         out.ok = false; out.error = String((err && err.message) || err).slice(0, 300);
       }
@@ -11672,6 +11676,9 @@ const pulseWorkerHandlers = {
       } else {
         // Sentiment V2 runs after detection, in the same non-tick invocation (never alongside the prediction tick), so
         // detection's writes complete first and a V2 failure cannot affect them. V2 is idempotent per V1 observation.
+        // One counter of top-level D1 calls for the whole chain (D1 limits queries per invocation; a batch counts as one).
+        const sv2Q = { n: 0 };
+        env = { ...env, DB: sv2CountingDb(env.DB, sv2Q) };
         ctx.waitUntil(runAutomaticDetection(env, { trigger: 'cron', nowTs: event.scheduledTime })
           .then(r => console.log('event detection (cron):', JSON.stringify({ ok: r.ok, skipped: r.skipped || false, reason: r.reason || r.error || null })))
           .catch(err => console.error('Event detection (cron) failed:', err))
@@ -11681,14 +11688,15 @@ const pulseWorkerHandlers = {
           .then(r => { const line = JSON.stringify({ ok: r.ok, skipped: r.skipped || false, copied: r.copied || 0, already_present: r.already_present || 0, history_last_ts: r.history_last_ts || null, invalid: r.invalid || [], errors: r.errors || [], truncated: r.truncated || false });
             if (r.ok) console.log('v1 archive sync (cron):', line); else console.error('v1 archive sync (cron) FAILED:', line); })
           .catch(err => console.error('V1 archive sync (cron) failed:', err))
-          // Independent evidence (RSS/Atom/official feeds), bounded per run; V2 uses only items retrieved before each decision.
-          .then(() => sv2CollectEvidence(env, { nowTs: event.scheduledTime }))
-          .then(r => { const line = JSON.stringify({ ok: r.ok, skipped: r.skipped || false, items_new: r.items_new || 0, items_duplicate: r.items_duplicate || 0, budget: r.budget || null, sources: (r.sources || []).map(x => `${x.id}:${x.status}`), errors: r.errors || [] });
-            if (r.ok) console.log('sv2 evidence (cron):', line); else console.error('sv2 evidence (cron) FAILED:', line); })
-          .catch(err => console.error('SV2 evidence (cron) failed:', err))
           .then(() => runSentimentV2Cycle(env, { nowTs: event.scheduledTime }))
           .then(r => console.log('sentiment v2 (cron):', JSON.stringify({ ok: r.ok, skipped: r.skipped || false, written: r.written || 0, reason: r.reason || null })))
-          .catch(err => console.error('Sentiment V2 (cron) failed:', err)));
+          .catch(err => console.error('Sentiment V2 (cron) failed:', err))
+          // Independent evidence last: V2 decisions are past V1 timestamps, so evidence retrieved now could not count for them
+          // anyway (point-in-time), and V2 gets the D1 query headroom first. The collector spends only what is left.
+          .then(() => sv2CollectEvidence(env, { nowTs: event.scheduledTime, queryBudget: SV2_D1_QUERIES_PER_INVOCATION - SV2_D1_QUERY_RESERVE - sv2Q.n }))
+          .then(r => { const line = JSON.stringify({ ok: r.ok, skipped: r.skipped || false, items_new: r.items_new || 0, items_duplicate: r.items_duplicate || 0, budget: r.budget || null, sources: (r.sources || []).map(x => `${x.id}:${x.status}`), errors: r.errors || [] });
+            if (r.ok) console.log('sv2 evidence (cron):', line); else console.error('sv2 evidence (cron) FAILED:', line); })
+          .catch(err => console.error('SV2 evidence (cron) failed:', err)));
       }
     }
     // No catch-all else: an unrecognized event.cron does nothing.
@@ -12608,12 +12616,15 @@ function sv2AiEstimateNeurons(pricing, promptBytes) {
 // Every number the AI writes in free text must already occur in the package it was given: no invented figures,
 // prices or forecasts. Returns the offending numbers.
 function sv2UngroundedNumbers(texts, pkgText) {
-  const hay = String(pkgText).replace(/,/g, '');
+  // Whole numeric values only: a figure is grounded when the same number occurs as a complete value in the package,
+  // never as a fragment of a longer one (e.g. 179 inside a 13-digit timestamp).
+  const norm = (x) => { const n = Number(String(x).replace(/,/g, '')); return Number.isFinite(n) ? String(n) : null; };
+  const have = new Set([...String(pkgText).matchAll(/(?<![\d.])\d+(?:\.\d+)?(?![\d.])/g)].map(m => norm(m[0])).filter(Boolean));
   const bad = [];
   for (const t of texts) {
-    for (const m of String(t || '').matchAll(/\d+(?:[.,]\d+)*/g)) {
-      const n = m[0].replace(/,/g, '');
-      if (!hay.includes(n)) bad.push(m[0]);
+    for (const m of String(t || '').matchAll(/(?<![\d.,])\d{1,3}(?:,\d{3})+(?:\.\d+)?(?![\d.,])|(?<![\d.,])\d+(?:\.\d+)?(?![\d.])/g)) {
+      const n = norm(m[0]);
+      if (n === null || !have.has(n)) bad.push(m[0]);
     }
   }
   return bad;
@@ -12786,6 +12797,23 @@ async function syncV1ArchiveFromHistory(env, { nowTs } = {}) {
   }
   out.ok = out.errors.length === 0;
   return out;
+}
+
+// Workers Free: D1 allows 50 queries per Worker invocation (a db.batch() counts as one). The non-tick cron chain counts
+// its top-level D1 calls so the last step (the evidence collector) only uses the remaining headroom.
+const SV2_D1_QUERIES_PER_INVOCATION = 50;
+const SV2_D1_QUERY_RESERVE = 3;                  // d1_usage_daily recording and slack
+function sv2CountingDb(db, counter) {
+  if (!db) return db;
+  const wrapStmt = (st) => ({ ...st, __d1Statement: st.__d1Statement || st,
+    bind: (...a) => wrapStmt(st.bind(...a)),
+    first: (...x) => { counter.n++; return st.first(...x); },
+    all: (...x) => { counter.n++; return st.all(...x); },
+    run: (...x) => { counter.n++; return st.run(...x); },
+    raw: (...x) => { counter.n++; return st.raw(...x); } });
+  return { ...db, prepare: (sql) => wrapStmt(db.prepare(sql)),
+    batch: (stmts) => { counter.n++; return db.batch(stmts.map(s => (s && s.__d1Statement ? s.__d1Statement : s))); },
+    exec: (...x) => { counter.n++; return db.exec(...x); } };
 }
 
 async function runSentimentV2Cycle(env, { nowTs } = {}) {

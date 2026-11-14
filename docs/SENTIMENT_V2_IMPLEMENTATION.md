@@ -174,7 +174,7 @@ GLM-4.7-flash (`@cf/zai-org/glm-4.7-flash`):
   - 8 s timeout, 256 KiB per response and 768 KiB per run;
   - one retry on network error, timeout, 429 or 5xx, and none on other 4xx;
   - content-type allowlist; conditional requests (ETag / Last-Modified).
-- **D1 queries per run:** at most 2 + 3 × feeds (one lookup, one duplicate-check batch and one write batch per feed; a `db.batch()` counts as one query against D1's per-invocation limit).
+- **D1 query budget shared across the cron chain:** the non-tick chain (detection → V1 archive copy → V2 → collector) counts its top-level D1 calls; the collector runs last and only uses `50 − 3 − used` (it starts no feed it cannot finish). Collector cost: at most 2 + 3 × feeds (one lookup, one duplicate-check batch and one write batch per feed; a `db.batch()` counts as one query against D1's per-invocation limit).
 - **Storage (migration 0029):**
   - `sv2_evidence`: `evidence_id` = sha256 of the canonical URL; `title_hash` for cross-source duplicates (kept with `dup_of`, excluded from scoring); `content_hash`; publication and retrieval timestamps; provenance.
   - `sv2_source_state`: reliability (ok/fail counts), consecutive failures, exponential backoff up to 16×, ETag.
@@ -209,7 +209,7 @@ GLM-4.7-flash (`@cf/zai-org/glm-4.7-flash`):
   - Actual Neurons, from reported token usage, are recorded on the same row.
 - **Output validation:**
   - JSON only, with the existing schema and cited-ID checks;
-  - every number in free text must appear in the evidence package;
+  - every number in free text must appear as a whole value in the evidence package (not as a fragment of a longer number);
   - any extra field (e.g. a score) is rejected.
 - **The score is never changed.** An AI failure only marks the result DEGRADED.
 

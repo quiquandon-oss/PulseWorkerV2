@@ -38,10 +38,23 @@ jobs:
           ref: ${{ inputs.ref }}
           persist-credentials: false
 
-      - name: Validate wrangler.staging.toml targets only the staging Worker and database
+      # The deploy configuration never comes from the ref being deployed: a ref could add a [build] command (Wrangler
+      # runs it during deploy, with the deploy token in its environment) or other settings. The reviewed
+      # wrangler.staging.toml from this workflow's own commit (on main) replaces the ref's copy.
+      - name: Use the reviewed wrangler.staging.toml from the workflow's commit, not from the ref
+        env:
+          WF_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          git -c protocol.version=2 fetch -q --depth=1 "https://github.com/${GITHUB_REPOSITORY}.git" "$WF_SHA"
+          git show "FETCH_HEAD:wrangler.staging.toml" > wrangler.staging.toml
+          echo "using wrangler.staging.toml from workflow commit $WF_SHA"
+
+      - name: Validate wrangler.staging.toml targets only the staging Worker and database, with no build step
         run: |
           set -e
           grep -qx 'name = "pulseworker-v2-staging"' wrangler.staging.toml || { echo "::error::not the staging Worker name"; exit 1; }
+          if grep -qiE '^\s*\[(build|\[?env)|^\s*command\s*=' wrangler.staging.toml; then echo "::error::build commands or env sections are not allowed in the staging config"; exit 1; fi
           grep -qx 'database_id = "5458d504-2778-49ae-bd25-7751f1c49d50"' wrangler.staging.toml || { echo "::error::not the staging D1 id"; exit 1; }
           if grep -qE '^name = "pulseworker-v2"$|^database_name = "sentiment-history"|f91ca980-b886-423a-bd6f-f3baea46d181' wrangler.staging.toml; then
             echo "::error::production identifier in wrangler.staging.toml"; exit 1; fi

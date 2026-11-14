@@ -478,7 +478,7 @@ class TestHistoricalObservationWindow:
         # Not one of the 4 already-historical rows was fed back through
         # the newly-archived write path on the second run.
         new_sql = d1.executed_sql[sql_count_before_second:]
-        assert not any(sql.startswith("INSERT INTO research_sentiment_archive") for sql in new_sql)
+        assert not any(sql.startswith("INSERT OR IGNORE INTO research_sentiment_archive") for sql in new_sql)
 
     def test_insufficient_archive_data_still_reported_when_genuinely_insufficient(self):
         # Only 1 real archived row and no history at all -- the fix must
@@ -589,7 +589,7 @@ class TestDuplicateHandlingContract:
         insert_history(d1, ts_b, 55, {"fng": 55})  # genuinely new, unarchived row
         result = ep.run_pipeline(d1.query, d1.execute, now_ts=ts_b + HOUR)
         assert result["newly_archived"] == 1  # only ts_b -- ts_a was never re-offered
-        insert_sqls = [sql for sql in d1.executed_sql if sql.startswith("INSERT INTO research_sentiment_archive")]
+        insert_sqls = [sql for sql in d1.executed_sql if sql.startswith("INSERT OR IGNORE INTO research_sentiment_archive")]
         assert len(insert_sqls) == 1
         # observation_ts is the first VALUES column (see ARCHIVE_COLUMNS) --
         # this pins the single INSERT to ts_b specifically, not merely to

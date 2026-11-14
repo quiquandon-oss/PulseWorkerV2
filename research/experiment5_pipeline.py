@@ -115,7 +115,9 @@ def build_insert_archive_sql(archive_row):
     already computed content_hash etc). Builds the literal INSERT this
     module replicates to real D1."""
     values = [archive_row[c] for c in ARCHIVE_COLUMNS]
-    return (f"INSERT INTO research_sentiment_archive ({', '.join(ARCHIVE_COLUMNS)}) VALUES "
+    # OR IGNORE: the Worker (syncV1ArchiveFromHistory) may archive the same observation, with the identical
+    # content_hash, between this job's read and this INSERT; UNIQUE(observation_ts) then keeps the first row.
+    return (f"INSERT OR IGNORE INTO research_sentiment_archive ({', '.join(ARCHIVE_COLUMNS)}) VALUES "
             f"({', '.join(_sql_literal(v) for v in values)})")
 
 

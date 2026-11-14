@@ -1,0 +1,117 @@
+# Sentiment V2 staging deploy (manual). Deploys a chosen ref of worker.js to the STAGING Worker only
+# (pulseworker-v2-staging, staging D1 5458d504-...), applies the Sentiment V2 migrations to the STAGING database,
+# and sets the staging admin token. Uses only the dedicated staging token; never the production token.
+# Production is untouched: deploy.yml (production) is unchanged and this workflow cannot target production
+# (the config check below refuses any production Worker or database identifier).
+name: Deploy Sentiment V2 Staging
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: 'Git ref (branch or commit) to deploy to staging'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sv2-staging
+  cancel-in-progress: false
+
+jobs:
+  deploy-staging:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Verify the staging-only secrets are configured
+        env:
+          STAGING_TOKEN: ${{ secrets.STAGE7_STAGING_CLOUDFLARE_API_TOKEN }}
+          STAGING_ADMIN: ${{ secrets.STAGE7_STAGING_ADMIN_TOKEN }}
+        run: |
+          if [ -z "$STAGING_TOKEN" ]; then echo "::error::STAGE7_STAGING_CLOUDFLARE_API_TOKEN missing; refusing (never falls back to the production token)"; exit 1; fi
+          if [ -z "$STAGING_ADMIN" ]; then echo "::error::STAGE7_STAGING_ADMIN_TOKEN missing"; exit 1; fi
+
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683   # v4.2.2
+        with:
+          ref: ${{ inputs.ref }}
+          persist-credentials: false
+
+      # The deploy configuration never comes from the ref being deployed, nor from the dispatching branch: a ref could
+      # add a build command (Wrangler runs it during deploy, with the deploy token in its environment). The run must be
+      # dispatched from main, and the staging config is taken from origin/main and validated against an allowlist.
+      - name: Refuse dispatches from anything but main
+        run: |
+          if [ "$GITHUB_REF" != "refs/heads/main" ]; then echo "::error::dispatch this workflow from main (got $GITHUB_REF); the ref to deploy is the input"; exit 1; fi
+
+      - name: Use the reviewed wrangler.staging.toml from origin/main, not from the ref
+        run: |
+          set -euo pipefail
+          git -c protocol.version=2 fetch -q --depth=1 "https://github.com/${GITHUB_REPOSITORY}.git" refs/heads/main
+          git show "FETCH_HEAD:wrangler.staging.toml" > wrangler.staging.toml
+          echo "using wrangler.staging.toml from origin/main $(git rev-parse FETCH_HEAD)"
+
+      - name: Validate the staging config (parsed TOML, allowlisted keys only, staging targets only)
+        run: |
+          python3 - <<'PYEOF'
+          import tomllib, sys
+          c = tomllib.load(open('wrangler.staging.toml', 'rb'))
+          allowed = {'name', 'main', 'compatibility_date', 'account_id', 'vars', 'd1_databases', 'ai', 'observability', 'workers_dev'}
+          extra = set(c) - allowed
+          if extra: sys.exit(f"::error::keys not allowed in the staging config: {sorted(extra)} (no build, env, triggers, routes, services)")
+          if c.get('name') != 'pulseworker-v2-staging': sys.exit('::error::not the staging Worker name')
+          if c.get('main') != 'worker.js': sys.exit('::error::main must be worker.js')
+          dbs = c.get('d1_databases') or []
+          if len(dbs) != 1 or dbs[0].get('database_id') != '5458d504-2778-49ae-bd25-7751f1c49d50' or dbs[0].get('database_name') != 'pulseworker-v2-staging':
+              sys.exit('::error::the only D1 binding must be the staging database')
+          if set(c.get('ai') or {}) - {'binding'}: sys.exit('::error::unexpected [ai] keys')
+          if any(not isinstance(v, str) for v in (c.get('vars') or {}).values()): sys.exit('::error::vars must be plain strings')
+          print('staging config validated:', sorted(c))
+          PYEOF
+
+      - name: Validate wrangler.staging.toml targets only the staging Worker and database
+        run: |
+          set -e
+          grep -qx 'name = "pulseworker-v2-staging"' wrangler.staging.toml || { echo "::error::not the staging Worker name"; exit 1; }
+          grep -qx 'database_id = "5458d504-2778-49ae-bd25-7751f1c49d50"' wrangler.staging.toml || { echo "::error::not the staging D1 id"; exit 1; }
+          if grep -qE '^name = "pulseworker-v2"$|^database_name = "sentiment-history"|f91ca980-b886-423a-bd6f-f3baea46d181' wrangler.staging.toml; then
+            echo "::error::production identifier in wrangler.staging.toml"; exit 1; fi
+          echo "staging target validated"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: Tests (the deployed worker.js must pass the suite)
+        run: |
+          npm ci
+          npm test
+
+      - name: Apply Sentiment V2 migrations to the STAGING database (additive; existing tables are left as they are)
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.STAGE7_STAGING_CLOUDFLARE_API_TOKEN }}
+        run: |
+          set -euo pipefail
+          for f in 0015_experiment5_sentiment_archive.sql 0027_sentiment_v2_results.sql 0029_sv2_evidence_and_ai_budget.sql; do
+            [ -f ".ai/migrations/$f" ] || { echo "skip $f (not in this ref)"; continue; }
+            if out=$(npx --yes wrangler@4 d1 execute pulseworker-v2-staging --remote -c wrangler.staging.toml --file ".ai/migrations/$f" 2>&1); then
+              echo "applied $f"
+            elif echo "$out" | grep -qi 'already exists'; then
+              echo "kept $f (its tables already exist)"
+            else
+              echo "$out"; echo "::error::migration $f failed on staging"; exit 1
+            fi
+          done
+
+      - name: Deploy to the staging Worker
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.STAGE7_STAGING_CLOUDFLARE_API_TOKEN }}
+        run: npx --yes wrangler@4 deploy -c wrangler.staging.toml --var GIT_COMMIT_SHA:$(git rev-parse HEAD)
+
+      - name: Set the staging admin token
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.STAGE7_STAGING_CLOUDFLARE_API_TOKEN }}
+          ADMIN: ${{ secrets.STAGE7_STAGING_ADMIN_TOKEN }}
+        run: printf '%s' "$ADMIN" | npx --yes wrangler@4 secret put STAGE7_ADMIN_TOKEN -c wrangler.staging.toml

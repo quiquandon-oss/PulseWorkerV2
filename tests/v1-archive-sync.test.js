@@ -8,12 +8,14 @@ import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { extractFunctions, extractConstants, evalInScope } from './helpers/extract.js';
 import { makeD1 } from './replay/d1-sqlite.mjs';
+import { SV2_SOURCE_REGISTRY } from '../sentiment-v2/collector.js';
+import { sv2EvidenceReadings, sv2ScoreHeadline, SV2_EVIDENCE_RULES } from '../sentiment-v2/evidence-score.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(__dirname, '..');
 const WORKER = readFileSync(join(ROOT, 'worker.js'), 'utf8');
 const ARCHIVE_DDL = readFileSync(join(ROOT, '.ai/migrations/0015_experiment5_sentiment_archive.sql'), 'utf8');
-const V2_DDL = readFileSync(join(ROOT, '.ai/migrations/0027_sentiment_v2_results.sql'), 'utf8');
+const V2_DDL = readFileSync(join(ROOT, '.ai/migrations/0027_sentiment_v2_results.sql'), 'utf8') + '\n' + readFileSync(join(ROOT, '.ai/migrations/0029_sv2_evidence_and_ai_budget.sql'), 'utf8');
 // V1's `history` table as PulseWorker creates it (columns this code reads, plus btc_price which it must not copy).
 const HISTORY_DDL = `CREATE TABLE history (id INTEGER PRIMARY KEY AUTOINCREMENT, ts INTEGER NOT NULL, score INTEGER NOT NULL,
   sources_json TEXT, technical_score INTEGER, gold_regime TEXT, btc_price REAL, regime_mag REAL, bottom_score REAL);
@@ -28,9 +30,12 @@ const SYNC_CONSTS = ['V1_ARCHIVE_SYNC_WINDOW_MS', 'V1_ARCHIVE_SYNC_MAX_ROWS', 'V
 const V2 = ['sv2Config', 'sv2Finite', 'sv2ParseSources', 'sv2History', 'sv2AttachPrices', 'sv2IndexAtOrBefore', 'sv2PriceAt',
   'sv2SourceStatus', 'sv2Pearson', 'sv2FamilyOf', 'sv2Redundancy', 'sv2Families', 'sv2EventFamily', 'sv2EventReactions',
   'sv2Events', 'sv2Regime', 'sv2Profile', 'sv2Analogues', 'sv2Classify', 'sv2Compute', 'sv2AiPackage',
-  'sv2ValidateAiOutput', 'sv2RunAi', 'sv2Row', 'runSentimentV2Cycle', 'sv2AlignSeries', 'sv2SeriesStatus', 'getSentimentV2Comparison'];
-const V2_CONSTS = ['SENTIMENT_V2_VERSION', 'SV2_INSERT_SQL', 'SV2_PERIODS_MS', 'SV2_MAX_POINTS', 'SV2_MAX_ROWS', 'SV2_MAX_PRICE_ROWS', 'SV2_STALE_MS'];
-const S = evalInScope(extractConstants(...SYNC_CONSTS, ...V2_CONSTS) + '\n' + extractFunctions(...SYNC, ...V2));
+  'sv2ValidateAiOutput', 'sv2RunAi', 'sv2Row', 'runSentimentV2Cycle', 'sv2AlignSeries', 'sv2SeriesStatus', 'getSentimentV2Comparison',
+  'sv2EvidenceSummary', 'sv2EvidenceItemsForAi', 'sv2AiBudget', 'sv2AiEstimateNeurons', 'sv2UngroundedNumbers', 'sv2LatestView'];
+const V2_CONSTS = ['SENTIMENT_V2_VERSION', 'SV2_VERSIONS_SHOWN', 'SV2_INSERT_SQL', 'SV2_PERIODS_MS', 'SV2_MAX_POINTS', 'SV2_MAX_ROWS', 'SV2_MAX_PRICE_ROWS', 'SV2_STALE_MS',
+  'SV2_AI_PRICING', 'SV2_AI_MAX_OUTPUT_TOKENS', 'SV2_AI_RESERVE_SQL', 'SV2_AI_TEMPLATE_TOKENS'];
+const S = evalInScope(extractConstants(...SYNC_CONSTS, ...V2_CONSTS) + '\n' + extractFunctions(...SYNC, ...V2),
+  { SV2_SOURCE_REGISTRY, sv2EvidenceReadings, sv2ScoreHeadline, SV2_EVIDENCE_RULES });
 
 const H = 3600000;
 const NOW = Date.UTC(2026, 10, 14, 20, 0, 0);

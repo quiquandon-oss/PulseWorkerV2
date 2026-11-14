@@ -6,15 +6,20 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { extractFunctions, extractConstants, evalInScope } from './helpers/extract.js';
+import { SV2_SOURCE_REGISTRY } from '../sentiment-v2/collector.js';
+import { sv2EvidenceReadings, sv2ScoreHeadline, SV2_EVIDENCE_RULES } from '../sentiment-v2/evidence-score.js';
 
 const FUNCS = ['sv2Config', 'sv2Finite', 'sv2ParseSources', 'sv2History', 'sv2AttachPrices', 'sv2IndexAtOrBefore', 'sv2PriceAt',
   'sv2SourceStatus', 'sv2Pearson', 'sv2FamilyOf', 'sv2Redundancy', 'sv2Families', 'sv2EventFamily', 'sv2EventReactions',
   'sv2Events', 'sv2Regime', 'sv2Profile', 'sv2Analogues', 'sv2Classify', 'sv2Compute', 'sv2AiPackage',
   'sv2ValidateAiOutput', 'sv2RunAi', 'sv2Row', 'runSentimentV2Cycle', 'sv2AlignSeries', 'sv2SeriesStatus',
-  'getSentimentV2Comparison', 'getSentimentV2ComparisonCached'];
-const CONSTS = ['SENTIMENT_V2_VERSION', 'SV2_INSERT_SQL', 'SV2_PERIODS_MS', 'SV2_MAX_POINTS', 'SV2_MAX_ROWS', 'SV2_MAX_PRICE_ROWS', 'SV2_STALE_MS', 'sv2ComparisonCache'];
+  'getSentimentV2Comparison', 'getSentimentV2ComparisonCached', 'sv2EvidenceSummary', 'sv2EvidenceItemsForAi', 'sv2AiBudget',
+  'sv2AiEstimateNeurons', 'sv2UngroundedNumbers', 'sv2LatestView'];
+const CONSTS = ['SENTIMENT_V2_VERSION', 'SV2_VERSIONS_SHOWN', 'SV2_INSERT_SQL', 'SV2_PERIODS_MS', 'SV2_MAX_POINTS', 'SV2_MAX_ROWS', 'SV2_MAX_PRICE_ROWS', 'SV2_STALE_MS', 'sv2ComparisonCache',
+  'SV2_AI_PRICING', 'SV2_AI_MAX_OUTPUT_TOKENS', 'SV2_AI_RESERVE_SQL', 'SV2_AI_TEMPLATE_TOKENS'];
+const GLOBALS = { SV2_SOURCE_REGISTRY, sv2EvidenceReadings, sv2ScoreHeadline, SV2_EVIDENCE_RULES };
 const SRC = extractConstants(...CONSTS) + '\n' + extractFunctions(...FUNCS);
-const fresh = () => evalInScope(SRC);
+const fresh = () => evalInScope(SRC, GLOBALS);
 const S = fresh();
 const cfg = S.sv2Config();
 const H = 3600000, D = 24 * H;
@@ -35,18 +40,37 @@ function archive(n, { step = 2 * H, start = T0, src = null, price = null } = {})
   return rows;
 }
 
-function fakeDb({ archive: arch = [], events = [], results = [], failEvents = false, prices = [], noTable = false, slots = [] } = {}) {
+function fakeDb({ archive: arch = [], events = [], results = [], failEvents = false, prices = [], noTable = false, slots = [], evidence = [], noEvidenceTable = false } = {}) {
   const log = [];
   const exec = (sql, a) => {
     log.push(sql);
     if (sql.startsWith('SELECT name FROM sqlite_master')) return noTable ? null : { name: 'sentiment_v2_results' };
-    if (sql.startsWith('INSERT INTO sentiment_v2_ai_calls')) {
-      const [day, ts, , ceiling] = a;
-      const used = slots.filter(x => x.day === day).length;
-      if (used >= ceiling) return { meta: { changes: 0 } };
-      slots.push({ day, slot: used + 1, reserved_ts: ts });
-      return { meta: { changes: 1 } };
+    // Neuron ledger (shared `slots` array plays the table; the budget condition is evaluated exactly as the SQL does)
+    if (sql.startsWith('INSERT INTO sv2_ai_neurons')) {
+      const [day, ts, model, est, , , est2, budget] = a;
+      const committed = slots.filter(x => x.day === day).reduce((s2, x) => s2 + Math.max(x.reserved_neurons, x.actual_neurons || 0), 0);
+      if (committed + est2 > budget) return { meta: { changes: 0 } };
+      const slot = slots.filter(x => x.day === day).length + 1;
+      slots.push({ rowid: slots.length + 1, day, slot, reserved_ts: ts, model, reserved_neurons: est, actual_neurons: null, status: 'reserved' });
+      return { meta: { changes: 1, last_row_id: slots.length } };
     }
+    if (sql.startsWith('SELECT slot FROM sv2_ai_neurons WHERE rowid')) { const x = slots.find(y => y.rowid === a[0]); return x ? { slot: x.slot } : null; }
+    if (sql.startsWith('UPDATE sv2_ai_neurons')) {
+      const x = slots.find(y => y.day === a[4] && y.slot === a[5]);
+      if (x) Object.assign(x, { input_tokens: a[0], output_tokens: a[1], actual_neurons: a[2], status: a[3] });
+      return { meta: { changes: x ? 1 : 0 } };
+    }
+    if (sql.startsWith("SELECT 1 AS x FROM sv2_ai_neurons")) return slots.some(y => y.day === a[0] && y.status === 'account_limited') ? { x: 1 } : null;
+    if (sql.startsWith('SELECT evidence_id, source_id, title, canonical_url, published_ts, retrieved_ts, dup_of FROM sv2_evidence')) {
+      if (noEvidenceTable) throw new Error('no such table: sv2_evidence');
+      if (/WHERE source_id = \?/.test(sql)) {
+        const f = evidence.filter(e => e.source_id === a[0] && e.retrieved_ts <= a[1] && !e.dup_of).sort((x, y) => y.retrieved_ts - x.retrieved_ts);
+        return f[0] || null;
+      }
+      if (!/LIMIT \?$/.test(sql)) throw new Error('unbounded evidence read');
+      return evidence.filter(e => e.retrieved_ts <= a[0] && !e.dup_of).sort((x, y) => y.retrieved_ts - x.retrieved_ts).slice(0, a[a.length - 1]);
+    }
+    if (sql.startsWith('SELECT ts FROM history')) throw new Error('no such table: history');
     if (sql.startsWith('SELECT MAX(decision_ts)')) {
       const ts = results.filter(r => r.asset === a[0] && r.calc_version === a[1]).map(r => r.decision_ts);
       return { t: ts.length ? Math.max(...ts) : null };
@@ -80,17 +104,21 @@ function fakeDb({ archive: arch = [], events = [], results = [], failEvents = fa
         sentiment_score: a[5], sentiment_class: a[6], confidence: a[7], ai_model: a[18], ai_status: a[19], created_ts: a[22] });
       return { meta: { changes: 1 } };
     }
-    if (sql.startsWith('SELECT decision_ts, sentiment_score, status FROM sentiment_v2_results')) {
+    if (sql.startsWith('SELECT decision_ts, sentiment_score, status, calc_version FROM sentiment_v2_results')) {
       if (!/DESC LIMIT \?/.test(sql)) throw new Error('unbounded V2 read');
-      return results.filter(r => r.calc_version === a[0] && r.decision_ts >= a[1] && r.decision_ts <= a[2]).sort((x, y) => y.decision_ts - x.decision_ts).slice(0, a[3]);
+      const nv = (sql.match(/IN \(([?,\s]+)\)/)[1].match(/\?/g) || []).length;
+      const vs = a.slice(0, nv), [from, to, lim] = a.slice(nv);
+      return results.filter(r => vs.includes(r.calc_version) && r.decision_ts >= from && r.decision_ts <= to).sort((x, y) => y.decision_ts - x.decision_ts).slice(0, lim);
     }
-    if (sql.startsWith('SELECT decision_ts FROM sentiment_v2_results')) {
+    if (sql.startsWith('SELECT decision_ts FROM sentiment_v2_results') || sql.startsWith('SELECT decision_ts, calc_version FROM sentiment_v2_results')) {
       if (!/LIMIT 1$/.test(sql)) throw new Error('unbounded V2 metadata read');
-      const ts = results.filter(r => r.calc_version === a[0]).map(r => r.decision_ts);
-      if (!ts.length) return null;
-      return { decision_ts: /DESC/.test(sql) ? Math.max(...ts) : Math.min(...ts) };
+      const vs = /IN \(/.test(sql) ? a : [a[0]];
+      const rs = results.filter(r => vs.includes(r.calc_version));
+      if (!rs.length) return null;
+      const pick = rs.reduce((m, r) => (/DESC/.test(sql) ? r.decision_ts > m.decision_ts : r.decision_ts < m.decision_ts) ? r : m);
+      return { decision_ts: pick.decision_ts, calc_version: pick.calc_version };
     }
-    if (sql.startsWith('SELECT decision_ts, status, degraded_reason')) return results.find(r => r.decision_ts === a[1]) || null;
+    if (sql.startsWith('SELECT decision_ts, calc_version, status, degraded_reason')) return results.find(r => r.decision_ts === a[1] && r.calc_version === a[0]) || null;
     throw new Error(`unexpected SQL: ${sql}`);
   };
   return { log, results, slots, prepare(sql) {
@@ -290,13 +318,13 @@ describe('idempotency and V1 immutability', () => {
     await X.runSentimentV2Cycle({ ...ENABLED, DB: db }, { nowTs: rows[119].observation_ts });
     const writes = db.log.filter(sql => /^\s*(INSERT|UPDATE|DELETE|REPLACE|CREATE|DROP|ALTER)/i.test(sql));
     expect(writes.length).toBeGreaterThan(0);
-    expect(writes.every(sql => /^INSERT OR IGNORE INTO sentiment_v2_results |^INSERT INTO sentiment_v2_ai_calls /.test(sql))).toBe(true);
+    expect(writes.every(sql => /^INSERT OR IGNORE INTO sentiment_v2_results |^INSERT INTO sv2_ai_neurons |^UPDATE sv2_ai_neurons /.test(sql))).toBe(true);
   });
   it('no V2 function contains SQL that modifies another table', () => {
     const body = extractFunctions(...FUNCS) + extractConstants(...CONSTS);
     const targets = [...body.matchAll(/\b(INSERT(?: OR \w+)? INTO|UPDATE|DELETE FROM|REPLACE INTO|DROP TABLE|ALTER TABLE)\s+(\w+)/gi)].map(m => m[2]);
     expect(targets.length).toBeGreaterThan(0);
-    expect(new Set(targets)).toEqual(new Set(['sentiment_v2_results', 'sentiment_v2_ai_calls']));
+    expect(new Set(targets)).toEqual(new Set(['sentiment_v2_results', 'sv2_ai_neurons']));
   });
   it('does nothing when disabled', async () => {
     const db = fakeDb({ archive: archive(50) });
@@ -329,32 +357,67 @@ describe('AI: validation, quota, unavailability, zero paid fallback', () => {
     expect(S.sv2ValidateAiOutput('text', allowedIds).ok).toBe(false);
     expect(S.sv2ValidateAiOutput({ ...good, event_relevance: [{ id: 'event:zz', relevance: 'high', overlap: 'none' }] }, allowedIds).ok).toBe(false);
   });
-  it('is disabled without a configured model and ceiling, and never calls the binding then', async () => {
+  // A ledger double: reserve() succeeds while the budget allows (same rule as SV2_AI_RESERVE_SQL), record() stores usage.
+  const ledgerFor = (budgetRows = []) => ({
+    rows: budgetRows,
+    async accountLimitedToday() { return this.rows.some(r => r.status === 'account_limited'); },
+    async reserveNeurons(budget, est) {
+      const committed = this.rows.reduce((s2, r) => s2 + Math.max(r.reserved, r.actual || 0), 0);
+      if (committed + est > budget) return null;
+      this.rows.push({ slot: this.rows.length + 1, reserved: est, actual: null, status: 'reserved' });
+      return this.rows.length;
+    },
+    async recordNeurons(slot, u) { Object.assign(this.rows[slot - 1], { actual: u.actual_neurons ?? null, status: u.status }); },
+  });
+  const GLM = '@cf/zai-org/glm-4.7-flash';
+  const okResp = (obj, usage = { prompt_tokens: 900, completion_tokens: 300 }) => ({ response: JSON.stringify(obj), usage });
+  it('is disabled without a model or a Neuron budget, and never calls the binding then', async () => {
     let calls = 0;
-    const AI = { run: async () => { calls++; return { response: JSON.stringify(good) }; } };
-    expect((await S.sv2RunAi({ AI }, pkg, allowedIds, yes)).status).toBe('disabled');
-    expect((await S.sv2RunAi({ AI, SENTIMENT_V2_AI_MODEL: '@cf/x/y', SENTIMENT_V2_AI_DAILY_CALLS: '0' }, pkg, allowedIds, yes)).status).toBe('disabled');
+    const AI = { run: async () => { calls++; return okResp(good); } };
+    expect((await S.sv2RunAi({ AI }, pkg, allowedIds, ledgerFor())).status).toBe('disabled');
+    expect((await S.sv2RunAi({ AI, SENTIMENT_V2_AI_MODEL: GLM, SV2_GLM_DAILY_NEURONS: '0' }, pkg, allowedIds, ledgerFor())).status).toBe('disabled');
+    expect((await S.sv2RunAi({ AI, SENTIMENT_V2_AI_MODEL: '@cf/unknown/model', SV2_GLM_DAILY_NEURONS: '500' }, pkg, allowedIds, ledgerFor())).status).toBe('unpriced_model');
     expect(calls).toBe(0);
   });
-  it('enforces the daily ceiling, reports a missing binding and errors, and never retries elsewhere', async () => {
+  it('enforces the daily Neuron budget, stops after the account allocation is reported exhausted, and never retries elsewhere', async () => {
     let calls = 0;
-    const env = { SENTIMENT_V2_AI_MODEL: '@cf/x/y', SENTIMENT_V2_AI_DAILY_CALLS: '2', AI: { run: async () => { calls++; throw new Error('daily free allocation exceeded'); } } };
-    expect((await S.sv2RunAi(env, pkg, allowedIds, no)).status).toBe('quota_guard');
-    expect(calls).toBe(0);
-    const err = await S.sv2RunAi(env, pkg, allowedIds, yes);
-    expect(err.status).toBe('error');
+    const est = S.sv2AiEstimateNeurons(S.SV2_AI_PRICING[GLM], 5000);
+    expect(est).toBeGreaterThan(S.SV2_AI_MAX_OUTPUT_TOKENS * 36400 / 1e6);   // the output cap alone is inside the bound
+    const env = { SENTIMENT_V2_AI_MODEL: GLM, SV2_GLM_DAILY_NEURONS: '100', AI: { run: async () => { calls++; throw new Error('3036: You have used up your daily free allocation of 10,000 neurons'); } } };
+    const led = ledgerFor();
+    const first = await S.sv2RunAi(env, pkg, allowedIds, led);
+    expect(first.status).toBe('account_limited');
     expect(calls).toBe(1);
-    expect((await S.sv2RunAi({ ...env, AI: undefined }, pkg, allowedIds, yes)).status).toBe('unavailable');
+    expect((await S.sv2RunAi(env, pkg, allowedIds, led)).status).toBe('quota_guard');   // no further call today
+    expect(calls).toBe(1);
+    const tiny = await S.sv2RunAi({ ...env, SV2_GLM_DAILY_NEURONS: '1' }, pkg, allowedIds, ledgerFor());
+    expect(tiny.status).toBe('quota_guard');                                              // reservation larger than budget
+    expect(calls).toBe(1);
+    expect((await S.sv2RunAi({ ...env, AI: undefined }, pkg, allowedIds, ledgerFor())).status).toBe('unavailable');
   });
-  it('accepts valid JSON from the binding and rejects malformed output', async () => {
-    const env = { SENTIMENT_V2_AI_MODEL: '@cf/x/y', SENTIMENT_V2_AI_DAILY_CALLS: '5' };
-    expect((await S.sv2RunAi({ ...env, AI: { run: async () => ({ response: '```json\n' + JSON.stringify(good) + '\n```' }) } }, pkg, allowedIds, yes)).status).toBe('ok');
-    expect((await S.sv2RunAi({ ...env, AI: { run: async () => ({ response: 'Sentiment is 72.' }) } }, pkg, allowedIds, yes)).status).toBe('invalid_output');
-    expect((await S.sv2RunAi({ ...env, AI: { run: async () => ({ response: { ...good, score: 9 } }) } }, pkg, allowedIds, yes)).status).toBe('invalid_output');
+  it('records actual Neurons from reported token usage, and the committed total never exceeds the budget', async () => {
+    const env = { SENTIMENT_V2_AI_MODEL: GLM, SV2_GLM_DAILY_NEURONS: '200', AI: { run: async () => okResp(good) } };
+    const led = ledgerFor();
+    let n = 0;
+    for (let k = 0; k < 20; k++) if ((await S.sv2RunAi(env, pkg, allowedIds, led)).status === 'ok') n++;
+    const committed = led.rows.reduce((s2, r) => s2 + Math.max(r.reserved, r.actual || 0), 0);
+    expect(n).toBeGreaterThan(0);
+    expect(committed).toBeLessThanOrEqual(200);
+    expect(led.rows[0].actual).toBeCloseTo((900 * 5500 + 300 * 36400) / 1e6, 3);
+  });
+  it('accepts valid JSON from the binding and rejects malformed output, extra fields and ungrounded numbers', async () => {
+    const env = { SENTIMENT_V2_AI_MODEL: GLM, SV2_GLM_DAILY_NEURONS: '1000' };
+    expect((await S.sv2RunAi({ ...env, AI: { run: async () => ({ response: '```json\n' + JSON.stringify(good) + '\n```' }) } }, pkg, allowedIds, ledgerFor())).status).toBe('ok');
+    expect((await S.sv2RunAi({ ...env, AI: { run: async () => ({ choices: [{ message: { content: JSON.stringify(good) } }], usage: { prompt_tokens: 1, completion_tokens: 1 } }) } }, pkg, allowedIds, ledgerFor())).status).toBe('ok');
+    expect((await S.sv2RunAi({ ...env, AI: { run: async () => ({ response: 'Sentiment is 72.' }) } }, pkg, allowedIds, ledgerFor())).status).toBe('invalid_output');
+    expect((await S.sv2RunAi({ ...env, AI: { run: async () => ({ response: { ...good, score: 9 } }) } }, pkg, allowedIds, ledgerFor())).status).toBe('invalid_output');
+    const invented = await S.sv2RunAi({ ...env, AI: { run: async () => okResp({ ...good, summary: 'BTC will reach 123456 next week.' }) } }, pkg, allowedIds, ledgerFor());
+    expect(invented.status).toBe('invalid_output');
+    expect(invented.reason).toMatch(/numbers not in the evidence package: 123456/);
   });
   it('an AI failure degrades the cycle but never changes the score', async () => {
     const rows = archive(150);
-    const env = { ...ENABLED, SENTIMENT_V2_AI_MODEL: '@cf/x/y', SENTIMENT_V2_AI_DAILY_CALLS: '3', AI: { run: async () => { throw new Error('x'); } } };
+    const env = { ...ENABLED, SENTIMENT_V2_AI_MODEL: GLM, SV2_GLM_DAILY_NEURONS: '500', AI: { run: async () => { throw new Error('x'); } } };
     const db = fakeDb({ archive: rows });
     await fresh().runSentimentV2Cycle({ ...env, DB: db }, { nowTs: rows[149].observation_ts });
     const off = fakeDb({ archive: rows });
@@ -370,10 +433,10 @@ describe('AI: validation, quota, unavailability, zero paid fallback', () => {
     expect(body).not.toMatch(/openai|anthropic|generativelanguage|googleapis|huggingface|replicate|together|groq|api[_-]?key/i);
     expect((body.match(/env\.AI\.run\(/g) || []).length).toBe(1);
   });
-  it('ships with AI disabled in wrangler.toml', () => {
+  it('ships in wrangler.toml with GLM named but a zero Neuron budget until staging verifies it', () => {
     const toml = readFileSync(join(dirname(fileURLToPath(import.meta.url)), '..', 'wrangler.toml'), 'utf8');
-    expect(toml).toMatch(/SENTIMENT_V2_AI_MODEL = ""/);
-    expect(toml).toMatch(/SENTIMENT_V2_AI_DAILY_CALLS = "0"/);
+    expect(toml).toMatch(/SENTIMENT_V2_AI_MODEL = "@cf\/zai-org\/glm-4\.7-flash"/);
+    expect(toml).toMatch(/SV2_GLM_DAILY_NEURONS = "0"/);
   });
 });
 
@@ -492,24 +555,28 @@ describe('deployment safety and the atomic AI ceiling', () => {
     expect(db.log.length).toBe(1);
     expect(db.results.length).toBe(0);
   });
-  it('never exceeds the daily ceiling across overlapping and retried cycles; a reserved slot counts even when the call fails', async () => {
+  it('never exceeds the daily Neuron budget across overlapping and retried cycles; a reservation counts even when the call fails', async () => {
     const rows = archive(160);
     let calls = 0;
     const AI = { run: async () => { calls++; throw new Error('upstream failure'); } };
-    const env = { ...ENABLED, SENTIMENT_V2_AI_MODEL: '@cf/x/y', SENTIMENT_V2_AI_DAILY_CALLS: '2', AI };
+    const GLM = '@cf/zai-org/glm-4.7-flash';
+    const est = 30;   // budget for exactly two reservations of this package size (checked below)
+    const env = { ...ENABLED, SENTIMENT_V2_AI_MODEL: GLM, AI };
     const slots = [];
     const now = rows[159].observation_ts;
-    // three overlapping cycles, each with its own view of results (as if none saw the others' inserts)
-    await Promise.all([0, 1, 2].map(() => fresh().runSentimentV2Cycle({ ...env, DB: fakeDb({ archive: rows, slots }) }, { nowTs: now })));
-    // and a retry
-    await fresh().runSentimentV2Cycle({ ...env, DB: fakeDb({ archive: rows, slots }) }, { nowTs: now });
+    const probe = fakeDb({ archive: rows });
+    await fresh().runSentimentV2Cycle({ ...env, SV2_GLM_DAILY_NEURONS: '100000', DB: probe }, { nowTs: now });
+    const one = probe.slots[0].reserved_neurons;
+    expect(one).toBeGreaterThan(est);
+    const budget = String(one * 2 + one / 2);
+    await Promise.all([0, 1, 2].map(() => fresh().runSentimentV2Cycle({ ...env, SV2_GLM_DAILY_NEURONS: budget, DB: fakeDb({ archive: rows, slots }) }, { nowTs: now })));
+    await fresh().runSentimentV2Cycle({ ...env, SV2_GLM_DAILY_NEURONS: budget, DB: fakeDb({ archive: rows, slots }) }, { nowTs: now });
     expect(slots.length).toBe(2);
-    expect(calls).toBe(2);
+    expect(calls).toBe(3);                 // 1 probe + 2 within budget
   });
-  it('the reservation statement is a single atomic conditional insert keyed by day and slot', () => {
-    const body = extractFunctions('runSentimentV2Cycle');
-    expect(body).toMatch(/INSERT INTO sentiment_v2_ai_calls \(day, slot, reserved_ts\) SELECT \?, COALESCE\(MAX\(slot\), 0\) \+ 1, \? FROM sentiment_v2_ai_calls WHERE day = \? HAVING COALESCE\(MAX\(slot\), 0\) < \?/);
-    const mig = readFileSync(join(dirname(fileURLToPath(import.meta.url)), '..', '.ai', 'migrations', '0027_sentiment_v2_results.sql'), 'utf8');
+  it('the reservation is one atomic conditional insert keyed by day and slot, checked against max(reserved, actual)', () => {
+    expect(S.SV2_AI_RESERVE_SQL).toMatch(/^INSERT INTO sv2_ai_neurons .* SELECT .* WHERE \(SELECT COALESCE\(SUM\(MAX\(reserved_neurons, COALESCE\(actual_neurons, 0\)\)\), 0\) FROM sv2_ai_neurons WHERE day = \?\) \+ \? <= \?$/);
+    const mig = readFileSync(join(dirname(fileURLToPath(import.meta.url)), '..', '.ai', 'migrations', '0029_sv2_evidence_and_ai_budget.sql'), 'utf8');
     expect(mig).toMatch(/PRIMARY KEY \(day, slot\)/);
   });
 });

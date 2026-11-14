@@ -13,7 +13,7 @@ const SQL_KW = new Set(('select from where and or not null is in as on join left
 
 export function collectSources(root) {
   const files = [join(root, 'worker.js')];
-  for (const d of ['events', 'learning']) {
+  for (const d of ['events', 'learning', 'sentiment-v2']) {
     try { for (const f of readdirSync(join(root, d))) if (f.endsWith('.js')) files.push(join(root, d, f)); } catch {}
   }
   return files.map((f) => readFileSync(f, 'utf8')).join('\n');

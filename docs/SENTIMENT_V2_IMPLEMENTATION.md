@@ -136,3 +136,85 @@ for 16 cycles plus uncached API requests (about 1% of the free 5M).
 | B9 | backend | **approve** | none |
 | F1 | frontend | needs-attention | medium ×2: no refresh on tab re-entry; stale hidden by short history → 5-min refresh, independent notices |
 | F2 | frontend | **approve** | none |
+
+## 10. Scope lock 2026-11-14: independent evidence, sv2-1.1.0, optional GLM
+
+Owner decisions (2026-11-14):
+- Collected evidence changes the score under a **new calc version `sv2-1.1.0`**. `sv2-1.0.0` results stay stored and
+  shown; they are no longer computed.
+- The collector runs **inside the existing hourly non-tick cron**, with a small per-run budget and no new Cron Trigger.
+- Reviews: `@codex review` on each PR.
+
+### 10.1 Free capacity (verified 2026-11-14, Cloudflare docs and repository settings)
+
+| Resource | Free allowance | V2 limit (enforced in code) |
+|---|---|---|
+| Workers Free CPU | 10 ms per invocation | ≤ 3 feeds and ≤ 768 KiB per run (≈ 6 ms per MB parsed, measured locally: worst case ≈ 4-5 ms), index-based parser, hashing only for new items |
+| Workers Free subrequests | 50 external per invocation (shared with Event Detection) | ≤ 8 per run, redirects and retries included |
+| Cron Triggers | 5 per account, all in use | none added |
+| D1 | 5 M rows read and 100 k rows written per day; 5 GB | Indexed, `LIMIT`-bounded reads. Writes only for new items (one `IN` lookup per feed). Estimated ≤ 2 k rows written per day. |
+| Workers AI | 10,000 Neurons/day per account, **shared with V1** (sentiment-ff75 uses `llama-3.1-8b-instruct-fast`). On Workers Free, exhaustion returns error 3036 and is never billed. | `SV2_GLM_DAILY_NEURONS` (production `0` until staging verifies; intended ≤ 1,000). Atomic reservation of an upper-bound estimate. Stop on 3036 for the rest of the day. |
+| GitHub Actions | Public repositories: standard runners free | TimesFM 2.5 / Chronos-2 workflows unchanged; measured and pinned in a separate PR |
+
+GLM-4.7-flash (`@cf/zai-org/glm-4.7-flash`):
+- Listed as available on Workers Free (Cloudflare changelog 2026-07-28).
+- 5,500 Neurons per million input tokens and 36,400 Neurons per million output tokens (pricing page, 2026-11-12).
+- **Account availability is verified on staging only**, with `POST /api/sentiment-v2/run {"steps":["glm_probe"]}`.
+
+### 10.2 Collector (`sentiment-v2/collector.js`)
+
+- **Registry:** `SV2_SOURCE_REGISTRY`, approved public RSS/Atom/official URLs.
+  - Feeds V1 already reads (Cointelegraph, CoinDesk, The Block, BBC, Investing.com) are excluded, so V2's evidence is independent of V1's readings.
+  - SEC sources need the owner-configured `EVENT_SEC_USER_AGENT`; without it they report `NOT_CONFIGURED`.
+  - `SV2_SOURCES_DISABLED` switches individual sources off.
+- **Safety:**
+  - https only, and only registry hosts;
+  - no IP literals or internal names, no credentials, default port only;
+  - `redirect: manual`, with every hop re-validated (at most 2 redirects);
+  - 8 s timeout, 256 KiB per response and 768 KiB per run;
+  - one retry on network error, timeout, 429 or 5xx, and none on other 4xx;
+  - content-type allowlist; conditional requests (ETag / Last-Modified).
+- **D1 query budget shared across the cron chain:** the non-tick chain (detection → V1 archive copy → V2 → collector) counts its top-level D1 calls; the collector runs last and only uses `50 − 3 − used` (it starts no feed it cannot finish). Collector cost: at most 2 + 3 × feeds (one lookup, one duplicate-check batch and one write batch per feed; a `db.batch()` counts as one query against D1's per-invocation limit).
+- **Storage (migration 0029):**
+  - `sv2_evidence`: `evidence_id` = sha256 of the canonical URL; `title_hash` for cross-source duplicates (kept with `dup_of`, excluded from scoring); `content_hash`; publication and retrieval timestamps; provenance.
+  - `sv2_source_state`: reliability (ok/fail counts), consecutive failures, exponential backoff up to 16×, ETag.
+  - `sv2_collection_runs`: per-run budget use and errors.
+
+### 10.3 Scoring (`sentiment-v2/evidence-score.js`, `sv2Compute`)
+
+- **Headline scorer:** V1's own lexicon and arithmetic, copied verbatim and pinned by hash (108 terms, sha256 `989054b3…`). V1 and V2 therefore read a headline the same way.
+- **Reading per evidence source at decision time t:**
+  - only items retrieved ≤ t, not duplicates;
+  - each item's time is its publication time, or its retrieval time when the publisher gives none or a future time;
+  - items must fall within the source's `freshness_h`.
+- **States:**
+  - `fresh`: at least 2 lexicon hits. The reading is `round((tanh(mean score per hit / 1.5) + 1) × 50)` (V1 batch arithmetic).
+  - `insufficient`: items present but fewer than 2 hits.
+  - `stale`: only older items.
+  - `missing`: nothing retrieved by t.
+  - Only `fresh` enters the family score; nothing is imputed as 50.
+- **In the families:**
+  - Evidence sources join their registry family as additional sources.
+  - `missing` sources are not "known", so they don't lower coverage. `stale` and `insufficient` sources are known but not fresh.
+  - Redundancy (Pearson) still runs on V1 sources only, because evidence sources have no per-observation history.
+  - Historical analogues still use V1 sources only, for comparability.
+- **Point-in-time:** a V1 reading at 19:45 uses only evidence retrieved by 19:45. Evidence collected at 20:00 counts only for later readings.
+
+### 10.4 GLM (`sv2RunAi`)
+
+- **Off unless all of these hold:** a priced model, `SV2_GLM_DAILY_NEURONS > 0`, the AI binding, and no 3036 response seen today.
+- **Budget:**
+  - Before each call, one conditional `INSERT … SELECT` reserves an upper bound: input tokens ≤ the prompt's UTF-8 bytes + 256 (a byte-level tokenizer cannot exceed one token per byte), plus `max_completion_tokens` 1,200, at the published rates.
+  - It succeeds only if the day's committed total (max of reserved and actual per call) plus the reservation stays within the budget.
+  - Actual Neurons, from reported token usage, are recorded on the same row.
+- **Output validation:**
+  - JSON only, with the existing schema and cited-ID checks;
+  - every number in free text must appear as a whole value in the evidence package (not as a fragment of a longer number);
+  - any extra field (e.g. a score) is rejected.
+- **The score is never changed.** An AI failure only marks the result DEGRADED.
+
+### 10.5 Not in this scope
+
+- No search API, crawling, paid provider or paid fallback.
+- No TiRex, LightGBM, XGBoost or HMM.
+- V1 is unchanged.

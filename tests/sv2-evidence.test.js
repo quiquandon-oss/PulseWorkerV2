@@ -97,6 +97,17 @@ describe('bounded fetch', () => {
     expect((await run(async () => { n++; return resp(rss([])); }, { budget })).status).toBe('BUDGET_EXHAUSTED');
     expect(n).toBe(0);
   });
+  it('retries once when the body read fails after the headers arrived (Codex P2)', async () => {
+    let n = 0;
+    const broken = () => new Response(new ReadableStream({ start(c) { c.enqueue(new TextEncoder().encode('<rss>')); c.error(new Error('connection reset')); } }),
+      { status: 200, headers: { 'content-type': 'application/rss+xml' } });
+    const r = await run(async () => (n++ === 0 ? broken() : resp(rss([]))));
+    expect([r.ok, n]).toEqual([true, 2]);
+    n = 0;
+    const r2 = await run(async () => { n++; return broken(); });
+    expect([r2.status, n]).toEqual(['NETWORK_ERROR', 2]);
+    expect(r2.error).toMatch(/body read failed/);
+  });
   it('treats 304 as success without a body', async () => {
     expect(await run(async () => new Response(null, { status: 304 }))).toMatchObject({ ok: true, notModified: true });
   });
@@ -188,6 +199,32 @@ describe('collection run (real SQLite, migration 0029)', () => {
     expect(r.ok).toBe(false);
     expect(r.errors[0]).toMatch(/no such table/);
   });
+  it('issues at most 2 + 3 × feeds D1 queries per run, however many new items arrive (Codex P1: D1 per-invocation limit)', async () => {
+    const d1 = makeD1(DDL);
+    let queries = 0, inBatch = false;
+    const counted = { ...d1.binding,
+      prepare: (sql) => { const st = d1.binding.prepare(sql); const wrap = (o) => ({ ...o, bind: (...a) => wrap(o.bind(...a)),
+        first: (...x) => { if (!inBatch) queries++; return o.first(...x); }, all: (...x) => { if (!inBatch) queries++; return o.all(...x); },
+        run: (...x) => { if (!inBatch) queries++; return o.run(...x); } }); return wrap(st); },
+      batch: async (stmts) => { queries++; inBatch = true; try { return await d1.binding.batch(stmts); } finally { inBatch = false; } } };
+    const reg3 = [...REG, { ...REG[0], id: 'c', url: 'https://feeds.example.org/c.xml' }];
+    const f = async (u) => resp(rss(items(new URL(u).pathname.slice(1, 2), 25)));
+    const r = await C.sv2CollectEvidence({ DB: counted, SV2_COLLECTOR_ENABLED: '1' }, { nowTs: NOW, fetchImpl: f, registry: reg3, sleep: noSleep });
+    expect(r.items_new).toBe(75);
+    expect(queries).toBeLessThanOrEqual(2 + 3 * C.SV2_COLLECTOR_LIMITS.maxSourcesPerRun);
+    expect(d1.db.prepare('SELECT COUNT(*) AS n FROM sv2_evidence').get().n).toBe(75);
+    expect(d1.db.prepare('SELECT COUNT(*) AS n FROM sv2_source_state').get().n).toBe(3);
+  });
+  it('a failed batch write records STORE_ERROR state for that source and the run continues', async () => {
+    const d1 = makeD1(DDL);
+    let calls = 0;
+    const b = { ...d1.binding, batch: async (stmts) => { if (++calls === 2) throw new Error('D1_ERROR: overloaded'); return d1.binding.batch(stmts); } };
+    const r = await C.sv2CollectEvidence({ DB: b, SV2_COLLECTOR_ENABLED: '1' }, { nowTs: NOW, fetchImpl: feeds({ 'feeds.example.org': rss(items('a', 2)), 'news.example.net': rss(items('b', 2)) }), registry: REG, sleep: noSleep });
+    expect(r.ok).toBe(false);
+    expect(r.sources.map(x => x.status)).toContain('STORE_ERROR');
+    expect(r.sources.length).toBe(2);
+    expect(d1.db.prepare("SELECT COUNT(*) AS n FROM sv2_source_state WHERE last_status = 'STORE_ERROR'").get().n).toBe(1);
+  });
   it('writes only to sv2_* tables and reads no V1 table', () => {
     const src = readFileSync(join(ROOT, 'sentiment-v2/collector.js'), 'utf8');
     const tables = [...src.matchAll(/\b(?:INSERT(?: OR \w+)? INTO|UPDATE|DELETE FROM|FROM)\s+(\w+)/g)].map(m => m[1]).filter(t => t !== 'SET');   // DO UPDATE SET (upsert)
@@ -235,7 +272,7 @@ const FUNCS = ['sv2Config', 'sv2Finite', 'sv2ParseSources', 'sv2History', 'sv2At
   'sv2AiEstimateNeurons', 'sv2UngroundedNumbers', 'sv2RunAi', 'sv2Row', 'runSentimentV2Cycle', 'sv2AlignSeries', 'sv2SeriesStatus', 'sv2LatestView',
   'getSentimentV2Comparison', 'getSentimentV2Status', 'getSentimentV2Evidence', 'sv2GlmProbe'];
 const CONSTS = ['SENTIMENT_V2_VERSION', 'SV2_VERSIONS_SHOWN', 'SV2_INSERT_SQL', 'SV2_PERIODS_MS', 'SV2_MAX_POINTS', 'SV2_MAX_ROWS', 'SV2_MAX_PRICE_ROWS',
-  'SV2_STALE_MS', 'SV2_AI_PRICING', 'SV2_AI_MAX_OUTPUT_TOKENS', 'SV2_AI_RESERVE_SQL'];
+  'SV2_STALE_MS', 'SV2_AI_PRICING', 'SV2_AI_MAX_OUTPUT_TOKENS', 'SV2_AI_RESERVE_SQL', 'SV2_AI_TEMPLATE_TOKENS'];
 const S = evalInScope(extractConstants(...CONSTS) + '\n' + extractFunctions(...FUNCS), {
   SV2_SOURCE_REGISTRY: C.SV2_SOURCE_REGISTRY, SV2_COLLECTOR_LIMITS: C.SV2_COLLECTOR_LIMITS, SV2_COLLECTOR_VERSION: C.SV2_COLLECTOR_VERSION,
   sv2EvidenceReadings: E.sv2EvidenceReadings, sv2ScoreHeadline: E.sv2ScoreHeadline, SV2_EVIDENCE_RULES: E.SV2_EVIDENCE_RULES, SV2_LEXICON_SOURCE: E.SV2_LEXICON_SOURCE });
@@ -349,6 +386,14 @@ describe('GLM Neuron ledger on real SQLite', () => {
     const row = d1.db.prepare('SELECT status, ai_status, ai_json FROM sentiment_v2_results').get();
     expect([row.status, row.ai_status, calls]).toEqual(['OK', 'quota_guard', 0]);
     expect(JSON.parse(row.ai_json).reason).toMatch(/daily Neuron budget 1 would be exceeded/);
+  });
+  it('the reservation bounds input by UTF-8 bytes, so multilingual titles cannot exceed it (Codex P2)', () => {
+    const p = S.SV2_AI_PRICING[GLM];
+    const text = '比特币价格暴跌，市场恐慌'.repeat(50);                       // CJK: 3 bytes per character
+    const bytes = new TextEncoder().encode(text).length;
+    const est = S.sv2AiEstimateNeurons(p, bytes);
+    const worstTokens = bytes + S.SV2_AI_TEMPLATE_TOKENS;                // ≥ any byte-level tokenisation
+    expect(est).toBeGreaterThanOrEqual((worstTokens * p.neurons_per_m_input + S.SV2_AI_MAX_OUTPUT_TOKENS * p.neurons_per_m_output) / 1e6 - 0.01);
   });
   it('the number-grounding check rejects figures absent from the package', () => {
     expect(S.sv2UngroundedNumbers(['Regulatory family at 14.5 with 2 sources'], '{"score":14.5,"n":2}')).toEqual([]);

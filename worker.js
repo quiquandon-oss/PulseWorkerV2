@@ -12596,10 +12596,12 @@ function sv2AiBudget(env) {
   return Number.isFinite(n) && n > 0 ? n : 0;
 }
 
-// Upper bound in Neurons for one call: input tokens ≤ characters / 2 (conservative; typical English JSON is ~3-4
-// characters per token) plus the max_completion_tokens cap, at the model's published rates.
-function sv2AiEstimateNeurons(pricing, promptChars) {
-  const inTok = Math.ceil(promptChars / 2);
+// Upper bound in Neurons for one call. Input: the prompt's UTF-8 byte length plus a chat-template allowance; a
+// byte-level BPE tokenizer cannot emit more tokens than input bytes, so this holds for any language or script.
+// Output: the max_completion_tokens cap. Both at the model's published rates.
+const SV2_AI_TEMPLATE_TOKENS = 256;
+function sv2AiEstimateNeurons(pricing, promptBytes) {
+  const inTok = Math.ceil(promptBytes) + SV2_AI_TEMPLATE_TOKENS;
   return Math.ceil((inTok * pricing.neurons_per_m_input + SV2_AI_MAX_OUTPUT_TOKENS * pricing.neurons_per_m_output) / 1e6 * 100) / 100;
 }
 
@@ -12633,7 +12635,7 @@ async function sv2RunAi(env, pkg, allowedIds, ledger) {
     'uncertainty. Cite only identifiers present in the package. Separate observed facts from inference. Do not output any score, ' +
     'price target or forecast, and do not write any number that does not appear in the package. Use only the package; do not add outside facts.';
   const user = JSON.stringify(pkg);
-  const estimate = sv2AiEstimateNeurons(pricing, system.length + user.length);
+  const estimate = sv2AiEstimateNeurons(pricing, new TextEncoder().encode(system).length + new TextEncoder().encode(user).length);
   let slot;
   try { slot = await ledger.reserveNeurons(budget, estimate, model); }
   catch (err) { return { status: 'quota_guard', model, counted: false, reason: 'reservation failed: ' + String((err && err.message) || err).slice(0, 120) }; }

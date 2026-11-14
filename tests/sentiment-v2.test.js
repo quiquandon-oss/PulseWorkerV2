@@ -16,7 +16,7 @@ const FUNCS = ['sv2Config', 'sv2Finite', 'sv2ParseSources', 'sv2History', 'sv2At
   'getSentimentV2Comparison', 'getSentimentV2ComparisonCached', 'sv2EvidenceSummary', 'sv2EvidenceItemsForAi', 'sv2AiBudget',
   'sv2AiEstimateNeurons', 'sv2UngroundedNumbers', 'sv2LatestView'];
 const CONSTS = ['SENTIMENT_V2_VERSION', 'SV2_VERSIONS_SHOWN', 'SV2_INSERT_SQL', 'SV2_PERIODS_MS', 'SV2_MAX_POINTS', 'SV2_MAX_ROWS', 'SV2_MAX_PRICE_ROWS', 'SV2_STALE_MS', 'sv2ComparisonCache',
-  'SV2_AI_PRICING', 'SV2_AI_MAX_OUTPUT_TOKENS', 'SV2_AI_RESERVE_SQL'];
+  'SV2_AI_PRICING', 'SV2_AI_MAX_OUTPUT_TOKENS', 'SV2_AI_RESERVE_SQL', 'SV2_AI_TEMPLATE_TOKENS'];
 const GLOBALS = { SV2_SOURCE_REGISTRY, sv2EvidenceReadings, sv2ScoreHeadline, SV2_EVIDENCE_RULES };
 const SRC = extractConstants(...CONSTS) + '\n' + extractFunctions(...FUNCS);
 const fresh = () => evalInScope(SRC, GLOBALS);

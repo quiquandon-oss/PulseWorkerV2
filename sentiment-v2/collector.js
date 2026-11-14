@@ -126,7 +126,14 @@ export async function sv2SafeFetch(url, { allowedHosts, budget, fetchImpl = fetc
     if (!res.ok) { try { await res.body?.cancel(); } catch (_e) { /* ignore */ } return { ok: false, status: 'HTTP_ERROR', error: `HTTP ${res.status}`, redirects }; }
     const ct = res.headers.get('content-type') || '';
     if (ct && !ALLOWED_CONTENT.test(ct)) { try { await res.body?.cancel(); } catch (_e) { /* ignore */ } return { ok: false, status: 'BAD_CONTENT_TYPE', error: `content-type ${ct.slice(0, 60)}`, redirects }; }
-    const body = await readCapped(res, Math.min(limits.maxBytesPerResponse, limits.maxBytesPerRun - budget.bytes));
+    let body;
+    try {
+      body = await readCapped(res, Math.min(limits.maxBytesPerResponse, limits.maxBytesPerRun - budget.bytes));
+    } catch (e) {
+      // A disconnect or timeout while reading the body gets the same single retry as one before the headers.
+      if (attempt < limits.retries) { attempt++; await wait(500); continue; }
+      return { ok: false, status: 'NETWORK_ERROR', error: 'body read failed: ' + (e && e.name === 'TimeoutError' ? 'timeout' : String((e && e.message) || e).slice(0, 140)), redirects };
+    }
     budget.bytes += body.bytes;
     if (body.tooLarge) return { ok: false, status: 'TOO_LARGE', error: `response over ${limits.maxBytesPerResponse} bytes`, redirects };
     return { ok: true, status: 'OK', text: body.text, bytes: body.bytes, finalUrl: chk.url.toString(), redirects,
@@ -271,6 +278,7 @@ export async function sv2CollectEvidence(env, { nowTs, fetchImpl, registry = SV2
   for (const s of due) {
     const st = stateById[s.id] || {};
     const out = { id: s.id, status: null, items: 0, new: 0, duplicate: 0, bytes: 0, error: null };
+    let stmtsFor = [], freshItems = [];
     let headers = {};
     if (s.ua === 'sec') {
       if (!env.EVENT_SEC_USER_AGENT) { out.status = 'NOT_CONFIGURED'; out.error = 'EVENT_SEC_USER_AGENT not set (SEC fair-access policy)'; }
@@ -314,28 +322,34 @@ export async function sv2CollectEvidence(env, { nowTs, fetchImpl, registry = SV2
           out.status = 'STORE_ERROR'; out.error = 'lookup failed: ' + String((err && err.message) || err).slice(0, 160);
         }
       }
+      // D1 limits queries per Worker invocation and counts a db.batch() as one query: per feed this is one lookup
+      // (above), one batch of duplicate checks and one batch of writes (items + source state), so a run issues at most
+      // 2 + 3 x maxSourcesPerRun D1 queries however many items arrive.
+      const fresh = [];
       for (const { it, canon, evidenceId } of out.status === 'STORE_ERROR' ? [] : cands.filter(c => !known.has(c.evidenceId))) {
         // Items dated in the future (clock skew) keep no publication time; their retrieval time still bounds their use.
         const pub = it.published_ts !== null && it.published_ts <= now + 300000 ? it.published_ts : null;
-        const titleHash = await sv2Sha256(sv2NormTitle(it.title));
-        const contentHash = await sv2Sha256([canon, it.title, it.summary, String(pub)].join('\n'));
+        fresh.push({ it, canon, evidenceId, pub, titleHash: await sv2Sha256(sv2NormTitle(it.title)),
+          contentHash: await sv2Sha256([canon, it.title, it.summary, String(pub)].join('\n')) });
+      }
+      if (fresh.length) {
         try {
-          const dup = await env.DB.prepare('SELECT evidence_id FROM sv2_evidence WHERE title_hash = ? AND source_id <> ? AND retrieved_ts >= ? AND dup_of IS NULL ORDER BY retrieved_ts ASC LIMIT 1')
-            .bind(titleHash, s.id, now - limits.dupWindowMs).first();
-          const r = await env.DB.prepare('INSERT OR IGNORE INTO sv2_evidence (evidence_id, source_id, family, canonical_url, title, summary, published_ts, retrieved_ts, title_hash, content_hash, dup_of, collector_version) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
-            .bind(evidenceId, s.id, s.family, canon, it.title, it.summary || null, pub, now, titleHash, contentHash, dup ? dup.evidence_id : null, SV2_COLLECTOR_VERSION).run();
-          if (r && r.meta && Number(r.meta.changes) > 0) { if (dup) { out.duplicate++; run.items_duplicate++; } else { out.new++; run.items_new++; } }
+          const dups = await env.DB.batch(fresh.map(f => env.DB.prepare('SELECT evidence_id FROM sv2_evidence WHERE title_hash = ? AND source_id <> ? AND retrieved_ts >= ? AND dup_of IS NULL ORDER BY retrieved_ts ASC LIMIT 1')
+            .bind(f.titleHash, s.id, now - limits.dupWindowMs)));
+          fresh.forEach((f, k) => { const r = dups[k] && dups[k].results && dups[k].results[0]; f.dupOf = r ? r.evidence_id : null; });
         } catch (err) {
-          out.error = 'store failed: ' + String((err && err.message) || err).slice(0, 160);
-          out.status = 'STORE_ERROR';
-          break;
+          out.status = 'STORE_ERROR'; out.error = 'duplicate check failed: ' + String((err && err.message) || err).slice(0, 160);
         }
       }
+      if (out.status === 'STORE_ERROR') fresh.length = 0;
+      stmtsFor = fresh.map(f => env.DB.prepare('INSERT OR IGNORE INTO sv2_evidence (evidence_id, source_id, family, canonical_url, title, summary, published_ts, retrieved_ts, title_hash, content_hash, dup_of, collector_version) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
+        .bind(f.evidenceId, s.id, s.family, f.canon, f.it.title, f.it.summary || null, f.pub, now, f.titleHash, f.contentHash, f.dupOf, SV2_COLLECTOR_VERSION));
+      freshItems = fresh;
     }
-    const success = out.status === 'OK' || out.status === 'NOT_MODIFIED';
-    const notConfigured = out.status === 'NOT_CONFIGURED';
-    try {
-      await env.DB.prepare(`INSERT INTO sv2_source_state (source_id, last_attempt_ts, last_success_ts, last_status, last_error, consecutive_failures, ok_count, fail_count, last_new_items, etag, last_modified)
+    const stateStmt = (status, error, newCount) => {
+      const success = status === 'OK' || status === 'NOT_MODIFIED';
+      const notConfigured = status === 'NOT_CONFIGURED';
+      return env.DB.prepare(`INSERT INTO sv2_source_state (source_id, last_attempt_ts, last_success_ts, last_status, last_error, consecutive_failures, ok_count, fail_count, last_new_items, etag, last_modified)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(source_id) DO UPDATE SET last_attempt_ts = excluded.last_attempt_ts,
           last_success_ts = COALESCE(excluded.last_success_ts, sv2_source_state.last_success_ts), last_status = excluded.last_status,
@@ -344,11 +358,26 @@ export async function sv2CollectEvidence(env, { nowTs, fetchImpl, registry = SV2
           ok_count = sv2_source_state.ok_count + excluded.ok_count, fail_count = sv2_source_state.fail_count + excluded.fail_count,
           last_new_items = excluded.last_new_items, etag = COALESCE(excluded.etag, sv2_source_state.etag),
           last_modified = COALESCE(excluded.last_modified, sv2_source_state.last_modified)`)
-        .bind(s.id, now, success ? now : null, out.status, out.error, success || notConfigured ? 0 : 1, success ? 1 : 0, success || notConfigured ? 0 : 1,
-          out.new, out.etag || null, out.lastModified || null, success || notConfigured ? 1 : 0).run();
+        .bind(s.id, now, success ? now : null, status, error, success || notConfigured ? 0 : 1, success ? 1 : 0, success || notConfigured ? 0 : 1,
+          newCount, out.etag || null, out.lastModified || null, success || notConfigured ? 1 : 0);
+    };
+    // Items and the source state are written in one batch; new and duplicate counts come from each insert's changes.
+    const newCount = freshItems.filter(f => !f.dupOf).length;
+    try {
+      const res = await env.DB.batch([...stmtsFor, stateStmt(out.status, out.error, newCount)]);
+      freshItems.forEach((f, k) => {
+        const changed = res[k] && res[k].meta && Number(res[k].meta.changes) > 0;
+        if (!changed) return;
+        if (f.dupOf) { out.duplicate++; run.items_duplicate++; } else { out.new++; run.items_new++; }
+      });
     } catch (err) {
-      run.errors.push(`${s.id}: state write failed: ` + String((err && err.message) || err).slice(0, 120));
+      out.status = 'STORE_ERROR'; out.error = 'store failed: ' + String((err && err.message) || err).slice(0, 160);
+      out.new = 0; out.duplicate = 0;
+      try { await stateStmt(out.status, out.error, 0).run(); }
+      catch (err2) { run.errors.push(`${s.id}: state write failed: ` + String((err2 && err2.message) || err2).slice(0, 120)); }
     }
+    const success = out.status === 'OK' || out.status === 'NOT_MODIFIED';
+    const notConfigured = out.status === 'NOT_CONFIGURED';
     if (!success && !notConfigured) run.errors.push(`${s.id}: ${out.status} ${out.error || ''}`.trim());
     delete out.etag; delete out.lastModified;
     run.sources.push(out);

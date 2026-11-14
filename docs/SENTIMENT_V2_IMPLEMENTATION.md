@@ -174,6 +174,7 @@ GLM-4.7-flash (`@cf/zai-org/glm-4.7-flash`):
   - 8 s timeout, 256 KiB per response and 768 KiB per run;
   - one retry on network error, timeout, 429 or 5xx, and none on other 4xx;
   - content-type allowlist; conditional requests (ETag / Last-Modified).
+- **D1 queries per run:** at most 2 + 3 × feeds (one lookup, one duplicate-check batch and one write batch per feed; a `db.batch()` counts as one query against D1's per-invocation limit).
 - **Storage (migration 0029):**
   - `sv2_evidence`: `evidence_id` = sha256 of the canonical URL; `title_hash` for cross-source duplicates (kept with `dup_of`, excluded from scoring); `content_hash`; publication and retrieval timestamps; provenance.
   - `sv2_source_state`: reliability (ok/fail counts), consecutive failures, exponential backoff up to 16×, ETag.
@@ -203,7 +204,7 @@ GLM-4.7-flash (`@cf/zai-org/glm-4.7-flash`):
 
 - **Off unless all of these hold:** a priced model, `SV2_GLM_DAILY_NEURONS > 0`, the AI binding, and no 3036 response seen today.
 - **Budget:**
-  - Before each call, one conditional `INSERT … SELECT` reserves an upper bound: input tokens ≤ characters / 2, plus `max_completion_tokens` 1,200, at the published rates.
+  - Before each call, one conditional `INSERT … SELECT` reserves an upper bound: input tokens ≤ the prompt's UTF-8 bytes + 256 (a byte-level tokenizer cannot exceed one token per byte), plus `max_completion_tokens` 1,200, at the published rates.
   - It succeeds only if the day's committed total (max of reserved and actual per call) plus the reservation stays within the budget.
   - Actual Neurons, from reported token usage, are recorded on the same row.
 - **Output validation:**

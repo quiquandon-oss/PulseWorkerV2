@@ -6,6 +6,8 @@ import { authorizeWrite, getSessionState, signIn, clearedCookieHeader, SIGNIN_HT
 import { listCandidates, getCandidate, createCandidate, updateCandidate, decideCandidate, listVersions } from './learning/learning-candidates.js';
 // Event Detection Layer (separate from V1 scoring): see events/ and EVENT_DETECTION.md.
 import { handleEventRoutes, runAutomaticDetection } from './events/event-api.js';
+import { sv2CollectEvidence, SV2_SOURCE_REGISTRY, SV2_COLLECTOR_LIMITS, SV2_COLLECTOR_VERSION } from './sentiment-v2/collector.js';
+import { sv2EvidenceReadings, sv2ScoreHeadline, SV2_EVIDENCE_RULES, SV2_LEXICON_SOURCE } from './sentiment-v2/evidence-score.js';
 // ---- BTC k-NN historical analog model ----
 // Feature vector: the 4 headline gauges already computed and logged by the
 // original CryptoPulse pipeline every cycle (sentiment composite, technical
@@ -10450,6 +10452,8 @@ const V2_OPS_ROUTES = new Set([
   'GET:/recalibrate-refresh', 'GET:/recalibrate-refresh-challenger', 'GET:/run-link-analysis', 'GET:/run-analysis',
   'GET:/backtest-technical', 'GET:/backtest-feature', 'GET:/backtest-combined', 'GET:/backtest-regime-split',
   'POST:/analyst-relay/submit',
+  // Sentiment V2: runs the cron's V2 steps on demand (staging has no Cron Trigger) and an optional GLM probe.
+  'POST:/api/sentiment-v2/run',
 ]);
 const ANALYST_RELAY_MAX_BYTES = 200 * 1024;
 function v2OpsAuth(request, url, env) {
@@ -10870,6 +10874,49 @@ const pulseWorkerHandlers = {
     }
 
     // ---- GET /prediction-freshness -- read-only persistence monitor (see getPredictionFreshness)
+    // Owner-only (V2_OPS_ROUTES): the non-tick cron's V2 steps on demand, in the same order, with the same budgets.
+    // steps: any of 'sync', 'collect', 'v2', 'glm_probe'. The GLM probe sends one tiny fixed package through the same
+    // Neuron ledger to verify model availability and real Neuron use; it writes no V2 result.
+    if (url.pathname === '/api/sentiment-v2/run' && request.method === 'POST') {
+      let steps = ['sync', 'collect', 'v2'];
+      try { const b = await request.json(); if (b && Array.isArray(b.steps)) steps = b.steps.filter(x => ['sync', 'collect', 'v2', 'glm_probe'].includes(x)); } catch (_e) { /* defaults */ }
+      const now = Date.now(), out = { ok: true, ran_at: now, steps };
+      try {
+        if (steps.includes('sync')) out.sync = await syncV1ArchiveFromHistory(env, { nowTs: now });
+        if (steps.includes('collect')) out.collect = await sv2CollectEvidence(env, { nowTs: now });
+        if (steps.includes('v2')) out.v2 = await runSentimentV2Cycle(env, { nowTs: now });
+        if (steps.includes('glm_probe')) out.glm_probe = await sv2GlmProbe(env, now);
+      } catch (err) {
+        out.ok = false; out.error = String((err && err.message) || err).slice(0, 300);
+      }
+      routeCacheClear();
+      return new Response(JSON.stringify(out), { status: out.ok ? 200 : 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+    }
+
+    // Sentiment V2 evidence and status (read-only, bounded, cached 5 min at the edge).
+    if ((url.pathname === '/api/sentiment-v2/status' || url.pathname === '/api/sentiment-v2/evidence') && request.method === 'GET') {
+      const isStatus = url.pathname === '/api/sentiment-v2/status';
+      const hours = Math.max(1, Math.min(168, parseInt(url.searchParams.get('hours') || '24', 10) || 24));
+      const limit = Math.max(1, Math.min(100, parseInt(url.searchParams.get('limit') || '50', 10) || 50));
+      try {
+        const edge = typeof caches !== 'undefined' && caches.default ? caches.default : null;
+        const cacheKey = new Request(isStatus ? `${url.origin}/api/sentiment-v2/status` : `${url.origin}/api/sentiment-v2/evidence?hours=${hours}&limit=${limit}`, { method: 'GET' });
+        if (edge) {
+          const hit = await edge.match(cacheKey);
+          if (hit) return new Response(hit.body, { headers: { ...corsHeaders, 'Content-Type': 'application/json', 'Cache-Control': 'public, max-age=300', 'X-SV2-Cache': 'edge' } });
+        }
+        const result = isStatus ? await getSentimentV2Status(env, Date.now()) : await getSentimentV2Evidence(env, Date.now(), hours, limit);
+        const body = JSON.stringify(result);
+        if (edge) {
+          try { await edge.put(cacheKey, new Response(body, { headers: { 'Content-Type': 'application/json', 'Cache-Control': 'public, max-age=300' } })); }
+          catch (cacheErr) { console.error('sentiment v2 cache put failed:', String(cacheErr)); }
+        }
+        return new Response(body, { headers: { ...corsHeaders, 'Content-Type': 'application/json', 'Cache-Control': 'public, max-age=300', 'X-SV2-Cache': 'miss' } });
+      } catch (err) {
+        return new Response(JSON.stringify({ ok: false, error: String(err) }), { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+      }
+    }
+
     if (url.pathname === '/api/sentiment-v2/comparison' && request.method === 'GET') {
       const period = String(url.searchParams.get('period') || '7d').toLowerCase();
       if (!Object.prototype.hasOwnProperty.call(SV2_PERIODS_MS, period)) {
@@ -11634,6 +11681,11 @@ const pulseWorkerHandlers = {
           .then(r => { const line = JSON.stringify({ ok: r.ok, skipped: r.skipped || false, copied: r.copied || 0, already_present: r.already_present || 0, history_last_ts: r.history_last_ts || null, invalid: r.invalid || [], errors: r.errors || [], truncated: r.truncated || false });
             if (r.ok) console.log('v1 archive sync (cron):', line); else console.error('v1 archive sync (cron) FAILED:', line); })
           .catch(err => console.error('V1 archive sync (cron) failed:', err))
+          // Independent evidence (RSS/Atom/official feeds), bounded per run; V2 uses only items retrieved before each decision.
+          .then(() => sv2CollectEvidence(env, { nowTs: event.scheduledTime }))
+          .then(r => { const line = JSON.stringify({ ok: r.ok, skipped: r.skipped || false, items_new: r.items_new || 0, items_duplicate: r.items_duplicate || 0, budget: r.budget || null, sources: (r.sources || []).map(x => `${x.id}:${x.status}`), errors: r.errors || [] });
+            if (r.ok) console.log('sv2 evidence (cron):', line); else console.error('sv2 evidence (cron) FAILED:', line); })
+          .catch(err => console.error('SV2 evidence (cron) failed:', err))
           .then(() => runSentimentV2Cycle(env, { nowTs: event.scheduledTime }))
           .then(r => console.log('sentiment v2 (cron):', JSON.stringify({ ok: r.ok, skipped: r.skipped || false, written: r.written || 0, reason: r.reason || null })))
           .catch(err => console.error('Sentiment V2 (cron) failed:', err)));
@@ -12034,7 +12086,10 @@ async function dispatchResearchCollection(env, fetchImpl = fetch, url = RESEARCH
 // unless a verified-free Workers AI model and a daily ceiling are configured. There is no other AI provider and no
 // paid fallback.
 // ============================================================================================================
-const SENTIMENT_V2_VERSION = 'sv2-1.0.0';
+// sv2-1.1.0 (2026-11-14, owner decision): adds independently collected evidence (sentiment-v2/collector.js) as extra
+// sources in the existing families. sv2-1.0.0 results stay stored and visible; they are no longer computed.
+const SENTIMENT_V2_VERSION = 'sv2-1.1.0';
+const SV2_VERSIONS_SHOWN = ['sv2-1.0.0', 'sv2-1.1.0'];
 
 function sv2Config() {
   return {
@@ -12203,6 +12258,7 @@ function sv2Families(status, redundancy, cfg) {
       score: groupMeans.length ? groupMeans.reduce((s, x) => s + x, 0) / groupMeans.length : null,
       sources_fresh: fresh, sources_stale: observed.filter(k => status[k].state === 'stale'),
       sources_missing: observed.filter(k => status[k].state === 'missing'),
+      sources_insufficient: observed.filter(k => status[k].state === 'insufficient'),
       sources_never_observed: keys.filter(k => !(k in status)),
       independent_groups: groupMeans.length,
     };
@@ -12367,11 +12423,37 @@ function sv2Classify(score) {
   return 'strongly_bullish';
 }
 
-function sv2Compute(hist, i, events, cfg) {
+function sv2EvidenceSummary(evidence) {
+  const out = {};
+  for (const [k, v] of Object.entries(evidence)) {
+    out[k] = { state: v.state, family: v.family, value: v.value ?? null, items: v.items || 0, hits: v.hits || 0,
+      latest_ts: v.latest_ts ?? null, item_ids: (v.item_ids || []).map(x => x.id).slice(0, 10) };
+  }
+  return out;
+}
+
+function sv2Compute(hist, i, events, cfgIn, evidence = null) {
   const row = hist[i], t = row.ts;
-  const status = sv2SourceStatus(hist, i, cfg);
+  const status = sv2SourceStatus(hist, i, cfgIn);
+  const v1Keys = Object.keys(status);
+  // sv2-1.1.0: independent evidence sources join their registry family. Readings are point-in-time (evidence-score.js).
+  // A source with nothing retrieved by t is not "known" (like a V1 source never seen in the window); stale and
+  // insufficient sources are known but excluded from the score, never imputed as neutral.
+  let cfg = cfgIn;
+  if (evidence) {
+    const fams = Object.fromEntries(Object.entries(cfgIn.families).map(([f, ks]) => [f, ks.slice()]));
+    for (const [k, v] of Object.entries(evidence)) {
+      if (!fams[v.family]) continue;
+      fams[v.family].push(k);
+      if (v.state === 'missing') continue;
+      status[k] = v.state === 'fresh' ? { state: 'fresh', value: v.value, items: v.items, hits: v.hits, origin: 'evidence' }
+        : { state: v.state, items: v.items || 0, hits: v.hits || 0, origin: 'evidence' };
+    }
+    cfg = { ...cfgIn, families: fams };
+  }
   const keys = Object.keys(status);
-  const redundancy = sv2Redundancy(hist, i, keys.filter(k => status[k].state !== 'missing'), cfg);
+  // Redundancy needs per-observation history, which only V1 sources have; evidence sources are their own group.
+  const redundancy = sv2Redundancy(hist, i, v1Keys.filter(k => status[k].state !== 'missing'), cfgIn);
   const families = sv2Families(status, redundancy, cfg);
   const scored = Object.entries(families).filter(([, f]) => f.score !== null);
   const fresh = keys.filter(k => status[k].state === 'fresh');
@@ -12382,11 +12464,12 @@ function sv2Compute(hist, i, events, cfg) {
   const regime = sv2Regime(hist, i);
   const predictive = sv2Analogues(hist, i, cfg);
   const missing = { missing: keys.filter(k => status[k].state === 'missing'), stale: keys.filter(k => status[k].state === 'stale'),
+    insufficient: keys.filter(k => status[k].state === 'insufficient'),
     unmapped, families_without_sources: Object.entries(families).filter(([, f]) => !f.sources_fresh.length && !f.sources_stale.length && !f.sources_missing.length).map(([k]) => k),
     families_without_fresh_sources: Object.entries(families).filter(([, f]) => f.score === null).map(([k]) => k) };
   const base = { asset: 'BTC', decision_ts: t, calc_version: cfg.version, evidence_coverage: Math.round(coverage * 1000) / 1000,
     market_regime: regime.regime, regime, event_intensity: ev.intensity, events: ev, predictive, missing,
-    redundancy: redundancy.pairs };
+    redundancy: redundancy.pairs, evidence: evidence ? sv2EvidenceSummary(evidence) : null };
   if (!scored.length) {
     return { ...base, status: 'FAILED', degraded_reason: 'no_fresh_sources', sentiment_score: null, sentiment_class: null,
       confidence: 0, families: {}, supporting_ids: [], contradicting_ids: [] };
@@ -12408,7 +12491,16 @@ function sv2Compute(hist, i, events, cfg) {
   for (const k of fresh) {
     const s = Math.sign(status[k].value - 50);
     if (s === 0 || sign === 0) continue;
-    (s === sign ? supporting : contradicting).push(`v1:${k}@${t}`);
+    (s === sign ? supporting : contradicting).push(status[k].origin === 'evidence' ? `${k}@${t}` : `v1:${k}@${t}`);
+  }
+  if (evidence) {
+    for (const v of Object.values(evidence)) {
+      if (v.state !== 'fresh') continue;
+      for (const it of v.item_ids || []) {
+        if (it.sign === 0 || sign === 0) continue;
+        (it.sign === sign ? supporting : contradicting).push(`evidence:${it.id}`);
+      }
+    }
   }
   for (const e of ev.events) {
     const s = e.direction === 'UP' ? 1 : e.direction === 'DOWN' ? -1 : 0;
@@ -12422,20 +12514,43 @@ function sv2Compute(hist, i, events, cfg) {
     supporting_ids: supporting.slice(0, cfg.maxIds), contradicting_ids: contradicting.slice(0, cfg.maxIds) };
 }
 
+// Newest evidence items usable at decision time ts (retrieved ≤ ts, inside the source's freshness window), at most 3 per
+// source and 12 in total, for the AI annotation package. Titles only (no article bodies).
+function sv2EvidenceItemsForAi(rows, ts, evidence) {
+  const fresh = new Map(SV2_SOURCE_REGISTRY.map(s => [s.id, s]));
+  const per = {}, out = [];
+  const usable = (rows || []).filter(r => !r.dup_of && Number(r.retrieved_ts) <= ts).map(r => {
+    const pub = r.published_ts === null || r.published_ts === undefined ? null : Number(r.published_ts);
+    return { r, evTs: pub !== null && pub <= Number(r.retrieved_ts) ? pub : Number(r.retrieved_ts) };
+  }).filter(x => { const s = fresh.get(x.r.source_id); return s && x.evTs <= ts && x.evTs >= ts - s.freshness_h * 3600000; })
+    .sort((a, b) => b.evTs - a.evTs);
+  for (const { r, evTs } of usable) {
+    if ((per[r.source_id] = (per[r.source_id] || 0) + 1) > 3) continue;
+    const st = evidence && evidence[`ev:${r.source_id}`];
+    out.push({ id: `evidence:${r.evidence_id}`, source: r.source_id, family: fresh.get(r.source_id).family,
+      title: String(r.title || '').slice(0, 200), evidence_ts: evTs, url: r.canonical_url, source_state: st ? st.state : null });
+    if (out.length >= 12) break;
+  }
+  return out;
+}
+
 function sv2AiPackage(result) {
   // Compact, timestamped evidence package; every item carries the identifier the AI must cite.
   const ids = [];
   const fams = {};
   for (const [f, v] of Object.entries(result.families || {})) {
     if (v.score === null) continue;
-    fams[f] = { score: v.score, sources: v.sources_fresh.map(k => { ids.push(`v1:${k}@${result.decision_ts}`); return `v1:${k}@${result.decision_ts}`; }) };
+    fams[f] = { score: v.score, sources: v.sources_fresh.map(k => {
+      const id = k.startsWith('ev:') ? `${k}@${result.decision_ts}` : `v1:${k}@${result.decision_ts}`;
+      ids.push(id); return id; }) };
   }
   const events = (result.events.events || []).slice(0, 10).map(e => {
     ids.push(`event:${e.id}`);
     return { id: `event:${e.id}`, type: e.type, severity: e.severity, direction: e.direction, role: e.role, family: e.family,
       first_detected_ts: e.first_detected_ts, overlaps_fresh_family: e.overlaps_fresh_family };
   });
-  return { pkg: { decision_ts: result.decision_ts, regime: result.market_regime, families: fams, events,
+  const evidence = (result.evidence_items || []).map(x => { ids.push(x.id); return { id: x.id, source: x.source, family: x.family, title: x.title, evidence_ts: x.evidence_ts }; });
+  return { pkg: { decision_ts: result.decision_ts, regime: result.market_regime, families: fams, events, evidence,
     stale: result.missing.stale, missing: result.missing.missing }, allowedIds: ids };
 }
 
@@ -12464,45 +12579,108 @@ function sv2ValidateAiOutput(obj, allowedIds) {
     uncertainty: obj.uncertainty } };
 }
 
-async function sv2RunAi(env, pkg, allowedIds, reserve) {
-  // The only AI route: the account's Workers AI binding, and only when a model verified as free for this account and a
-  // daily ceiling below the free allowance are configured. No other provider, no paid fallback, no retries.
+// Workers AI Neuron rates, from the Workers AI pricing page (developers.cloudflare.com/workers-ai/platform/pricing,
+// updated 2026-11-12). Only priced models can run: an unknown model is refused rather than called unmetered.
+// GLM-4.7-flash is listed as available on Workers Free (changelog 2026-07-28). On Workers Free, exceeding the account's
+// 10,000 Neurons/day returns error 3036 and is not billed; this budget keeps V2 far below it (V1 also uses Workers AI).
+const SV2_AI_PRICING = {
+  '@cf/zai-org/glm-4.7-flash': { neurons_per_m_input: 5500, neurons_per_m_output: 36400 },
+};
+const SV2_AI_MAX_OUTPUT_TOKENS = 1200;          // max_completion_tokens: hard cap on generated tokens (incl. reasoning)
+const SV2_AI_RESERVE_SQL = "INSERT INTO sv2_ai_neurons (day, reserved_ts, model, reserved_neurons, slot, status) " +
+  "SELECT ?, ?, ?, ?, COALESCE((SELECT MAX(slot) FROM sv2_ai_neurons WHERE day = ?), 0) + 1, 'reserved' " +
+  "WHERE (SELECT COALESCE(SUM(MAX(reserved_neurons, COALESCE(actual_neurons, 0))), 0) FROM sv2_ai_neurons WHERE day = ?) + ? <= ?";
+
+function sv2AiBudget(env) {
+  const n = Number(env.SV2_GLM_DAILY_NEURONS || '0');
+  return Number.isFinite(n) && n > 0 ? n : 0;
+}
+
+// Upper bound in Neurons for one call: input tokens ≤ characters / 2 (conservative; typical English JSON is ~3-4
+// characters per token) plus the max_completion_tokens cap, at the model's published rates.
+function sv2AiEstimateNeurons(pricing, promptChars) {
+  const inTok = Math.ceil(promptChars / 2);
+  return Math.ceil((inTok * pricing.neurons_per_m_input + SV2_AI_MAX_OUTPUT_TOKENS * pricing.neurons_per_m_output) / 1e6 * 100) / 100;
+}
+
+// Every number the AI writes in free text must already occur in the package it was given: no invented figures,
+// prices or forecasts. Returns the offending numbers.
+function sv2UngroundedNumbers(texts, pkgText) {
+  const hay = String(pkgText).replace(/,/g, '');
+  const bad = [];
+  for (const t of texts) {
+    for (const m of String(t || '').matchAll(/\d+(?:[.,]\d+)*/g)) {
+      const n = m[0].replace(/,/g, '');
+      if (!hay.includes(n)) bad.push(m[0]);
+    }
+  }
+  return bad;
+}
+
+async function sv2RunAi(env, pkg, allowedIds, ledger) {
+  // The only AI route: the account's Workers AI binding, a priced model and a daily Neuron budget. No other provider,
+  // no paid fallback, no retries. The annotation never sets or changes a number in the result.
   const model = String(env.SENTIMENT_V2_AI_MODEL || '').trim();
-  const ceiling = Math.max(0, parseInt(env.SENTIMENT_V2_AI_DAILY_CALLS || '0', 10) || 0);
-  if (!model || ceiling === 0) return { status: 'disabled', model: model || null, counted: false, reason: 'no verified free Workers AI model and ceiling configured' };
+  const budget = sv2AiBudget(env);
+  if (!model || budget === 0) return { status: 'disabled', model: model || null, counted: false, reason: 'no model or no daily Neuron budget configured' };
+  const pricing = SV2_AI_PRICING[model];
+  if (!pricing) return { status: 'unpriced_model', model, counted: false, reason: 'model has no Neuron pricing entry; refusing to call it unmetered' };
   if (!env.AI || typeof env.AI.run !== 'function') return { status: 'unavailable', model, counted: false, reason: 'Workers AI binding unavailable' };
-  // Reserve a slot of today's ceiling atomically before calling; no slot, no call.
-  if (!(await reserve(ceiling))) return { status: 'quota_guard', model, counted: false, reason: `daily ceiling ${ceiling} reached` };
+  try { if (await ledger.accountLimitedToday()) return { status: 'quota_guard', model, counted: false, reason: 'account free allocation reported exhausted today' }; }
+  catch (err) { return { status: 'quota_guard', model, counted: false, reason: 'Neuron ledger unavailable: ' + String((err && err.message) || err).slice(0, 120) }; }
   const system = 'You annotate a crypto sentiment evidence package. Return ONLY a JSON object with keys summary, cited_ids, ' +
     'contradictions (array of {ids, note}), event_relevance (array of {id, relevance: low|medium|high, overlap: none|partial|full}), ' +
-    'uncertainty. Cite only identifiers present in the package. Separate observed facts from inference. Do not output any score.';
+    'uncertainty. Cite only identifiers present in the package. Separate observed facts from inference. Do not output any score, ' +
+    'price target or forecast, and do not write any number that does not appear in the package. Use only the package; do not add outside facts.';
+  const user = JSON.stringify(pkg);
+  const estimate = sv2AiEstimateNeurons(pricing, system.length + user.length);
+  let slot;
+  try { slot = await ledger.reserveNeurons(budget, estimate, model); }
+  catch (err) { return { status: 'quota_guard', model, counted: false, reason: 'reservation failed: ' + String((err && err.message) || err).slice(0, 120) }; }
+  if (slot === null || slot === undefined) return { status: 'quota_guard', model, counted: false, reason: `daily Neuron budget ${budget} would be exceeded (this call reserves ${estimate})` };
+  const record = async (u) => { try { await ledger.recordNeurons(slot, u); } catch (_e) { /* the reservation still bounds the budget */ } };
   let raw;
   try {
-    raw = await env.AI.run(model, { messages: [{ role: 'system', content: system }, { role: 'user', content: JSON.stringify(pkg) }], max_tokens: 700 });
+    raw = await env.AI.run(model, { messages: [{ role: 'system', content: system }, { role: 'user', content: user }],
+      max_completion_tokens: SV2_AI_MAX_OUTPUT_TOKENS, temperature: 0 });
   } catch (err) {
-    return { status: 'error', model, counted: true, reason: String((err && err.message) || err).slice(0, 200) };
+    const msg = String((err && err.message) || err);
+    const status = /3036|daily free allocation|neurons/i.test(msg) ? 'account_limited' : 'error';
+    await record({ status });
+    return { status, model, counted: true, reserved_neurons: estimate, reason: msg.slice(0, 200) };
   }
-  let obj = raw && typeof raw === 'object' && 'response' in raw ? raw.response : raw;
+  const usage = raw && raw.usage ? raw.usage : null;
+  const inTok = usage ? Number(usage.prompt_tokens) : null, outTok = usage ? Number(usage.completion_tokens) : null;
+  const actual = Number.isFinite(inTok) && Number.isFinite(outTok)
+    ? Math.round((inTok * pricing.neurons_per_m_input + outTok * pricing.neurons_per_m_output) / 1e6 * 1000) / 1000 : null;
+  let obj = raw && typeof raw === 'object' && 'response' in raw ? raw.response
+    : raw && raw.choices && raw.choices[0] && raw.choices[0].message ? raw.choices[0].message.content : raw;
+  const meta = { reserved_neurons: estimate, input_tokens: Number.isFinite(inTok) ? inTok : null, output_tokens: Number.isFinite(outTok) ? outTok : null, actual_neurons: actual };
   if (typeof obj === 'string') {
     try { obj = JSON.parse(obj.trim().replace(/^```(?:json)?\s*/, '').replace(/```$/, '').trim()); }
-    catch (e) { return { status: 'invalid_output', model, counted: true, reason: 'output is not JSON' }; }
+    catch (e) { await record({ ...meta, status: 'invalid_output' }); return { status: 'invalid_output', model, counted: true, ...meta, reason: 'output is not JSON' }; }
   }
   const v = sv2ValidateAiOutput(obj, allowedIds);
-  if (!v.ok) return { status: 'invalid_output', model, counted: true, reason: v.errors.slice(0, 3).join('; ') };
-  return { status: 'ok', model, counted: true, output: v.value };
+  if (!v.ok) { await record({ ...meta, status: 'invalid_output' }); return { status: 'invalid_output', model, counted: true, ...meta, reason: v.errors.slice(0, 3).join('; ') }; }
+  const ungrounded = sv2UngroundedNumbers([v.value.summary, v.value.uncertainty, ...v.value.contradictions.map(c => c.note)], user);
+  if (ungrounded.length) { await record({ ...meta, status: 'invalid_output' }); return { status: 'invalid_output', model, counted: true, ...meta, reason: `numbers not in the evidence package: ${ungrounded.slice(0, 5).join(', ')}` }; }
+  await record({ ...meta, status: 'ok' });
+  return { status: 'ok', model, counted: true, ...meta, output: v.value };
 }
 
 function sv2Row(result, ai, usage, nowTs) {
   let status = result.status, reason = result.degraded_reason;
-  if (status === 'OK' && ai && !['disabled', 'ok'].includes(ai.status)) { status = 'DEGRADED'; reason = `ai_${ai.status}`; }
+  // Only an AI fault degrades a result. A budget stop (quota_guard, account_limited) or an unpriced/disabled model is the
+  // designed €0 behaviour: the optional annotation is absent, ai_status says why, and the deterministic result stands.
+  if (status === 'OK' && ai && ['error', 'invalid_output', 'unavailable'].includes(ai.status)) { status = 'DEGRADED'; reason = `ai_${ai.status}`; }
   return [result.asset, result.decision_ts, result.calc_version, status, reason, result.sentiment_score, result.sentiment_class,
     result.confidence, result.evidence_coverage, result.market_regime, JSON.stringify(result.regime), result.event_intensity,
     JSON.stringify({ direction_balance: result.events.direction_balance, adjustment: result.events.adjustment,
       events: result.events.events, excluded: result.events.excluded, n_raw: result.events.n_raw }),
     JSON.stringify(result.predictive), JSON.stringify({ families: result.families, composite_before_events: result.composite_before_events ?? null,
-      redundancy: result.redundancy }),
+      redundancy: result.redundancy, evidence: result.evidence ?? null, evidence_status: result.evidence_status ?? null }),
     JSON.stringify(result.supporting_ids), JSON.stringify(result.contradicting_ids), JSON.stringify(result.missing),
-    ai ? ai.model : null, ai ? ai.status : 'disabled', JSON.stringify(ai ? { reason: ai.reason || null, output: ai.output || null } : {}),
+    ai ? ai.model : null, ai ? ai.status : 'disabled', JSON.stringify(ai ? { reason: ai.reason || null, output: ai.output || null, reserved_neurons: ai.reserved_neurons ?? null, actual_neurons: ai.actual_neurons ?? null, input_tokens: ai.input_tokens ?? null, output_tokens: ai.output_tokens ?? null } : {}),
     JSON.stringify(usage), nowTs];
 }
 
@@ -12631,7 +12809,7 @@ async function runSentimentV2Cycle(env, { nowTs } = {}) {
   const hist = sv2History(histRes.results);
   rowsRead += hist.length;
   // Newest first, so a cap can only cut the oldest context; reaching a cap is recorded and degrades the result.
-  const PRICE_CAP = 20000, EVENT_CAP = 2000;
+  const PRICE_CAP = 20000, EVENT_CAP = 2000, EVIDENCE_CAP = 3000;
   const priceRes = await env.DB.prepare('SELECT ts, btc_price FROM btc_data WHERE ts >= ? AND ts <= ? ORDER BY ts DESC LIMIT ?')
     .bind(lo - cfg.priceToleranceMs, hi, PRICE_CAP).all();
   const priceRows = (priceRes.results || []).slice().reverse();
@@ -12649,21 +12827,65 @@ async function runSentimentV2Cycle(env, { nowTs } = {}) {
   } catch (err) {
     eventsError = String((err && err.message) || err).slice(0, 160);
   }
+  // sv2-1.1.0 independent evidence (migration 0029). Bounded: per freshness group, only rows retrieved within that
+  // group's window before the oldest pending decision (a superset of what any decision can use), newest first, capped.
+  let evidenceRows = null, evidenceStatus = String(env.SV2_COLLECTOR_ENABLED || '0') === '1' ? 'ok' : 'collector_disabled', evidenceError = null;
+  try {
+    const groups = {};
+    for (const src of SV2_SOURCE_REGISTRY) (groups[src.freshness_h] = groups[src.freshness_h] || []).push(src.id);
+    const clauses = [], binds = [];
+    for (const [fh, ids] of Object.entries(groups)) {
+      clauses.push(`(source_id IN (${ids.map(() => '?').join(',')}) AND retrieved_ts >= ?)`);
+      binds.push(...ids, pending[0] - Number(fh) * 3600000);
+    }
+    const er = await env.DB.prepare(`SELECT evidence_id, source_id, title, canonical_url, published_ts, retrieved_ts, dup_of FROM sv2_evidence WHERE retrieved_ts <= ? AND dup_of IS NULL AND (${clauses.join(' OR ')}) ORDER BY retrieved_ts DESC LIMIT ?`)
+      .bind(hi, ...binds, EVIDENCE_CAP).all();
+    evidenceRows = er.results || [];
+    rowsRead += evidenceRows.length;
+    if (evidenceRows.length >= EVIDENCE_CAP) truncatedInputs.push(`sv2_evidence from ${evidenceRows[evidenceRows.length - 1].retrieved_ts}`);
+    // A source with nothing in its window: one indexed single-row lookup tells stale (older items exist) from missing.
+    const present = new Set(evidenceRows.map(r => r.source_id));
+    for (const src of SV2_SOURCE_REGISTRY) {
+      if (present.has(src.id)) continue;
+      const last = await env.DB.prepare('SELECT evidence_id, source_id, title, canonical_url, published_ts, retrieved_ts, dup_of FROM sv2_evidence WHERE source_id = ? AND retrieved_ts <= ? AND dup_of IS NULL ORDER BY retrieved_ts DESC LIMIT 1')
+        .bind(src.id, hi).first();
+      if (last) { evidenceRows.push(last); rowsRead++; }
+    }
+  } catch (err) {
+    evidenceRows = null; evidenceStatus = 'unavailable';
+    evidenceError = String((err && err.message) || err).slice(0, 160);
+  }
   const day = new Date(now).toISOString().slice(0, 10);
-  let aiReserved = 0;
-  const reserve = async ceiling => {
-    const r = await env.DB.prepare('INSERT INTO sentiment_v2_ai_calls (day, slot, reserved_ts) SELECT ?, COALESCE(MAX(slot), 0) + 1, ? FROM sentiment_v2_ai_calls WHERE day = ? HAVING COALESCE(MAX(slot), 0) < ?')
-      .bind(day, now, day, ceiling).run();
+  let aiNeuronsReserved = 0;
+  // Atomic Neuron reservation (one conditional INSERT ... SELECT): succeeds only if today's committed total plus this
+  // upper-bound estimate stays within the daily budget. Committed = max(reserved, actual) per earlier call.
+  const reserveNeurons = async (budgetNeurons, estimate, model) => {
+    const r = await env.DB.prepare(SV2_AI_RESERVE_SQL).bind(day, now, model, estimate, day, day, estimate, budgetNeurons).run();
     const ok = !!(r && r.meta && Number(r.meta.changes) > 0);
-    if (ok) aiReserved++;
-    return ok;
+    if (!ok) return null;
+    aiNeuronsReserved += estimate;
+    const row = await env.DB.prepare('SELECT slot FROM sv2_ai_neurons WHERE rowid = ?').bind(r.meta.last_row_id).first();
+    return row ? Number(row.slot) : null;
+  };
+  const recordNeurons = async (slot, u) => {
+    if (slot === null || slot === undefined) return;
+    await env.DB.prepare('UPDATE sv2_ai_neurons SET input_tokens = ?, output_tokens = ?, actual_neurons = ?, status = ? WHERE day = ? AND slot = ?')
+      .bind(u.input_tokens ?? null, u.output_tokens ?? null, u.actual_neurons ?? null, u.status, day, slot).run();
+  };
+  const accountLimitedToday = async () => {
+    const r = await env.DB.prepare("SELECT 1 AS x FROM sv2_ai_neurons WHERE day = ? AND status = 'account_limited' LIMIT 1").bind(day).first();
+    return !!r;
   };
   let written = 0;
   const decisions = [];
   for (const ts of pending) {
     const i = sv2IndexAtOrBefore(hist, ts);
     if (i < 0 || hist[i].ts !== ts) continue;
-    const result = sv2Compute(hist, i, events, cfg);
+    const evidence = evidenceRows ? sv2EvidenceReadings(evidenceRows, ts, SV2_SOURCE_REGISTRY, SV2_EVIDENCE_RULES) : null;
+    const result = sv2Compute(hist, i, events, cfg, evidence);
+    result.evidence_status = evidenceStatus;
+    if (evidenceRows) result.evidence_items = sv2EvidenceItemsForAi(evidenceRows, ts, evidence);
+    if (evidenceError) { result.evidence_error = evidenceError; if (result.status === 'OK') { result.status = 'DEGRADED'; result.degraded_reason = 'evidence_unavailable'; } }
     if (eventsError) { result.events.error = eventsError; if (result.status === 'OK') { result.status = 'DEGRADED'; result.degraded_reason = 'event_ledger_unavailable'; } }
     if (truncatedInputs.length) {
       result.missing.truncated_inputs = truncatedInputs;
@@ -12672,10 +12894,10 @@ async function runSentimentV2Cycle(env, { nowTs } = {}) {
     let ai = { status: 'disabled', model: null, counted: false };
     if (result.sentiment_score !== null) {
       const { pkg, allowedIds } = sv2AiPackage(result);
-      ai = await sv2RunAi(env, pkg, allowedIds, reserve);
+      ai = await sv2RunAi(env, pkg, allowedIds, { reserveNeurons, recordNeurons, accountLimitedToday });
     }
-    const usage = { d1_rows_read_cycle: rowsRead, ai_slots_reserved_this_cycle: aiReserved,
-      ai_daily_ceiling: Math.max(0, parseInt(env.SENTIMENT_V2_AI_DAILY_CALLS || '0', 10) || 0) };
+    const usage = { d1_rows_read_cycle: rowsRead, ai_neurons_reserved_this_cycle: Math.round(aiNeuronsReserved * 100) / 100,
+      ai_daily_neuron_budget: sv2AiBudget(env), evidence_rows: evidenceRows ? evidenceRows.length : null };
     const res = await env.DB.prepare(SV2_INSERT_SQL).bind(...sv2Row(result, ai, usage, now)).run();
     const changes = res && res.meta ? Number(res.meta.changes || 0) : 0;
     written += changes;
@@ -12703,6 +12925,7 @@ function sv2AlignSeries(v1Rows, v2Rows, maxPoints) {
     const v2 = v2By.get(ts);
     const pt = { ts, v1: sv2Finite(r.score), btc: sv2Finite(r.btc_price),
       v2: v2 ? sv2Finite(v2.sentiment_score) : null, v2_status: v2 ? v2.status : null };
+    if (v2 && v2.calc_version) pt.v2_version = v2.calc_version;
     if (r.btc_ts !== undefined) pt.btc_ts = r.btc_ts;
     return pt;
   });
@@ -12735,21 +12958,33 @@ async function getSentimentV2Comparison(env, period, nowTs) {
     .bind(from, nowTs, SV2_MAX_ROWS).all();
   const v1Rows = (v1.results || []).slice().reverse();
   const truncated = v1Rows.length >= SV2_MAX_ROWS;
-  let v2Rows = [], meta = { n: 0, first_ts: null, last_ts: null }, latest = null, v2Error = null;
+  let v2Rows = [], meta = { n: 0, first_ts: null, last_ts: null }, latest = null, v2Error = null, versionSince = null;
   try {
     const v2From = truncated ? Number(v1Rows[0].observation_ts) : from;
-    const v2 = await env.DB.prepare("SELECT decision_ts, sentiment_score, status FROM sentiment_v2_results WHERE asset = 'BTC' AND calc_version = ? AND decision_ts >= ? AND decision_ts <= ? ORDER BY decision_ts DESC LIMIT ?")
-      .bind(SENTIMENT_V2_VERSION, v2From, nowTs, SV2_MAX_ROWS).all();
-    v2Rows = (v2.results || []).slice().reverse();
+    // Every shown calc version (sv2-1.0.0 history, sv2-1.1.0 current); where both exist for one timestamp the newer wins.
+    const vIn = SV2_VERSIONS_SHOWN.map(() => '?').join(',');
+    const v2 = await env.DB.prepare(`SELECT decision_ts, sentiment_score, status, calc_version FROM sentiment_v2_results WHERE asset = 'BTC' AND calc_version IN (${vIn}) AND decision_ts >= ? AND decision_ts <= ? ORDER BY decision_ts DESC LIMIT ?`)
+      .bind(...SV2_VERSIONS_SHOWN, v2From, nowTs, SV2_MAX_ROWS).all();
+    const byTs = new Map();
+    for (const r of (v2.results || [])) {
+      const prev = byTs.get(Number(r.decision_ts));
+      if (!prev || SV2_VERSIONS_SHOWN.indexOf(r.calc_version) > SV2_VERSIONS_SHOWN.indexOf(prev.calc_version)) byTs.set(Number(r.decision_ts), r);
+    }
+    v2Rows = [...byTs.values()].sort((a, b) => Number(a.decision_ts) - Number(b.decision_ts));
     // Two indexed single-row lookups (asset, decision_ts): cost stays constant as V2 history grows.
-    const firstRow = await env.DB.prepare("SELECT decision_ts FROM sentiment_v2_results WHERE asset = 'BTC' AND calc_version = ? ORDER BY decision_ts ASC LIMIT 1")
+    const firstRow = await env.DB.prepare(`SELECT decision_ts FROM sentiment_v2_results WHERE asset = 'BTC' AND calc_version IN (${vIn}) ORDER BY decision_ts ASC LIMIT 1`)
+      .bind(...SV2_VERSIONS_SHOWN).first();
+    const lastRow = await env.DB.prepare(`SELECT decision_ts, calc_version FROM sentiment_v2_results WHERE asset = 'BTC' AND calc_version IN (${vIn}) ORDER BY decision_ts DESC, calc_version DESC LIMIT 1`)
+      .bind(...SV2_VERSIONS_SHOWN).first();
+    // When the current version started (first sv2-1.1.0 result), for the chart's version marker.
+    const curFirst = await env.DB.prepare("SELECT decision_ts FROM sentiment_v2_results WHERE asset = 'BTC' AND calc_version = ? ORDER BY decision_ts ASC LIMIT 1")
       .bind(SENTIMENT_V2_VERSION).first();
-    const lastRow = await env.DB.prepare("SELECT decision_ts FROM sentiment_v2_results WHERE asset = 'BTC' AND calc_version = ? ORDER BY decision_ts DESC LIMIT 1")
-      .bind(SENTIMENT_V2_VERSION).first();
+    versionSince = curFirst ? Number(curFirst.decision_ts) : null;
     meta = { n: lastRow ? 1 : 0, first_ts: firstRow ? Number(firstRow.decision_ts) : null, last_ts: lastRow ? Number(lastRow.decision_ts) : null };
     if (meta.last_ts !== null) {
-      latest = await env.DB.prepare("SELECT decision_ts, status, degraded_reason, sentiment_score, sentiment_class, confidence, evidence_coverage, market_regime, event_intensity, ai_status, ai_model FROM sentiment_v2_results WHERE asset = 'BTC' AND calc_version = ? AND decision_ts = ?")
-        .bind(SENTIMENT_V2_VERSION, meta.last_ts).first();
+      latest = await env.DB.prepare("SELECT decision_ts, calc_version, status, degraded_reason, sentiment_score, sentiment_class, confidence, evidence_coverage, market_regime, event_intensity, ai_status, ai_model, ai_json, family_json FROM sentiment_v2_results WHERE asset = 'BTC' AND calc_version = ? AND decision_ts = ?")
+        .bind(lastRow.calc_version, meta.last_ts).first();
+      if (latest) latest = sv2LatestView(latest);
     }
   } catch (err) {
     v2Error = String((err && err.message) || err).slice(0, 160);
@@ -12779,7 +13014,101 @@ async function getSentimentV2Comparison(env, period, nowTs) {
     truncated, truncated_from_ts: truncated ? Number(v1Rows[0].observation_ts) : null,
     btc_truncated: btcTruncated, btc_from_ts: btcTruncated ? btcFrom : null,
     series_status: sv2SeriesStatus(aligned.points, meta, nowTs), v2_latest: latest, v2_error: v2Error,
-    v1_history_last_ts: v1HistoryLastTs };
+    v1_history_last_ts: v1HistoryLastTs, current_calc_version: SENTIMENT_V2_VERSION, current_version_since: versionSince };
+}
+
+// One minimal GLM call through the real Neuron ledger (same reservation SQL, same budget, same validation).
+async function sv2GlmProbe(env, now) {
+  const day = new Date(now).toISOString().slice(0, 10);
+  const pkg = { decision_ts: now, regime: 'probe', families: { probe: { score: 50, sources: ['probe:a'] } }, events: [], evidence: [], stale: [], missing: [] };
+  const ledger = {
+    async accountLimitedToday() { return !!(await env.DB.prepare("SELECT 1 AS x FROM sv2_ai_neurons WHERE day = ? AND status = 'account_limited' LIMIT 1").bind(day).first()); },
+    async reserveNeurons(budget, est, model) {
+      const r = await env.DB.prepare(SV2_AI_RESERVE_SQL).bind(day, now, model, est, day, day, est, budget).run();
+      if (!(r && r.meta && Number(r.meta.changes) > 0)) return null;
+      const row = await env.DB.prepare('SELECT slot FROM sv2_ai_neurons WHERE rowid = ?').bind(r.meta.last_row_id).first();
+      return row ? Number(row.slot) : null;
+    },
+    async recordNeurons(slot, u) {
+      await env.DB.prepare('UPDATE sv2_ai_neurons SET input_tokens = ?, output_tokens = ?, actual_neurons = ?, status = ? WHERE day = ? AND slot = ?')
+        .bind(u.input_tokens ?? null, u.output_tokens ?? null, u.actual_neurons ?? null, u.status, day, slot).run();
+    },
+  };
+  return sv2RunAi(env, pkg, ['probe:a'], ledger);
+}
+
+// Compact view of the newest V2 result for the API: parsed AI annotation and usage, evidence summary; no raw JSON.
+function sv2LatestView(row) {
+  let ai = null, fam = null;
+  try { ai = JSON.parse(row.ai_json || '{}'); } catch (_e) { ai = null; }
+  try { fam = JSON.parse(row.family_json || '{}'); } catch (_e) { fam = null; }
+  const { ai_json, family_json, ...rest } = row;
+  return { ...rest, ai_annotation: ai && ai.output ? ai.output : null,
+    ai_usage: ai ? { reserved_neurons: ai.reserved_neurons ?? null, actual_neurons: ai.actual_neurons ?? null, reason: ai.reason ?? null } : null,
+    evidence: fam && fam.evidence ? fam.evidence : null, evidence_status: fam ? fam.evidence_status ?? null : null };
+}
+
+// Source registry with reliability and freshness, the last collection runs with their budget use, today's GLM Neuron
+// use against its budget, and the configured limits. Every read is bounded (registry-sized or LIMIT).
+async function getSentimentV2Status(env, nowTs) {
+  const day = new Date(nowTs).toISOString().slice(0, 10);
+  const out = { ok: true, generated_at: nowTs, calc_version: SENTIMENT_V2_VERSION, versions_shown: SV2_VERSIONS_SHOWN,
+    collector: { version: SV2_COLLECTOR_VERSION, enabled: String(env.SV2_COLLECTOR_ENABLED || '0') === '1', limits: SV2_COLLECTOR_LIMITS,
+      disabled_sources: String(env.SV2_SOURCES_DISABLED || '').split(',').map(x => x.trim()).filter(Boolean), lexicon: SV2_LEXICON_SOURCE,
+      evidence_rules: SV2_EVIDENCE_RULES },
+    sources: [], runs: [], ai: null, errors: [] };
+  let states = {};
+  try {
+    const r = await env.DB.prepare('SELECT * FROM sv2_source_state LIMIT 100').all();
+    states = Object.fromEntries((r.results || []).map(x => [x.source_id, x]));
+  } catch (err) { out.errors.push('sv2_source_state: ' + String((err && err.message) || err).slice(0, 120)); }
+  for (const src of SV2_SOURCE_REGISTRY) {
+    const st = states[src.id] || null;
+    let latest = null;
+    try {
+      latest = await env.DB.prepare('SELECT retrieved_ts, published_ts FROM sv2_evidence WHERE source_id = ? ORDER BY retrieved_ts DESC LIMIT 1').bind(src.id).first();
+    } catch (_e) { latest = null; }
+    const attempts = st ? Number(st.ok_count) + Number(st.fail_count) : 0;
+    const lastEvidenceTs = latest ? Number(latest.published_ts ?? latest.retrieved_ts) : null;
+    out.sources.push({ id: src.id, name: src.name, family: src.family, kind: src.kind, url: src.url, interval_min: src.interval_min,
+      freshness_h: src.freshness_h, last_attempt_ts: st ? st.last_attempt_ts : null, last_success_ts: st ? st.last_success_ts : null,
+      last_status: st ? st.last_status : 'NEVER_RUN', last_error: st ? st.last_error : null,
+      consecutive_failures: st ? Number(st.consecutive_failures) : 0, reliability: attempts ? Math.round(Number(st.ok_count) / attempts * 1000) / 1000 : null,
+      attempts, last_evidence_ts: lastEvidenceTs, fresh: lastEvidenceTs !== null && nowTs - lastEvidenceTs <= src.freshness_h * 3600000 });
+  }
+  try {
+    const r = await env.DB.prepare('SELECT run_ts, items_seen, items_new, items_duplicate, subrequests, bytes, errors_json, sources_json FROM sv2_collection_runs ORDER BY run_ts DESC LIMIT 10').all();
+    out.runs = (r.results || []).map(x => ({ run_ts: x.run_ts, items_seen: x.items_seen, items_new: x.items_new, items_duplicate: x.items_duplicate,
+      subrequests: x.subrequests, bytes: x.bytes, errors: JSON.parse(x.errors_json || '[]'), sources: JSON.parse(x.sources_json || '[]').map(y => `${y.id}:${y.status}`) }));
+  } catch (err) { out.errors.push('sv2_collection_runs: ' + String((err && err.message) || err).slice(0, 120)); }
+  const model = String(env.SENTIMENT_V2_AI_MODEL || '').trim();
+  const budget = sv2AiBudget(env);
+  out.ai = { model: model || null, priced: !!SV2_AI_PRICING[model], daily_neuron_budget: budget, enabled: !!model && budget > 0 && !!SV2_AI_PRICING[model],
+    day, calls: 0, reserved_neurons: 0, actual_neurons: 0, committed_neurons: 0, account_limited_today: false, remaining_neurons: budget,
+    account_free_allocation_neurons: 10000, max_output_tokens: SV2_AI_MAX_OUTPUT_TOKENS };
+  try {
+    const r = await env.DB.prepare("SELECT COUNT(*) AS calls, COALESCE(SUM(reserved_neurons), 0) AS reserved, COALESCE(SUM(actual_neurons), 0) AS actual, COALESCE(SUM(MAX(reserved_neurons, COALESCE(actual_neurons, 0))), 0) AS committed, MAX(CASE WHEN status = 'account_limited' THEN 1 ELSE 0 END) AS limited FROM sv2_ai_neurons WHERE day = ?").bind(day).first();
+    if (r) Object.assign(out.ai, { calls: Number(r.calls), reserved_neurons: Math.round(Number(r.reserved) * 100) / 100, actual_neurons: Math.round(Number(r.actual) * 100) / 100,
+      committed_neurons: Math.round(Number(r.committed) * 100) / 100, account_limited_today: Number(r.limited) === 1,
+      remaining_neurons: Math.max(0, Math.round((budget - Number(r.committed)) * 100) / 100) });
+  } catch (err) { out.errors.push('sv2_ai_neurons: ' + String((err && err.message) || err).slice(0, 120)); }
+  return out;
+}
+
+// Newest evidence items (duplicates excluded), with provenance and the deterministic lexicon score of each title.
+async function getSentimentV2Evidence(env, nowTs, hours, limit) {
+  const since = nowTs - hours * 3600000;
+  try {
+    const r = await env.DB.prepare('SELECT evidence_id, source_id, family, canonical_url, title, published_ts, retrieved_ts, content_hash, collector_version FROM sv2_evidence WHERE retrieved_ts >= ? AND dup_of IS NULL ORDER BY retrieved_ts DESC LIMIT ?')
+      .bind(since, limit).all();
+    const names = Object.fromEntries(SV2_SOURCE_REGISTRY.map(s => [s.id, s.name]));
+    return { ok: true, generated_at: nowTs, hours, limit, items: (r.results || []).map(x => {
+      const h = sv2ScoreHeadline(x.title);
+      return { ...x, source_name: names[x.source_id] || x.source_id, lexicon_score: h.score, lexicon_hits: h.hits };
+    }) };
+  } catch (err) {
+    return { ok: true, available: false, generated_at: nowTs, items: [], error: String((err && err.message) || err).slice(0, 160) };
+  }
 }
 
 async function getSentimentV2ComparisonCached(env, period, nowTs) {

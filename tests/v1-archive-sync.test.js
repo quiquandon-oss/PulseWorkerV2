@@ -130,6 +130,18 @@ describe('successful collection, idempotency and the regression itself', () => {
     expect(rows.length).toBe(2);
     expect(rows[0]).toMatchObject({ content_hash: 'from-python', archived_ts: 7, written_by: 'experiment5-pipeline' });
   });
+  it('copies all readings in one D1 batch (one query against the per-invocation limit) (Codex P2)', async () => {
+    const d1 = setup({ history: Array.from({ length: 6 }, (_, i) => ({ ts: NOW - (i + 1) * H, score: 30 + i, sources_json: '{}' })) });
+    let top = 0, inBatch = false;
+    const b = d1.binding;
+    const counted = { ...b, prepare: (sql) => { const st = b.prepare(sql); const w = (o) => ({ ...o, bind: (...a) => w(o.bind(...a)),
+      all: (...x) => { if (!inBatch) top++; return o.all(...x); }, first: (...x) => { if (!inBatch) top++; return o.first(...x); },
+      run: (...x) => { if (!inBatch) top++; return o.run(...x); } }); return w(st); },
+      batch: async (s) => { top++; inBatch = true; try { return await b.batch(s); } finally { inBatch = false; } } };
+    const r = await S.syncV1ArchiveFromHistory({ DB: counted }, { nowTs: NOW });
+    expect(r.copied).toBe(6);
+    expect(top).toBe(3);                       // history read, archive read, one batch
+  });
   it('a row archived concurrently by the GitHub job is counted as already present, never duplicated', async () => {
     const d1 = setup({ history: [{ ts: NOW - H, score: 30, sources_json: '{}' }] });
     const raceEnv = env(d1);

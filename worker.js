@@ -12619,10 +12619,12 @@ function sv2UngroundedNumbers(texts, pkgText) {
   // Whole numeric values only: a figure is grounded when the same number occurs as a complete value in the package,
   // never as a fragment of a longer one (e.g. 179 inside a 13-digit timestamp).
   const norm = (x) => { const n = Number(String(x).replace(/,/g, '')); return Number.isFinite(n) ? String(n) : null; };
-  const have = new Set([...String(pkgText).matchAll(/(?<![\d.])\d+(?:\.\d+)?(?![\d.])/g)].map(m => norm(m[0])).filter(Boolean));
+  // Signs count: -50 is not grounded by 50. A '-' is a sign only when it does not follow a letter or digit (so the
+  // range "40-50" reads as 40 and 50).
+  const have = new Set([...String(pkgText).matchAll(/(?<![\w.])-?\d+(?:\.\d+)?(?![\d.])/g)].map(m => norm(m[0])).filter(Boolean));
   const bad = [];
   for (const t of texts) {
-    for (const m of String(t || '').matchAll(/(?<![\d.,])\d{1,3}(?:,\d{3})+(?:\.\d+)?(?![\d.,])|(?<![\d.,])\d+(?:\.\d+)?(?![\d.])/g)) {
+    for (const m of String(t || '').matchAll(/(?<![\w.,])-?\d{1,3}(?:,\d{3})+(?:\.\d+)?(?![\d.,])|(?<![\w.,])-?\d+(?:\.\d+)?(?![\d.])|(?<=\w)\d+(?:\.\d+)?(?![\d.])/g)) {
       const n = norm(m[0]);
       if (n === null || !have.has(n)) bad.push(m[0]);
     }
@@ -12779,6 +12781,9 @@ async function syncV1ArchiveFromHistory(env, { nowTs } = {}) {
   out.truncated = histRows.length >= V1_ARCHIVE_SYNC_MAX_ROWS;
   if (histRows.length) out.history_last_ts = Number(histRows[0].ts);
   const todo = histRows.filter(r => !archived.has(Number(r.ts))).sort((x, y) => Number(x.ts) - Number(y.ts));
+  // All inserts in one db.batch(): one D1 query against the per-invocation limit, however many readings are copied,
+  // so V2 keeps its headroom. If the batch fails, rows are retried one by one so one bad row cannot block the others.
+  const prepared = [];
   for (const row of todo) {
     const bad = v1ArchiveInvalidReason(row, now);
     if (bad) { out.invalid.push({ ts: row.ts, reason: bad }); continue; }
@@ -12786,13 +12791,22 @@ async function syncV1ArchiveFromHistory(env, { nowTs } = {}) {
     const sourcesText = typeof row.sources_json === 'string' && row.sources_json !== '' ? row.sources_json : '{}';
     const technical = row.technical_score === undefined ? null : row.technical_score;
     const gold = row.gold_regime === undefined ? null : row.gold_regime;
-    try {
-      const hash = await v1ArchiveContentHash(ts, sourcesText, row.score, technical, null, gold);
-      const r = await env.DB.prepare(V1_ARCHIVE_INSERT_SQL).bind(ts, sourcesText, row.score, technical, null, gold,
-        V1_ARCHIVE_SOURCE_WEIGHTS_VERSION, V1_ARCHIVE_SCHEMA_VERSION, V1_ARCHIVE_WRITTEN_BY, hash, now).run();
-      if (r && r.meta && Number(r.meta.changes) > 0) out.copied++; else out.already_present++;
-    } catch (err) {
-      out.errors.push(`insert ${ts} failed: ` + String((err && err.message) || err).slice(0, 200));
+    const hash = await v1ArchiveContentHash(ts, sourcesText, row.score, technical, null, gold);
+    prepared.push({ ts, stmt: () => env.DB.prepare(V1_ARCHIVE_INSERT_SQL).bind(ts, sourcesText, row.score, technical, null, gold,
+      V1_ARCHIVE_SOURCE_WEIGHTS_VERSION, V1_ARCHIVE_SCHEMA_VERSION, V1_ARCHIVE_WRITTEN_BY, hash, now) });
+  }
+  const count = (r) => { if (r && r.meta && Number(r.meta.changes) > 0) out.copied++; else out.already_present++; };
+  if (prepared.length) {
+    let batched = null;
+    if (typeof env.DB.batch === 'function') {
+      try { batched = await env.DB.batch(prepared.map(p => p.stmt())); } catch (_e) { batched = null; }
+    }
+    if (batched) batched.forEach(count);
+    else {
+      for (const p of prepared) {
+        try { count(await p.stmt().run()); }
+        catch (err) { out.errors.push(`insert ${p.ts} failed: ` + String((err && err.message) || err).slice(0, 200)); }
+      }
     }
   }
   out.ok = out.errors.length === 0;

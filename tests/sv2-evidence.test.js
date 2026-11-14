@@ -414,6 +414,12 @@ describe('GLM Neuron ledger on real SQLite', () => {
     expect(S.sv2UngroundedNumbers(['Support near 179 and 655'], pkg)).toEqual(['179', '655']);   // fragments of decision_ts
     expect(S.sv2UngroundedNumbers(['Score 14'], pkg)).toEqual(['14']);                                // not 14.5
   });
+  it('grounding keeps signs: -50 is not grounded by 50, ranges like 40-50 are not negatives (Codex P2)', () => {
+    const pkg = JSON.stringify({ a: 50, b: 40, adj: -2.42 });
+    expect(S.sv2UngroundedNumbers(['Down -50 points'], pkg)).toEqual(['-50']);
+    expect(S.sv2UngroundedNumbers(['Adjustment -2.42; range 40-50'], pkg)).toEqual([]);
+    expect(S.sv2UngroundedNumbers(['Adjustment 2.42'], pkg)).toEqual(['2.42']);
+  });
   it('the number-grounding check rejects figures absent from the package', () => {
     expect(S.sv2UngroundedNumbers(['Regulatory family at 14.5 with 2 sources'], '{"score":14.5,"n":2}')).toEqual([]);
     expect(S.sv2UngroundedNumbers(['BTC to 150,000 by Friday'], '{"score":14.5}')).toEqual(['150,000']);

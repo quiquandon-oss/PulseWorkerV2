@@ -24,6 +24,9 @@ SENTIMENT_V2_ENABLED = "1"
 # (spec section 3). Set both a model id and a daily call ceiling below the free allowance to enable it.
 SENTIMENT_V2_AI_MODEL = ""
 SENTIMENT_V2_AI_DAILY_CALLS = "0"
+# Hourly copy of new V1 `history` readings into research_sentiment_archive before each V2 cycle (worker.js
+# syncV1ArchiveFromHistory). "0" stops the copy; the GitHub live-evidence-collection job still archives as before.
+V1_ARCHIVE_SYNC_ENABLED = "1"
 
 # Deliberately the SAME database as the original PulseWorker (sentiment-ff75) —
 # gives this Worker read access to the existing history/technical_eval tables

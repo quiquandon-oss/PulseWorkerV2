@@ -11628,6 +11628,12 @@ const pulseWorkerHandlers = {
         ctx.waitUntil(runAutomaticDetection(env, { trigger: 'cron', nowTs: event.scheduledTime })
           .then(r => console.log('event detection (cron):', JSON.stringify({ ok: r.ok, skipped: r.skipped || false, reason: r.reason || r.error || null })))
           .catch(err => console.error('Event detection (cron) failed:', err))
+          // Copy new V1 readings from `history` into the archive V2 reads. A failure is logged as an error and V2 still
+          // runs on what the archive already holds (it never invents a missing reading).
+          .then(() => syncV1ArchiveFromHistory(env, { nowTs: event.scheduledTime }))
+          .then(r => { const line = JSON.stringify({ ok: r.ok, skipped: r.skipped || false, copied: r.copied || 0, already_present: r.already_present || 0, history_last_ts: r.history_last_ts || null, invalid: r.invalid || [], errors: r.errors || [], truncated: r.truncated || false });
+            if (r.ok) console.log('v1 archive sync (cron):', line); else console.error('v1 archive sync (cron) FAILED:', line); })
+          .catch(err => console.error('V1 archive sync (cron) failed:', err))
           .then(() => runSentimentV2Cycle(env, { nowTs: event.scheduledTime }))
           .then(r => console.log('sentiment v2 (cron):', JSON.stringify({ ok: r.ok, skipped: r.skipped || false, written: r.written || 0, reason: r.reason || null })))
           .catch(err => console.error('Sentiment V2 (cron) failed:', err)));
@@ -12505,6 +12511,103 @@ const SV2_INSERT_SQL = 'INSERT OR IGNORE INTO sentiment_v2_results (asset, decis
   'predictive_json, family_json, supporting_ids_json, contradicting_ids_json, missing_json, ai_model, ai_status, ai_json, ' +
   'usage_json, created_ts) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)';
 
+// ---- V1 archive copy in the Worker (2026-11-14) ----
+// V2 reads V1 only from research_sentiment_archive. Until now the only writer was the Experiment 5 job in
+// live-evidence-collection.yml (GitHub Actions, '0 */6 * * *'), whose scheduled runs start 0.5-5 h late or not at
+// all, so V1 readings already in `history` reached V2 up to ~12 h late. This copies new `history` rows on the
+// Worker's own hourly non-tick cron, right before the V2 cycle. Rows are identical to the Python job's
+// (research/experiment5_pipeline.py + research/sentiment_archive.py): same columns, same canonicalisation, same
+// content_hash, btc_price NULL (that job never copies it; V2 attaches btc_data prices). Only written_by and
+// archived_ts differ, and neither is part of the hash. The GitHub job stays as a backstop and skips rows already
+// archived. Read-only on `history`; writes only INSERT OR IGNORE into research_sentiment_archive (UNIQUE observation_ts).
+const V1_ARCHIVE_SYNC_WINDOW_MS = 48 * 3600000;
+const V1_ARCHIVE_SYNC_MAX_ROWS = 100;
+const V1_ARCHIVE_WRITTEN_BY = 'pulseworker-v2-archive-sync';
+const V1_ARCHIVE_SOURCE_WEIGHTS_VERSION = 'v1-unversioned';   // = experiment5_pipeline.py
+const V1_ARCHIVE_SCHEMA_VERSION = 'exp5-v1';                   // = sentiment_archive.SCHEMA_VERSION
+const V1_ARCHIVE_FUTURE_SKEW_MS = 5 * 60000;
+const V1_ARCHIVE_INSERT_SQL = 'INSERT OR IGNORE INTO research_sentiment_archive (observation_ts, sources_json, score, ' +
+  'technical_score, btc_price, gold_regime, source_weights_version, schema_version, written_by, content_hash, archived_ts) ' +
+  'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)';
+
+// Python json.dumps(value, sort_keys=True, separators=(',', ':')) for the scalar values the hash covers (None, bool,
+// int, float, str), so a Worker row hashes exactly like the Python job's row for the same observation.
+function v1ArchivePyJson(v) {
+  if (v === null || v === undefined) return 'null';
+  if (typeof v === 'boolean') return v ? 'true' : 'false';
+  if (typeof v === 'number') {
+    if (!isFinite(v)) return v > 0 ? 'Infinity' : v < 0 ? '-Infinity' : 'NaN';
+    if (Number.isInteger(v) && Math.abs(v) < 1e21) return String(v);   // JSON integers arrive in Python as int
+    const a = Math.abs(v);
+    if (a >= 1e-4 && a < 1e16) return String(v);                      // both use the shortest round-trip digits
+    const [m, e] = v.toExponential().split('e');                       // Python repr: 1.5e-05, 1e+16
+    const n = Number(e);
+    return m + 'e' + (n < 0 ? '-' : '+') + String(Math.abs(n)).padStart(2, '0');
+  }
+  return JSON.stringify(String(v)).replace(/[\u007f-\uffff]/g, c => '\\u' + c.charCodeAt(0).toString(16).padStart(4, '0'));
+}
+
+async function v1ArchiveContentHash(observationTs, sourcesText, score, technicalScore, btcPrice, goldRegime) {
+  const payload = [String(observationTs), sourcesText === null || sourcesText === undefined ? 'null' : sourcesText,
+    v1ArchivePyJson(score), v1ArchivePyJson(technicalScore), v1ArchivePyJson(btcPrice), v1ArchivePyJson(goldRegime),
+    V1_ARCHIVE_SOURCE_WEIGHTS_VERSION, V1_ARCHIVE_SCHEMA_VERSION].join('\n');
+  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(payload));
+  return [...new Uint8Array(digest)].map(b => b.toString(16).padStart(2, '0')).join('');
+}
+
+// A history row is copied only if it is a real reading: integer timestamp not in the future, score in 0..100.
+function v1ArchiveInvalidReason(row, now) {
+  const ts = Number(row.ts);
+  if (!Number.isInteger(ts) || ts <= 0) return 'invalid ts';
+  if (ts > now + V1_ARCHIVE_FUTURE_SKEW_MS) return 'ts in the future';
+  const score = row.score;
+  if (typeof score !== 'number' || !isFinite(score) || score < 0 || score > 100) return 'score missing or outside 0..100';
+  return null;
+}
+
+async function syncV1ArchiveFromHistory(env, { nowTs } = {}) {
+  if (String(env.V1_ARCHIVE_SYNC_ENABLED === undefined ? '1' : env.V1_ARCHIVE_SYNC_ENABLED) !== '1') {
+    return { ok: true, skipped: true, reason: 'disabled' };
+  }
+  const now = nowTs || Date.now();
+  const from = now - V1_ARCHIVE_SYNC_WINDOW_MS;
+  const out = { ok: true, history_rows: 0, history_last_ts: null, copied: 0, already_present: 0, invalid: [], errors: [],
+    truncated: false };
+  let histRows, archived;
+  try {
+    const h = await env.DB.prepare('SELECT ts, score, sources_json, technical_score, gold_regime FROM history WHERE ts >= ? AND ts <= ? ORDER BY ts DESC LIMIT ?')
+      .bind(from, now + V1_ARCHIVE_FUTURE_SKEW_MS, V1_ARCHIVE_SYNC_MAX_ROWS).all();
+    histRows = h.results || [];
+    const a = await env.DB.prepare('SELECT observation_ts FROM research_sentiment_archive WHERE observation_ts >= ? AND observation_ts <= ? ORDER BY observation_ts DESC LIMIT ?')
+      .bind(from, now + V1_ARCHIVE_FUTURE_SKEW_MS, V1_ARCHIVE_SYNC_MAX_ROWS * 2).all();
+    archived = new Set((a.results || []).map(r => Number(r.observation_ts)));
+  } catch (err) {
+    return { ...out, ok: false, errors: ['read failed: ' + String((err && err.message) || err).slice(0, 200)] };
+  }
+  out.history_rows = histRows.length;
+  out.truncated = histRows.length >= V1_ARCHIVE_SYNC_MAX_ROWS;
+  if (histRows.length) out.history_last_ts = Number(histRows[0].ts);
+  const todo = histRows.filter(r => !archived.has(Number(r.ts))).sort((x, y) => Number(x.ts) - Number(y.ts));
+  for (const row of todo) {
+    const bad = v1ArchiveInvalidReason(row, now);
+    if (bad) { out.invalid.push({ ts: row.ts, reason: bad }); continue; }
+    const ts = Number(row.ts);
+    const sourcesText = typeof row.sources_json === 'string' && row.sources_json !== '' ? row.sources_json : '{}';
+    const technical = row.technical_score === undefined ? null : row.technical_score;
+    const gold = row.gold_regime === undefined ? null : row.gold_regime;
+    try {
+      const hash = await v1ArchiveContentHash(ts, sourcesText, row.score, technical, null, gold);
+      const r = await env.DB.prepare(V1_ARCHIVE_INSERT_SQL).bind(ts, sourcesText, row.score, technical, null, gold,
+        V1_ARCHIVE_SOURCE_WEIGHTS_VERSION, V1_ARCHIVE_SCHEMA_VERSION, V1_ARCHIVE_WRITTEN_BY, hash, now).run();
+      if (r && r.meta && Number(r.meta.changes) > 0) out.copied++; else out.already_present++;
+    } catch (err) {
+      out.errors.push(`insert ${ts} failed: ` + String((err && err.message) || err).slice(0, 200));
+    }
+  }
+  out.ok = out.errors.length === 0;
+  return out;
+}
+
 async function runSentimentV2Cycle(env, { nowTs } = {}) {
   if (String(env.SENTIMENT_V2_ENABLED || '0') !== '1') return { ok: true, skipped: true, reason: 'disabled' };
   const cfg = sv2Config();
@@ -12651,6 +12754,13 @@ async function getSentimentV2Comparison(env, period, nowTs) {
   } catch (err) {
     v2Error = String((err && err.message) || err).slice(0, 160);
   }
+  // Newest V1 reading in `history` (one indexed row): when it is newer than the newest archived reading, V1 is
+  // producing and the copy into the archive is what lags. Additive field; null if it cannot be read.
+  let v1HistoryLastTs = null;
+  try {
+    const hl = await env.DB.prepare('SELECT ts FROM history ORDER BY ts DESC LIMIT 1').first();
+    v1HistoryLastTs = hl && hl.ts !== null && hl.ts !== undefined ? Number(hl.ts) : null;
+  } catch { v1HistoryLastTs = null; }
   let btcTruncated = false, btcFrom = null;
   if (v1Rows.some(r => sv2Finite(r.btc_price) === null)) {
     const tol = sv2Config().priceToleranceMs;
@@ -12668,7 +12778,8 @@ async function getSentimentV2Comparison(env, period, nowTs) {
     points: aligned.points, downsampled: aligned.downsampled, max_points: SV2_MAX_POINTS,
     truncated, truncated_from_ts: truncated ? Number(v1Rows[0].observation_ts) : null,
     btc_truncated: btcTruncated, btc_from_ts: btcTruncated ? btcFrom : null,
-    series_status: sv2SeriesStatus(aligned.points, meta, nowTs), v2_latest: latest, v2_error: v2Error };
+    series_status: sv2SeriesStatus(aligned.points, meta, nowTs), v2_latest: latest, v2_error: v2Error,
+    v1_history_last_ts: v1HistoryLastTs };
 }
 
 async function getSentimentV2ComparisonCached(env, period, nowTs) {

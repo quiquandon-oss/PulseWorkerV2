@@ -43,8 +43,9 @@ const KEYS = ['fng', 'cryptonews', 'foufi', 'funding', 'longshort', 'hypefunding
   'gold', 'nasdaq', 'sp500', 'ninemag', 'regulatory', 'geopolitics', 'strc'];
 const sources = (i) => JSON.stringify(Object.fromEntries(KEYS.map((k, j) => [k, Math.round((50 + 20 * Math.sin(i / (4 + j) + j)) * 100) / 100])));
 
-function setup({ history = [], archive = [] } = {}) {
-  const d1 = makeD1([HISTORY_DDL, ARCHIVE_DDL, V2_DDL, EVENTS_DDL]);
+function setup({ history = [], archive = [], without0029 = false } = {}) {
+  const v2ddl = without0029 ? readFileSync(join(ROOT, '.ai/migrations/0027_sentiment_v2_results.sql'), 'utf8') : V2_DDL;
+  const d1 = makeD1([HISTORY_DDL, ARCHIVE_DDL, v2ddl, EVENTS_DDL]);
   for (const r of history) {
     d1.db.prepare('INSERT INTO history (ts, score, sources_json, technical_score, gold_regime, btc_price) VALUES (?, ?, ?, ?, ?, ?)')
       .run(r.ts, r.score, r.sources_json ?? null, r.technical_score ?? null, r.gold_regime ?? null, r.btc_price ?? 70000);
@@ -115,6 +116,23 @@ describe('successful collection, idempotency and the regression itself', () => {
     const rest = await S.runSentimentV2Cycle(env(d1), { nowTs: NOW });       // ample budget: the deferred ones follow
     expect(rest.decisions.map(d => d.decision_ts)).toEqual([at(38), at(39)]);
     expect(rest.deferred_readings).toBeUndefined();
+  });
+  it('collector off and migration 0029 not applied: V2 reads no evidence and its decisions are not degraded (Codex P2)', async () => {
+    const archive = [];
+    const t0 = NOW - 100 * H;
+    for (let i = 0; i < 40; i++) archive.push({ observation_ts: t0 + i * 2 * H, score: 40, sources_json: sources(i) });
+    const pre = setup({ archive, without0029: true });
+    const off = await S.runSentimentV2Cycle(env(pre), { nowTs: NOW });
+    expect(off.written).toBe(1);
+    const row = pre.db.prepare('SELECT status, degraded_reason, family_json FROM sentiment_v2_results').get();
+    expect(row.degraded_reason ?? null).not.toBe('evidence_unavailable');
+    expect(JSON.parse(row.family_json).evidence_status).toBe('collector_disabled');
+    const on = setup({ archive, without0029: true });                                            // misconfigured: visible
+    const r = await S.runSentimentV2Cycle(env(on, { SV2_COLLECTOR_ENABLED: '1' }), { nowTs: NOW });
+    expect(r.written).toBe(1);
+    const row2 = on.db.prepare('SELECT status, degraded_reason, family_json FROM sentiment_v2_results').get();
+    expect(JSON.parse(row2.family_json).evidence_status).toBe('unavailable');
+    expect(row2.degraded_reason === 'evidence_unavailable' || row2.status !== 'OK').toBe(true);
   });
   it('the cron and owner-run V2 calls pass the shared remaining D1 budget', () => {
     expect(WORKER.match(/runSentimentV2Cycle\((env|renv), \{ nowTs: [^}]*queryBudget: SV2_D1_QUERIES_PER_INVOCATION - SV2_D1_QUERY_RESERVE - (sv2Q|q)\.n \}\)/g)).toHaveLength(2);

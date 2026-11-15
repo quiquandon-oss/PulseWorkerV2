@@ -12904,8 +12904,11 @@ async function runSentimentV2Cycle(env, { nowTs, queryBudget = Infinity } = {}) 
   }
   // sv2-1.1.0 independent evidence (migration 0029). Bounded: per freshness group, only rows retrieved within that
   // group's window before the oldest pending decision (a superset of what any decision can use), newest first, capped.
-  let evidenceRows = null, evidenceStatus = String(env.SV2_COLLECTOR_ENABLED || '0') === '1' ? 'ok' : 'collector_disabled', evidenceError = null;
-  try {
+  // With the collector off (the staged-rollout state, possibly before migration 0029 exists) no evidence is read at all:
+  // the decision is V1-only, exactly as before, and is not marked degraded. With it on, a failed read is visible.
+  const collectorOn = String(env.SV2_COLLECTOR_ENABLED || '0') === '1';
+  let evidenceRows = null, evidenceStatus = collectorOn ? 'ok' : 'collector_disabled', evidenceError = null;
+  if (collectorOn) try {
     const groups = {};
     for (const src of SV2_SOURCE_REGISTRY) (groups[src.freshness_h] = groups[src.freshness_h] || []).push(src.id);
     const clauses = [], binds = [];

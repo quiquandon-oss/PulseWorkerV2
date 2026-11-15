@@ -452,6 +452,20 @@ describe('AI: validation, quota, unavailability, zero paid fallback', () => {
     expect(extra.value.contradictions).toEqual([{ ids: ['evidence:e1'], note: 'n' }]);
     expect(extra.value.event_relevance).toEqual([{ id: 'event:x1', relevance: 'low', overlap: 'none' }]);
     expect(JSON.stringify(extra.value)).not.toMatch(/score|unit/);
+    // Entity names match whole terms only (Codex P2): ETH is not named by "whether", Fed is not named by "federal".
+    const t3 = { ...titles, 'evidence:e2': 'Analysts ask whether federal policy shifts; ETH and S&P 500 react' };
+    const ent = (name) => S.sv2ValidateAiOutput({ ...base, entities: [{ id: 'evidence:e2', name, kind: 'other' }], figures: [] }, ids, t3).ok;
+    expect(ent('ETH')).toBe(true);
+    expect(ent('S&P 500')).toBe(true);
+    expect(ent('fed')).toBe(false);
+    const t4 = { ...titles, 'evidence:e2': 'Fed holds rates' };
+    expect(S.sv2ValidateAiOutput({ ...base, entities: [{ id: 'evidence:e2', name: 'ETH', kind: 'asset' }], figures: [] }, ids,
+      { 'evidence:e2': 'Investors weigh whether to buy' }).ok).toBe(false);
+    expect(S.sv2ValidateAiOutput({ ...base, entities: [{ id: 'evidence:e2', name: 'Fed', kind: 'regulator' }], figures: [] }, ids, t4).ok).toBe(true);
+    // Exact decimal comparison, no float rounding (Codex P2).
+    expect(S.sv2UngroundedNumbers(['9007199254740993'], 'supply 9007199254740992')).toEqual(['9007199254740993']);
+    expect(S.sv2UngroundedNumbers(['9007199254740992', '1500.0', '01500'], 'supply 9007199254740992 and 1,500')).toEqual([]);
+    expect(S.sv2UngroundedNumbers(['-0', '0.50'], 'from 0 to 0.5')).toEqual([]);
   });
   it('the evidence package carries each item\'s source, published and retrieved time, and the hash covers exactly what is sent', async () => {
     const rr = { ...r, evidence_items: [

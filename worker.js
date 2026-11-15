@@ -12598,7 +12598,9 @@ function sv2ValidateAiOutput(obj, allowedIds, titles = {}) {
   if (!Array.isArray(obj.entities) || obj.entities.length > SV2_AI_MAX_EXTRACTED) errors.push(`entities must be an array of at most ${SV2_AI_MAX_EXTRACTED}`);
   else for (const e of obj.entities) {
     const t = e && allowed.has(e.id) ? titleOf(e.id) : null;
-    if (t === null || !isStr(e.name, 80) || !SV2_AI_ENTITY_KINDS.includes(e.kind) || !t.toLowerCase().includes(e.name.trim().toLowerCase())) {
+    // Whole-term match: the name must appear in the title bounded by non-letters/digits ("ETH" is not in "whether") (Codex P2).
+    const named = (title, name) => new RegExp(`(?<![\\p{L}\\p{N}])${name.trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?![\\p{L}\\p{N}])`, 'iu').test(title);
+    if (t === null || !isStr(e.name, 80) || !SV2_AI_ENTITY_KINDS.includes(e.kind) || !named(t, e.name)) {
       errors.push(`invalid or ungrounded entity: ${String(e && e.name).slice(0, 40)}`); break; }
   }
   if (!Array.isArray(obj.figures) || obj.figures.length > SV2_AI_MAX_EXTRACTED) errors.push(`figures must be an array of at most ${SV2_AI_MAX_EXTRACTED}`);
@@ -12652,7 +12654,14 @@ function sv2AiEstimateNeurons(pricing, promptBytes) {
 function sv2UngroundedNumbers(texts, pkgText) {
   // Whole numeric values only: a figure is grounded when the same number occurs as a complete value in the package,
   // never as a fragment of a longer one (e.g. 179 inside a 13-digit timestamp).
-  const norm = (x) => { const n = Number(String(x).replace(/,/g, '')); return Number.isFinite(n) ? String(n) : null; };
+  // Exact decimal text, never a float: commas, leading integer zeros and trailing fraction zeros are dropped, so 1,500 /
+  // 1500 / 1500.0 compare equal while 9007199254740993 never equals 9007199254740992 (Codex P2).
+  const norm = (x) => {
+    const m = /^(-?)(\d+)(?:\.(\d+))?$/.exec(String(x).replace(/,/g, ''));
+    if (!m) return null;
+    const int = m[2].replace(/^0+(?=\d)/, ''), frac = (m[3] || '').replace(/0+$/, '');
+    return (m[1] && (int !== '0' || frac) ? '-' : '') + int + (frac ? '.' + frac : '');
+  };
   // Signs count: -50 is not grounded by 50. A '-' is a sign only when it does not follow a letter or digit (so the
   // range "40-50" reads as 40 and 50).
   // A sign before a currency marker belongs to the amount: "-$50", "−€50" and "$-50" all read as -50 (same in package

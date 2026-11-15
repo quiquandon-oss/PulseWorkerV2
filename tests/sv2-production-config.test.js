@@ -36,10 +36,27 @@ describe('production wrangler.toml: GLM and the collector are OFF', () => {
   });
   it('V1 schedules and the production targets are unchanged', () => {
     expect(noComments(PROD)).toMatch(/^crons = \["0 \* \* \* \*", "0 7 \* \* \*"\]/m);
-    expect(kv(PROD, 'name')).toBe('pulseworker-v2');
-    expect(noComments(PROD)).toContain('f91ca980-b886-423a-bd6f-f3baea46d181');
     expect(kv(PROD, 'V1_ARCHIVE_SYNC_ENABLED')).toBe('1');
     expect(kv(PROD, 'SENTIMENT_V2_ENABLED')).toBe('1');
+  });
+  it('the complete production deployment target is unchanged: Worker, entry point, account, and the single D1 binding', () => {
+    const code = noComments(PROD);
+    const top = code.slice(0, code.search(/^\[/m));                       // keys before the first table
+    const topKv = (k) => (top.match(new RegExp(`^${k}\\s*=\\s*"(.*)"`, 'm')) || [])[1];
+    expect(topKv('name')).toBe('pulseworker-v2');
+    expect(topKv('main')).toBe('worker.js');
+    expect(topKv('compatibility_date')).toBe('2024-11-01');
+    expect(topKv('account_id')).toBe('f58e761fbc8e62dc404d8684290af264');
+    // exactly one D1 binding and it is the production database, under the binding name the Worker code uses
+    expect((code.match(/^\[\[d1_databases\]\]/gm) || []).length).toBe(1);
+    const d1 = code.slice(code.indexOf('[[d1_databases]]')).split(/^\[(?!\[d1_databases)/m)[0];
+    const d1kv = (k) => (d1.match(new RegExp(`^${k}\\s*=\\s*"(.*)"`, 'm')) || [])[1];
+    expect({ binding: d1kv('binding'), database_name: d1kv('database_name'), database_id: d1kv('database_id') })
+      .toEqual({ binding: 'DB', database_name: 'sentiment-history', database_id: 'f91ca980-b886-423a-bd6f-f3baea46d181' });
+    // the same set of tables as before: no new binding, trigger table, service, route or build step
+    expect([...code.matchAll(/^\[{1,2}([\w.]+)\]{1,2}/gm)].map((m) => m[1]).sort())
+      .toEqual(['ai', 'd1_databases', 'observability.logs', 'observability.traces', 'triggers', 'vars']);
+    expect(code).not.toMatch(/^(routes?|services|kv_namespaces|r2_buckets|queues|durable_objects|build|env)\b/m);
   });
 });
 

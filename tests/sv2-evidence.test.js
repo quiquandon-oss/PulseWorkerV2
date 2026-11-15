@@ -491,13 +491,13 @@ describe('GLM Neuron ledger on real SQLite', () => {
   it('every AI result carries the prompt version and the sha256 of the exact prompt and evidence package sent', async () => {
     const sent = [];
     const env = { SENTIMENT_V2_AI_MODEL: GLM, SV2_GLM_DAILY_NEURONS: '1000',
-      AI: { run: async (_m, o) => { sent.push(o.messages); return { response: JSON.stringify({ summary: 'ok', cited_ids: ['ev:a'], contradictions: [], event_relevance: [], uncertainty: 'low' }), usage: { prompt_tokens: 100, completion_tokens: 50 } }; } } };
+      AI: { run: async (_m, o) => { sent.push(o.messages); return { response: JSON.stringify({ summary: 'ok', cited_ids: ['ev:a'], contradictions: [], event_relevance: [], uncertainty: 'low', entities: [], figures: [] }), usage: { prompt_tokens: 100, completion_tokens: 50 } }; } } };
     const ledger = { reserveNeurons: async () => 1, recordNeurons: async () => {}, accountLimitedToday: async () => false };
     const pkg = { decision_ts: 1, evidence: [{ id: 'ev:a', title: 'x' }] };
     const r = await S.sv2RunAi(env, pkg, new Set(['ev:a']), ledger);
     const hex = (s) => createHash('sha256').update(s).digest('hex');
     expect(r.status).toBe('ok');
-    expect(r).toMatchObject({ prompt_version: 'sv2-ai-prompt-1', prompt_sha256: hex(sent[0][0].content), package_sha256: hex(sent[0][1].content) });
+    expect(r).toMatchObject({ prompt_version: 'sv2-ai-prompt-2', prompt_sha256: hex(sent[0][0].content), package_sha256: hex(sent[0][1].content) });
     expect(sent[0][1].content).toBe(JSON.stringify(pkg));
     // Budget stops and failures are traceable too; the hashes are persisted in ai_json.
     const stopped = await S.sv2RunAi(env, pkg, new Set(['ev:a']), { ...ledger, reserveNeurons: async () => null });
@@ -511,7 +511,7 @@ describe('GLM Neuron ledger on real SQLite', () => {
     const d1 = makeD1(DDL);
     let calls = 0;
     const env = { DB: d1.binding, SENTIMENT_V2_AI_MODEL: GLM, SV2_GLM_DAILY_NEURONS: '150',
-      AI: { run: async () => { calls++; return { response: JSON.stringify({ summary: 'ok', cited_ids: ['probe:a'], contradictions: [], event_relevance: [], uncertainty: 'probe' }), usage: { prompt_tokens: 400, completion_tokens: 200 } }; } } };
+      AI: { run: async () => { calls++; return { response: JSON.stringify({ summary: 'ok', cited_ids: ['probe:a'], contradictions: [], event_relevance: [], uncertainty: 'probe', entities: [], figures: [] }), usage: { prompt_tokens: 400, completion_tokens: 200 } }; } } };
     const results = [];
     for (let k = 0; k < 10; k++) results.push(await S.sv2GlmProbe(env, NOW));
     const rows = d1.db.prepare('SELECT * FROM sv2_ai_neurons').all();

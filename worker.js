@@ -12540,7 +12540,9 @@ function sv2EvidenceItemsForAi(rows, ts, evidence) {
     if ((per[r.source_id] = (per[r.source_id] || 0) + 1) > 3) continue;
     const st = evidence && evidence[`ev:${r.source_id}`];
     out.push({ id: `evidence:${r.evidence_id}`, source: r.source_id, family: fresh.get(r.source_id).family,
-      title: String(r.title || '').slice(0, 200), evidence_ts: evTs, url: r.canonical_url, source_state: st ? st.state : null });
+      title: String(r.title || '').slice(0, 200), evidence_ts: evTs,
+      published_ts: r.published_ts === null || r.published_ts === undefined ? null : Number(r.published_ts),
+      retrieved_ts: Number(r.retrieved_ts), url: r.canonical_url, source_state: st ? st.state : null });
     if (out.length >= 12) break;
   }
   return out;
@@ -12561,17 +12563,23 @@ function sv2AiPackage(result) {
     return { id: `event:${e.id}`, type: e.type, severity: e.severity, direction: e.direction, role: e.role, family: e.family,
       first_detected_ts: e.first_detected_ts, overlaps_fresh_family: e.overlaps_fresh_family };
   });
-  const evidence = (result.evidence_items || []).map(x => { ids.push(x.id); return { id: x.id, source: x.source, family: x.family, title: x.title, evidence_ts: x.evidence_ts }; });
+  const evidence = (result.evidence_items || []).map(x => { ids.push(x.id); return { id: x.id, source: x.source, family: x.family, title: x.title, evidence_ts: x.evidence_ts,
+    published_ts: x.published_ts ?? null, retrieved_ts: x.retrieved_ts ?? null }; });
   return { pkg: { decision_ts: result.decision_ts, regime: result.market_regime, families: fams, events, evidence,
     stale: result.missing.stale, missing: result.missing.missing }, allowedIds: ids };
 }
 
-function sv2ValidateAiOutput(obj, allowedIds) {
+// Entity kinds the AI may assign. Entities and figures are extracted from stored evidence titles only: each must name an
+// evidence item of the package and occur in that item's own title (an entity name as a case-insensitive substring, a
+// figure as a whole numeric value), so nothing can be attributed to a source that did not say it.
+function sv2ValidateAiOutput(obj, allowedIds, titles = {}) {
+  const SV2_AI_ENTITY_KINDS = ['asset', 'organization', 'regulator', 'person', 'instrument', 'other'];
+  const SV2_AI_MAX_EXTRACTED = 20;
   const errors = [];
   const allowed = new Set(allowedIds || []);
   const isStr = (x, max) => typeof x === 'string' && x.trim().length > 0 && x.length <= max;
   if (!obj || typeof obj !== 'object' || Array.isArray(obj)) return { ok: false, errors: ['not an object'] };
-  const extra = Object.keys(obj).filter(k => !['summary', 'cited_ids', 'contradictions', 'event_relevance', 'uncertainty'].includes(k));
+  const extra = Object.keys(obj).filter(k => !['summary', 'cited_ids', 'contradictions', 'event_relevance', 'uncertainty', 'entities', 'figures'].includes(k));
   if (extra.length) errors.push(`unexpected fields: ${extra.join(',')}`);      // e.g. a numeric score the AI may not set
   if (!isStr(obj.summary, 800)) errors.push('summary must be a non-empty string <= 800 chars');
   if (!isStr(obj.uncertainty, 400)) errors.push('uncertainty must be a non-empty string <= 400 chars');
@@ -12586,9 +12594,23 @@ function sv2ValidateAiOutput(obj, allowedIds) {
     if (!e || !allowed.has(e.id) || !String(e.id).startsWith('event:') || !['low', 'medium', 'high'].includes(e.relevance)
         || !['none', 'partial', 'full'].includes(e.overlap)) { errors.push('invalid event_relevance entry'); break; }
   }
+  const titleOf = (id) => (Object.prototype.hasOwnProperty.call(titles, id) && String(id).startsWith('evidence:') ? String(titles[id]) : null);
+  if (!Array.isArray(obj.entities) || obj.entities.length > SV2_AI_MAX_EXTRACTED) errors.push(`entities must be an array of at most ${SV2_AI_MAX_EXTRACTED}`);
+  else for (const e of obj.entities) {
+    const t = e && allowed.has(e.id) ? titleOf(e.id) : null;
+    if (t === null || !isStr(e.name, 80) || !SV2_AI_ENTITY_KINDS.includes(e.kind) || !t.toLowerCase().includes(e.name.trim().toLowerCase())) {
+      errors.push(`invalid or ungrounded entity: ${String(e && e.name).slice(0, 40)}`); break; }
+  }
+  if (!Array.isArray(obj.figures) || obj.figures.length > SV2_AI_MAX_EXTRACTED) errors.push(`figures must be an array of at most ${SV2_AI_MAX_EXTRACTED}`);
+  else for (const f of obj.figures) {
+    const t = f && allowed.has(f.id) ? titleOf(f.id) : null;
+    const v = f && (typeof f.value === 'number' || typeof f.value === 'string') ? String(f.value) : null;
+    if (t === null || v === null || !/\d/.test(v) || sv2UngroundedNumbers([v], t).length) {
+      errors.push(`invalid or ungrounded figure: ${String(v).slice(0, 40)}`); break; }
+  }
   return errors.length ? { ok: false, errors } : { ok: true, value: {
     summary: obj.summary, cited_ids: obj.cited_ids, contradictions: obj.contradictions, event_relevance: obj.event_relevance,
-    uncertainty: obj.uncertainty } };
+    uncertainty: obj.uncertainty, entities: obj.entities, figures: obj.figures } };
 }
 
 // Workers AI Neuron rates, from the Workers AI pricing page (developers.cloudflare.com/workers-ai/platform/pricing,
@@ -12642,7 +12664,7 @@ function sv2UngroundedNumbers(texts, pkgText) {
   return bad;
 }
 
-const SV2_AI_PROMPT_VERSION = 'sv2-ai-prompt-1';     // bump whenever the system prompt text changes
+const SV2_AI_PROMPT_VERSION = 'sv2-ai-prompt-2';     // bump whenever the system prompt text changes
 async function sv2HexSha256(text) {
   const d = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(String(text)));
   return [...new Uint8Array(d)].map(b => b.toString(16).padStart(2, '0')).join('');
@@ -12660,7 +12682,9 @@ async function sv2RunAi(env, pkg, allowedIds, ledger) {
   catch (err) { return { status: 'quota_guard', model, counted: false, reason: 'Neuron ledger unavailable: ' + String((err && err.message) || err).slice(0, 120) }; }
   const system = 'You annotate a crypto sentiment evidence package. Return ONLY a JSON object with keys summary, cited_ids, ' +
     'contradictions (array of {ids, note}), event_relevance (array of {id, relevance: low|medium|high, overlap: none|partial|full}), ' +
-    'uncertainty. Cite only identifiers present in the package. Separate observed facts from inference. Do not output any score, ' +
+    'uncertainty, entities (array of {id, name, kind: asset|organization|regulator|person|instrument|other}, name copied from the ' +
+    'title of evidence item id), figures (array of {id, value}, a number copied from the title of evidence item id). ' +
+    'Cite only identifiers present in the package. Separate observed facts from inference. Do not output any score, ' +
     'price target or forecast, and do not write any number that does not appear in the package. Use only the package; do not add outside facts.';
   const user = JSON.stringify(pkg);
   // Traceability: every result from here on carries the hashes of the exact system prompt and evidence package sent to
@@ -12678,7 +12702,10 @@ async function sv2RunAi(env, pkg, allowedIds, ledger) {
       max_completion_tokens: SV2_AI_MAX_OUTPUT_TOKENS, temperature: 0 });
   } catch (err) {
     const msg = String((err && err.message) || err);
-    const status = /3036|daily free allocation|neurons/i.test(msg) ? 'account_limited' : 'error';
+    // 3036: the account's daily free allocation is used up (not billed on Workers Free). 3040 / 429: model capacity or rate
+    // limit, transient. Neither retries here or elsewhere; both are recorded against the reservation.
+    const status = /3036|daily free allocation|neurons/i.test(msg) ? 'account_limited'
+      : /3040|\b429\b|rate.?limit|out of capacity|capacity/i.test(msg) ? 'rate_limited' : 'error';
     await record({ status });
     return { status, model, ...trace, counted: true, reserved_neurons: estimate, reason: msg.slice(0, 200) };
   }
@@ -12693,7 +12720,8 @@ async function sv2RunAi(env, pkg, allowedIds, ledger) {
     try { obj = JSON.parse(obj.trim().replace(/^```(?:json)?\s*/, '').replace(/```$/, '').trim()); }
     catch (e) { await record({ ...meta, status: 'invalid_output' }); return { status: 'invalid_output', model, ...trace, counted: true, ...meta, reason: 'output is not JSON' }; }
   }
-  const v = sv2ValidateAiOutput(obj, allowedIds);
+  const titles = Object.fromEntries(((pkg && pkg.evidence) || []).map(x => [x.id, x.title]));
+  const v = sv2ValidateAiOutput(obj, allowedIds, titles);
   if (!v.ok) { await record({ ...meta, status: 'invalid_output' }); return { status: 'invalid_output', model, ...trace, counted: true, ...meta, reason: v.errors.slice(0, 3).join('; ') }; }
   const ungrounded = sv2UngroundedNumbers([v.value.summary, v.value.uncertainty, ...v.value.contradictions.map(c => c.note)], user);
   if (ungrounded.length) { await record({ ...meta, status: 'invalid_output' }); return { status: 'invalid_output', model, ...trace, counted: true, ...meta, reason: `numbers not in the evidence package: ${ungrounded.slice(0, 5).join(', ')}` }; }
@@ -12705,7 +12733,7 @@ function sv2Row(result, ai, usage, nowTs) {
   let status = result.status, reason = result.degraded_reason;
   // Only an AI fault degrades a result. A budget stop (quota_guard, account_limited) or an unpriced/disabled model is the
   // designed €0 behaviour: the optional annotation is absent, ai_status says why, and the deterministic result stands.
-  if (status === 'OK' && ai && ['error', 'invalid_output', 'unavailable'].includes(ai.status)) { status = 'DEGRADED'; reason = `ai_${ai.status}`; }
+  if (status === 'OK' && ai && ['error', 'invalid_output', 'unavailable', 'rate_limited'].includes(ai.status)) { status = 'DEGRADED'; reason = `ai_${ai.status}`; }
   return [result.asset, result.decision_ts, result.calc_version, status, reason, result.sentiment_score, result.sentiment_class,
     result.confidence, result.evidence_coverage, result.market_regime, JSON.stringify(result.regime), result.event_intensity,
     JSON.stringify({ direction_balance: result.events.direction_balance, adjustment: result.events.adjustment,

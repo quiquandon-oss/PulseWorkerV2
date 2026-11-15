@@ -346,7 +346,7 @@ describe('AI: validation, quota, unavailability, zero paid fallback', () => {
   const r = S.sv2Compute(hist, hist.length - 1, [], cfg);
   const { pkg, allowedIds } = S.sv2AiPackage(r);
   const yes = async () => true, no = async () => false;
-  const good = { summary: 'Families mostly bearish.', cited_ids: [allowedIds[0]], contradictions: [], event_relevance: [], uncertainty: 'Small sample.' };
+  const good = { summary: 'Families mostly bearish.', cited_ids: [allowedIds[0]], contradictions: [], event_relevance: [], uncertainty: 'Small sample.', entities: [], figures: [] };
   it('accepts schema-valid output citing package identifiers only', () => {
     expect(S.sv2ValidateAiOutput(good, allowedIds).ok).toBe(true);
   });
@@ -414,6 +414,59 @@ describe('AI: validation, quota, unavailability, zero paid fallback', () => {
     const invented = await S.sv2RunAi({ ...env, AI: { run: async () => okResp({ ...good, summary: 'BTC will reach 123456 next week.' }) } }, pkg, allowedIds, ledgerFor());
     expect(invented.status).toBe('invalid_output');
     expect(invented.reason).toMatch(/numbers not in the evidence package: 123456/);
+  });
+  it('entities and figures must come from the title of a cited evidence item, figures as whole values only', () => {
+    const ids = ['evidence:e1', 'evidence:e2', 'event:x1'];
+    const titles = { 'evidence:e1': 'SEC approves spot ETF from BlackRock with 150 million inflows', 'evidence:e2': 'Fed holds rates' };
+    const base = { summary: 'ok', cited_ids: ['evidence:e1'], contradictions: [], event_relevance: [], uncertainty: 'low' };
+    const v = (entities, figures) => S.sv2ValidateAiOutput({ ...base, entities, figures }, ids, titles);
+    expect(v([{ id: 'evidence:e1', name: 'BlackRock', kind: 'organization' }, { id: 'evidence:e1', name: 'sec', kind: 'regulator' }],
+      [{ id: 'evidence:e1', value: 150 }, { id: 'evidence:e1', value: '150' }]).ok).toBe(true);
+    expect(v([{ id: 'evidence:e2', name: 'BlackRock', kind: 'organization' }], []).ok).toBe(false);     // not in that item's title
+    expect(v([{ id: 'event:x1', name: 'ETF', kind: 'instrument' }], []).ok).toBe(false);                // events have no source title
+    expect(v([{ id: 'evidence:zz', name: 'SEC', kind: 'regulator' }], []).ok).toBe(false);             // not in the package
+    expect(v([{ id: 'evidence:e1', name: 'SEC', kind: 'exchange' }], []).ok).toBe(false);              // unknown kind
+    expect(v([], [{ id: 'evidence:e1', value: 50 }]).ok).toBe(false);                                   // fragment of 150
+    expect(v([], [{ id: 'evidence:e1', value: -150 }]).ok).toBe(false);                                 // sign matters
+    expect(v([], [{ id: 'evidence:e2', value: 150 }]).ok).toBe(false);                                  // other item's figure
+    expect(v([], [{ id: 'evidence:e1', value: 'many' }]).ok).toBe(false);                               // not a number
+    expect(v(Array.from({ length: 21 }, () => ({ id: 'evidence:e1', name: 'SEC', kind: 'regulator' })), []).ok).toBe(false);
+    expect(S.sv2ValidateAiOutput({ ...base, entities: [] }, ids, titles).ok).toBe(false);             // figures required
+  });
+  it('the evidence package carries each item\'s source, published and retrieved time, and the hash covers exactly what is sent', async () => {
+    const rr = { ...r, evidence_items: [
+      { id: 'evidence:a1', source: 'decrypt', family: 'market_sentiment_news', title: 'BTC ETF inflows rise', evidence_ts: 1000, published_ts: 1000, retrieved_ts: 2000 },
+      { id: 'evidence:a2', source: 'fed_press', family: 'macro_policy', title: 'Fed statement', evidence_ts: 3000, published_ts: null, retrieved_ts: 3000 }] };
+    const { pkg: p2, allowedIds: ids2 } = S.sv2AiPackage(rr);
+    expect(p2.evidence).toEqual([
+      { id: 'evidence:a1', source: 'decrypt', family: 'market_sentiment_news', title: 'BTC ETF inflows rise', evidence_ts: 1000, published_ts: 1000, retrieved_ts: 2000 },
+      { id: 'evidence:a2', source: 'fed_press', family: 'macro_policy', title: 'Fed statement', evidence_ts: 3000, published_ts: null, retrieved_ts: 3000 }]);
+    expect(ids2).toEqual(expect.arrayContaining(['evidence:a1', 'evidence:a2']));
+    let sent = null;
+    const out = { summary: 'ETF inflows rise.', cited_ids: ['evidence:a1'], contradictions: [], event_relevance: [], uncertainty: 'low',
+      entities: [{ id: 'evidence:a1', name: 'ETF', kind: 'instrument' }], figures: [] };
+    const res = await S.sv2RunAi({ SENTIMENT_V2_AI_MODEL: GLM, SV2_GLM_DAILY_NEURONS: '1000', AI: { run: async (_m, o) => { sent = o.messages; return okResp(out); } } }, p2, ids2, ledgerFor());
+    expect(res.status).toBe('ok');
+    expect(res.output.entities).toEqual(out.entities);
+    expect(sent[1].content).toBe(JSON.stringify(p2));
+    expect(res.package_sha256).toBe(await S.sv2HexSha256(JSON.stringify(p2)));
+    expect(res.prompt_sha256).toBe(await S.sv2HexSha256(sent[0].content));
+    expect(res.prompt_version).toBe('sv2-ai-prompt-2');
+  });
+  it('a model rate limit or capacity error is its own degraded state: recorded against the reservation, never retried', async () => {
+    for (const msg of ['3040: Capacity temporarily exceeded', 'HTTP 429 Too Many Requests', 'Out of capacity']) {
+      let calls = 0;
+      const led = ledgerFor();
+      const res = await S.sv2RunAi({ SENTIMENT_V2_AI_MODEL: GLM, SV2_GLM_DAILY_NEURONS: '1000', AI: { run: async () => { calls++; throw new Error(msg); } } }, pkg, allowedIds, led);
+      expect(res).toMatchObject({ status: 'rate_limited', counted: true });
+      expect(res.prompt_sha256).toMatch(/^[0-9a-f]{64}$/);
+      expect(calls).toBe(1);
+      expect(led.rows).toHaveLength(1);
+      expect(led.rows[0].status).toBe('rate_limited');
+    }
+    const row = S.sv2Row({ ...r, status: 'OK' }, { status: 'rate_limited', model: GLM }, {}, 1);
+    expect(row[3]).toBe('DEGRADED');
+    expect(row[4]).toBe('ai_rate_limited');
   });
   it('an AI failure degrades the cycle but never changes the score', async () => {
     const rows = archive(150);

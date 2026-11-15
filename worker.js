@@ -12604,13 +12604,21 @@ function sv2ValidateAiOutput(obj, allowedIds, titles = {}) {
   if (!Array.isArray(obj.figures) || obj.figures.length > SV2_AI_MAX_EXTRACTED) errors.push(`figures must be an array of at most ${SV2_AI_MAX_EXTRACTED}`);
   else for (const f of obj.figures) {
     const t = f && allowed.has(f.id) ? titleOf(f.id) : null;
-    const v = f && (typeof f.value === 'number' || typeof f.value === 'string') ? String(f.value) : null;
-    if (t === null || v === null || !/\d/.test(v) || sv2UngroundedNumbers([v], t).length) {
+    // A figure is ONE numeric literal (a JSON number, or a string such as "-1,500.5"): no units, words or ranges that would
+    // let ungrounded text ride along with a grounded number (Codex P2).
+    const v = f && ((typeof f.value === 'number' && Number.isFinite(f.value)) || typeof f.value === 'string') ? String(f.value).trim() : null;
+    if (t === null || v === null || !/^-?(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?$/.test(v) || sv2UngroundedNumbers([v], t).length) {
       errors.push(`invalid or ungrounded figure: ${String(v).slice(0, 40)}`); break; }
   }
+  // The accepted output is rebuilt from the validated fields only, so an extra nested field (e.g. a "score" inside an
+  // entity) can never be persisted or shown (Codex P2).
   return errors.length ? { ok: false, errors } : { ok: true, value: {
-    summary: obj.summary, cited_ids: obj.cited_ids, contradictions: obj.contradictions, event_relevance: obj.event_relevance,
-    uncertainty: obj.uncertainty, entities: obj.entities, figures: obj.figures } };
+    summary: obj.summary, cited_ids: [...obj.cited_ids],
+    contradictions: obj.contradictions.map(c => ({ ids: [...c.ids], note: c.note })),
+    event_relevance: obj.event_relevance.map(e => ({ id: e.id, relevance: e.relevance, overlap: e.overlap })),
+    uncertainty: obj.uncertainty,
+    entities: obj.entities.map(e => ({ id: e.id, name: e.name, kind: e.kind })),
+    figures: obj.figures.map(f => ({ id: f.id, value: f.value })) } };
 }
 
 // Workers AI Neuron rates, from the Workers AI pricing page (developers.cloudflare.com/workers-ai/platform/pricing,

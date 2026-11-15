@@ -438,6 +438,20 @@ describe('AI: validation, quota, unavailability, zero paid fallback', () => {
     expect(v2([{ id: 'evidence:e2', value: 1500 }, { id: 'evidence:e2', value: '1,500' }]).ok).toBe(true);
     expect(v2([{ id: 'evidence:e2', value: 15000 }]).ok).toBe(false);
     expect(S.sv2UngroundedNumbers(['Outflows of 1,500 BTC', 'outflows of 1500 BTC'], JSON.stringify({ title: t2['evidence:e2'] }))).toEqual([]);
+    // A figure is one numeric literal: no units or ranges riding along with a grounded number (Codex P2).
+    expect(v([], [{ id: 'evidence:e1', value: '150 BTC' }]).ok).toBe(false);
+    expect(v([], [{ id: 'evidence:e1', value: '150 to 150' }]).ok).toBe(false);
+    expect(v([], [{ id: 'evidence:e1', value: ' 150 ' }]).ok).toBe(true);
+    // Only validated fields survive: an extra nested field is dropped, never persisted or shown (Codex P2).
+    const extra = S.sv2ValidateAiOutput({ ...base, entities: [{ id: 'evidence:e1', name: 'SEC', kind: 'regulator', score: 99 }],
+      figures: [{ id: 'evidence:e1', value: 150, unit: 'BTC' }], contradictions: [{ ids: ['evidence:e1'], note: 'n', score: 1 }],
+      event_relevance: [{ id: 'event:x1', relevance: 'low', overlap: 'none', score: 2 }] }, ids, titles);
+    expect(extra.ok).toBe(true);
+    expect(extra.value.entities).toEqual([{ id: 'evidence:e1', name: 'SEC', kind: 'regulator' }]);
+    expect(extra.value.figures).toEqual([{ id: 'evidence:e1', value: 150 }]);
+    expect(extra.value.contradictions).toEqual([{ ids: ['evidence:e1'], note: 'n' }]);
+    expect(extra.value.event_relevance).toEqual([{ id: 'event:x1', relevance: 'low', overlap: 'none' }]);
+    expect(JSON.stringify(extra.value)).not.toMatch(/score|unit/);
   });
   it('the evidence package carries each item\'s source, published and retrieved time, and the hash covers exactly what is sent', async () => {
     const rr = { ...r, evidence_items: [

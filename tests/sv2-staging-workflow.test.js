@@ -74,10 +74,39 @@ describe('deploy-sv2-staging workflow', () => {
     expect(all.indexOf(s)).toBeGreaterThan(all.indexOf(step('Deploy to the staging Worker')));
   });
 
-  it('never echoes, traces or debug-logs a credential', () => {
+  // Run lines of a step, without the `run:` header.
+  const runLines = (st) => {
+    const lines = st.run.split('\n').map((l) => l.trim());
+    return (lines[0] === 'run: |' ? lines.slice(1) : lines).map((l) => l.replace(/^run:\s*/, '')).filter(Boolean);
+  };
+  const holdsSensitive = (st) => Object.values(st.env).some((v) => /EVENT_SEC_USER_AGENT|STAGE7_STAGING_ADMIN_TOKEN/.test(v));
+
+  it('steps that hold the SEC User-Agent or the admin token run ONLY their one expected command (no env, printf, echo or tracing can be added)', () => {
+    const sensitive = all.filter(holdsSensitive);
+    expect(sensitive.map((s) => s.name).sort()).toEqual(['Set the staging SEC User-Agent', 'Set the staging admin token', 'Verify the staging-only secrets are configured']);
+    const expected = {
+      'Set the staging SEC User-Agent': [`printf '%s' "$SEC_UA" | npx --yes wrangler@4 secret put EVENT_SEC_USER_AGENT -c wrangler.staging.toml`],
+      'Set the staging admin token': [`printf '%s' "$ADMIN" | npx --yes wrangler@4 secret put STAGE7_ADMIN_TOKEN -c wrangler.staging.toml`],
+    };
+    for (const st of sensitive) {
+      if (expected[st.name]) { expect(runLines(st), st.name).toEqual(expected[st.name]); continue; }
+      // the check step: only `if [ -z "$VAR" ]; then echo "::error::<fixed text without expansions>"; exit 1; fi`
+      expect(runLines(st).length).toBe(3);
+      for (const l of runLines(st)) expect(l, l).toMatch(/^if \[ -z "\$(STAGING_TOKEN|STAGING_ADMIN|SEC_UA)" \]; then echo "::error::[^$`\\]*"; exit 1; fi$/);
+    }
+  });
+
+  it('no step anywhere dumps the environment, traces, or enables runner debug logging', () => {
     expect(code).not.toMatch(/\bset -[a-z]*x/);
-    expect(code).not.toMatch(/ACTIONS_STEP_DEBUG|ACTIONS_RUNNER_DEBUG/);
-    expect(code).not.toMatch(/echo[^\n]*\$\{?(SEC_UA|ADMIN|STAGING_ADMIN|STAGING_TOKEN|EVENT_SEC_USER_AGENT)\b/);
+    expect(code).not.toMatch(/ACTIONS_STEP_DEBUG|ACTIONS_RUNNER_DEBUG|RUNNER_DEBUG/);
+    for (const st of all) for (const l of runLines(st)) {
+      expect(l, `${st.name}: ${l}`).not.toMatch(/(^|[;&|(]\s*)(env|printenv|export|declare|typeset|compgen)(\s|$|[;&|)])/);
+      expect(l, `${st.name}: ${l}`).not.toMatch(/\/proc\/[^ ]*environ|\bxxd\b|\bbase64\b|\bcurl\b|\bwget\b/);
+      // printf may only feed a pipe (stdin of wrangler secret put), never print to the log
+      if (/\bprintf\b/.test(l)) expect(l, st.name).toMatch(/^printf '%s' "\$[A-Z_]+" \| npx --yes wrangler@4 secret put /);
+    }
+    // echo prints only fixed text or a command's own output, never a credential variable
+    expect(code).not.toMatch(/echo[^\n]*\$\{?(SEC_UA|ADMIN|STAGING_ADMIN|STAGING_TOKEN|EVENT_SEC_USER_AGENT|CLOUDFLARE_API_TOKEN)\b/);
   });
 
   it('fails closed when the User-Agent secret is missing', () => {

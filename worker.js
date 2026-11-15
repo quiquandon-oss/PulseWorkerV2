@@ -13182,7 +13182,19 @@ async function getSentimentV2Status(env, nowTs) {
     let latest = null;
     if (canRead) {
       try {
-        latest = await env.DB.prepare('SELECT retrieved_ts, published_ts FROM sv2_evidence WHERE source_id = ? ORDER BY retrieved_ts DESC LIMIT 1').bind(src.id).first();
+        // Newest evidence time as the scorer defines it (sv2EvidenceReadings: published_ts when present and not after
+        // retrieval, else retrieved_ts), among non-duplicate items retrieved within the freshness window. Bounded by
+        // the (source_id, retrieved_ts) index. All items of one run share retrieved_ts, so ordering by it alone picked
+        // an arbitrary (in practice the oldest) item and reported every source as not fresh (staging, 2026-11-15).
+        const since = nowTs - src.freshness_h * 3600000;
+        const w = await env.DB.prepare('SELECT MAX(CASE WHEN published_ts IS NOT NULL AND published_ts <= retrieved_ts THEN published_ts ELSE retrieved_ts END) AS ev_ts FROM sv2_evidence WHERE source_id = ? AND dup_of IS NULL AND retrieved_ts >= ? AND retrieved_ts <= ?')
+          .bind(src.id, since, nowTs).first();
+        latest = w && w.ev_ts !== null && w.ev_ts !== undefined ? { ev_ts: Number(w.ev_ts) } : null;
+        if (!latest) {                                      // nothing retrieved in the window: newest item, for display
+          const r = await env.DB.prepare('SELECT MAX(CASE WHEN published_ts IS NOT NULL AND published_ts <= retrieved_ts THEN published_ts ELSE retrieved_ts END) AS ev_ts FROM sv2_evidence WHERE source_id = ? AND dup_of IS NULL AND retrieved_ts = (SELECT MAX(retrieved_ts) FROM sv2_evidence WHERE source_id = ? AND dup_of IS NULL)')
+            .bind(src.id, src.id).first();
+          latest = r && r.ev_ts !== null && r.ev_ts !== undefined ? { ev_ts: Number(r.ev_ts) } : null;
+        }
       } catch (err) {
         latest = null;
         const e = sv2ReadError('sv2_evidence', err);              // reported once, however many sources fail
@@ -13190,7 +13202,7 @@ async function getSentimentV2Status(env, nowTs) {
       }
     }
     const attempts = st ? Number(st.ok_count) + Number(st.fail_count) : 0;
-    const lastEvidenceTs = latest ? Number(latest.published_ts ?? latest.retrieved_ts) : null;
+    const lastEvidenceTs = latest ? latest.ev_ts : null;
     out.sources.push({ id: src.id, name: src.name, family: src.family, kind: src.kind, url: src.url, interval_min: src.interval_min,
       freshness_h: src.freshness_h, last_attempt_ts: st ? st.last_attempt_ts : null, last_success_ts: st ? st.last_success_ts : null,
       last_status: st ? st.last_status : 'NEVER_RUN', last_error: st ? st.last_error : null,

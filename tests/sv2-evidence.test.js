@@ -446,6 +446,24 @@ describe('status and evidence API health (production 2026-11-15: ok:true with ra
     expect(st).toMatchObject({ ok: true, health: 'degraded', errors: ['sv2_evidence: read failed'] });
     expect(sqlLeak(st)).toBe(false);
   });
+  it('freshness uses the newest evidence time of a run, not an arbitrary item (staging 2026-11-15: every OK source showed not fresh)', async () => {
+    const d1 = makeD1(DDL);
+    const run = NOW - H;                                                    // one run: same retrieved_ts for every item
+    // Inserted oldest first, as the collector stores a feed: the old code read one row by retrieved_ts and got 72 h.
+    addEvidence(d1, 'decrypt', 'Old story one', run, NOW - 72 * H);
+    addEvidence(d1, 'decrypt', 'Older story number two', run, NOW - 48 * H);
+    addEvidence(d1, 'decrypt', 'Bitcoin rally record', run, NOW - 18 * H);
+    addEvidence(d1, 'decrypt', 'Future-dated item', run, NOW + 5 * H);    // publisher clock ahead: counts as retrieved_ts
+    addEvidence(d1, 'fed_press', 'Monetary policy statement', NOW - 400 * H, NOW - 400 * H);   // only outside its window
+    const st = await S.getSentimentV2Status({ DB: d1.binding }, NOW);
+    expect(st.sources.find(s => s.id === 'decrypt')).toMatchObject({ last_evidence_ts: run, fresh: true });
+    expect(st.sources.find(s => s.id === 'fed_press')).toMatchObject({ last_evidence_ts: NOW - 400 * H, fresh: false });
+    expect(st.sources.find(s => s.id === 'cftc_press')).toMatchObject({ last_evidence_ts: null, fresh: false });
+    // Matches the scorer's definition of evidence time.
+    const r = E.sv2EvidenceReadings(d1.db.prepare('SELECT * FROM sv2_evidence').all(), NOW, C.SV2_SOURCE_REGISTRY);
+    expect(r['ev:decrypt'].state).not.toBe('stale');
+    expect(r['ev:fed_press'].state).toBe('stale');
+  });
   it('failing collector sources are operational, not a schema or API fault', async () => {
     const d1 = makeD1(DDL);
     d1.db.prepare("INSERT INTO sv2_source_state (source_id, last_attempt_ts, last_status, last_error, consecutive_failures, ok_count, fail_count) VALUES ('decrypt', ?, 'HTTP_ERROR', 'HTTP 503', 3, 1, 3)").run(NOW - H);

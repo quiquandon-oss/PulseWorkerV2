@@ -12624,10 +12624,16 @@ function sv2UngroundedNumbers(texts, pkgText) {
   const norm = (x) => { const n = Number(String(x).replace(/,/g, '')); return Number.isFinite(n) ? String(n) : null; };
   // Signs count: -50 is not grounded by 50. A '-' is a sign only when it does not follow a letter or digit (so the
   // range "40-50" reads as 40 and 50).
-  const have = new Set([...String(pkgText).matchAll(/(?<![\w.])-?\d+(?:\.\d+)?(?![\d.])/g)].map(m => norm(m[0])).filter(Boolean));
+  // A sign before a currency marker belongs to the amount: "-$50", "−€50" and "$-50" all read as -50 (same in package
+  // and output), so an opposite-signed amount cannot pass as grounded by the unsigned figure.
+  const signs = (x) => String(x || '')
+    .replace(/\u2212(?=\s?(?:US)?[$€£¥]?\s?\d)/g, '-')
+    .replace(/(^|[^\w.])-\s?(?:US)?[$€£¥]\s?(?=\d)/g, '$1-')
+    .replace(/(?:US)?[$€£¥]\s?-(?=\d)/g, '-');
+  const have = new Set([...signs(pkgText).matchAll(/(?<![\w.])-?\d+(?:\.\d+)?(?![\d.])/g)].map(m => norm(m[0])).filter(Boolean));
   const bad = [];
   for (const t of texts) {
-    for (const m of String(t || '').matchAll(/(?<![\w.,])-?\d{1,3}(?:,\d{3})+(?:\.\d+)?(?![\d.,])|(?<![\w.,])-?\d+(?:\.\d+)?(?![\d.])|(?<=\w)\d+(?:\.\d+)?(?![\d.])/g)) {
+    for (const m of signs(t).matchAll(/(?<![\w.,])-?\d{1,3}(?:,\d{3})+(?:\.\d+)?(?![\d.,])|(?<![\w.,])-?\d+(?:\.\d+)?(?![\d.])|(?<=\w)\d+(?:\.\d+)?(?![\d.])/g)) {
       const n = norm(m[0]);
       if (n === null || !have.has(n)) bad.push(m[0]);
     }

@@ -434,6 +434,12 @@ describe('GLM Neuron ledger on real SQLite', () => {
     expect(S.sv2UngroundedNumbers(['Down -50 points'], pkg)).toEqual(['-50']);
     expect(S.sv2UngroundedNumbers(['Adjustment -2.42; range 40-50'], pkg)).toEqual([]);
     expect(S.sv2UngroundedNumbers(['Adjustment 2.42'], pkg)).toEqual(['2.42']);
+    // Codex P2: a sign before a currency marker belongs to the amount.
+    const usd = '{"flow_usd_m":50,"chg":-120}';
+    expect(S.sv2UngroundedNumbers(['ETF flows -$50M'], usd)).toEqual(['-50']);
+    expect(S.sv2UngroundedNumbers(['ETF flows $-50M', 'outflow −€50m', 'down - US$50'], usd)).toEqual(['-50', '-50', '-50']);
+    expect(S.sv2UngroundedNumbers(['ETF flows $50M', 'change -$120'], usd)).toEqual([]);
+    expect(S.sv2UngroundedNumbers(['change $120'], usd)).toEqual(['120']);
   });
   it('the number-grounding check rejects figures absent from the package', () => {
     expect(S.sv2UngroundedNumbers(['Regulatory family at 14.5 with 2 sources'], '{"score":14.5,"n":2}')).toEqual([]);

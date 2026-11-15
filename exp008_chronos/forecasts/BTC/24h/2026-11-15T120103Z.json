@@ -1,0 +1,44 @@
+{
+ "anchor": {
+  "source": "experiment_4_timesfm",
+  "timesfm_target_ts": 1794830463484,
+  "timesfm_ts": 1794754516361
+ },
+ "code_sha": "1ed55e639a589bcdc54d92e32f16b90194ac4d74",
+ "coin": "BTC",
+ "context_length": 128,
+ "context_sha256": "ae1efd95186285be3f151d24dbd6c85e60988f775dc50fc866ce6c148ff46795",
+ "direction": "UP",
+ "features_used": "univariate: btc_price only, no covariates",
+ "forecast_horizon_steps": 8,
+ "forecast_median": 65437.375,
+ "forecast_q10": 62528.265625,
+ "forecast_q90": 69019.546875,
+ "format": "exp008-chronos-store-v1",
+ "horizon_hours": 24,
+ "id": "BTC_24h_2026-11-15T120103Z",
+ "inference_backend": "torch-cpu",
+ "input_end_ts": 1794744063484,
+ "issued_ts": 1794764951089,
+ "last_tick_return_pct": -0.2630009633174819,
+ "model_id": "amazon/chronos-2",
+ "model_revision": "29ec3766d36d6f73f0696f85560a422f50e8498c",
+ "model_revision_resolved": "29ec3766d36d6f73f0696f85560a422f50e8498c",
+ "model_version": "chronos-2",
+ "persistence_direction": "DOWN",
+ "persistence_rule": "last deduplicated tick (research/plans/2026-11-01-prospective-evaluation-plans.md)",
+ "predicted_return_pct": 0.32252748095113987,
+ "price_at_prediction": 65227.0,
+ "quantile_levels": [
+  0.1,
+  0.5,
+  0.9
+ ],
+ "runtime": {
+  "chronos": "2.3.2",
+  "torch": "2.15.0+cpu",
+  "transformers": "5.23.0"
+ },
+ "step_ms": 10800609,
+ "target_ts": 1794830463484
+}

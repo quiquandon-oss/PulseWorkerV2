@@ -158,7 +158,7 @@ describe('SQL must be additive', () => {
     }
   });
   for (const sql of ['DROP TABLE history', 'DELETE FROM history', 'UPDATE history SET x = 1', 'INSERT INTO history VALUES (1)', 'ALTER TABLE history DROP COLUMN x',
-    'ALTER TABLE history RENAME TO h2', 'PRAGMA writable_schema = 1', 'ATTACH DATABASE "x" AS y', 'CREATE TABLE a (x); DROP TABLE a', 'CREATE TRIGGER t AFTER INSERT ON a BEGIN DELETE FROM a; END']) {
+    'ALTER TABLE history RENAME TO h2', 'ALTER TABLE history ADD COLUMN x TEXT', 'PRAGMA writable_schema = 1', 'ATTACH DATABASE "x" AS y', 'CREATE TABLE a (x); DROP TABLE a', 'CREATE TRIGGER t AFTER INSERT ON a BEGIN DELETE FROM a; END']) {
     it(`rejects: ${sql}`, () => expect(() => assertAdditive('x.sql', sql)).toThrow(/not an additive statement/));
   }
   describe('quote-aware SQL handling (Codex): nothing can hide inside a string, identifier or comment', () => {

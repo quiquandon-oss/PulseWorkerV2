@@ -9,7 +9,7 @@
 //   - before any SQL is executed, `wrangler d1 info` must report the staging database id, and no production id;
 //   - migrations run in ascending numeric order from a fixed plan; a listed file that is missing is an ERROR (it is
 //     never skipped), except 0029, which is required exactly when the ref contains the evidence collector that needs it;
-//   - SQL must be additive: CREATE TABLE/INDEX or ALTER TABLE ... ADD COLUMN, nothing that deletes or rewrites data;
+//   - SQL must be additive: CREATE TABLE/INDEX only (every created object is verified); no ALTER, nothing that deletes or rewrites data;
 //   - 0015 has no IF NOT EXISTS, so it is run only when its table is absent (checked, not guessed from an error text);
 //   - after the last migration every table the SQL creates must exist.
 // Only the commands below are ever run, always with `-c <staging config>` and the staging database name.
@@ -101,7 +101,8 @@ export function statements(sql) {
 const ADDITIVE = [
   /^CREATE\s+(UNIQUE\s+)?INDEX\s+(IF\s+NOT\s+EXISTS\s+)?[\w"`]+\s+ON\s+/i,
   /^CREATE\s+TABLE\s+(IF\s+NOT\s+EXISTS\s+)?[\w"`]+\s*\(/i,
-  /^ALTER\s+TABLE\s+[\w"`]+\s+ADD\s+COLUMN\s+/i,
+  // No ALTER: ADD COLUMN is not retry-safe (a rerun after a partial success fails on the duplicate column) and the runner
+  // cannot verify a column it did not create. A migration that needs one needs a deliberate change to this runner first.
 ];
 // Canonical form of a CREATE statement for comparison. Ignored: comments, whitespace, IF NOT EXISTS (SQLite does not store
 // it) and the case of keywords and unquoted names. Compared exactly: string literals (case-sensitive), quoted identifiers,

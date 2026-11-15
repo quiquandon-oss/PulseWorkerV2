@@ -10888,7 +10888,7 @@ const pulseWorkerHandlers = {
         if (steps.includes('sync')) out.sync = await syncV1ArchiveFromHistory(renv, { nowTs: now,
           queryBudget: SV2_D1_QUERIES_PER_INVOCATION - SV2_D1_QUERY_RESERVE - SV2_CYCLE_QUERY_HEADROOM - q.n });
         if (steps.includes('v2')) out.v2 = await runSentimentV2Cycle(renv, { nowTs: now, queryBudget: SV2_D1_QUERIES_PER_INVOCATION - SV2_D1_QUERY_RESERVE - q.n });
-        if (steps.includes('collect')) out.collect = await sv2CollectEvidence(renv, { nowTs: now, queryBudget: SV2_D1_QUERIES_PER_INVOCATION - SV2_D1_QUERY_RESERVE - q.n });
+        if (steps.includes('collect')) out.collect = await sv2CollectGuarded(renv, now, () => SV2_D1_QUERIES_PER_INVOCATION - SV2_D1_QUERY_RESERVE - q.n);
         if (steps.includes('glm_probe')) out.glm_probe = await sv2GlmProbe(renv, now);
         out.d1_queries = q.n;
       } catch (err) {
@@ -11697,7 +11697,7 @@ const pulseWorkerHandlers = {
           .catch(err => console.error('Sentiment V2 (cron) failed:', err))
           // Independent evidence last: V2 decisions are past V1 timestamps, so evidence retrieved now could not count for them
           // anyway (point-in-time), and V2 gets the D1 query headroom first. The collector spends only what is left.
-          .then(() => sv2CollectEvidence(env, { nowTs: event.scheduledTime, queryBudget: SV2_D1_QUERIES_PER_INVOCATION - SV2_D1_QUERY_RESERVE - sv2Q.n }))
+          .then(() => sv2CollectGuarded(env, event.scheduledTime, () => SV2_D1_QUERIES_PER_INVOCATION - SV2_D1_QUERY_RESERVE - sv2Q.n))
           .then(r => { const line = JSON.stringify({ ok: r.ok, skipped: r.skipped || false, items_new: r.items_new || 0, items_duplicate: r.items_duplicate || 0, budget: r.budget || null, sources: (r.sources || []).map(x => `${x.id}:${x.status}`), errors: r.errors || [] });
             if (r.ok) console.log('sv2 evidence (cron):', line); else console.error('sv2 evidence (cron) FAILED:', line); })
           .catch(err => console.error('SV2 evidence (cron) failed:', err)));
@@ -11790,6 +11790,39 @@ function logD1Usage(usage, fields, env) {
 const D1_USAGE_RECORD_MIN_ROWS = 50;
 const D1_USAGE_TABLE_RETRY_MS = 10 * 60 * 1000;
 let d1UsageTableUnavailableUntil = 0;
+
+// Automatic stop for the evidence collector: before a collection run, one bounded read of today's recorded D1 usage
+// (d1_usage_daily, written by every invocation). At or above the stop thresholds (default 70% of the Workers Free
+// daily allowance: 5,000,000 rows read, 100,000 rows written) the collector does not run; V1, predictions, event
+// detection and V2 scoring are never affected. Thresholds can be lowered (never raised past the allowance) with
+// SV2_COLLECTOR_D1_READ_STOP / SV2_COLLECTOR_D1_WRITE_STOP. If usage cannot be read, the collector also does not run.
+const SV2_D1_DAILY_READS = 5000000;
+const SV2_D1_DAILY_WRITES = 100000;
+function sv2CollectorD1Stops(env) {
+  const lim = (v, def, cap) => { const n = Number(v); return Number.isFinite(n) && n > 0 ? Math.min(n, cap) : def; };
+  return { reads: lim(env.SV2_COLLECTOR_D1_READ_STOP, 0.7 * SV2_D1_DAILY_READS, SV2_D1_DAILY_READS),
+    writes: lim(env.SV2_COLLECTOR_D1_WRITE_STOP, 0.7 * SV2_D1_DAILY_WRITES, SV2_D1_DAILY_WRITES) };
+}
+async function sv2CollectGuarded(env, nowTs, budgetFn) {
+  if (String(env.SV2_COLLECTOR_ENABLED || '0') !== '1') return sv2CollectEvidence(env, { nowTs, queryBudget: budgetFn() });
+  if (budgetFn() < 1 + 2 + 3) return { ok: true, skipped: true, reason: 'D1 query headroom too small for the usage guard and one feed' };
+  const stops = sv2CollectorD1Stops(env);
+  let used;
+  try {
+    used = await env.DB.prepare('SELECT COALESCE(SUM(rows_read), 0) AS r, COALESCE(SUM(rows_written), 0) AS w FROM d1_usage_daily WHERE day = ? LIMIT 1')
+      .bind(new Date(nowTs).toISOString().slice(0, 10)).first();
+  } catch (err) {
+    console.error('sv2 collector usage guard: read failed:', String((err && err.message) || err));
+    return { ok: false, skipped: true, auto_stop: 'usage_unreadable', reason: 'collector stopped: daily D1 usage could not be read' };
+  }
+  const r = Number(used && used.r) || 0, w = Number(used && used.w) || 0;
+  if (r >= stops.reads || w >= stops.writes) {
+    const reason = `collector stopped: daily D1 usage ${r} rows read / ${w} written reached the stop (${stops.reads} / ${stops.writes})`;
+    console.warn('sv2 collector usage guard:', reason);
+    return { ok: true, skipped: true, auto_stop: 'd1_daily_budget', reason, d1_today: { rows_read: r, rows_written: w }, stops };
+  }
+  return sv2CollectEvidence(env, { nowTs, queryBudget: budgetFn() });
+}
 
 async function recordD1UsageDaily(env, usage, kind, key, now = Date.now()) {
   try {

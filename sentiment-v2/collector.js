@@ -284,7 +284,13 @@ export async function sv2CollectEvidence(env, { nowTs, fetchImpl, registry = SV2
   const feedsAffordable = Math.max(0, Math.floor((queryBudget - 2) / 3));
   const due = dueAll.slice(0, feedsAffordable);
   if (due.length < dueAll.length) run.deferred_for_d1_budget = dueAll.slice(due.length).map(x => x.id);
+  // Every D1 call this run makes is counted (a batch is one). The static estimate above assumes 3 per feed; a failed batch
+  // write adds a recovery write, so each feed re-checks that it and the final run record still fit, and the recovery write
+  // itself is skipped when it would not. The run therefore never exceeds the query budget it was given.
+  let q = 1;                                           // the source-state read above
+  const RUN_RECORD = 1;
   for (const s of due) {
+    if (q + 3 + RUN_RECORD > queryBudget) { (run.deferred_for_d1_budget = run.deferred_for_d1_budget || []).push(s.id); continue; }
     const st = stateById[s.id] || {};
     const out = { id: s.id, status: null, items: 0, new: 0, duplicate: 0, bytes: 0, error: null };
     let stmtsFor = [], freshItems = [];
@@ -326,6 +332,7 @@ export async function sv2CollectEvidence(env, { nowTs, fetchImpl, registry = SV2
       run.items_seen += cands.length;
       let known = new Set();
       if (cands.length) {
+        q += 1;
         try {
           const kr = await env.DB.prepare(`SELECT evidence_id FROM sv2_evidence WHERE evidence_id IN (${cands.map(() => '?').join(',')}) LIMIT ?`)
             .bind(...cands.map(c => c.evidenceId), cands.length).all();
@@ -345,6 +352,7 @@ export async function sv2CollectEvidence(env, { nowTs, fetchImpl, registry = SV2
           contentHash: await sv2Sha256([canon, it.title, it.summary, String(pub)].join('\n')) });
       }
       if (fresh.length) {
+        q += 1;
         try {
           const dups = await env.DB.batch(fresh.map(f => env.DB.prepare('SELECT evidence_id FROM sv2_evidence WHERE title_hash = ? AND source_id <> ? AND retrieved_ts >= ? AND dup_of IS NULL ORDER BY retrieved_ts ASC LIMIT 1')
             .bind(f.titleHash, s.id, now - limits.dupWindowMs)));
@@ -375,6 +383,7 @@ export async function sv2CollectEvidence(env, { nowTs, fetchImpl, registry = SV2
     };
     // Items and the source state are written in one batch; new and duplicate counts come from each insert's changes.
     const newCount = freshItems.filter(f => !f.dupOf).length;
+    q += 1;
     try {
       const res = await env.DB.batch([...stmtsFor, stateStmt(out.status, out.error, newCount)]);
       freshItems.forEach((f, k) => {
@@ -385,8 +394,13 @@ export async function sv2CollectEvidence(env, { nowTs, fetchImpl, registry = SV2
     } catch (err) {
       out.status = 'STORE_ERROR'; out.error = 'store failed: ' + String((err && err.message) || err).slice(0, 160);
       out.new = 0; out.duplicate = 0;
-      try { await stateStmt(out.status, out.error, 0).run(); }
-      catch (err2) { run.errors.push(`${s.id}: state write failed: ` + String((err2 && err2.message) || err2).slice(0, 120)); }
+      if (q + 1 + RUN_RECORD <= queryBudget) {
+        q += 1;
+        try { await stateStmt(out.status, out.error, 0).run(); }
+        catch (err2) { run.errors.push(`${s.id}: state write failed: ` + String((err2 && err2.message) || err2).slice(0, 120)); }
+      } else {
+        run.errors.push(`${s.id}: state write skipped (no D1 query headroom left)`);   // the next run retries the feed
+      }
     }
     const success = out.status === 'OK' || out.status === 'NOT_MODIFIED';
     const notConfigured = out.status === 'NOT_CONFIGURED';
@@ -395,7 +409,7 @@ export async function sv2CollectEvidence(env, { nowTs, fetchImpl, registry = SV2
     run.sources.push(out);
   }
   run.budget = { subrequests: budget.subrequests, subrequest_limit: limits.maxSubrequestsPerRun, bytes: budget.bytes, byte_limit: limits.maxBytesPerRun,
-    sources_due_run: due.length, source_limit: limits.maxSourcesPerRun };
+    sources_due_run: due.length, source_limit: limits.maxSourcesPerRun, d1_queries: q + RUN_RECORD, d1_query_budget: Number.isFinite(queryBudget) ? queryBudget : null };
   try {
     await env.DB.prepare('INSERT OR IGNORE INTO sv2_collection_runs (run_ts, collector_version, sources_json, items_seen, items_new, items_duplicate, subrequests, bytes, errors_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)')
       .bind(now, SV2_COLLECTOR_VERSION, JSON.stringify(run.sources), run.items_seen, run.items_new, run.items_duplicate, budget.subrequests, budget.bytes, JSON.stringify(run.errors)).run();

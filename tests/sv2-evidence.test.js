@@ -242,6 +242,26 @@ describe('collection run (real SQLite, migration 0029)', () => {
     expect(r.sources.length).toBe(2);
     expect(d1.db.prepare("SELECT COUNT(*) AS n FROM sv2_source_state WHERE last_status = 'STORE_ERROR'").get().n).toBe(1);
   });
+  for (const budget of [5, 6, 7, 8, 9, 12]) {
+    it(`never exceeds the D1 query budget it is given, even when the write batch fails and recovery is needed (budget ${budget}) (Codex)`, async () => {
+      const d1 = makeD1(DDL);
+      let queries = 0, inBatch = false, batches = 0;
+      const counted = { ...d1.binding,
+        prepare: (sql) => { const st = d1.binding.prepare(sql); const wrap = (o) => ({ ...o, bind: (...a) => wrap(o.bind(...a)),
+          first: (...x) => { if (!inBatch) queries++; return o.first(...x); }, all: (...x) => { if (!inBatch) queries++; return o.all(...x); },
+          run: (...x) => { if (!inBatch) queries++; return o.run(...x); } }); return wrap(st); },
+        // every write batch fails: the dup-check batch (odd) succeeds, the items+state batch (even) throws
+        batch: async (stmts) => { queries++; if (++batches % 2 === 0) throw new Error('D1_ERROR: overloaded'); inBatch = true; try { return await d1.binding.batch(stmts); } finally { inBatch = false; } } };
+      const reg3 = [...REG, { ...REG[0], id: 'c', url: 'https://feeds.example.org/c.xml' }];
+      const f = async (u) => resp(rss(items(new URL(u).pathname.slice(1, 2) + new URL(u).hostname.slice(0, 1), 3)));
+      const r = await C.sv2CollectEvidence({ DB: counted, SV2_COLLECTOR_ENABLED: '1' }, { nowTs: NOW, fetchImpl: f, registry: reg3, sleep: noSleep, queryBudget: budget });
+      expect(queries, `queries used with budget ${budget}`).toBeLessThanOrEqual(budget);
+      expect(r.budget.d1_queries, 'self-reported count matches').toBe(queries);
+      if (budget === 5) expect(r.errors.join('|')).toMatch(/state write skipped \(no D1 query headroom left\)/);   // recovery skipped, not squeezed in
+      if (budget >= 8) expect(d1.db.prepare("SELECT COUNT(*) AS n FROM sv2_source_state WHERE last_status = 'STORE_ERROR'").get().n).toBeGreaterThan(0);
+      expect(d1.db.prepare('SELECT COUNT(*) AS n FROM sv2_collection_runs').get().n).toBe(1);   // the run record always fits
+    });
+  }
   it('a source whose fetch throws is recorded and the later due feeds and the run record still proceed (Codex P2)', async () => {
     const d1 = makeD1(DDL);
     const f = async (u) => { if (u.includes('feeds.example.org')) throw Object.assign(new TypeError('Invalid URL'), { name: 'TypeError' }); return resp(rss(items('b', 2))); };

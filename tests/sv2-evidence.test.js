@@ -318,9 +318,9 @@ const FUNCS = ['sv2Config', 'sv2Finite', 'sv2ParseSources', 'sv2History', 'sv2At
   'sv2Pearson', 'sv2FamilyOf', 'sv2Redundancy', 'sv2Families', 'sv2EventFamily', 'sv2EventReactions', 'sv2Events', 'sv2Regime', 'sv2Profile',
   'sv2Analogues', 'sv2Classify', 'sv2EvidenceSummary', 'sv2Compute', 'sv2EvidenceItemsForAi', 'sv2AiPackage', 'sv2ValidateAiOutput', 'sv2AiBudget',
   'sv2AiEstimateNeurons', 'sv2UngroundedNumbers', 'sv2RunAi', 'sv2Row', 'runSentimentV2Cycle', 'sv2AlignSeries', 'sv2SeriesStatus', 'sv2LatestView',
-  'getSentimentV2Comparison', 'getSentimentV2Status', 'getSentimentV2Evidence', 'sv2GlmProbe'];
+  'getSentimentV2Comparison', 'getSentimentV2Status', 'getSentimentV2Evidence', 'sv2GlmProbe', 'sv2SchemaCheck', 'sv2ReadError'];
 const CONSTS = ['SENTIMENT_V2_VERSION', 'SV2_VERSIONS_SHOWN', 'SV2_INSERT_SQL', 'SV2_PERIODS_MS', 'SV2_MAX_POINTS', 'SV2_MAX_ROWS', 'SV2_MAX_PRICE_ROWS',
-  'SV2_STALE_MS', 'SV2_AI_PRICING', 'SV2_AI_MAX_OUTPUT_TOKENS', 'SV2_AI_RESERVE_SQL', 'SV2_AI_TEMPLATE_TOKENS', 'SV2_CYCLE_QUERIES_FIXED', 'SV2_CYCLE_QUERIES_PER_READING'];
+  'SV2_STALE_MS', 'SV2_AI_PRICING', 'SV2_AI_MAX_OUTPUT_TOKENS', 'SV2_AI_RESERVE_SQL', 'SV2_AI_TEMPLATE_TOKENS', 'SV2_CYCLE_QUERIES_FIXED', 'SV2_CYCLE_QUERIES_PER_READING', 'SV2_SCHEMA_TABLES', 'SV2_SCHEMA_MIGRATION'];
 const S = evalInScope(extractConstants(...CONSTS) + '\n' + extractFunctions(...FUNCS), {
   SV2_SOURCE_REGISTRY: C.SV2_SOURCE_REGISTRY, SV2_COLLECTOR_LIMITS: C.SV2_COLLECTOR_LIMITS, SV2_COLLECTOR_VERSION: C.SV2_COLLECTOR_VERSION,
   sv2EvidenceReadings: E.sv2EvidenceReadings, sv2ScoreHeadline: E.sv2ScoreHeadline, SV2_EVIDENCE_RULES: E.SV2_EVIDENCE_RULES, SV2_LEXICON_SOURCE: E.SV2_LEXICON_SOURCE });
@@ -395,11 +395,58 @@ describe('sv2-1.1.0 cycle with evidence (real SQLite)', () => {
     expect(st.ai).toMatchObject({ enabled: true, daily_neuron_budget: 1000, remaining_neurons: 1000, account_free_allocation_neurons: 10000 });
     const ev = await S.getSentimentV2Evidence(env(d1), NOW, 24, 50);
     expect(ev.items[0]).toMatchObject({ source_id: 'decrypt', source_name: 'Decrypt', lexicon_hits: 2 });
+    expect(st).toMatchObject({ ok: true, health: 'ok', errors: [], schema: { ready: true, missing: [] } });
+    expect(ev).toMatchObject({ ok: true, available: true, health: 'ok' });
     const bare = makeD1([]);
     expect((await S.getSentimentV2Status({ DB: bare.binding }, NOW)).errors.length).toBeGreaterThan(0);
     expect((await S.getSentimentV2Evidence({ DB: bare.binding }, NOW, 24, 50)).available).toBe(false);
     const writes = d1.log.filter(l => /^(INSERT|UPDATE|DELETE)/i.test(l.sql));
     expect(writes).toEqual([]);
+  });
+});
+
+describe('status and evidence API health (production 2026-11-15: ok:true with raw "no such table" errors)', () => {
+  const sqlLeak = (o) => /SQLITE|D1_ERROR|no such table/i.test(JSON.stringify(o));
+  it('migration 0029 missing: status says ok:false / schema_missing, names the tables, skips the failing reads, leaks no SQL', async () => {
+    const pre = makeD1([]);                                             // production today: none of the 0029 tables
+    const st = await S.getSentimentV2Status({ DB: pre.binding }, NOW);
+    expect(st).toMatchObject({ ok: false, health: 'schema_missing',
+      schema: { ready: false, missing: ['sv2_evidence', 'sv2_source_state', 'sv2_collection_runs', 'sv2_ai_neurons'], required_migration: '0029_sv2_evidence_and_ai_budget' } });
+    expect(st.errors).toEqual(['schema_missing: sv2_evidence, sv2_source_state, sv2_collection_runs, sv2_ai_neurons (apply migration 0029_sv2_evidence_and_ai_budget)']);
+    expect(sqlLeak(st)).toBe(false);
+    // Backward compatible fields are still there.
+    expect(st.sources.length).toBe(C.SV2_SOURCE_REGISTRY.length);
+    expect(st.sources.every(s => s.last_status === 'NEVER_RUN')).toBe(true);
+    expect(st.collector.enabled).toBe(false);
+    expect(st.ai).toMatchObject({ enabled: false, daily_neuron_budget: 0 });
+    expect(pre.log.length).toBe(1);                                     // one sqlite_master lookup, no failing reads
+    const ev = await S.getSentimentV2Evidence({ DB: pre.binding }, NOW, 24, 50);
+    expect(ev).toMatchObject({ ok: true, available: false, health: 'schema_missing', items: [] });
+    expect(sqlLeak(ev)).toBe(false);
+  });
+  it('partial schema (one table missing) is schema_missing and names only that table', async () => {
+    const part = makeD1(DDL);
+    part.db.exec('DROP TABLE sv2_ai_neurons');
+    const st = await S.getSentimentV2Status({ DB: part.binding }, NOW);
+    expect(st).toMatchObject({ ok: false, health: 'schema_missing', schema: { missing: ['sv2_ai_neurons'] } });
+  });
+  it('a read failure on existing tables is degraded (ok stays true), reported by component, without SQL text', async () => {
+    const d1 = makeD1(DDL);
+    const b = d1.binding;
+    const failing = { ...b, prepare: (sql) => (/FROM sv2_collection_runs/.test(sql) ? { bind() { return this; }, all: async () => { throw new Error('D1_ERROR: SQLITE_BUSY: database is locked'); } } : b.prepare(sql)) };
+    const st = await S.getSentimentV2Status({ DB: failing }, NOW);
+    expect(st).toMatchObject({ ok: true, health: 'degraded', errors: ['sv2_collection_runs: read failed'] });
+    expect(sqlLeak(st)).toBe(false);
+  });
+  it('failing collector sources are operational, not a schema or API fault', async () => {
+    const d1 = makeD1(DDL);
+    d1.db.prepare("INSERT INTO sv2_source_state (source_id, last_attempt_ts, last_status, last_error, consecutive_failures, ok_count, fail_count) VALUES ('decrypt', ?, 'HTTP_ERROR', 'HTTP 503', 3, 1, 3)").run(NOW - H);
+    const st = await S.getSentimentV2Status({ DB: d1.binding, SV2_COLLECTOR_ENABLED: '1' }, NOW);
+    expect(st).toMatchObject({ ok: true, health: 'ok', errors: [], sources_failing: 1 });
+    expect(st.sources.find(s => s.id === 'decrypt')).toMatchObject({ last_status: 'HTTP_ERROR', consecutive_failures: 3 });
+  });
+  it('the route does not edge-cache degraded or error responses', () => {
+    expect(WORKER).toMatch(/if \(edge && result\.health !== 'degraded' && result\.health !== 'error'\)/);
   });
 });
 

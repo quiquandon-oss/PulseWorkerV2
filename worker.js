@@ -10912,7 +10912,8 @@ const pulseWorkerHandlers = {
         }
         const result = isStatus ? await getSentimentV2Status(env, Date.now()) : await getSentimentV2Evidence(env, Date.now(), hours, limit);
         const body = JSON.stringify(result);
-        if (edge) {
+        // Transient read failures are not cached (the next request retries); healthy and schema_missing states are.
+        if (edge && result.health !== 'degraded' && result.health !== 'error') {
           try { await edge.put(cacheKey, new Response(body, { headers: { 'Content-Type': 'application/json', 'Cache-Control': 'public, max-age=300' } })); }
           catch (cacheErr) { console.error('sentiment v2 cache put failed:', String(cacheErr)); }
         }
@@ -13129,24 +13130,61 @@ function sv2LatestView(row) {
 
 // Source registry with reliability and freshness, the last collection runs with their budget use, today's GLM Neuron
 // use against its budget, and the configured limits. Every read is bounded (registry-sized or LIMIT).
+// Tables created by migration 0029. One indexed sqlite_master lookup tells which exist, so the status and evidence
+// routes can report missing schema accurately (and skip the reads that would fail) instead of passing SQL errors on.
+const SV2_SCHEMA_TABLES = ['sv2_evidence', 'sv2_source_state', 'sv2_collection_runs', 'sv2_ai_neurons'];
+const SV2_SCHEMA_MIGRATION = '0029_sv2_evidence_and_ai_budget';
+async function sv2SchemaCheck(env, tables = SV2_SCHEMA_TABLES) {
+  try {
+    const r = await env.DB.prepare(`SELECT name FROM sqlite_master WHERE type = 'table' AND name IN (${tables.map(() => '?').join(',')}) LIMIT ${tables.length}`)
+      .bind(...tables).all();
+    const have = new Set((r.results || []).map(x => x.name));
+    const missing = tables.filter(t => !have.has(t));
+    return { ready: missing.length === 0, missing, required_migration: missing.length ? SV2_SCHEMA_MIGRATION : null };
+  } catch (err) {
+    console.error('sv2 schema check failed:', String((err && err.message) || err));
+    return { ready: null, missing: [], required_migration: null, error: 'schema check failed' };
+  }
+}
+// A read failure is reported by component only; the SQL detail goes to the Worker log, not the public response.
+function sv2ReadError(component, err) {
+  console.error(`sentiment v2 ${component} read failed:`, String((err && err.message) || err));
+  return `${component}: read failed`;
+}
+
 async function getSentimentV2Status(env, nowTs) {
   const day = new Date(nowTs).toISOString().slice(0, 10);
-  const out = { ok: true, generated_at: nowTs, calc_version: SENTIMENT_V2_VERSION, versions_shown: SV2_VERSIONS_SHOWN,
+  // health: 'ok' | 'degraded' (a read failed on existing tables) | 'schema_missing' (migration 0029 not applied) |
+  // 'error' (the schema could not be checked). ok is false for schema_missing and error. Collector source failures
+  // (a feed down, rate-limited, ...) are operational and reported per source; they do not change ok or health.
+  const schema = await sv2SchemaCheck(env);
+  const out = { ok: true, health: 'ok', schema, generated_at: nowTs, calc_version: SENTIMENT_V2_VERSION, versions_shown: SV2_VERSIONS_SHOWN,
     collector: { version: SV2_COLLECTOR_VERSION, enabled: String(env.SV2_COLLECTOR_ENABLED || '0') === '1', limits: SV2_COLLECTOR_LIMITS,
       disabled_sources: String(env.SV2_SOURCES_DISABLED || '').split(',').map(x => x.trim()).filter(Boolean), lexicon: SV2_LEXICON_SOURCE,
       evidence_rules: SV2_EVIDENCE_RULES },
-    sources: [], runs: [], ai: null, errors: [] };
+    sources: [], runs: [], ai: null, errors: [], sources_failing: 0 };
+  const canRead = schema.ready === true;
+  if (schema.ready === false) {
+    out.ok = false; out.health = 'schema_missing';
+    out.errors.push(`schema_missing: ${schema.missing.join(', ')} (apply migration ${SV2_SCHEMA_MIGRATION})`);
+  } else if (schema.ready === null) {
+    out.ok = false; out.health = 'error'; out.errors.push('schema: check failed');
+  }
   let states = {};
-  try {
-    const r = await env.DB.prepare('SELECT * FROM sv2_source_state LIMIT 100').all();
-    states = Object.fromEntries((r.results || []).map(x => [x.source_id, x]));
-  } catch (err) { out.errors.push('sv2_source_state: ' + String((err && err.message) || err).slice(0, 120)); }
+  if (canRead) {
+    try {
+      const r = await env.DB.prepare('SELECT * FROM sv2_source_state LIMIT 100').all();
+      states = Object.fromEntries((r.results || []).map(x => [x.source_id, x]));
+    } catch (err) { out.errors.push(sv2ReadError('sv2_source_state', err)); }
+  }
   for (const src of SV2_SOURCE_REGISTRY) {
     const st = states[src.id] || null;
     let latest = null;
-    try {
-      latest = await env.DB.prepare('SELECT retrieved_ts, published_ts FROM sv2_evidence WHERE source_id = ? ORDER BY retrieved_ts DESC LIMIT 1').bind(src.id).first();
-    } catch (_e) { latest = null; }
+    if (canRead) {
+      try {
+        latest = await env.DB.prepare('SELECT retrieved_ts, published_ts FROM sv2_evidence WHERE source_id = ? ORDER BY retrieved_ts DESC LIMIT 1').bind(src.id).first();
+      } catch (_e) { latest = null; }
+    }
     const attempts = st ? Number(st.ok_count) + Number(st.fail_count) : 0;
     const lastEvidenceTs = latest ? Number(latest.published_ts ?? latest.retrieved_ts) : null;
     out.sources.push({ id: src.id, name: src.name, family: src.family, kind: src.kind, url: src.url, interval_min: src.interval_min,
@@ -13154,39 +13192,46 @@ async function getSentimentV2Status(env, nowTs) {
       last_status: st ? st.last_status : 'NEVER_RUN', last_error: st ? st.last_error : null,
       consecutive_failures: st ? Number(st.consecutive_failures) : 0, reliability: attempts ? Math.round(Number(st.ok_count) / attempts * 1000) / 1000 : null,
       attempts, last_evidence_ts: lastEvidenceTs, fresh: lastEvidenceTs !== null && nowTs - lastEvidenceTs <= src.freshness_h * 3600000 });
+    if (st && Number(st.consecutive_failures) > 0) out.sources_failing++;
   }
-  try {
+  if (canRead) try {
     const r = await env.DB.prepare('SELECT run_ts, items_seen, items_new, items_duplicate, subrequests, bytes, errors_json, sources_json FROM sv2_collection_runs ORDER BY run_ts DESC LIMIT 10').all();
     out.runs = (r.results || []).map(x => ({ run_ts: x.run_ts, items_seen: x.items_seen, items_new: x.items_new, items_duplicate: x.items_duplicate,
       subrequests: x.subrequests, bytes: x.bytes, errors: JSON.parse(x.errors_json || '[]'), sources: JSON.parse(x.sources_json || '[]').map(y => `${y.id}:${y.status}`) }));
-  } catch (err) { out.errors.push('sv2_collection_runs: ' + String((err && err.message) || err).slice(0, 120)); }
+  } catch (err) { out.errors.push(sv2ReadError('sv2_collection_runs', err)); }
   const model = String(env.SENTIMENT_V2_AI_MODEL || '').trim();
   const budget = sv2AiBudget(env);
   out.ai = { model: model || null, priced: !!SV2_AI_PRICING[model], daily_neuron_budget: budget, enabled: !!model && budget > 0 && !!SV2_AI_PRICING[model],
     day, calls: 0, reserved_neurons: 0, actual_neurons: 0, committed_neurons: 0, account_limited_today: false, remaining_neurons: budget,
     account_free_allocation_neurons: 10000, max_output_tokens: SV2_AI_MAX_OUTPUT_TOKENS };
-  try {
+  if (canRead) try {
     const r = await env.DB.prepare("SELECT COUNT(*) AS calls, COALESCE(SUM(reserved_neurons), 0) AS reserved, COALESCE(SUM(actual_neurons), 0) AS actual, COALESCE(SUM(MAX(reserved_neurons, COALESCE(actual_neurons, 0))), 0) AS committed, MAX(CASE WHEN status = 'account_limited' THEN 1 ELSE 0 END) AS limited FROM sv2_ai_neurons WHERE day = ?").bind(day).first();
     if (r) Object.assign(out.ai, { calls: Number(r.calls), reserved_neurons: Math.round(Number(r.reserved) * 100) / 100, actual_neurons: Math.round(Number(r.actual) * 100) / 100,
       committed_neurons: Math.round(Number(r.committed) * 100) / 100, account_limited_today: Number(r.limited) === 1,
       remaining_neurons: Math.max(0, Math.round((budget - Number(r.committed)) * 100) / 100) });
-  } catch (err) { out.errors.push('sv2_ai_neurons: ' + String((err && err.message) || err).slice(0, 120)); }
+  } catch (err) { out.errors.push(sv2ReadError('sv2_ai_neurons', err)); }
+  if (out.health === 'ok' && out.errors.length) out.health = 'degraded';
   return out;
 }
 
 // Newest evidence items (duplicates excluded), with provenance and the deterministic lexicon score of each title.
 async function getSentimentV2Evidence(env, nowTs, hours, limit) {
   const since = nowTs - hours * 3600000;
+  // Missing schema is a known state (evidence storage not set up), not a failure: ok stays true, available false,
+  // as before, with a stable reason instead of the SQL error text.
+  const schema = await sv2SchemaCheck(env, ['sv2_evidence']);
+  if (schema.ready === false) return { ok: true, available: false, health: 'schema_missing', schema, generated_at: nowTs, items: [],
+    reason: `evidence storage not set up (apply migration ${SV2_SCHEMA_MIGRATION})` };
   try {
     const r = await env.DB.prepare('SELECT evidence_id, source_id, family, canonical_url, title, published_ts, retrieved_ts, content_hash, collector_version FROM sv2_evidence WHERE retrieved_ts >= ? AND dup_of IS NULL ORDER BY retrieved_ts DESC LIMIT ?')
       .bind(since, limit).all();
     const names = Object.fromEntries(SV2_SOURCE_REGISTRY.map(s => [s.id, s.name]));
-    return { ok: true, generated_at: nowTs, hours, limit, items: (r.results || []).map(x => {
+    return { ok: true, available: true, health: 'ok', generated_at: nowTs, hours, limit, items: (r.results || []).map(x => {
       const h = sv2ScoreHeadline(x.title);
       return { ...x, source_name: names[x.source_id] || x.source_id, lexicon_score: h.score, lexicon_hits: h.hits };
     }) };
   } catch (err) {
-    return { ok: true, available: false, generated_at: nowTs, items: [], error: String((err && err.message) || err).slice(0, 160) };
+    return { ok: false, available: false, health: 'error', generated_at: nowTs, items: [], error: sv2ReadError('sv2_evidence', err) };
   }
 }
 

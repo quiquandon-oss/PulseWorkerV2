@@ -111,9 +111,12 @@ export function normalizeSql(sql) {
   const end = toks.findIndex((x) => x.t === 'punct' && x.v === ';');
   const one = end < 0 ? toks : toks.slice(0, end);
   const words = one.map((x) => (x.t === 'word' ? { ...x, v: x.v.toLowerCase() } : x));
-  for (let k = 0; k + 2 < words.length; k += 1) {
-    if (words[k].t === 'word' && words[k].v === 'if' && words[k + 1].v === 'not' && words[k + 2].v === 'exists') { words.splice(k, 3); break; }
-  }
+  // SQLite drops IF NOT EXISTS only where the grammar allows it: right after CREATE [UNIQUE] TABLE|INDEX. The same words
+  // anywhere later in a definition are part of it and stay significant.
+  const w = (k) => (words[k] && words[k].t === 'word' ? words[k].v : null);
+  let k = w(0) === 'create' ? 1 : -1;
+  if (k === 1 && w(1) === 'unique') k = 2;
+  if (k > 0 && (w(k) === 'table' || w(k) === 'index') && w(k + 1) === 'if' && w(k + 2) === 'not' && w(k + 3) === 'exists') words.splice(k + 1, 3);
   let out = '';
   words.forEach((x, k) => {
     const tight = (v) => v === '(' || v === ')' || v === ',';

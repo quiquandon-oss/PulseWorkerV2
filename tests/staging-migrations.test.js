@@ -214,6 +214,14 @@ describe('SQL must be additive', () => {
       const b = normalizeSql(`create table foo(id integer primary key,name text not null default 'x y')`);
       expect(a).toBe(b);
     });
+    it('removes IF NOT EXISTS only at the CREATE prefix: the same words later in a definition stay significant', () => {
+      expect(normalizeSql('CREATE TABLE IF NOT EXISTS a (x INTEGER)')).toBe(normalizeSql('CREATE TABLE a (x INTEGER)'));
+      expect(normalizeSql('CREATE UNIQUE INDEX IF NOT EXISTS i ON a (x)')).toBe(normalizeSql('CREATE UNIQUE INDEX i ON a (x)'));
+      const withClause = 'CREATE TABLE a (x INTEGER CHECK (if NOT EXISTS (x)))';
+      expect(normalizeSql(withClause)).toContain('if not exists');
+      expect(normalizeSql(withClause)).not.toBe(normalizeSql('CREATE TABLE a (x INTEGER CHECK ((x)))'));
+      expect(normalizeSql('CREATE TABLE a (x TEXT DEFAULT (if NOT EXISTS))')).not.toBe(normalizeSql('CREATE TABLE a (x TEXT DEFAULT ())'));
+    });
     it('still distinguishes different columns, types, constraints and index columns', () => {
       const base = normalizeSql('CREATE TABLE a (id INTEGER PRIMARY KEY, n TEXT NOT NULL)');
       for (const other of ['CREATE TABLE a (id INTEGER PRIMARY KEY, m TEXT NOT NULL)', 'CREATE TABLE a (id INTEGER PRIMARY KEY, n INTEGER NOT NULL)', 'CREATE TABLE a (id INTEGER PRIMARY KEY, n TEXT)', 'CREATE TABLE a (id INTEGER, n TEXT NOT NULL)']) expect(normalizeSql(other)).not.toBe(base);

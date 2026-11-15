@@ -37,6 +37,9 @@ function build({ historyRows = 120 } = {}) {
     d1.db.prepare('INSERT INTO history (ts, score, sources_json, technical_score, btc_price) VALUES (?,?,?,?,?)').run(ts, 50 + Math.round(10 * Math.sin(i / 5)), sources(i), 50, 70000 + 100 * i);
     d1.db.prepare('INSERT INTO btc_data (ts, btc_price) VALUES (?, ?)').run(ts, 70000 + 100 * i);
   }
+  // As in production, the previous hourly invocation recorded its D1 usage (the collector's usage guard requires a fresh record).
+  d1.db.prepare("INSERT INTO d1_usage_daily (day, kind, key, invocations, statements, rows_read, rows_written, max_rows_read, last_ts) VALUES (?, 'scheduled', '0 * * * *', 1, 30, 3000, 40, 3000, ?)")
+    .run(new Date(T).toISOString().slice(0, 10), T - H);
   return d1;
 }
 

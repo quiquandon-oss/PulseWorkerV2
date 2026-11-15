@@ -12,6 +12,32 @@ const text = (p) => readFileSync(join(ROOT, p), 'utf8');
 const noComments = (s) => s.split('\n').filter((l) => !l.trim().startsWith('#')).join('\n');
 const kv = (src, key) => { const m = noComments(src).match(new RegExp(`^${key}\\s*=\\s*"(.*)"\\s*(#.*)?$`, 'm')); return m ? m[1] : undefined; };
 
+// A small TOML reader for the subset wrangler configs use: [table], [a.b], [[array of tables]], and key = "string" | number |
+// true | false | ["string", ...] on one line, with # comments. Anything else throws, so a new construct cannot slip past.
+function parseToml(src) {
+  const root = {};
+  let cur = root;
+  const stripComment = (l) => { let q = false; for (let i = 0; i < l.length; i += 1) { if (l[i] === '"') q = !q; else if (l[i] === '#' && !q) return l.slice(0, i); } return l; };
+  const val = (v) => {
+    if (/^"(?:[^"\\]|\\.)*"$/.test(v)) return JSON.parse(v);
+    if (/^-?\d+(\.\d+)?$/.test(v)) return Number(v);
+    if (v === 'true' || v === 'false') return v === 'true';
+    if (/^\[\s*("(?:[^"\\]|\\.)*"\s*(,\s*)?)*\]$/.test(v)) return JSON.parse(v.replace(/,\s*\]$/, ']'));
+    throw new Error(`unsupported TOML value: ${v}`);
+  };
+  const walk = (path, create) => path.split('.').reduce((o, k) => { if (!(k in o)) o[k] = create === 'array' ? [] : {}; return o[k]; }, root);
+  for (const raw of src.split('\n')) {
+    const line = stripComment(raw).trim();
+    if (!line) continue;
+    let m;
+    if ((m = line.match(/^\[\[([\w.]+)\]\]$/))) { const parts = m[1].split('.'); const parent = parts.length > 1 ? walk(parts.slice(0, -1).join('.')) : root; const k = parts.at(-1); (parent[k] = parent[k] || []).push(cur = {}); }
+    else if ((m = line.match(/^\[([\w.]+)\]$/))) cur = walk(m[1]);
+    else if ((m = line.match(/^([\w-]+)\s*=\s*(.+)$/))) cur[m[1]] = val(m[2].trim());
+    else throw new Error(`unsupported TOML line: ${line}`);
+  }
+  return root;
+}
+
 const PROD = text('wrangler.toml');
 const STAGING = text('wrangler.staging.toml');
 const DEPLOY = text('.github/workflows/deploy.yml');
@@ -38,6 +64,32 @@ describe('production wrangler.toml: GLM and the collector are OFF', () => {
     expect(noComments(PROD)).toMatch(/^crons = \["0 \* \* \* \*", "0 7 \* \* \*"\]/m);
     expect(kv(PROD, 'V1_ARCHIVE_SYNC_ENABLED')).toBe('1');
     expect(kv(PROD, 'SENTIMENT_V2_ENABLED')).toBe('1');
+  });
+  it('the ENTIRE parsed production configuration equals the reviewed snapshot: every top-level key, every key of every table, every variable', () => {
+    // Any added, removed or changed setting (workers_dev, routes, vars, observability, a new binding...) fails here and must be reviewed.
+    expect(parseToml(PROD)).toEqual({
+      name: 'pulseworker-v2',
+      main: 'worker.js',
+      compatibility_date: '2024-11-01',
+      account_id: 'f58e761fbc8e62dc404d8684290af264',
+      ai: { binding: 'AI' },
+      vars: {
+        GIT_COMMIT_SHA: 'unknown',
+        SENTIMENT_V2_ENABLED: '1',
+        SENTIMENT_V2_AI_MODEL: '',          // GLM off, part 1: no model id
+        SV2_GLM_DAILY_NEURONS: '0',         // GLM off, part 2: no Neuron budget
+        SV2_COLLECTOR_ENABLED: '0',         // collector off
+        V1_ARCHIVE_SYNC_ENABLED: '1',
+      },
+      d1_databases: [{ binding: 'DB', database_name: 'sentiment-history', database_id: 'f91ca980-b886-423a-bd6f-f3baea46d181' }],
+      triggers: { crons: ['0 * * * *', '0 7 * * *'] },
+      observability: { logs: { enabled: true, head_sampling_rate: 1, invocation_logs: true, persist: true }, traces: { enabled: false, head_sampling_rate: 1, persist: true } },
+    });
+  });
+  it('the parser itself rejects constructs it does not understand (so nothing can hide behind unsupported syntax)', () => {
+    expect(() => parseToml('a = { b = 1 }')).toThrow(/unsupported TOML value/);
+    expect(() => parseToml('weird line')).toThrow(/unsupported TOML line/);
+    expect(parseToml('[t]\nk = "a # not a comment"  # comment\n')).toEqual({ t: { k: 'a # not a comment' } });
   });
   it('the complete production deployment target is unchanged: Worker, entry point, account, and the single D1 binding', () => {
     const code = noComments(PROD);

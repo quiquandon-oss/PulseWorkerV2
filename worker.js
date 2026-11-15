@@ -12662,7 +12662,9 @@ function sv2ValidateAiOutput(obj, allowedIds, titles = {}) {
     const t = f && allowed.has(f.id) ? titleOf(f.id) : null;
     // A figure is ONE numeric literal (a JSON number, or a string such as "-1,500.5"): no units, words or ranges that would
     // let ungrounded text ride along with a grounded number (Codex P2).
-    const v = f && ((typeof f.value === 'number' && Number.isFinite(f.value)) || typeof f.value === 'string') ? String(f.value).trim() : null;
+    // The prompt asks for the value as a STRING copied from the title, so its digits survive JSON parsing exactly. A JSON
+    // number is accepted only within the safe-integer range, where parsing cannot have rounded it (Codex P2).
+    const v = f && ((typeof f.value === 'number' && Number.isFinite(f.value) && Math.abs(f.value) <= Number.MAX_SAFE_INTEGER) || typeof f.value === 'string') ? String(f.value).trim() : null;
     if (t === null || v === null || !/^-?(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?$/.test(v) || sv2UngroundedNumbers([v], t).length) {
       errors.push(`invalid or ungrounded figure: ${String(v).slice(0, 40)}`); break; }
   }
@@ -12739,7 +12741,7 @@ function sv2UngroundedNumbers(texts, pkgText) {
   return bad;
 }
 
-const SV2_AI_PROMPT_VERSION = 'sv2-ai-prompt-2';     // bump whenever the system prompt text changes
+const SV2_AI_PROMPT_VERSION = 'sv2-ai-prompt-3';     // bump whenever the system prompt text changes
 async function sv2HexSha256(text) {
   const d = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(String(text)));
   return [...new Uint8Array(d)].map(b => b.toString(16).padStart(2, '0')).join('');
@@ -12758,7 +12760,7 @@ async function sv2RunAi(env, pkg, allowedIds, ledger) {
   const system = 'You annotate a crypto sentiment evidence package. Return ONLY a JSON object with keys summary, cited_ids, ' +
     'contradictions (array of {ids, note}), event_relevance (array of {id, relevance: low|medium|high, overlap: none|partial|full}), ' +
     'uncertainty, entities (array of {id, name, kind: asset|organization|regulator|person|instrument|other}, name copied from the ' +
-    'title of evidence item id), figures (array of {id, value}, a number copied from the title of evidence item id). ' +
+    'title of evidence item id), figures (array of {id, value}, value a string holding one number copied exactly from the title of evidence item id). ' +
     'Cite only identifiers present in the package. Separate observed facts from inference. Do not output any score, ' +
     'price target or forecast, and do not write any number that does not appear in the package. Use only the package; do not add outside facts.';
   const user = JSON.stringify(pkg);

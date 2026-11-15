@@ -466,6 +466,13 @@ describe('AI: validation, quota, unavailability, zero paid fallback', () => {
     expect(S.sv2UngroundedNumbers(['9007199254740993'], 'supply 9007199254740992')).toEqual(['9007199254740993']);
     expect(S.sv2UngroundedNumbers(['9007199254740992', '1500.0', '01500'], 'supply 9007199254740992 and 1,500')).toEqual([]);
     expect(S.sv2UngroundedNumbers(['-0', '0.50'], 'from 0 to 0.5')).toEqual([]);
+    // Unsafe integers: as a string the exact digits are grounded; as a JSON number (already rounded by parsing) it is
+    // refused rather than grounded against a different value (Codex P2).
+    const big = { 'evidence:e1': 'Supply counter reads 9007199254740993 units' };
+    const fig = (value) => S.sv2ValidateAiOutput({ ...base, entities: [], figures: [{ id: 'evidence:e1', value }] }, ids, big).ok;
+    expect(fig('9007199254740993')).toBe(true);
+    expect(fig(JSON.parse('9007199254740993'))).toBe(false);
+    expect(fig('9007199254740992')).toBe(false);
   });
   it('the evidence package carries each item\'s source, published and retrieved time, and the hash covers exactly what is sent', async () => {
     const rr = { ...r, evidence_items: [
@@ -485,7 +492,7 @@ describe('AI: validation, quota, unavailability, zero paid fallback', () => {
     expect(sent[1].content).toBe(JSON.stringify(p2));
     expect(res.package_sha256).toBe(await S.sv2HexSha256(JSON.stringify(p2)));
     expect(res.prompt_sha256).toBe(await S.sv2HexSha256(sent[0].content));
-    expect(res.prompt_version).toBe('sv2-ai-prompt-2');
+    expect(res.prompt_version).toBe('sv2-ai-prompt-3');
   });
   it('the stored row and the API view keep model, status, tokens, Neurons, cited evidence and the exact-input hashes', async () => {
     const res = await S.sv2RunAi({ SENTIMENT_V2_AI_MODEL: GLM, SV2_GLM_DAILY_NEURONS: '1000', AI: { run: async () => okResp(good) } }, pkg, allowedIds, ledgerFor());
@@ -497,7 +504,7 @@ describe('AI: validation, quota, unavailability, zero paid fallback', () => {
     const view = S.sv2LatestView({ asset: 'BTC', status: 'OK', ai_model: GLM, ai_status: 'ok', ai_json: JSON.stringify(aiJson), family_json: '{}' });
     expect(view.ai_annotation.cited_ids).toEqual(good.cited_ids);
     expect(view.ai_usage).toMatchObject({ input_tokens: 900, output_tokens: 300, reserved_neurons: res.reserved_neurons, actual_neurons: res.actual_neurons });
-    expect(view.ai_trace).toEqual({ prompt_version: 'sv2-ai-prompt-2', prompt_sha256: res.prompt_sha256, package_sha256: res.package_sha256 });
+    expect(view.ai_trace).toEqual({ prompt_version: 'sv2-ai-prompt-3', prompt_sha256: res.prompt_sha256, package_sha256: res.package_sha256 });
     expect(S.sv2LatestView({ asset: 'BTC', ai_json: '{}', family_json: '{}' }).ai_trace).toBe(null);
   });
   it('a model rate limit or capacity error is its own degraded state: recorded against the reservation, never retried', async () => {

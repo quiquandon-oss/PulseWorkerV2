@@ -43,5 +43,7 @@ describe('sv2-staging-run.yml', () => {
     const opts = [...code.matchAll(/^\s+- ((?:sync|v2|collect|glm_probe)(?:,(?:sync|v2|collect))*)$/gm)].map((m) => m[1]);
     expect(opts).toEqual(['collect', 'sync,v2', 'sync,v2,collect', 'glm_probe']);
     expect(code).toContain("if res.get('status') != 'ok': bad.append('glm_probe: status=%s reason=%s'");
+    expect(code).toContain("for k in ('input_tokens', 'output_tokens', 'actual_neurons')");
+    expect(code).toContain("glm_probe: answered without measured usage");
   });
 });

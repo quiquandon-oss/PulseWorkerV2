@@ -23,6 +23,8 @@ describe('wrangler.staging.toml', () => {
   it('allows GLM on staging only as glm-4.7-flash with a hard 100-Neuron daily budget (1% of the free allocation)', () => {
     expect(kv('SENTIMENT_V2_AI_MODEL')).toBe('@cf/zai-org/glm-4.7-flash');
     expect(Number(kv('SV2_GLM_DAILY_NEURONS'))).toBeLessThanOrEqual(100);
+    expect(text).toMatch(/GLM IS ENABLED ON STAGING/);
+    expect(text).not.toMatch(/stays DISABLED/);
     const worker = readFileSync(join(root, 'worker.js'), 'utf8');
     expect(worker).toContain("if (!model || budget === 0) return { status: 'disabled'");
     expect(worker).toContain("'@cf/zai-org/glm-4.7-flash': { neurons_per_m_input: 5500, neurons_per_m_output: 36400 }");

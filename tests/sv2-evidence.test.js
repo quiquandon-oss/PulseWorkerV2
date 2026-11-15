@@ -531,17 +531,22 @@ describe('collector automatic stop on the daily D1 allowance', () => {
   const USAGE = 'CREATE TABLE d1_usage_daily (day TEXT, kind TEXT, key TEXT, invocations INTEGER, statements INTEGER, rows_read INTEGER, rows_written INTEGER, max_rows_read INTEGER, last_ts INTEGER)';
   const day = new Date(NOW).toISOString().slice(0, 10);
   const withUsage = (r, w) => { const d1 = makeD1([USAGE]); d1.db.prepare('INSERT INTO d1_usage_daily VALUES (?, ?, ?, 1, 1, ?, ?, 0, 0)').run(day, 'scheduled', '0 * * * *', r, w); return d1; };
-  it('collects below 70% of the free daily allowance; stops at or above it, for reads or writes', async () => {
+  it('collects below 50% of the free daily allowance; stops at or above it, for reads or writes', async () => {
     expect(await G.sv2CollectGuarded({ DB: withUsage(1_082_269, 1_380).binding, SV2_COLLECTOR_ENABLED: '1' }, NOW, () => 40)).toMatchObject({ ran: true, queryBudget: 40 });
-    const reads = await G.sv2CollectGuarded({ DB: withUsage(3_500_000, 10).binding, SV2_COLLECTOR_ENABLED: '1' }, NOW, () => 40);
-    expect(reads).toMatchObject({ skipped: true, auto_stop: 'd1_daily_budget', d1_today: { rows_read: 3_500_000 } });
+    const reads = await G.sv2CollectGuarded({ DB: withUsage(2_500_000, 10).binding, SV2_COLLECTOR_ENABLED: '1' }, NOW, () => 40);
+    expect(reads).toMatchObject({ skipped: true, auto_stop: 'd1_daily_budget', d1_today: { rows_read: 2_500_000 } });
     expect(reads.ran).toBeUndefined();
-    expect(await G.sv2CollectGuarded({ DB: withUsage(10, 70_000).binding, SV2_COLLECTOR_ENABLED: '1' }, NOW, () => 40)).toMatchObject({ auto_stop: 'd1_daily_budget' });
+    expect(await G.sv2CollectGuarded({ DB: withUsage(10, 50_000).binding, SV2_COLLECTOR_ENABLED: '1' }, NOW, () => 40)).toMatchObject({ auto_stop: 'd1_daily_budget' });
+  });
+  it('adds this invocation\'s live, not yet recorded usage (Codex P2)', async () => {
+    const env = { DB: withUsage(2_400_000, 0).binding, SV2_COLLECTOR_ENABLED: '1', __d1Usage: { rows_read: 150_000, rows_written: 0 } };
+    expect(await G.sv2CollectGuarded(env, NOW, () => 40)).toMatchObject({ auto_stop: 'd1_daily_budget', d1_today: { rows_read: 2_550_000 } });
+    expect(WORKER).toMatch(/return \{ \.\.\.env, DB: instrumentD1\(env\.DB, usage\), __d1Usage: usage \};/);
   });
   it('fails closed when usage cannot be read, and only lowers (never raises past the allowance) via variables', async () => {
     expect(await G.sv2CollectGuarded({ DB: makeD1([]).binding, SV2_COLLECTOR_ENABLED: '1' }, NOW, () => 40)).toMatchObject({ ok: false, skipped: true, auto_stop: 'usage_unreadable' });
     expect(G.sv2CollectorD1Stops({ SV2_COLLECTOR_D1_READ_STOP: '1000000' }).reads).toBe(1_000_000);
-    expect(G.sv2CollectorD1Stops({ SV2_COLLECTOR_D1_READ_STOP: '99000000', SV2_COLLECTOR_D1_WRITE_STOP: 'x' })).toEqual({ reads: 5_000_000, writes: 70_000 });
+    expect(G.sv2CollectorD1Stops({ SV2_COLLECTOR_D1_READ_STOP: '99000000', SV2_COLLECTOR_D1_WRITE_STOP: 'x' })).toEqual({ reads: 5_000_000, writes: 50_000 });
     expect(await G.sv2CollectGuarded({ DB: withUsage(1_000_000, 0).binding, SV2_COLLECTOR_ENABLED: '1', SV2_COLLECTOR_D1_READ_STOP: '900000' }, NOW, () => 40)).toMatchObject({ auto_stop: 'd1_daily_budget' });
   });
   it('costs no query when the collector is off, and needs headroom for the guard plus one feed', async () => {

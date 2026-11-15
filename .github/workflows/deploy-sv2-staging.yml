@@ -36,9 +36,13 @@ jobs:
         env:
           STAGING_TOKEN: ${{ secrets.STAGE7_STAGING_CLOUDFLARE_API_TOKEN }}
           STAGING_ADMIN: ${{ secrets.STAGE7_STAGING_ADMIN_TOKEN }}
+          SEC_UA: ${{ vars.EVENT_SEC_USER_AGENT }}
         run: |
           if [ -z "$STAGING_TOKEN" ]; then echo "::error::STAGE7_STAGING_CLOUDFLARE_API_TOKEN missing; refusing (never falls back to the production token)"; exit 1; fi
           if [ -z "$STAGING_ADMIN" ]; then echo "::error::STAGE7_STAGING_ADMIN_TOKEN missing"; exit 1; fi
+          # SEC EDGAR requires a contact User-Agent; the SEC adapter reports not_configured without it. The value is an
+          # environment VARIABLE of sv2-staging (not a secret) and is never printed here.
+          if [ -z "$SEC_UA" ]; then echo "::error::EVENT_SEC_USER_AGENT variable missing in the sv2-staging environment"; exit 1; fi
 
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683   # v4.2.2
         with:
@@ -115,7 +119,9 @@ jobs:
       - name: Deploy to the staging Worker
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.STAGE7_STAGING_CLOUDFLARE_API_TOKEN }}
-        run: npx --yes wrangler@4 deploy -c wrangler.staging.toml --var GIT_COMMIT_SHA:$(git rev-parse HEAD)
+          EVENT_SEC_USER_AGENT: ${{ vars.EVENT_SEC_USER_AGENT }}
+        # EVENT_SEC_USER_AGENT reaches the Worker runtime as env.EVENT_SEC_USER_AGENT (read by events/adapters/sec-edgar.js).
+        run: npx --yes wrangler@4 deploy -c wrangler.staging.toml --var GIT_COMMIT_SHA:$(git rev-parse HEAD) --var "EVENT_SEC_USER_AGENT:${EVENT_SEC_USER_AGENT}"
 
       - name: Set the staging admin token
         env:

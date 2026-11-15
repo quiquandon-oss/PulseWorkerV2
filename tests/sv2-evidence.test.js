@@ -525,6 +525,59 @@ describe('status and evidence API health (production 2026-11-15: ok:true with ra
   });
 });
 
+describe('collector automatic stop on the daily D1 allowance', () => {
+  const G = evalInScope(extractConstants('SV2_D1_DAILY_READS', 'SV2_D1_DAILY_WRITES', 'SV2_D1_USAGE_MAX_AGE_MS') + '\n' + extractFunctions('sv2CollectorD1Stops', 'sv2CollectGuarded'),
+    { sv2CollectEvidence: async (env, o) => ({ ok: true, ran: true, queryBudget: o.queryBudget }) });
+  const USAGE = 'CREATE TABLE d1_usage_daily (day TEXT, kind TEXT, key TEXT, invocations INTEGER, statements INTEGER, rows_read INTEGER, rows_written INTEGER, max_rows_read INTEGER, last_ts INTEGER)';
+  const day = new Date(NOW).toISOString().slice(0, 10);
+  const withUsage = (r, w, lastTs = NOW - 30 * 60000) => { const d1 = makeD1([USAGE]); d1.db.prepare('INSERT INTO d1_usage_daily VALUES (?, ?, ?, 1, 1, ?, ?, 0, ?)').run(day, 'scheduled', '0 * * * *', r, w, lastTs); return d1; };
+  it('collects below 50% of the free daily allowance; stops at or above it, for reads or writes', async () => {
+    expect(await G.sv2CollectGuarded({ DB: withUsage(1_082_269, 1_380).binding, SV2_COLLECTOR_ENABLED: '1' }, NOW, () => 40)).toMatchObject({ ran: true, queryBudget: 40 });
+    const reads = await G.sv2CollectGuarded({ DB: withUsage(2_500_000, 10).binding, SV2_COLLECTOR_ENABLED: '1' }, NOW, () => 40);
+    expect(reads).toMatchObject({ skipped: true, auto_stop: 'd1_daily_budget', d1_today: { rows_read: 2_500_000 } });
+    expect(reads.ran).toBeUndefined();
+    expect(await G.sv2CollectGuarded({ DB: withUsage(10, 50_000).binding, SV2_COLLECTOR_ENABLED: '1' }, NOW, () => 40)).toMatchObject({ auto_stop: 'd1_daily_budget' });
+  });
+  it('adds this invocation\'s live, not yet recorded usage (Codex P2)', async () => {
+    const env = { DB: withUsage(2_400_000, 0).binding, SV2_COLLECTOR_ENABLED: '1', __d1Usage: { rows_read: 150_000, rows_written: 0 } };
+    expect(await G.sv2CollectGuarded(env, NOW, () => 40)).toMatchObject({ auto_stop: 'd1_daily_budget', d1_today: { rows_read: 2_550_000 } });
+    expect(WORKER).toMatch(/return \{ \.\.\.env, DB: instrumentD1\(env\.DB, usage\), __d1Usage: usage \};/);
+  });
+  it('fails closed when usage cannot be read, and only lowers (never raises past the allowance) via variables', async () => {
+    expect(await G.sv2CollectGuarded({ DB: makeD1([]).binding, SV2_COLLECTOR_ENABLED: '1' }, NOW, () => 40)).toMatchObject({ ok: false, skipped: true, auto_stop: 'usage_unreadable' });
+    expect(G.sv2CollectorD1Stops({ SV2_COLLECTOR_D1_READ_STOP: '1000000' }).reads).toBe(1_000_000);
+    expect(G.sv2CollectorD1Stops({ SV2_COLLECTOR_D1_READ_STOP: '99000000', SV2_COLLECTOR_D1_WRITE_STOP: 'x' })).toEqual({ reads: 5_000_000, writes: 50_000 });
+    expect(await G.sv2CollectGuarded({ DB: withUsage(1_000_000, 0).binding, SV2_COLLECTOR_ENABLED: '1', SV2_COLLECTOR_D1_READ_STOP: '900000' }, NOW, () => 40)).toMatchObject({ auto_stop: 'd1_daily_budget' });
+  });
+  it('fails closed when usage recording is off or the recorded usage is stale (Codex P2)', async () => {
+    expect(await G.sv2CollectGuarded({ DB: withUsage(10, 10).binding, SV2_COLLECTOR_ENABLED: '1', D1_USAGE_TABLE: '0' }, NOW, () => 40)).toMatchObject({ ok: false, auto_stop: 'usage_recording_off' });
+    const stale = await G.sv2CollectGuarded({ DB: withUsage(10, 10, NOW - 3 * 3600000).binding, SV2_COLLECTOR_ENABLED: '1' }, NOW, () => 40);
+    expect(stale).toMatchObject({ ok: false, auto_stop: 'usage_stale' });
+    expect(stale.reason).toMatch(/180 min old/);
+    expect(await G.sv2CollectGuarded({ DB: makeD1([USAGE]).binding, SV2_COLLECTOR_ENABLED: '1' }, NOW, () => 40)).toMatchObject({ auto_stop: 'usage_stale' });
+    // The owner run route (staging, no cron) skips only the age check; the thresholds and recording-off check still apply.
+    expect(await G.sv2CollectGuarded({ DB: makeD1([USAGE]).binding, SV2_COLLECTOR_ENABLED: '1' }, NOW, () => 40, { requireFresh: false })).toMatchObject({ ran: true });
+    expect(await G.sv2CollectGuarded({ DB: withUsage(2_600_000, 0, NOW - 9 * 3600000).binding, SV2_COLLECTOR_ENABLED: '1' }, NOW, () => 40, { requireFresh: false })).toMatchObject({ auto_stop: 'd1_daily_budget' });
+    // Production keeps the age check on the owner route too (Codex P2); only the staging config opts out.
+    expect(WORKER).toMatch(/\{ requireFresh: env\.SV2_USAGE_GUARD_REQUIRE_FRESH !== '0' \}/);
+    expect(readFileSync(join(ROOT, 'wrangler.staging.toml'), 'utf8')).toMatch(/^SV2_USAGE_GUARD_REQUIRE_FRESH = "0"$/m);
+    expect(readFileSync(join(ROOT, 'wrangler.toml'), 'utf8')).not.toMatch(/SV2_USAGE_GUARD_REQUIRE_FRESH/);
+    // Just after midnight: today has no rows yet, yesterday's last hourly record is recent, so collection proceeds.
+    const d1 = makeD1([USAGE]);
+    const midnight = Date.UTC(2026, 10, 16, 0, 0, 30);
+    d1.db.prepare('INSERT INTO d1_usage_daily VALUES (?, ?, ?, 1, 1, ?, ?, 0, ?)').run('2026-11-15', 'scheduled', '0 * * * *', 4_900_000, 0, midnight - 3600000);
+    expect(await G.sv2CollectGuarded({ DB: d1.binding, SV2_COLLECTOR_ENABLED: '1' }, midnight, () => 40)).toMatchObject({ ran: true });
+  });
+  it('costs no query when the collector is off, and needs headroom for the guard plus one feed', async () => {
+    const d1 = withUsage(0, 0);
+    const before = d1.log.length;
+    expect(await G.sv2CollectGuarded({ DB: d1.binding }, NOW, () => 40)).toMatchObject({ ran: true });   // the collector's own 'disabled' path
+    expect(d1.log.length).toBe(before);
+    expect(await G.sv2CollectGuarded({ DB: d1.binding, SV2_COLLECTOR_ENABLED: '1' }, NOW, () => 5)).toMatchObject({ skipped: true });
+    expect(d1.log.length).toBe(before);
+  });
+});
+
 describe('GLM Neuron ledger on real SQLite', () => {
   const GLM = '@cf/zai-org/glm-4.7-flash';
   it('pricing matches the published GLM-4.7-flash Neuron rates', () => {
@@ -592,8 +645,8 @@ describe('GLM Neuron ledger on real SQLite', () => {
 describe('wiring', () => {
   const sched = WORKER.slice(WORKER.indexOf("} else if (event.cron === '0 * * * *') {"), WORKER.indexOf('// No catch-all else'));
   it('non-tick cron order: detection → V1 archive copy → V2 → evidence collection (last, on the remaining D1 headroom), each failure logged', () => {
-    const order = ['runAutomaticDetection', 'syncV1ArchiveFromHistory', 'runSentimentV2Cycle', 'sv2CollectEvidence'].map(f => sched.indexOf(f));
-    expect(sched).toMatch(/queryBudget: SV2_D1_QUERIES_PER_INVOCATION - SV2_D1_QUERY_RESERVE - sv2Q\.n/);
+    const order = ['runAutomaticDetection', 'syncV1ArchiveFromHistory', 'runSentimentV2Cycle', 'sv2CollectGuarded'].map(f => sched.indexOf(f));
+    expect(sched).toMatch(/sv2CollectGuarded\(env, event\.scheduledTime, \(\) => SV2_D1_QUERIES_PER_INVOCATION - SV2_D1_QUERY_RESERVE - sv2Q\.n\)/);
     expect(order.every((x, i) => x > 0 && (i === 0 || x > order[i - 1]))).toBe(true);
     expect(sched).toMatch(/console\.error\('sv2 evidence \(cron\) FAILED:'/);
     expect(sched).toMatch(/\.catch\(err => console\.error\('SV2 evidence \(cron\) failed:'/);

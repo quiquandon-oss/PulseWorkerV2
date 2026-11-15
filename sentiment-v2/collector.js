@@ -35,7 +35,7 @@ export const SV2_COLLECTOR_LIMITS = {
   maxBytesPerResponse: 256 * 1024,
   maxBytesPerRun: 768 * 1024,
   timeoutMs: 8000,
-  retries: 1,                   // one retry on network error, timeout, 429 or 5xx
+  retries: 1,                   // one retry on network error, timeout or 5xx (never on 429: the publisher asked to slow down)
   maxRedirects: 2,
   maxItemsPerFeed: 25,
   titleMax: 300, summaryMax: 600,
@@ -47,6 +47,20 @@ const ALLOWED_CONTENT = /^(application\/(rss\+xml|atom\+xml|xml|rdf\+xml)|text\/
 
 export function sv2RegistryHosts(registry = SV2_SOURCE_REGISTRY) {
   return new Set(registry.map(s => new URL(s.url).hostname.toLowerCase()));
+}
+
+// Redirect target for diagnostics: scheme, host and path only (query, fragment and credentials dropped), capped.
+export function sv2RedirectTarget(raw) {
+  try { const u = new URL(raw); return `${u.protocol}//${u.hostname}${u.port ? ':' + u.port : ''}${u.pathname}`.slice(0, 120); }
+  catch (_e) { return 'unparseable URL'; }
+}
+// Retry-After as delay-seconds or an HTTP date; returned as a short, sanitized string, or null.
+export function sv2RetryAfter(v) {
+  if (v === null || v === undefined) return null;
+  const t = String(v).trim();
+  if (/^\d{1,9}$/.test(t)) return `${Number(t)} s`;
+  const d = Date.parse(t);
+  return Number.isFinite(d) ? new Date(d).toISOString() : null;
 }
 
 // ---- URL safety (SSRF) -------------------------------------------------------------------------------------------
@@ -95,7 +109,9 @@ export async function sv2SafeFetch(url, { allowedHosts, budget, fetchImpl = fetc
   let current = url, redirects = 0, attempt = 0;
   for (;;) {
     const chk = sv2CheckUrl(current, allowedHosts);
-    if (!chk.ok) return { ok: false, status: 'BLOCKED_URL', error: chk.reason, redirects };
+    // After a redirect, say where it pointed (scheme, host and path only; no query or credentials) so a refused hop can
+    // be diagnosed from the source state (staging 2026-11-15: bitcoinmagazine "scheme must be https" with no target).
+    if (!chk.ok) return { ok: false, status: 'BLOCKED_URL', error: redirects ? `${chk.reason} (redirect to ${sv2RedirectTarget(current)})` : chk.reason, redirects };
     if (budget.subrequests >= limits.maxSubrequestsPerRun) return { ok: false, status: 'BUDGET_EXHAUSTED', error: 'per-run subrequest budget reached', redirects };
     if (budget.bytes >= limits.maxBytesPerRun) return { ok: false, status: 'BUDGET_EXHAUSTED', error: 'per-run byte budget reached', redirects };
     budget.subrequests++;
@@ -119,10 +135,18 @@ export async function sv2SafeFetch(url, { allowedHosts, budget, fetchImpl = fetc
       continue;                                     // re-validated at the top of the loop
     }
     if (res.status === 304) return { ok: true, status: 'NOT_MODIFIED', notModified: true, finalUrl: chk.url.toString(), redirects, bytes: 0 };
-    if (res.status === 429 || res.status >= 500) {
+    // 429: the publisher asked us to slow down, so no retry in this run (a retry one second later would ignore that
+    // and spend another subrequest). The failure stretches the source's next interval through the existing backoff;
+    // Retry-After is recorded so the source state shows what the publisher asked for.
+    if (res.status === 429) {
+      try { await res.body?.cancel(); } catch (_e) { /* ignore */ }
+      const ra = sv2RetryAfter(res.headers.get('retry-after'));
+      return { ok: false, status: 'RATE_LIMITED', error: ra ? `HTTP 429 (Retry-After ${ra})` : 'HTTP 429', redirects };
+    }
+    if (res.status >= 500) {
       try { await res.body?.cancel(); } catch (_e) { /* ignore */ }
       if (attempt < limits.retries) { attempt++; await wait(1000); continue; }
-      return { ok: false, status: res.status === 429 ? 'RATE_LIMITED' : 'HTTP_ERROR', error: `HTTP ${res.status}`, redirects };
+      return { ok: false, status: 'HTTP_ERROR', error: `HTTP ${res.status}`, redirects };
     }
     if (!res.ok) { try { await res.body?.cancel(); } catch (_e) { /* ignore */ } return { ok: false, status: 'HTTP_ERROR', error: `HTTP ${res.status}`, redirects }; }
     const ct = res.headers.get('content-type') || '';

@@ -80,8 +80,8 @@ describe('bounded fetch', () => {
     expect(init.signal).toBeDefined();
     expect(init.headers['User-Agent']).toBe(C.SV2_COLLECTOR_USER_AGENT);
   });
-  it('retries once on network error, timeout, 429 or 5xx, never on 4xx', async () => {
-    for (const fail of [() => { throw new Error('reset'); }, () => resp('x', { status: 429 }), () => resp('x', { status: 503 })]) {
+  it('retries once on network error, timeout or 5xx, never on 4xx', async () => {
+    for (const fail of [() => { throw new Error('reset'); }, () => resp('x', { status: 503 })]) {
       let n = 0;
       const r = await run(async () => { n++; return fail(); });
       expect(r.ok).toBe(false);
@@ -90,6 +90,24 @@ describe('bounded fetch', () => {
     let n = 0;
     const r = await run(async () => { n++; return resp('x', { status: 404 }); });
     expect([r.status, n]).toEqual(['HTTP_ERROR', 1]);
+  });
+  it('does not retry a 429 in the same run and records Retry-After (staging 2026-11-15: cryptoslate)', async () => {
+    let n = 0;
+    const secs = await run(async () => { n++; return resp('slow down', { status: 429, headers: { 'retry-after': '3600' } }); });
+    expect([secs.status, secs.error, n]).toEqual(['RATE_LIMITED', 'HTTP 429 (Retry-After 3600 s)', 1]);
+    n = 0;
+    const date = await run(async () => { n++; return resp('', { status: 429, headers: { 'retry-after': 'Sun, 15 Nov 2026 18:00:00 GMT' } }); });
+    expect([date.error, n]).toEqual(['HTTP 429 (Retry-After 2026-11-15T18:00:00.000Z)', 1]);
+    const bare = await run(async () => resp('', { status: 429, headers: { 'retry-after': 'soon<script>' } }));
+    expect(bare.error).toBe('HTTP 429');                                 // unparseable value is not echoed
+  });
+  it('a refused redirect names its target, without query or credentials (staging 2026-11-15: bitcoinmagazine)', async () => {
+    const r = await run(async () => new Response(null, { status: 301, headers: { location: 'http://user:pw@feeds.example.org/a.xml?token=secret#x' } }));
+    expect(r).toMatchObject({ ok: false, status: 'BLOCKED_URL', redirects: 1 });
+    expect(r.error).toBe('scheme must be https (redirect to http://feeds.example.org/a.xml)');
+    expect(r.error).not.toMatch(/secret|user|pw/);
+    const direct = C.sv2CheckUrl('http://feeds.example.org/a.xml', new Set(['feeds.example.org']));
+    expect(direct.reason).toBe('scheme must be https');                  // no redirect: plain reason, unchanged
   });
   it('refuses oversized responses (declared or streamed), unexpected content types, and stops at the run budget', async () => {
     const big = 'x'.repeat(C.SV2_COLLECTOR_LIMITS.maxBytesPerResponse + 1);
@@ -231,6 +249,27 @@ describe('collection run (real SQLite, migration 0029)', () => {
     const part = await C.sv2CollectEvidence({ DB: d1.binding, SV2_COLLECTOR_ENABLED: '1' }, { nowTs: NOW, fetchImpl: counted, registry: reg3, sleep: noSleep, queryBudget: 8 });
     expect(part.sources.length).toBe(2);                        // (8 - 2) / 3 = 2 feeds
     expect(part.deferred_for_d1_budget.length).toBe(1);
+  });
+  it('re-fetching the same feed stores nothing new and leaves existing rows unchanged (idempotent; staging run 4: 25 seen, 1 new)', async () => {
+    const d1 = makeD1(DDL);
+    const env1 = { DB: d1.binding, SV2_COLLECTOR_ENABLED: '1' };
+    const f1 = feeds({ 'feeds.example.org': rss(items('a', 3)), 'news.example.net': rss([]) });
+    const first = await C.sv2CollectEvidence(env1, { nowTs: NOW, fetchImpl: f1, registry: REG, sleep: noSleep });
+    expect(first.items_new).toBe(3);
+    const before = d1.db.prepare('SELECT * FROM sv2_evidence ORDER BY evidence_id').all();
+    // Due again; the feed now has one new item on top of the same three.
+    const f2 = feeds({ 'feeds.example.org': rss([...items('a', 3), ...items('z', 1)]), 'news.example.net': rss([]) });
+    const later = NOW + 25 * 3600000;
+    const second = await C.sv2CollectEvidence(env1, { nowTs: later, fetchImpl: f2, registry: REG, sleep: noSleep });
+    expect(second.sources.find(s => s.id === 'a')).toMatchObject({ status: 'OK', items: 4, new: 1 });
+    const after = d1.db.prepare('SELECT * FROM sv2_evidence ORDER BY evidence_id').all();
+    expect(after.length).toBe(before.length + 1);
+    for (const row of before) expect(after.find(r => r.evidence_id === row.evidence_id)).toEqual(row);   // untouched
+    expect(new Set(after.map(r => r.canonical_url)).size).toBe(after.length);
+    // A third identical fetch: nothing new at all.
+    const third = await C.sv2CollectEvidence(env1, { nowTs: later + 25 * 3600000, fetchImpl: f2, registry: REG, sleep: noSleep });
+    expect(third.items_new).toBe(0);
+    expect(d1.db.prepare('SELECT COUNT(*) AS n FROM sv2_evidence').get().n).toBe(after.length);
   });
   it('a failed batch write records STORE_ERROR state for that source and the run continues', async () => {
     const d1 = makeD1(DDL);

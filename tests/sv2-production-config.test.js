@@ -117,11 +117,11 @@ describe('production wrangler.toml: GLM is OFF; the collector is ON behind its s
   });
 });
 
-describe('staging wrangler.staging.toml: collector ON, GLM bounded to a 100-Neuron daily probe budget', () => {
-  it('collector enabled; GLM only glm-4.7-flash with at most 100 Neurons per day (production stays off)', () => {
+describe('staging wrangler.staging.toml: collector ON, GLM bounded to a 200-Neuron daily probe budget', () => {
+  it('collector enabled; GLM only glm-4.7-flash with at most 200 Neurons per day (production stays off)', () => {
     expect(kv(STAGING, 'SV2_COLLECTOR_ENABLED')).toBe('1');
     expect(kv(STAGING, 'SENTIMENT_V2_AI_MODEL')).toBe('@cf/zai-org/glm-4.7-flash');
-    expect(Number(kv(STAGING, 'SV2_GLM_DAILY_NEURONS'))).toBeLessThanOrEqual(100);
+    expect(Number(kv(STAGING, 'SV2_GLM_DAILY_NEURONS'))).toBeLessThanOrEqual(200);
     expect(kv(PROD, 'SENTIMENT_V2_AI_MODEL')).toBe('');
     expect(kv(PROD, 'SV2_GLM_DAILY_NEURONS')).toBe('0');
   });

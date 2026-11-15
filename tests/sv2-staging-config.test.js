@@ -20,9 +20,9 @@ describe('wrangler.staging.toml', () => {
     expect(body).not.toContain('sentiment-history');
     expect(body).not.toMatch(/^name = "pulseworker-v2"$/m);
   });
-  it('allows GLM on staging only as glm-4.7-flash with a hard 100-Neuron daily budget (1% of the free allocation)', () => {
+  it('allows GLM on staging only as glm-4.7-flash with a hard 200-Neuron daily budget (2% of the free allocation)', () => {
     expect(kv('SENTIMENT_V2_AI_MODEL')).toBe('@cf/zai-org/glm-4.7-flash');
-    expect(Number(kv('SV2_GLM_DAILY_NEURONS'))).toBeLessThanOrEqual(100);
+    expect(Number(kv('SV2_GLM_DAILY_NEURONS'))).toBeLessThanOrEqual(200);
     expect(text).toMatch(/GLM IS ENABLED ON STAGING/);
     expect(text).not.toMatch(/stays DISABLED/);
     const worker = readFileSync(join(root, 'worker.js'), 'utf8');

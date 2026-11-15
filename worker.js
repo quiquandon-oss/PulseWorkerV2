@@ -12779,8 +12779,11 @@ async function sv2RunAi(env, pkg, allowedIds, ledger) {
   const record = async (u) => { try { await ledger.recordNeurons(slot, u); } catch (_e) { /* the reservation still bounds the budget */ } };
   let raw;
   try {
+    // GLM-4.7-flash reasons before answering; on staging (2026-11-15) the reasoning used the whole output cap and no answer
+    // was returned. Thinking is turned off through the model's chat template and a JSON object is requested.
     raw = await env.AI.run(model, { messages: [{ role: 'system', content: system }, { role: 'user', content: user }],
-      max_completion_tokens: SV2_AI_MAX_OUTPUT_TOKENS, temperature: 0 });
+      max_completion_tokens: SV2_AI_MAX_OUTPUT_TOKENS, temperature: 0,
+      chat_template_kwargs: { enable_thinking: false }, response_format: { type: 'json_object' } });
   } catch (err) {
     const msg = String((err && err.message) || err);
     // 3036: the account's daily free allocation is used up (not billed on Workers Free). 3040 / 429: model capacity or rate
@@ -12797,6 +12800,15 @@ async function sv2RunAi(env, pkg, allowedIds, ledger) {
   let obj = raw && typeof raw === 'object' && 'response' in raw ? raw.response
     : raw && raw.choices && raw.choices[0] && raw.choices[0].message ? raw.choices[0].message.content : raw;
   const meta = { reserved_neurons: estimate, input_tokens: Number.isFinite(inTok) ? inTok : null, output_tokens: Number.isFinite(outTok) ? outTok : null, actual_neurons: actual };
+  // No answer text at all: say why (e.g. reasoning used the whole output cap) instead of a bare "not an object".
+  if (obj === null || obj === undefined || (typeof obj === 'string' && !obj.trim())) {
+    const choice = raw && raw.choices && raw.choices[0] ? raw.choices[0] : null;
+    const finish = choice && choice.finish_reason ? String(choice.finish_reason).slice(0, 20) : null;
+    const reasoned = !!(choice && choice.message && (choice.message.reasoning_content || choice.message.reasoning));
+    await record({ ...meta, status: 'invalid_output' });
+    return { status: 'invalid_output', model, ...trace, counted: true, ...meta,
+      reason: `no answer text${finish ? ' (finish_reason ' + finish + ')' : ''}${reasoned ? '; reasoning only' : ''}${outTok >= SV2_AI_MAX_OUTPUT_TOKENS ? '; output cap reached' : ''}` };
+  }
   if (typeof obj === 'string') {
     try { obj = JSON.parse(obj.trim().replace(/^```(?:json)?\s*/, '').replace(/```$/, '').trim()); }
     catch (e) { await record({ ...meta, status: 'invalid_output' }); return { status: 'invalid_output', model, ...trace, counted: true, ...meta, reason: 'output is not JSON' }; }

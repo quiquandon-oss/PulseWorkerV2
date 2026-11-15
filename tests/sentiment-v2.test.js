@@ -512,6 +512,21 @@ describe('AI: validation, quota, unavailability, zero paid fallback', () => {
     expect(view.ai_trace).toEqual({ prompt_version: 'sv2-ai-prompt-3', prompt_sha256: res.prompt_sha256, package_sha256: res.package_sha256 });
     expect(S.sv2LatestView({ asset: 'BTC', ai_json: '{}', family_json: '{}' }).ai_trace).toBe(null);
   });
+  it('asks GLM for a JSON object with thinking off, and an empty answer says why instead of "not an object"', async () => {
+    let opts = null;
+    const led = ledgerFor();
+    const empty = await S.sv2RunAi({ SENTIMENT_V2_AI_MODEL: GLM, SV2_GLM_DAILY_NEURONS: '1000', AI: { run: async (_m, o) => { opts = o;
+      return { choices: [{ finish_reason: 'length', message: { content: null, reasoning_content: 'thinking...' } }], usage: { prompt_tokens: 220, completion_tokens: 1200 } }; } } }, pkg, allowedIds, led);
+    expect(opts.chat_template_kwargs).toEqual({ enable_thinking: false });
+    expect(opts.response_format).toEqual({ type: 'json_object' });
+    expect(empty.status).toBe('invalid_output');
+    expect(empty.reason).toBe('no answer text (finish_reason length); reasoning only; output cap reached');
+    expect(empty.actual_neurons).toBeCloseTo((220 * 5500 + 1200 * 36400) / 1e6, 3);   // still measured and recorded
+    expect(led.rows[0].status).toBe('invalid_output');
+    const ok = await S.sv2RunAi({ SENTIMENT_V2_AI_MODEL: GLM, SV2_GLM_DAILY_NEURONS: '1000',
+      AI: { run: async () => ({ choices: [{ finish_reason: 'stop', message: { content: JSON.stringify(good) } }], usage: { prompt_tokens: 220, completion_tokens: 80 } }) } }, pkg, allowedIds, ledgerFor());
+    expect(ok.status).toBe('ok');
+  });
   it('a model rate limit or capacity error is its own degraded state: recorded against the reservation, never retried', async () => {
     for (const msg of ['3040: Capacity temporarily exceeded', 'HTTP 429 Too Many Requests', 'Out of capacity']) {
       let calls = 0;

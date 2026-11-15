@@ -558,7 +558,10 @@ describe('collector automatic stop on the daily D1 allowance', () => {
     // The owner run route (staging, no cron) skips only the age check; the thresholds and recording-off check still apply.
     expect(await G.sv2CollectGuarded({ DB: makeD1([USAGE]).binding, SV2_COLLECTOR_ENABLED: '1' }, NOW, () => 40, { requireFresh: false })).toMatchObject({ ran: true });
     expect(await G.sv2CollectGuarded({ DB: withUsage(2_600_000, 0, NOW - 9 * 3600000).binding, SV2_COLLECTOR_ENABLED: '1' }, NOW, () => 40, { requireFresh: false })).toMatchObject({ auto_stop: 'd1_daily_budget' });
-    expect(WORKER).toMatch(/sv2CollectGuarded\(renv, now, \(\) => SV2_D1_QUERIES_PER_INVOCATION - SV2_D1_QUERY_RESERVE - q\.n, \{ requireFresh: false \}\)/);
+    // Production keeps the age check on the owner route too (Codex P2); only the staging config opts out.
+    expect(WORKER).toMatch(/\{ requireFresh: env\.SV2_USAGE_GUARD_REQUIRE_FRESH !== '0' \}/);
+    expect(readFileSync(join(ROOT, 'wrangler.staging.toml'), 'utf8')).toMatch(/^SV2_USAGE_GUARD_REQUIRE_FRESH = "0"$/m);
+    expect(readFileSync(join(ROOT, 'wrangler.toml'), 'utf8')).not.toMatch(/SV2_USAGE_GUARD_REQUIRE_FRESH/);
     // Just after midnight: today has no rows yet, yesterday's last hourly record is recent, so collection proceeds.
     const d1 = makeD1([USAGE]);
     const midnight = Date.UTC(2026, 10, 16, 0, 0, 30);

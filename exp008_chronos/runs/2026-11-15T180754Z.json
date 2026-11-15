@@ -1,0 +1,14 @@
+{
+ "code_sha": "71add5b9ea7240385c0767aed2aa65bb60721c4d",
+ "errors": [],
+ "forecasts": [
+  "BTC_12h_2026-11-15T180102Z",
+  "BTC_24h_2026-11-15T180102Z"
+ ],
+ "format": "exp008-chronos-store-v1",
+ "notes": [],
+ "pending": 2,
+ "resolved": 0,
+ "run_id": "43744876646",
+ "run_ts": 1794766074575
+}

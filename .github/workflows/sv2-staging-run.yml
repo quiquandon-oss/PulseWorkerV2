@@ -1,0 +1,67 @@
+# Sentiment V2 staging run (manual, staging only). Staging has no Cron Trigger, so this calls the owner-only
+# POST /api/sentiment-v2/run on the STAGING Worker with the staging admin token, then reads the public status and
+# evidence routes, and prints the JSON results (no secret is ever printed). It deploys nothing, applies no migration
+# and has no Cloudflare API token. Production is unreachable from here: the URL is the staging Worker only.
+name: Sentiment V2 Staging Run
+
+on:
+  workflow_dispatch:
+    inputs:
+      steps:
+        description: 'Steps to run on staging (collector limits: 3 sources, 8 subrequests per run)'
+        required: true
+        default: 'collect'
+        type: choice
+        options:
+          - collect
+          - sync,v2
+          - sync,v2,collect
+
+permissions: {}
+
+concurrency:
+  group: sv2-staging
+  cancel-in-progress: false
+
+jobs:
+  run-staging:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    # Same protected Environment as deploy-sv2-staging.yml: its secrets are available only to runs from main.
+    environment: sv2-staging
+    steps:
+      - name: Refuse anything but main
+        run: |
+          [ "$GITHUB_REF" = "refs/heads/main" ] || { echo "::error::dispatch from main only (got $GITHUB_REF)"; exit 1; }
+      - name: Run the V2 steps on the staging Worker and read status and evidence
+        env:
+          STAGING_ADMIN: ${{ secrets.STAGE7_STAGING_ADMIN_TOKEN }}
+          STEPS: ${{ inputs.steps }}
+        run: |
+          set -euo pipefail
+          [ -n "$STAGING_ADMIN" ] || { echo "::error::STAGE7_STAGING_ADMIN_TOKEN is not set in the sv2-staging environment"; exit 1; }
+          BASE=https://pulseworker-v2-staging.quiquandon.workers.dev
+          body=$(python3 -c "import json,os;print(json.dumps({'steps':os.environ['STEPS'].split(',')}))")
+          code=$(curl -sS -o run.json -w '%{http_code}' -X POST -H "Authorization: Bearer ${STAGING_ADMIN}" \
+            -H 'Content-Type: application/json' -d "$body" "$BASE/api/sentiment-v2/run")
+          echo "POST /api/sentiment-v2/run -> HTTP $code"
+          python3 -m json.tool run.json | head -c 20000
+          sleep 2
+          # /status is edge-cached for up to 5 min; run.json above is the authoritative result of this run.
+          curl -sS -o status.json "$BASE/api/sentiment-v2/status"
+          curl -sS -o evidence.json "$BASE/api/sentiment-v2/evidence?hours=24&limit=25"
+          python3 - <<'PY'
+          import json
+          s = json.load(open('status.json'))
+          print('STATUS ok=%s health=%s collector_enabled=%s ai_enabled=%s errors=%s' % (s.get('ok'), s.get('health'),
+                (s.get('collector') or {}).get('enabled'), (s.get('ai') or {}).get('enabled'), s.get('errors')))
+          for src in s.get('sources', []):
+              print('  %-16s %-14s attempts=%s reliability=%s fresh=%s err=%s' % (src['id'], src['last_status'], src['attempts'], src['reliability'], src['fresh'], (src.get('last_error') or '')[:80]))
+          for r in s.get('runs', [])[:5]:
+              print('  run %s seen=%s new=%s dup=%s subrequests=%s bytes=%s errors=%s' % (r['run_ts'], r['items_seen'], r['items_new'], r['items_duplicate'], r['subrequests'], r['bytes'], r['errors']))
+          e = json.load(open('evidence.json'))
+          print('EVIDENCE ok=%s available=%s items=%d' % (e.get('ok'), e.get('available'), len(e.get('items', []))))
+          for it in e.get('items', [])[:25]:
+              print('  [%s] %+d/%d %s' % (it['source_id'], it.get('lexicon_score', 0), it.get('lexicon_hits', 0), it['title'][:110]))
+          PY
+          [ "$code" = "200" ] || { echo "::error::staging run returned HTTP $code"; exit 1; }

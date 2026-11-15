@@ -45,6 +45,9 @@ SENTIMENT_V2_ENABLED = "1"
 SV2_COLLECTOR_ENABLED = "1"
 SENTIMENT_V2_AI_MODEL = ""
 SV2_GLM_DAILY_NEURONS = "0"
+# Staging has no Cron Trigger, so d1_usage_daily gets few records: the collector's usage guard skips only its
+# record-age check here (thresholds and the recording-off check still apply). Never set this in production.
+SV2_USAGE_GUARD_REQUIRE_FRESH = "0"
 
 # The ONLY D1 binding in this file -- a brand-new, empty database created
 # specifically for this staging deployment. Binding name "DB" matches

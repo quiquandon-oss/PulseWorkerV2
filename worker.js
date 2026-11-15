@@ -10888,7 +10888,8 @@ const pulseWorkerHandlers = {
         if (steps.includes('sync')) out.sync = await syncV1ArchiveFromHistory(renv, { nowTs: now,
           queryBudget: SV2_D1_QUERIES_PER_INVOCATION - SV2_D1_QUERY_RESERVE - SV2_CYCLE_QUERY_HEADROOM - q.n });
         if (steps.includes('v2')) out.v2 = await runSentimentV2Cycle(renv, { nowTs: now, queryBudget: SV2_D1_QUERIES_PER_INVOCATION - SV2_D1_QUERY_RESERVE - q.n });
-        if (steps.includes('collect')) out.collect = await sv2CollectGuarded(renv, now, () => SV2_D1_QUERIES_PER_INVOCATION - SV2_D1_QUERY_RESERVE - q.n, { requireFresh: false });
+        if (steps.includes('collect')) out.collect = await sv2CollectGuarded(renv, now, () => SV2_D1_QUERIES_PER_INVOCATION - SV2_D1_QUERY_RESERVE - q.n,
+          { requireFresh: env.SV2_USAGE_GUARD_REQUIRE_FRESH !== '0' });
         if (steps.includes('glm_probe')) out.glm_probe = await sv2GlmProbe(renv, now);
         out.d1_queries = q.n;
       } catch (err) {
@@ -11827,8 +11828,10 @@ async function sv2CollectGuarded(env, nowTs, budgetFn, { requireFresh = true } =
     return { ok: false, skipped: true, auto_stop: 'usage_unreadable', reason: 'collector stopped: daily D1 usage could not be read' };
   }
   const newest = used && used.t !== null && used.t !== undefined ? Number(used.t) : null;
-  // The hourly cron records every invocation, so there a missing or old record means recording has stopped. The owner
-  // run route (staging has no Cron Trigger and records only heavier requests) skips this age check, not the others.
+  // The hourly cron records every invocation, so a missing or old record means recording has stopped. Required on every
+  // path by default, including the owner run route on production. Only a Worker configured with
+  // SV2_USAGE_GUARD_REQUIRE_FRESH = "0" (the staging config: no Cron Trigger, so few records) skips this age check;
+  // the thresholds and the recording-off check always apply.
   if (requireFresh && (newest === null || nowTs - newest > SV2_D1_USAGE_MAX_AGE_MS)) {
     return { ok: false, skipped: true, auto_stop: 'usage_stale', reason: `collector stopped: newest D1 usage record is ${newest === null ? 'missing' : Math.round((nowTs - newest) / 60000) + ' min old'}` };
   }

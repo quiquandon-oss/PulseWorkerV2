@@ -12653,7 +12653,11 @@ function sv2UngroundedNumbers(texts, pkgText) {
     .replace(/\u2212(?=\s?(?:US)?[$€£¥]?\s?\d)/g, '-')
     .replace(/(^|[^\w.])-\s?(?:US)?[$€£¥]\s?(?=\d)/g, '$1-')
     .replace(/(?:US)?[$€£¥]\s?-(?=\d)/g, '-');
-  const have = new Set([...signs(pkgText).matchAll(/(?<![\w.])-?\d+(?:\.\d+)?(?![\d.])/g)].map(m => norm(m[0])).filter(Boolean));
+  // Package side: every plain value, plus every comma-grouped value read whole (a title's "1,500" grounds 1500 and "1,500";
+  // Codex P2). The plain pass is kept so nothing that was grounded before stops being grounded.
+  const src = signs(pkgText);
+  const have = new Set([...src.matchAll(/(?<![\w.])-?\d+(?:\.\d+)?(?![\d.])/g), ...src.matchAll(/(?<![\w.,])-?\d{1,3}(?:,\d{3})+(?:\.\d+)?(?![\d.,])/g)]
+    .map(m => norm(m[0])).filter(Boolean));
   const bad = [];
   for (const t of texts) {
     for (const m of signs(t).matchAll(/(?<![\w.,])-?\d{1,3}(?:,\d{3})+(?:\.\d+)?(?![\d.,])|(?<![\w.,])-?\d+(?:\.\d+)?(?![\d.])|(?<=\w)\d+(?:\.\d+)?(?![\d.])/g)) {

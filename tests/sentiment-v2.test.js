@@ -432,6 +432,12 @@ describe('AI: validation, quota, unavailability, zero paid fallback', () => {
     expect(v([], [{ id: 'evidence:e1', value: 'many' }]).ok).toBe(false);                               // not a number
     expect(v(Array.from({ length: 21 }, () => ({ id: 'evidence:e1', name: 'SEC', kind: 'regulator' })), []).ok).toBe(false);
     expect(S.sv2ValidateAiOutput({ ...base, entities: [] }, ids, titles).ok).toBe(false);             // figures required
+    // Comma-grouped figures in a title are whole values (Codex P2): 1,500 grounds 1500 and "1,500", never 500 or 15000.
+    const t2 = { ...titles, 'evidence:e2': 'Exchange outflows reach 1,500 BTC as Fed holds rates' };
+    const v2 = (figures) => S.sv2ValidateAiOutput({ ...base, entities: [], figures }, ids, t2);
+    expect(v2([{ id: 'evidence:e2', value: 1500 }, { id: 'evidence:e2', value: '1,500' }]).ok).toBe(true);
+    expect(v2([{ id: 'evidence:e2', value: 15000 }]).ok).toBe(false);
+    expect(S.sv2UngroundedNumbers(['Outflows of 1,500 BTC', 'outflows of 1500 BTC'], JSON.stringify({ title: t2['evidence:e2'] }))).toEqual([]);
   });
   it('the evidence package carries each item\'s source, published and retrieved time, and the hash covers exactly what is sent', async () => {
     const rr = { ...r, evidence_items: [

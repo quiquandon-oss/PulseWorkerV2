@@ -258,12 +258,26 @@ def test_evaluate_pairs_on_origin_and_excludes_mismatches(tmp_path):
 
 
 def test_forecast_records_the_resolved_model_revision(tmp_path, monkeypatch):
+    # Independent of the runner: the workflow sets CHRONOS_REVISION job-wide (#136), so the unpinned case must clear it
+    # (run 43726989429 failed here because the test inherited the pin).
+    monkeypatch.delenv("CHRONOS_REVISION", raising=False)
     d1 = FakeD1(); pts = series(); d1.prices(pts)
     d1.anchor(12, T0, pts[-2][1])
     monkeypatch.setattr(rx, "resolved_model_revision", lambda: "a" * 40)
     assert run(tmp_path, d1, FakePipeline(), T0 + H) == 0
     rec = json.loads(files(tmp_path, "forecasts")[0].read_text())
     assert rec["model_revision_resolved"] == "a" * 40 and rec["model_revision"] == "main (unpinned)"
+
+
+def test_forecast_records_the_pinned_model_revision(tmp_path, monkeypatch):
+    pin = "29ec3766d36d6f73f0696f85560a422f50e8498c"
+    monkeypatch.setenv("CHRONOS_REVISION", pin)
+    d1 = FakeD1(); pts = series(); d1.prices(pts)
+    d1.anchor(12, T0, pts[-2][1])
+    monkeypatch.setattr(rx, "resolved_model_revision", lambda: pin)
+    assert run(tmp_path, d1, FakePipeline(), T0 + H) == 0
+    rec = json.loads(files(tmp_path, "forecasts")[0].read_text())
+    assert rec["model_revision"] == pin and rec["model_revision_resolved"] == pin
 
 
 def test_resolved_model_revision_is_none_without_a_cached_snapshot(monkeypatch, tmp_path):

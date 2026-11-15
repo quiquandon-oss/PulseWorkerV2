@@ -10888,7 +10888,8 @@ const pulseWorkerHandlers = {
         if (steps.includes('sync')) out.sync = await syncV1ArchiveFromHistory(renv, { nowTs: now,
           queryBudget: SV2_D1_QUERIES_PER_INVOCATION - SV2_D1_QUERY_RESERVE - SV2_CYCLE_QUERY_HEADROOM - q.n });
         if (steps.includes('v2')) out.v2 = await runSentimentV2Cycle(renv, { nowTs: now, queryBudget: SV2_D1_QUERIES_PER_INVOCATION - SV2_D1_QUERY_RESERVE - q.n });
-        if (steps.includes('collect')) out.collect = await sv2CollectEvidence(renv, { nowTs: now, queryBudget: SV2_D1_QUERIES_PER_INVOCATION - SV2_D1_QUERY_RESERVE - q.n });
+        if (steps.includes('collect')) out.collect = await sv2CollectGuarded(renv, now, () => SV2_D1_QUERIES_PER_INVOCATION - SV2_D1_QUERY_RESERVE - q.n,
+          { requireFresh: env.SV2_USAGE_GUARD_REQUIRE_FRESH !== '0' });
         if (steps.includes('glm_probe')) out.glm_probe = await sv2GlmProbe(renv, now);
         out.d1_queries = q.n;
       } catch (err) {
@@ -11697,7 +11698,7 @@ const pulseWorkerHandlers = {
           .catch(err => console.error('Sentiment V2 (cron) failed:', err))
           // Independent evidence last: V2 decisions are past V1 timestamps, so evidence retrieved now could not count for them
           // anyway (point-in-time), and V2 gets the D1 query headroom first. The collector spends only what is left.
-          .then(() => sv2CollectEvidence(env, { nowTs: event.scheduledTime, queryBudget: SV2_D1_QUERIES_PER_INVOCATION - SV2_D1_QUERY_RESERVE - sv2Q.n }))
+          .then(() => sv2CollectGuarded(env, event.scheduledTime, () => SV2_D1_QUERIES_PER_INVOCATION - SV2_D1_QUERY_RESERVE - sv2Q.n))
           .then(r => { const line = JSON.stringify({ ok: r.ok, skipped: r.skipped || false, items_new: r.items_new || 0, items_duplicate: r.items_duplicate || 0, budget: r.budget || null, sources: (r.sources || []).map(x => `${x.id}:${x.status}`), errors: r.errors || [] });
             if (r.ok) console.log('sv2 evidence (cron):', line); else console.error('sv2 evidence (cron) FAILED:', line); })
           .catch(err => console.error('SV2 evidence (cron) failed:', err)));
@@ -11772,7 +11773,9 @@ function instrumentD1(db, usage) {
 // whether an invocation wrote. D1_USAGE_LOG = "0" only silences the log line.
 function withD1Usage(env, usage) {
   if (!env || !env.DB) return env;
-  return { ...env, DB: instrumentD1(env.DB, usage) };
+  // __d1Usage: this invocation's live counters, so a guard inside the invocation can add usage not yet recorded in
+  // d1_usage_daily (recording happens after the invocation's work settles).
+  return { ...env, DB: instrumentD1(env.DB, usage), __d1Usage: usage };
 }
 
 function logD1Usage(usage, fields, env) {
@@ -11790,6 +11793,57 @@ function logD1Usage(usage, fields, env) {
 const D1_USAGE_RECORD_MIN_ROWS = 50;
 const D1_USAGE_TABLE_RETRY_MS = 10 * 60 * 1000;
 let d1UsageTableUnavailableUntil = 0;
+
+// Automatic stop for the evidence collector: before a collection run, one bounded read of today's recorded D1 usage
+// (d1_usage_daily) plus this invocation's own live counters (not yet recorded). At or above the stop thresholds the
+// collector does not run; V1, predictions, event detection and V2 scoring are never affected. The recorded total is
+// a LOWER bound of the account's real usage: .first() reads record no rows, and other Workers on the account (V1's
+// sentiment-ff75) do not record here. The default stop is therefore conservative, 50% of the Workers Free daily
+// allowance (5,000,000 rows read, 100,000 rows written), leaving half for what is not counted. Thresholds can be
+// lowered (never raised past the allowance) with SV2_COLLECTOR_D1_READ_STOP / SV2_COLLECTOR_D1_WRITE_STOP. If usage
+// cannot be read, the collector does not run.
+const SV2_D1_DAILY_READS = 5000000;
+const SV2_D1_DAILY_WRITES = 100000;
+const SV2_D1_USAGE_MAX_AGE_MS = 2 * 3600000;   // hourly invocations each record; older than this means recording stopped
+function sv2CollectorD1Stops(env) {
+  const lim = (v, def, cap) => { const n = Number(v); return Number.isFinite(n) && n > 0 ? Math.min(n, cap) : def; };
+  return { reads: lim(env.SV2_COLLECTOR_D1_READ_STOP, 0.5 * SV2_D1_DAILY_READS, SV2_D1_DAILY_READS),
+    writes: lim(env.SV2_COLLECTOR_D1_WRITE_STOP, 0.5 * SV2_D1_DAILY_WRITES, SV2_D1_DAILY_WRITES) };
+}
+async function sv2CollectGuarded(env, nowTs, budgetFn, { requireFresh = true } = {}) {
+  if (String(env.SV2_COLLECTOR_ENABLED || '0') !== '1') return sv2CollectEvidence(env, { nowTs, queryBudget: budgetFn() });
+  if (budgetFn() < 1 + 2 + 3) return { ok: true, skipped: true, reason: 'D1 query headroom too small for the usage guard and one feed' };
+  const stops = sv2CollectorD1Stops(env);
+  // The guard is only as good as the recorded usage: with recording switched off it would read a stale, low total.
+  if (env.D1_USAGE_TABLE === '0') return { ok: false, skipped: true, auto_stop: 'usage_recording_off', reason: 'collector stopped: D1 usage recording is disabled (D1_USAGE_TABLE=0)' };
+  let used;
+  try {
+    // Today's totals, and the newest record of today or yesterday (every hourly invocation writes one), so a table that
+    // has stopped being updated is detected instead of trusted.
+    const today = new Date(nowTs).toISOString().slice(0, 10), yesterday = new Date(nowTs - 86400000).toISOString().slice(0, 10);
+    used = await env.DB.prepare('SELECT COALESCE(SUM(CASE WHEN day = ? THEN rows_read END), 0) AS r, COALESCE(SUM(CASE WHEN day = ? THEN rows_written END), 0) AS w, MAX(last_ts) AS t FROM d1_usage_daily WHERE day >= ? LIMIT 1')
+      .bind(today, today, yesterday).first();
+  } catch (err) {
+    console.error('sv2 collector usage guard: read failed:', String((err && err.message) || err));
+    return { ok: false, skipped: true, auto_stop: 'usage_unreadable', reason: 'collector stopped: daily D1 usage could not be read' };
+  }
+  const newest = used && used.t !== null && used.t !== undefined ? Number(used.t) : null;
+  // The hourly cron records every invocation, so a missing or old record means recording has stopped. Required on every
+  // path by default, including the owner run route on production. Only a Worker configured with
+  // SV2_USAGE_GUARD_REQUIRE_FRESH = "0" (the staging config: no Cron Trigger, so few records) skips this age check;
+  // the thresholds and the recording-off check always apply.
+  if (requireFresh && (newest === null || nowTs - newest > SV2_D1_USAGE_MAX_AGE_MS)) {
+    return { ok: false, skipped: true, auto_stop: 'usage_stale', reason: `collector stopped: newest D1 usage record is ${newest === null ? 'missing' : Math.round((nowTs - newest) / 60000) + ' min old'}` };
+  }
+  const live = env.__d1Usage || {};
+  const r = (Number(used && used.r) || 0) + (Number(live.rows_read) || 0), w = (Number(used && used.w) || 0) + (Number(live.rows_written) || 0);
+  if (r >= stops.reads || w >= stops.writes) {
+    const reason = `collector stopped: daily D1 usage ${r} rows read / ${w} written reached the stop (${stops.reads} / ${stops.writes})`;
+    console.warn('sv2 collector usage guard:', reason);
+    return { ok: true, skipped: true, auto_stop: 'd1_daily_budget', reason, d1_today: { rows_read: r, rows_written: w }, stops };
+  }
+  return sv2CollectEvidence(env, { nowTs, queryBudget: budgetFn() });
+}
 
 async function recordD1UsageDaily(env, usage, kind, key, now = Date.now()) {
   try {

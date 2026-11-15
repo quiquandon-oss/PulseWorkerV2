@@ -438,6 +438,14 @@ describe('status and evidence API health (production 2026-11-15: ok:true with ra
     expect(st).toMatchObject({ ok: true, health: 'degraded', errors: ['sv2_collection_runs: read failed'] });
     expect(sqlLeak(st)).toBe(false);
   });
+  it('a failed per-source evidence read is degraded too, reported once (Codex P2)', async () => {
+    const d1 = makeD1(DDL);
+    const b = d1.binding;
+    const failing = { ...b, prepare: (sql) => (/FROM sv2_evidence WHERE source_id/.test(sql) ? { bind() { return this; }, first: async () => { throw new Error('D1_ERROR: SQLITE_BUSY'); } } : b.prepare(sql)) };
+    const st = await S.getSentimentV2Status({ DB: failing }, NOW);
+    expect(st).toMatchObject({ ok: true, health: 'degraded', errors: ['sv2_evidence: read failed'] });
+    expect(sqlLeak(st)).toBe(false);
+  });
   it('failing collector sources are operational, not a schema or API fault', async () => {
     const d1 = makeD1(DDL);
     d1.db.prepare("INSERT INTO sv2_source_state (source_id, last_attempt_ts, last_status, last_error, consecutive_failures, ok_count, fail_count) VALUES ('decrypt', ?, 'HTTP_ERROR', 'HTTP 503', 3, 1, 3)").run(NOW - H);

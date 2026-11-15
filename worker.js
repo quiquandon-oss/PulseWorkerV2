@@ -13183,7 +13183,11 @@ async function getSentimentV2Status(env, nowTs) {
     if (canRead) {
       try {
         latest = await env.DB.prepare('SELECT retrieved_ts, published_ts FROM sv2_evidence WHERE source_id = ? ORDER BY retrieved_ts DESC LIMIT 1').bind(src.id).first();
-      } catch (_e) { latest = null; }
+      } catch (err) {
+        latest = null;
+        const e = sv2ReadError('sv2_evidence', err);              // reported once, however many sources fail
+        if (!out.errors.includes(e)) out.errors.push(e);
+      }
     }
     const attempts = st ? Number(st.ok_count) + Number(st.fail_count) : 0;
     const lastEvidenceTs = latest ? Number(latest.published_ts ?? latest.retrieved_ts) : null;

@@ -39,9 +39,9 @@ describe('sv2-staging-run.yml', () => {
     expect(code).toContain("NOT FRESH: every read was an edge-cached response from before this run");
     expect(code).not.toContain('GITHUB_RUN_NUMBER');
   });
-  it('offers only the V2 steps the Worker accepts; GLM probe is not offered', () => {
-    const opts = [...code.matchAll(/^\s+- ((?:sync|v2|collect)(?:,(?:sync|v2|collect))*)$/gm)].map((m) => m[1]);
-    expect(opts).toEqual(['collect', 'sync,v2', 'sync,v2,collect']);
-    expect(code).not.toContain('glm_probe');
+  it('offers only the steps the Worker accepts; the GLM probe runs alone and passes only on a validated ok answer', () => {
+    const opts = [...code.matchAll(/^\s+- ((?:sync|v2|collect|glm_probe)(?:,(?:sync|v2|collect))*)$/gm)].map((m) => m[1]);
+    expect(opts).toEqual(['collect', 'sync,v2', 'sync,v2,collect', 'glm_probe']);
+    expect(code).toContain("if res.get('status') != 'ok': bad.append('glm_probe: status=%s reason=%s'");
   });
 });

@@ -433,10 +433,10 @@ describe('AI: validation, quota, unavailability, zero paid fallback', () => {
     expect(body).not.toMatch(/openai|anthropic|generativelanguage|googleapis|huggingface|replicate|together|groq|api[_-]?key/i);
     expect((body.match(/env\.AI\.run\(/g) || []).length).toBe(1);
   });
-  it('ships in wrangler.toml with GLM named but a zero Neuron budget until staging verifies it', () => {
+  it('ships in wrangler.toml with GLM OFF twice over: an empty model id AND a zero Neuron budget', () => {
     const toml = readFileSync(join(dirname(fileURLToPath(import.meta.url)), '..', 'wrangler.toml'), 'utf8');
-    expect(toml).toMatch(/SENTIMENT_V2_AI_MODEL = "@cf\/zai-org\/glm-4\.7-flash"/);
-    expect(toml).toMatch(/SV2_GLM_DAILY_NEURONS = "0"/);
+    expect(toml).toMatch(/^SENTIMENT_V2_AI_MODEL = ""$/m);
+    expect(toml).toMatch(/^SV2_GLM_DAILY_NEURONS = "0"$/m);
   });
 });
 

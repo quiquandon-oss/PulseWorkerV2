@@ -28,9 +28,14 @@ SENTIMENT_V2_ENABLED = "1"
 SENTIMENT_V2_AI_MODEL = ""
 SV2_GLM_DAILY_NEURONS = "0"
 # Independent evidence collector (sentiment-v2/collector.js): "1" collects RSS/Atom/official feeds in the hourly
-# non-tick cron, within SV2_COLLECTOR_LIMITS. Off until migration 0029 is applied and staging has verified the sources.
-# SV2_SOURCES_DISABLED = "id,id" switches individual registry sources off without a deploy of code.
-SV2_COLLECTOR_ENABLED = "0"
+# non-tick cron, within SV2_COLLECTOR_LIMITS (3 sources, 8 subrequests, 768 KiB per run, the shared 50-query D1 budget)
+# and behind the daily D1 stop (sv2CollectGuarded: 2.5M rows read / 50k written, fail-closed on missing, stale or
+# disabled usage recording). Enabled 2026-11-15 after migration 0029 (applied) and staging verification (real feeds,
+# deduplication, provenance, 429/redirect handling, the daily stop observed in the deployed staging Worker).
+# "0" switches it off again. SV2_SOURCES_DISABLED = "id,id" switches individual registry sources off.
+SV2_COLLECTOR_ENABLED = "1"
+# Bitcoin Magazine's feed redirects to plain http://bitcoinmagazine.com/feed (refused: https only), seen on staging.
+SV2_SOURCES_DISABLED = "bitcoinmagazine"
 # Hourly copy of new V1 `history` readings into research_sentiment_archive before each V2 cycle (worker.js
 # syncV1ArchiveFromHistory). "0" stops the copy; the GitHub live-evidence-collection job still archives as before.
 V1_ARCHIVE_SYNC_ENABLED = "1"

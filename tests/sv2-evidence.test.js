@@ -655,7 +655,8 @@ describe('wiring', () => {
     expect(WORKER).toMatch(/'POST:\/api\/sentiment-v2\/run',/);
     const toml = readFileSync(join(ROOT, 'wrangler.toml'), 'utf8');
     expect(toml).toMatch(/crons = \["0 \* \* \* \*", "0 7 \* \* \*"\]/);
-    expect(toml).toMatch(/SV2_COLLECTOR_ENABLED = "0"/);
+    // Collector enabled 2026-11-15 behind the daily D1 stop; it still runs only inside the existing hourly cron.
+    expect(toml).toMatch(/^SV2_COLLECTOR_ENABLED = "1"$/m);
   });
   it('staging config targets only the staging Worker and database, with the AI binding', () => {
     const t = readFileSync(join(ROOT, 'wrangler.staging.toml'), 'utf8');

@@ -43,13 +43,17 @@ const STAGING = text('wrangler.staging.toml');
 const DEPLOY = text('.github/workflows/deploy.yml');
 const deployCode = noComments(DEPLOY);
 
-describe('production wrangler.toml: GLM and the collector are OFF', () => {
+describe('production wrangler.toml: GLM is OFF; the collector is ON behind its safety stop', () => {
   it('the GLM model id is EMPTY (not merely a zero budget)', () => {
     expect(kv(PROD, 'SENTIMENT_V2_AI_MODEL')).toBe('');
   });
-  it('the Neuron budget is "0" and the collector is "0"', () => {
+  it('the Neuron budget is "0"; the collector is "1" with Bitcoin Magazine disabled and no stop override', () => {
     expect(kv(PROD, 'SV2_GLM_DAILY_NEURONS')).toBe('0');
-    expect(kv(PROD, 'SV2_COLLECTOR_ENABLED')).toBe('0');
+    expect(kv(PROD, 'SV2_COLLECTOR_ENABLED')).toBe('1');
+    expect(kv(PROD, 'SV2_SOURCES_DISABLED')).toBe('bitcoinmagazine');
+    // The daily D1 stop runs at its defaults in production: no threshold override, no freshness opt-out, recording on.
+    const code = noComments(PROD);
+    expect(code).not.toMatch(/SV2_COLLECTOR_D1_(READ|WRITE)_STOP|SV2_USAGE_GUARD_REQUIRE_FRESH|D1_USAGE_TABLE/);
   });
   it('no GLM model name or other provider appears in any non-comment line, and no key or token is configured', () => {
     const code = noComments(PROD);
@@ -78,7 +82,8 @@ describe('production wrangler.toml: GLM and the collector are OFF', () => {
         SENTIMENT_V2_ENABLED: '1',
         SENTIMENT_V2_AI_MODEL: '',          // GLM off, part 1: no model id
         SV2_GLM_DAILY_NEURONS: '0',         // GLM off, part 2: no Neuron budget
-        SV2_COLLECTOR_ENABLED: '0',         // collector off
+        SV2_COLLECTOR_ENABLED: '1',         // collector on (2026-11-15), behind the daily D1 stop
+        SV2_SOURCES_DISABLED: 'bitcoinmagazine', // feed redirects to plain http
         V1_ARCHIVE_SYNC_ENABLED: '1',
       },
       d1_databases: [{ binding: 'DB', database_name: 'sentiment-history', database_id: 'f91ca980-b886-423a-bd6f-f3baea46d181' }],

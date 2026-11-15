@@ -526,11 +526,11 @@ describe('status and evidence API health (production 2026-11-15: ok:true with ra
 });
 
 describe('collector automatic stop on the daily D1 allowance', () => {
-  const G = evalInScope(extractConstants('SV2_D1_DAILY_READS', 'SV2_D1_DAILY_WRITES') + '\n' + extractFunctions('sv2CollectorD1Stops', 'sv2CollectGuarded'),
+  const G = evalInScope(extractConstants('SV2_D1_DAILY_READS', 'SV2_D1_DAILY_WRITES', 'SV2_D1_USAGE_MAX_AGE_MS') + '\n' + extractFunctions('sv2CollectorD1Stops', 'sv2CollectGuarded'),
     { sv2CollectEvidence: async (env, o) => ({ ok: true, ran: true, queryBudget: o.queryBudget }) });
   const USAGE = 'CREATE TABLE d1_usage_daily (day TEXT, kind TEXT, key TEXT, invocations INTEGER, statements INTEGER, rows_read INTEGER, rows_written INTEGER, max_rows_read INTEGER, last_ts INTEGER)';
   const day = new Date(NOW).toISOString().slice(0, 10);
-  const withUsage = (r, w) => { const d1 = makeD1([USAGE]); d1.db.prepare('INSERT INTO d1_usage_daily VALUES (?, ?, ?, 1, 1, ?, ?, 0, 0)').run(day, 'scheduled', '0 * * * *', r, w); return d1; };
+  const withUsage = (r, w, lastTs = NOW - 30 * 60000) => { const d1 = makeD1([USAGE]); d1.db.prepare('INSERT INTO d1_usage_daily VALUES (?, ?, ?, 1, 1, ?, ?, 0, ?)').run(day, 'scheduled', '0 * * * *', r, w, lastTs); return d1; };
   it('collects below 50% of the free daily allowance; stops at or above it, for reads or writes', async () => {
     expect(await G.sv2CollectGuarded({ DB: withUsage(1_082_269, 1_380).binding, SV2_COLLECTOR_ENABLED: '1' }, NOW, () => 40)).toMatchObject({ ran: true, queryBudget: 40 });
     const reads = await G.sv2CollectGuarded({ DB: withUsage(2_500_000, 10).binding, SV2_COLLECTOR_ENABLED: '1' }, NOW, () => 40);
@@ -548,6 +548,22 @@ describe('collector automatic stop on the daily D1 allowance', () => {
     expect(G.sv2CollectorD1Stops({ SV2_COLLECTOR_D1_READ_STOP: '1000000' }).reads).toBe(1_000_000);
     expect(G.sv2CollectorD1Stops({ SV2_COLLECTOR_D1_READ_STOP: '99000000', SV2_COLLECTOR_D1_WRITE_STOP: 'x' })).toEqual({ reads: 5_000_000, writes: 50_000 });
     expect(await G.sv2CollectGuarded({ DB: withUsage(1_000_000, 0).binding, SV2_COLLECTOR_ENABLED: '1', SV2_COLLECTOR_D1_READ_STOP: '900000' }, NOW, () => 40)).toMatchObject({ auto_stop: 'd1_daily_budget' });
+  });
+  it('fails closed when usage recording is off or the recorded usage is stale (Codex P2)', async () => {
+    expect(await G.sv2CollectGuarded({ DB: withUsage(10, 10).binding, SV2_COLLECTOR_ENABLED: '1', D1_USAGE_TABLE: '0' }, NOW, () => 40)).toMatchObject({ ok: false, auto_stop: 'usage_recording_off' });
+    const stale = await G.sv2CollectGuarded({ DB: withUsage(10, 10, NOW - 3 * 3600000).binding, SV2_COLLECTOR_ENABLED: '1' }, NOW, () => 40);
+    expect(stale).toMatchObject({ ok: false, auto_stop: 'usage_stale' });
+    expect(stale.reason).toMatch(/180 min old/);
+    expect(await G.sv2CollectGuarded({ DB: makeD1([USAGE]).binding, SV2_COLLECTOR_ENABLED: '1' }, NOW, () => 40)).toMatchObject({ auto_stop: 'usage_stale' });
+    // The owner run route (staging, no cron) skips only the age check; the thresholds and recording-off check still apply.
+    expect(await G.sv2CollectGuarded({ DB: makeD1([USAGE]).binding, SV2_COLLECTOR_ENABLED: '1' }, NOW, () => 40, { requireFresh: false })).toMatchObject({ ran: true });
+    expect(await G.sv2CollectGuarded({ DB: withUsage(2_600_000, 0, NOW - 9 * 3600000).binding, SV2_COLLECTOR_ENABLED: '1' }, NOW, () => 40, { requireFresh: false })).toMatchObject({ auto_stop: 'd1_daily_budget' });
+    expect(WORKER).toMatch(/sv2CollectGuarded\(renv, now, \(\) => SV2_D1_QUERIES_PER_INVOCATION - SV2_D1_QUERY_RESERVE - q\.n, \{ requireFresh: false \}\)/);
+    // Just after midnight: today has no rows yet, yesterday's last hourly record is recent, so collection proceeds.
+    const d1 = makeD1([USAGE]);
+    const midnight = Date.UTC(2026, 10, 16, 0, 0, 30);
+    d1.db.prepare('INSERT INTO d1_usage_daily VALUES (?, ?, ?, 1, 1, ?, ?, 0, ?)').run('2026-11-15', 'scheduled', '0 * * * *', 4_900_000, 0, midnight - 3600000);
+    expect(await G.sv2CollectGuarded({ DB: d1.binding, SV2_COLLECTOR_ENABLED: '1' }, midnight, () => 40)).toMatchObject({ ran: true });
   });
   it('costs no query when the collector is off, and needs headroom for the guard plus one feed', async () => {
     const d1 = withUsage(0, 0);

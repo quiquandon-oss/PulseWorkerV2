@@ -10888,7 +10888,7 @@ const pulseWorkerHandlers = {
         if (steps.includes('sync')) out.sync = await syncV1ArchiveFromHistory(renv, { nowTs: now,
           queryBudget: SV2_D1_QUERIES_PER_INVOCATION - SV2_D1_QUERY_RESERVE - SV2_CYCLE_QUERY_HEADROOM - q.n });
         if (steps.includes('v2')) out.v2 = await runSentimentV2Cycle(renv, { nowTs: now, queryBudget: SV2_D1_QUERIES_PER_INVOCATION - SV2_D1_QUERY_RESERVE - q.n });
-        if (steps.includes('collect')) out.collect = await sv2CollectGuarded(renv, now, () => SV2_D1_QUERIES_PER_INVOCATION - SV2_D1_QUERY_RESERVE - q.n);
+        if (steps.includes('collect')) out.collect = await sv2CollectGuarded(renv, now, () => SV2_D1_QUERIES_PER_INVOCATION - SV2_D1_QUERY_RESERVE - q.n, { requireFresh: false });
         if (steps.includes('glm_probe')) out.glm_probe = await sv2GlmProbe(renv, now);
         out.d1_queries = q.n;
       } catch (err) {
@@ -11803,22 +11803,34 @@ let d1UsageTableUnavailableUntil = 0;
 // cannot be read, the collector does not run.
 const SV2_D1_DAILY_READS = 5000000;
 const SV2_D1_DAILY_WRITES = 100000;
+const SV2_D1_USAGE_MAX_AGE_MS = 2 * 3600000;   // hourly invocations each record; older than this means recording stopped
 function sv2CollectorD1Stops(env) {
   const lim = (v, def, cap) => { const n = Number(v); return Number.isFinite(n) && n > 0 ? Math.min(n, cap) : def; };
   return { reads: lim(env.SV2_COLLECTOR_D1_READ_STOP, 0.5 * SV2_D1_DAILY_READS, SV2_D1_DAILY_READS),
     writes: lim(env.SV2_COLLECTOR_D1_WRITE_STOP, 0.5 * SV2_D1_DAILY_WRITES, SV2_D1_DAILY_WRITES) };
 }
-async function sv2CollectGuarded(env, nowTs, budgetFn) {
+async function sv2CollectGuarded(env, nowTs, budgetFn, { requireFresh = true } = {}) {
   if (String(env.SV2_COLLECTOR_ENABLED || '0') !== '1') return sv2CollectEvidence(env, { nowTs, queryBudget: budgetFn() });
   if (budgetFn() < 1 + 2 + 3) return { ok: true, skipped: true, reason: 'D1 query headroom too small for the usage guard and one feed' };
   const stops = sv2CollectorD1Stops(env);
+  // The guard is only as good as the recorded usage: with recording switched off it would read a stale, low total.
+  if (env.D1_USAGE_TABLE === '0') return { ok: false, skipped: true, auto_stop: 'usage_recording_off', reason: 'collector stopped: D1 usage recording is disabled (D1_USAGE_TABLE=0)' };
   let used;
   try {
-    used = await env.DB.prepare('SELECT COALESCE(SUM(rows_read), 0) AS r, COALESCE(SUM(rows_written), 0) AS w FROM d1_usage_daily WHERE day = ? LIMIT 1')
-      .bind(new Date(nowTs).toISOString().slice(0, 10)).first();
+    // Today's totals, and the newest record of today or yesterday (every hourly invocation writes one), so a table that
+    // has stopped being updated is detected instead of trusted.
+    const today = new Date(nowTs).toISOString().slice(0, 10), yesterday = new Date(nowTs - 86400000).toISOString().slice(0, 10);
+    used = await env.DB.prepare('SELECT COALESCE(SUM(CASE WHEN day = ? THEN rows_read END), 0) AS r, COALESCE(SUM(CASE WHEN day = ? THEN rows_written END), 0) AS w, MAX(last_ts) AS t FROM d1_usage_daily WHERE day >= ? LIMIT 1')
+      .bind(today, today, yesterday).first();
   } catch (err) {
     console.error('sv2 collector usage guard: read failed:', String((err && err.message) || err));
     return { ok: false, skipped: true, auto_stop: 'usage_unreadable', reason: 'collector stopped: daily D1 usage could not be read' };
+  }
+  const newest = used && used.t !== null && used.t !== undefined ? Number(used.t) : null;
+  // The hourly cron records every invocation, so there a missing or old record means recording has stopped. The owner
+  // run route (staging has no Cron Trigger and records only heavier requests) skips this age check, not the others.
+  if (requireFresh && (newest === null || nowTs - newest > SV2_D1_USAGE_MAX_AGE_MS)) {
+    return { ok: false, skipped: true, auto_stop: 'usage_stale', reason: `collector stopped: newest D1 usage record is ${newest === null ? 'missing' : Math.round((nowTs - newest) / 60000) + ' min old'}` };
   }
   const live = env.__d1Usage || {};
   const r = (Number(used && used.r) || 0) + (Number(live.rows_read) || 0), w = (Number(used && used.w) || 0) + (Number(live.rows_written) || 0);

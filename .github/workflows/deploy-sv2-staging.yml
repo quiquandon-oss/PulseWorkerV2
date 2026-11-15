@@ -64,6 +64,7 @@ jobs:
           set -euo pipefail
           git -c protocol.version=2 fetch -q --depth=1 "https://github.com/${GITHUB_REPOSITORY}.git" refs/heads/main
           git show "FETCH_HEAD:wrangler.staging.toml" > wrangler.staging.toml
+          git show "FETCH_HEAD:scripts/staging-migrations.mjs" > "$RUNNER_TEMP/staging-migrations.mjs"
           echo "using wrangler.staging.toml from origin/main $(git rev-parse FETCH_HEAD)"
 
       - name: Validate the staging config (parsed TOML, allowlisted keys only, staging targets only)
@@ -103,21 +104,17 @@ jobs:
           npm ci
           npm test
 
-      - name: Apply Sentiment V2 migrations to the STAGING database (additive; existing tables are left as they are)
+      # The runner is the copy from origin/main (fetched above), never the one in the deployed ref: it runs with the staging
+      # token. The SQL files come from the ref and must be additive. Ordering, the staging-only target check, the guard
+      # for the non-idempotent migration and the post-checks live in scripts/staging-migrations.mjs (tested). Any problem
+      # fails this step, so the Worker is not deployed against a half-migrated database.
+      - name: Apply the migrations to the STAGING database (0015, 0023, 0026, 0027 and, with the evidence collector, 0029)
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.STAGE7_STAGING_CLOUDFLARE_API_TOKEN }}
         run: |
           set -euo pipefail
-          for f in 0015_experiment5_sentiment_archive.sql 0027_sentiment_v2_results.sql 0029_sv2_evidence_and_ai_budget.sql; do
-            [ -f ".ai/migrations/$f" ] || { echo "skip $f (not in this ref)"; continue; }
-            if out=$(npx --yes wrangler@4 d1 execute pulseworker-v2-staging --remote -c wrangler.staging.toml --file ".ai/migrations/$f" 2>&1); then
-              echo "applied $f"
-            elif echo "$out" | grep -qi 'already exists'; then
-              echo "kept $f (its tables already exist)"
-            else
-              echo "$out"; echo "::error::migration $f failed on staging"; exit 1
-            fi
-          done
+          node "$RUNNER_TEMP/staging-migrations.mjs" plan
+          node "$RUNNER_TEMP/staging-migrations.mjs" apply
 
       - name: Deploy to the staging Worker
         env:

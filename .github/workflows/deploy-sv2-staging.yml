@@ -28,21 +28,24 @@ jobs:
     # branch's copy). GitHub enforces it instead: the staging secrets live in the protected Environment "sv2-staging",
     # whose deployment-branch policy allows only main. Owner setup (Settings -> Environments -> sv2-staging):
     #   1. Deployment branches and tags: Selected -> main only.
-    #   2. Environment secrets: STAGE7_STAGING_CLOUDFLARE_API_TOKEN, STAGE7_STAGING_ADMIN_TOKEN.
-    #   3. Remove the repository-level copies of those two secrets (any branch's workflow can read repository secrets).
+    #   2. Environment secrets: STAGE7_STAGING_CLOUDFLARE_API_TOKEN, STAGE7_STAGING_ADMIN_TOKEN, EVENT_SEC_USER_AGENT
+    #      (a SECRET, so Actions masks it; a variable is printed in the log's env header). Delete the old
+    #      EVENT_SEC_USER_AGENT *variable*.
+    #   3. Remove the repository-level copies of those secrets (any branch's workflow can read repository secrets).
     environment: sv2-staging
     steps:
       - name: Verify the staging-only secrets are configured
         env:
           STAGING_TOKEN: ${{ secrets.STAGE7_STAGING_CLOUDFLARE_API_TOKEN }}
           STAGING_ADMIN: ${{ secrets.STAGE7_STAGING_ADMIN_TOKEN }}
-          SEC_UA: ${{ vars.EVENT_SEC_USER_AGENT }}
+          SEC_UA: ${{ secrets.EVENT_SEC_USER_AGENT }}
         run: |
           if [ -z "$STAGING_TOKEN" ]; then echo "::error::STAGE7_STAGING_CLOUDFLARE_API_TOKEN missing; refusing (never falls back to the production token)"; exit 1; fi
           if [ -z "$STAGING_ADMIN" ]; then echo "::error::STAGE7_STAGING_ADMIN_TOKEN missing"; exit 1; fi
-          # SEC EDGAR requires a contact User-Agent; the SEC adapter reports not_configured without it. The value is an
-          # environment VARIABLE of sv2-staging (not a secret) and is never printed here.
-          if [ -z "$SEC_UA" ]; then echo "::error::EVENT_SEC_USER_AGENT variable missing in the sv2-staging environment"; exit 1; fi
+          # SEC EDGAR requires a contact User-Agent (it contains a contact address); the SEC adapter reports not_configured
+          # without it. It is an environment SECRET of sv2-staging so Actions masks it. A plain variable is printed in the
+          # `env:` header of every step that uses it (run 43695682270), so never use `vars.` for it.
+          if [ -z "$SEC_UA" ]; then echo "::error::EVENT_SEC_USER_AGENT secret missing in the sv2-staging environment"; exit 1; fi
 
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683   # v4.2.2
         with:
@@ -119,12 +122,19 @@ jobs:
       - name: Deploy to the staging Worker
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.STAGE7_STAGING_CLOUDFLARE_API_TOKEN }}
-          EVENT_SEC_USER_AGENT: ${{ vars.EVENT_SEC_USER_AGENT }}
-        # EVENT_SEC_USER_AGENT reaches the Worker runtime as env.EVENT_SEC_USER_AGENT (read by events/adapters/sec-edgar.js).
-        run: npx --yes wrangler@4 deploy -c wrangler.staging.toml --var GIT_COMMIT_SHA:$(git rev-parse HEAD) --var "EVENT_SEC_USER_AGENT:${EVENT_SEC_USER_AGENT}"
+        run: npx --yes wrangler@4 deploy -c wrangler.staging.toml --var GIT_COMMIT_SHA:$(git rev-parse HEAD)
 
       - name: Set the staging admin token
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.STAGE7_STAGING_CLOUDFLARE_API_TOKEN }}
           ADMIN: ${{ secrets.STAGE7_STAGING_ADMIN_TOKEN }}
         run: printf '%s' "$ADMIN" | npx --yes wrangler@4 secret put STAGE7_ADMIN_TOKEN -c wrangler.staging.toml
+
+      # The SEC User-Agent becomes a Worker SECRET (env.EVENT_SEC_USER_AGENT, read by events/adapters/sec-edgar.js), set
+      # through stdin like the admin token: never a command-line argument, never a plain Worker variable, never echoed.
+      # It runs after the deploy, which no longer sets a variable of that name.
+      - name: Set the staging SEC User-Agent
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.STAGE7_STAGING_CLOUDFLARE_API_TOKEN }}
+          SEC_UA: ${{ secrets.EVENT_SEC_USER_AGENT }}
+        run: printf '%s' "$SEC_UA" | npx --yes wrangler@4 secret put EVENT_SEC_USER_AGENT -c wrangler.staging.toml

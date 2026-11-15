@@ -8,12 +8,14 @@ import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { extractFunctions, extractConstants, evalInScope } from './helpers/extract.js';
 import { makeD1 } from './replay/d1-sqlite.mjs';
+import { SV2_SOURCE_REGISTRY } from '../sentiment-v2/collector.js';
+import { sv2EvidenceReadings, sv2ScoreHeadline, SV2_EVIDENCE_RULES } from '../sentiment-v2/evidence-score.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(__dirname, '..');
 const WORKER = readFileSync(join(ROOT, 'worker.js'), 'utf8');
 const ARCHIVE_DDL = readFileSync(join(ROOT, '.ai/migrations/0015_experiment5_sentiment_archive.sql'), 'utf8');
-const V2_DDL = readFileSync(join(ROOT, '.ai/migrations/0027_sentiment_v2_results.sql'), 'utf8');
+const V2_DDL = readFileSync(join(ROOT, '.ai/migrations/0027_sentiment_v2_results.sql'), 'utf8') + '\n' + readFileSync(join(ROOT, '.ai/migrations/0029_sv2_evidence_and_ai_budget.sql'), 'utf8');
 // V1's `history` table as PulseWorker creates it (columns this code reads, plus btc_price which it must not copy).
 const HISTORY_DDL = `CREATE TABLE history (id INTEGER PRIMARY KEY AUTOINCREMENT, ts INTEGER NOT NULL, score INTEGER NOT NULL,
   sources_json TEXT, technical_score INTEGER, gold_regime TEXT, btc_price REAL, regime_mag REAL, bottom_score REAL);
@@ -24,13 +26,16 @@ const EVENTS_DDL = `CREATE TABLE event_ledger (event_id TEXT, dedup_key TEXT, co
 
 const SYNC = ['v1ArchivePyJson', 'v1ArchiveContentHash', 'v1ArchiveInvalidReason', 'syncV1ArchiveFromHistory'];
 const SYNC_CONSTS = ['V1_ARCHIVE_SYNC_WINDOW_MS', 'V1_ARCHIVE_SYNC_MAX_ROWS', 'V1_ARCHIVE_WRITTEN_BY', 'V1_ARCHIVE_SOURCE_WEIGHTS_VERSION',
-  'V1_ARCHIVE_SCHEMA_VERSION', 'V1_ARCHIVE_FUTURE_SKEW_MS', 'V1_ARCHIVE_INSERT_SQL'];
+  'V1_ARCHIVE_SCHEMA_VERSION', 'V1_ARCHIVE_FUTURE_SKEW_MS', 'V1_ARCHIVE_INSERT_SQL', 'V1_ARCHIVE_FALLBACK_MAX_ROWS'];
 const V2 = ['sv2Config', 'sv2Finite', 'sv2ParseSources', 'sv2History', 'sv2AttachPrices', 'sv2IndexAtOrBefore', 'sv2PriceAt',
   'sv2SourceStatus', 'sv2Pearson', 'sv2FamilyOf', 'sv2Redundancy', 'sv2Families', 'sv2EventFamily', 'sv2EventReactions',
   'sv2Events', 'sv2Regime', 'sv2Profile', 'sv2Analogues', 'sv2Classify', 'sv2Compute', 'sv2AiPackage',
-  'sv2ValidateAiOutput', 'sv2RunAi', 'sv2Row', 'runSentimentV2Cycle', 'sv2AlignSeries', 'sv2SeriesStatus', 'getSentimentV2Comparison'];
-const V2_CONSTS = ['SENTIMENT_V2_VERSION', 'SV2_INSERT_SQL', 'SV2_PERIODS_MS', 'SV2_MAX_POINTS', 'SV2_MAX_ROWS', 'SV2_MAX_PRICE_ROWS', 'SV2_STALE_MS'];
-const S = evalInScope(extractConstants(...SYNC_CONSTS, ...V2_CONSTS) + '\n' + extractFunctions(...SYNC, ...V2));
+  'sv2ValidateAiOutput', 'sv2RunAi', 'sv2Row', 'runSentimentV2Cycle', 'sv2AlignSeries', 'sv2SeriesStatus', 'getSentimentV2Comparison',
+  'sv2EvidenceSummary', 'sv2EvidenceItemsForAi', 'sv2AiBudget', 'sv2AiEstimateNeurons', 'sv2UngroundedNumbers', 'sv2LatestView'];
+const V2_CONSTS = ['SENTIMENT_V2_VERSION', 'SV2_VERSIONS_SHOWN', 'SV2_INSERT_SQL', 'SV2_PERIODS_MS', 'SV2_MAX_POINTS', 'SV2_MAX_ROWS', 'SV2_MAX_PRICE_ROWS', 'SV2_STALE_MS',
+  'SV2_AI_PRICING', 'SV2_AI_MAX_OUTPUT_TOKENS', 'SV2_AI_RESERVE_SQL', 'SV2_AI_TEMPLATE_TOKENS', 'SV2_CYCLE_QUERIES_FIXED', 'SV2_CYCLE_QUERIES_PER_READING'];
+const S = evalInScope(extractConstants(...SYNC_CONSTS, ...V2_CONSTS) + '\n' + extractFunctions(...SYNC, ...V2),
+  { SV2_SOURCE_REGISTRY, sv2EvidenceReadings, sv2ScoreHeadline, SV2_EVIDENCE_RULES });
 
 const H = 3600000;
 const NOW = Date.UTC(2026, 10, 14, 20, 0, 0);
@@ -38,8 +43,9 @@ const KEYS = ['fng', 'cryptonews', 'foufi', 'funding', 'longshort', 'hypefunding
   'gold', 'nasdaq', 'sp500', 'ninemag', 'regulatory', 'geopolitics', 'strc'];
 const sources = (i) => JSON.stringify(Object.fromEntries(KEYS.map((k, j) => [k, Math.round((50 + 20 * Math.sin(i / (4 + j) + j)) * 100) / 100])));
 
-function setup({ history = [], archive = [] } = {}) {
-  const d1 = makeD1([HISTORY_DDL, ARCHIVE_DDL, V2_DDL, EVENTS_DDL]);
+function setup({ history = [], archive = [], without0029 = false } = {}) {
+  const v2ddl = without0029 ? readFileSync(join(ROOT, '.ai/migrations/0027_sentiment_v2_results.sql'), 'utf8') : V2_DDL;
+  const d1 = makeD1([HISTORY_DDL, ARCHIVE_DDL, v2ddl, EVENTS_DDL]);
   for (const r of history) {
     d1.db.prepare('INSERT INTO history (ts, score, sources_json, technical_score, gold_regime, btc_price) VALUES (?, ?, ?, ?, ?, ?)')
       .run(r.ts, r.score, r.sources_json ?? null, r.technical_score ?? null, r.gold_regime ?? null, r.btc_price ?? 70000);
@@ -87,6 +93,50 @@ describe('row format: identical to the Python Experiment 5 job', () => {
 });
 
 describe('successful collection, idempotency and the regression itself', () => {
+  it('V2 spends only the D1 budget it is given: defers the cycle or the newest readings, then catches up (Codex P2)', async () => {
+    const history = []; const archive = [];
+    const t0 = NOW - 100 * H;
+    for (let i = 0; i < 40; i++) archive.push({ observation_ts: t0 + i * 2 * H, score: 40, sources_json: sources(i) });
+    const d1 = setup({ history, archive });
+    await S.runSentimentV2Cycle(env(d1), { nowTs: t0 + 36 * 2 * H });      // first cycle: newest only (36)
+    let q = 0;
+    const b = d1.binding;
+    const counted = { ...b, prepare: (sql) => { const st = b.prepare(sql); const w = (o) => ({ ...o, bind: (...a) => w(o.bind(...a)),
+      all: (...x) => { q++; return o.all(...x); }, first: (...x) => { q++; return o.first(...x); }, run: (...x) => { q++; return o.run(...x); } }); return w(st); } };
+    const none = await S.runSentimentV2Cycle({ DB: counted, SENTIMENT_V2_ENABLED: '1' }, { nowTs: NOW, queryBudget: S.SV2_CYCLE_QUERIES_FIXED + S.SV2_CYCLE_QUERIES_PER_READING - 1 });
+    expect(none).toMatchObject({ ok: true, skipped: true, deferred_d1_budget: true });
+    expect(q).toBe(0);                                                       // not a single query spent
+    const budget = S.SV2_CYCLE_QUERIES_FIXED + S.SV2_CYCLE_QUERIES_PER_READING;
+    const one = await S.runSentimentV2Cycle({ DB: counted, SENTIMENT_V2_ENABLED: '1' }, { nowTs: NOW, queryBudget: budget });
+    expect(one.written).toBe(1);
+    expect(q).toBeLessThanOrEqual(budget);
+    const at = (k) => t0 + k * 2 * H;
+    expect(one.decisions[0].decision_ts).toBe(at(37));                       // oldest pending first
+    expect(one.deferred_readings).toEqual([at(38), at(39)]);
+    const rest = await S.runSentimentV2Cycle(env(d1), { nowTs: NOW });       // ample budget: the deferred ones follow
+    expect(rest.decisions.map(d => d.decision_ts)).toEqual([at(38), at(39)]);
+    expect(rest.deferred_readings).toBeUndefined();
+  });
+  it('collector off and migration 0029 not applied: V2 reads no evidence and its decisions are not degraded (Codex P2)', async () => {
+    const archive = [];
+    const t0 = NOW - 100 * H;
+    for (let i = 0; i < 40; i++) archive.push({ observation_ts: t0 + i * 2 * H, score: 40, sources_json: sources(i) });
+    const pre = setup({ archive, without0029: true });
+    const off = await S.runSentimentV2Cycle(env(pre), { nowTs: NOW });
+    expect(off.written).toBe(1);
+    const row = pre.db.prepare('SELECT status, degraded_reason, family_json FROM sentiment_v2_results').get();
+    expect(row.degraded_reason ?? null).not.toBe('evidence_unavailable');
+    expect(JSON.parse(row.family_json).evidence_status).toBe('collector_disabled');
+    const on = setup({ archive, without0029: true });                                            // misconfigured: visible
+    const r = await S.runSentimentV2Cycle(env(on, { SV2_COLLECTOR_ENABLED: '1' }), { nowTs: NOW });
+    expect(r.written).toBe(1);
+    const row2 = on.db.prepare('SELECT status, degraded_reason, family_json FROM sentiment_v2_results').get();
+    expect(JSON.parse(row2.family_json).evidence_status).toBe('unavailable');
+    expect(row2.degraded_reason === 'evidence_unavailable' || row2.status !== 'OK').toBe(true);
+  });
+  it('the cron and owner-run V2 calls pass the shared remaining D1 budget', () => {
+    expect(WORKER.match(/runSentimentV2Cycle\((env|renv), \{ nowTs: [^}]*queryBudget: SV2_D1_QUERIES_PER_INVOCATION - SV2_D1_QUERY_RESERVE - (sv2Q|q)\.n \}\)/g)).toHaveLength(2);
+  });
   it('a reading in history but not in the archive reaches V2 in the same cron chain (the 2026-11-14 gap)', async () => {
     const t1123 = NOW - 9 * H + 23 * 60000, t1830 = NOW - 2 * H + 30 * 60000;
     const history = []; const archive = [];
@@ -124,6 +174,42 @@ describe('successful collection, idempotency and the regression itself', () => {
     const rows = archiveRows(d1);
     expect(rows.length).toBe(2);
     expect(rows[0]).toMatchObject({ content_hash: 'from-python', archived_ts: 7, written_by: 'experiment5-pipeline' });
+  });
+  it('copies all readings in one D1 batch (one query against the per-invocation limit) (Codex P2)', async () => {
+    const d1 = setup({ history: Array.from({ length: 6 }, (_, i) => ({ ts: NOW - (i + 1) * H, score: 30 + i, sources_json: '{}' })) });
+    let top = 0, inBatch = false;
+    const b = d1.binding;
+    const counted = { ...b, prepare: (sql) => { const st = b.prepare(sql); const w = (o) => ({ ...o, bind: (...a) => w(o.bind(...a)),
+      all: (...x) => { if (!inBatch) top++; return o.all(...x); }, first: (...x) => { if (!inBatch) top++; return o.first(...x); },
+      run: (...x) => { if (!inBatch) top++; return o.run(...x); } }); return w(st); },
+      batch: async (s) => { top++; inBatch = true; try { return await b.batch(s); } finally { inBatch = false; } } };
+    const r = await S.syncV1ArchiveFromHistory({ DB: counted }, { nowTs: NOW });
+    expect(r.copied).toBe(6);
+    expect(top).toBe(3);                       // history read, archive read, one batch
+  });
+  it('a failed batch retries row by row only within the remaining D1 query budget; the rest are deferred (Codex P2)', async () => {
+    const d1 = setup({ history: Array.from({ length: 20 }, (_, i) => ({ ts: NOW - (i + 1) * H, score: 30 + i, sources_json: '{}' })) });
+    let runs = 0;
+    const b = d1.binding;
+    const failing = { ...b, batch: async () => { throw new Error('batch rejected'); },
+      prepare: (sql) => { const st = b.prepare(sql); const w = (o) => ({ ...o, bind: (...a) => w(o.bind(...a)),
+        run: (...x) => { runs++; return o.run(...x); } }); return w(st); } };
+    const tight = await S.syncV1ArchiveFromHistory({ DB: failing }, { nowTs: NOW, queryBudget: 5 });
+    expect(runs).toBe(2);                      // budget 5 - (2 reads + 1 failed batch)
+    expect(tight).toMatchObject({ ok: false, copied: 2, deferred: 18 });
+    expect(tight.errors.join(' ')).toMatch(/deferred/);
+    runs = 0;
+    const roomy = await S.syncV1ArchiveFromHistory({ DB: failing }, { nowTs: NOW, queryBudget: 1000 });
+    expect(runs).toBe(S.V1_ARCHIVE_FALLBACK_MAX_ROWS);   // hard cap even with headroom
+    expect(roomy.copied).toBe(S.V1_ARCHIVE_FALLBACK_MAX_ROWS);
+    runs = 0;
+    const none = await S.syncV1ArchiveFromHistory({ DB: failing }, { nowTs: NOW, queryBudget: 2 });
+    expect(runs).toBe(0);
+    expect(none.deferred).toBe(13);
+    expect(archiveRows(d1).length).toBe(7);    // deferred rows stay in history for a later run; nothing invented
+  });
+  it('the cron and owner-run calls pass a budget that keeps the V2 cycle headroom', () => {
+    expect(WORKER.match(/syncV1ArchiveFromHistory\((env|renv), \{ nowTs: [^}]*queryBudget: SV2_D1_QUERIES_PER_INVOCATION - SV2_D1_QUERY_RESERVE - SV2_CYCLE_QUERY_HEADROOM - (sv2Q|q)\.n \}\)/g)).toHaveLength(2);
   });
   it('a row archived concurrently by the GitHub job is counted as already present, never duplicated', async () => {
     const d1 = setup({ history: [{ ts: NOW - H, score: 30, sources_json: '{}' }] });

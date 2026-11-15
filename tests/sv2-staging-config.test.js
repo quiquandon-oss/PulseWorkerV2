@@ -20,13 +20,21 @@ describe('wrangler.staging.toml', () => {
     expect(body).not.toContain('sentiment-history');
     expect(body).not.toMatch(/^name = "pulseworker-v2"$/m);
   });
-  it('keeps GLM disabled: empty model and a zero daily call ceiling', () => {
+  it('keeps GLM disabled two ways: empty model AND a zero daily Neuron budget (either alone disables it in worker.js)', () => {
     expect(kv('SENTIMENT_V2_AI_MODEL')).toBe('');
-    expect(kv('SENTIMENT_V2_AI_DAILY_CALLS')).toBe('0');
-    expect(lines.join('\n')).not.toMatch(/glm/i);
+    expect(kv('SV2_GLM_DAILY_NEURONS')).toBe('0');
+    expect(lines.join('\n')).not.toMatch(/glm-|zai-org/i);
+    const worker = readFileSync(join(root, 'worker.js'), 'utf8');
+    expect(worker).toContain("if (!model || budget === 0) return { status: 'disabled'");
+  });
+  it('runs the free independent evidence collector in staging and sets no paid-provider setting', () => {
+    expect(kv('SV2_COLLECTOR_ENABLED')).toBe('1');
+    expect(lines.join('\n')).not.toMatch(/API_KEY|TOKEN|SECRET|OPENAI|ANTHROPIC|SERPAPI|BRAVE|TAVILY|BING/i);
   });
   it('sets no variable the Worker does not read, and no build, trigger or route keys', () => {
-    expect(lines.join('\n')).not.toMatch(/SV2_GLM_DAILY_NEURONS|SV2_COLLECTOR_ENABLED/);
+    const worker = readFileSync(join(root, 'worker.js'), 'utf8') + readFileSync(join(root, 'sentiment-v2', 'collector.js'), 'utf8');
+    const vars = [...lines.join('\n').matchAll(/^([A-Z][A-Z0-9_]+)\s*=\s*"/gm)].map((m) => m[1]).filter((k) => k !== 'GIT_COMMIT_SHA');
+    for (const k of vars) expect(worker, `${k} is set in staging but read by no code`).toContain(`env.${k}`);
     expect(lines.join('\n')).not.toMatch(/^\[(build|triggers|env|\[routes\])|^(routes?|triggers|build)\s*=/m);
   });
   it('leaves the shared 50-subrequest budget in the event runner as is', () => {

@@ -5,7 +5,7 @@
 import { readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 
-export const SOURCES = ['worker.js', 'events', 'learning'];
+export const SOURCES = ['worker.js', 'events', 'learning', 'sentiment-v2'];
 
 export function readSources(root) {
   const out = [];

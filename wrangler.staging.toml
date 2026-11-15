@@ -35,14 +35,16 @@ binding = "AI"
 
 [vars]
 GIT_COMMIT_SHA = "staging"
-# Sentiment V2 staging verification. The V2 cycle is enabled; the Workers AI (GLM) annotation stays DISABLED until the
-# account's free daily allocation has been independently verified and a later reviewed change sets a model and a daily
-# call ceiling. worker.js sv2RunAi only calls the AI binding when SENTIMENT_V2_AI_MODEL is non-empty AND
-# SENTIMENT_V2_AI_DAILY_CALLS is above 0; both are explicit here so the disabled state does not depend on defaults.
-# The free 10,000 Neurons/day are shared with production and V1.
+# Sentiment V2 staging verification. The V2 cycle and the independent evidence collector (RSS/Atom/official feeds only,
+# bounded per run; no paid provider) are enabled. The Workers AI (GLM) annotation stays DISABLED until the account's free
+# daily allocation has been independently verified and a later, separately approved change sets a model and a Neuron
+# budget. worker.js sv2RunAi calls the AI binding only when SENTIMENT_V2_AI_MODEL is non-empty AND SV2_GLM_DAILY_NEURONS
+# is above 0; both are explicit here so the disabled state does not depend on defaults. The free 10,000 Neurons/day are
+# shared with production and V1.
 SENTIMENT_V2_ENABLED = "1"
+SV2_COLLECTOR_ENABLED = "1"
 SENTIMENT_V2_AI_MODEL = ""
-SENTIMENT_V2_AI_DAILY_CALLS = "0"
+SV2_GLM_DAILY_NEURONS = "0"
 
 # The ONLY D1 binding in this file -- a brand-new, empty database created
 # specifically for this staging deployment. Binding name "DB" matches

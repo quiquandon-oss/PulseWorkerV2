@@ -11,6 +11,7 @@ on:
     # here, or this fix doesn't fix anything.
     paths:
       - 'worker.js'
+      - 'sentiment-v2/**'          # modules imported by worker.js (Sentiment V2 evidence collector and scorer)
       - 'wrangler.toml'
       - 'package.json'
       - 'package-lock.json'

@@ -473,6 +473,7 @@ describe('AI: validation, quota, unavailability, zero paid fallback', () => {
     expect(fig('9007199254740993')).toBe(true);
     expect(fig(JSON.parse('9007199254740993'))).toBe(false);
     expect(fig('9007199254740992')).toBe(false);
+    expect(readFileSync(new URL('../worker.js', import.meta.url), 'utf8')).toMatch(/figures \(array of \{id, value\}, value a string holding one number copied exactly from the title/);
   });
   it('the evidence package carries each item\'s source, published and retrieved time, and the hash covers exactly what is sent', async () => {
     const rr = { ...r, evidence_items: [

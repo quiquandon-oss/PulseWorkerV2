@@ -53,10 +53,49 @@ export function assertStagingConfig(tomlText) {
   }
 }
 
-// Strips SQL comments; returns the statements.
+// A quote-aware SQL tokenizer (SQLite lexical rules): 'strings' and "identifiers" with doubled-quote escapes, `identifiers`,
+// [identifiers], -- line comments and /* block comments */. Returns tokens { t: 'word' | 'string' | 'quoted' | 'punct' |
+// 'space' | 'comment', v }. An unterminated string, identifier or comment THROWS: the file is never partly understood.
+export function tokenize(sql) {
+  const toks = [];
+  let i = 0;
+  const n = sql.length;
+  const quoted = (open, close, type) => {
+    let j = i + 1;
+    for (;;) {
+      if (j >= n) throw new Error(`unterminated ${type} starting at offset ${i}`);
+      if (sql[j] === close) { if (close !== ']' && sql[j + 1] === close) { j += 2; continue; } break; }
+      j += 1;
+    }
+    toks.push({ t: type === 'string' ? 'string' : 'quoted', v: sql.slice(i, j + 1) });
+    i = j + 1;
+  };
+  while (i < n) {
+    const c = sql[i];
+    if (/\s/.test(c)) { let j = i; while (j < n && /\s/.test(sql[j])) j += 1; toks.push({ t: 'space', v: sql.slice(i, j) }); i = j; }
+    else if (c === '-' && sql[i + 1] === '-') { let j = sql.indexOf('\n', i); if (j < 0) j = n; toks.push({ t: 'comment', v: sql.slice(i, j) }); i = j; }
+    else if (c === '/' && sql[i + 1] === '*') { const j = sql.indexOf('*/', i + 2); if (j < 0) throw new Error(`unterminated comment starting at offset ${i}`); toks.push({ t: 'comment', v: sql.slice(i, j + 2) }); i = j + 2; }
+    else if (c === "'") quoted("'", "'", 'string');
+    else if (c === '"') quoted('"', '"', 'identifier');
+    else if (c === '`') quoted('`', '`', 'identifier');
+    else if (c === '[') quoted('[', ']', 'identifier');
+    else if (/[A-Za-z0-9_$\u0080-￿]/.test(c)) { let j = i; while (j < n && /[A-Za-z0-9_$.\u0080-￿]/.test(sql[j])) j += 1; toks.push({ t: 'word', v: sql.slice(i, j) }); i = j; }
+    else { toks.push({ t: 'punct', v: c }); i += 1; }
+  }
+  return toks;
+}
+
+// The statements of a file, split on ';' OUTSIDE strings, identifiers and comments; comments become one space and
+// string contents are kept exactly. Throws on an unterminated quote or comment.
 export function statements(sql) {
-  const noComments = sql.replace(/--[^\n]*/g, '').replace(/\/\*[\s\S]*?\*\//g, '');
-  return noComments.split(';').map((s) => s.trim()).filter(Boolean);
+  const out = [];
+  let cur = '';
+  for (const tok of tokenize(sql)) {
+    if (tok.t === 'punct' && tok.v === ';') { out.push(cur); cur = ''; continue; }
+    cur += tok.t === 'comment' ? ' ' : tok.v;
+  }
+  out.push(cur);
+  return out.map((s) => s.trim()).filter(Boolean);
 }
 
 const ADDITIVE = [
@@ -64,12 +103,24 @@ const ADDITIVE = [
   /^CREATE\s+TABLE\s+(IF\s+NOT\s+EXISTS\s+)?[\w"`]+\s*\(/i,
   /^ALTER\s+TABLE\s+[\w"`]+\s+ADD\s+COLUMN\s+/i,
 ];
-// Canonical form of a CREATE statement for comparison: comments, IF NOT EXISTS (SQLite does not store it), case and
-// whitespace around punctuation are ignored; everything that defines the object (columns, types, constraints, index
-// columns, uniqueness) is compared.
+// Canonical form of a CREATE statement for comparison. Ignored: comments, whitespace, IF NOT EXISTS (SQLite does not store
+// it) and the case of keywords and unquoted names. Compared exactly: string literals (case-sensitive), quoted identifiers,
+// and everything that defines the object (columns, types, constraints, defaults, index columns, uniqueness).
 export function normalizeSql(sql) {
-  const one = statements(sql)[0] || '';
-  return one.replace(/\bIF\s+NOT\s+EXISTS\b/i, '').replace(/\s+/g, ' ').replace(/\s*([(),])\s*/g, '$1').trim().toLowerCase();
+  const toks = tokenize(sql).filter((x) => x.t !== 'space' && x.t !== 'comment');
+  const end = toks.findIndex((x) => x.t === 'punct' && x.v === ';');
+  const one = end < 0 ? toks : toks.slice(0, end);
+  const words = one.map((x) => (x.t === 'word' ? { ...x, v: x.v.toLowerCase() } : x));
+  for (let k = 0; k + 2 < words.length; k += 1) {
+    if (words[k].t === 'word' && words[k].v === 'if' && words[k + 1].v === 'not' && words[k + 2].v === 'exists') { words.splice(k, 3); break; }
+  }
+  let out = '';
+  words.forEach((x, k) => {
+    const tight = (v) => v === '(' || v === ')' || v === ',';
+    if (k > 0 && !(x.t === 'punct' && tight(x.v)) && !(words[k - 1].t === 'punct' && tight(words[k - 1].v))) out += ' ';
+    out += x.v;
+  });
+  return out;
 }
 
 // Throws unless every statement is additive. Returns the objects the SQL creates and their canonical definitions:

@@ -5,7 +5,7 @@ import { describe, it, expect } from 'vitest';
 import { readFileSync, existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
-import { STAGING, PRODUCTION, PLAN, assertStagingConfig, assertAdditive, statements, resolvePlan, applyMigrations } from '../scripts/staging-migrations.mjs';
+import { STAGING, PRODUCTION, PLAN, assertStagingConfig, assertAdditive, statements, normalizeSql, tokenize, resolvePlan, applyMigrations } from '../scripts/staging-migrations.mjs';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 const real = (p) => readFileSync(join(root, p), 'utf8');
@@ -161,6 +161,73 @@ describe('SQL must be additive', () => {
     'ALTER TABLE history RENAME TO h2', 'PRAGMA writable_schema = 1', 'ATTACH DATABASE "x" AS y', 'CREATE TABLE a (x); DROP TABLE a', 'CREATE TRIGGER t AFTER INSERT ON a BEGIN DELETE FROM a; END']) {
     it(`rejects: ${sql}`, () => expect(() => assertAdditive('x.sql', sql)).toThrow(/not an additive statement/));
   }
+  describe('quote-aware SQL handling (Codex): nothing can hide inside a string, identifier or comment', () => {
+    const rejects = (sql, re = /not an additive statement|unterminated/) => expect(() => assertAdditive('x.sql', sql)).toThrow(re);
+    it('a `--` inside a string literal does not swallow the DROP that follows', () => {
+      rejects(`CREATE TABLE safe (value TEXT DEFAULT '--'); DROP TABLE history;`);
+      rejects(`CREATE TABLE safe (value TEXT DEFAULT '--');\nDROP TABLE history;`);
+    });
+    it('a `/*` inside a string literal does not open a comment over a later DROP', () => {
+      rejects(`CREATE TABLE safe (value TEXT DEFAULT '/*'); DROP TABLE history; -- */`);
+    });
+    it('a `--` or `;` inside a quoted identifier does not hide or split anything', () => {
+      rejects(`CREATE TABLE "a--b;c" (x TEXT); DROP TABLE history;`);
+      rejects('CREATE TABLE `a--b` (x TEXT); DELETE FROM history;');
+      rejects('CREATE TABLE [a--b] (x TEXT); UPDATE history SET x = 1;');
+    });
+    it('a `;` inside a string literal does not split the statement (and a harmless one is accepted)', () => {
+      expect(statements(`CREATE TABLE a (v TEXT DEFAULT ';x');`)).toEqual([`CREATE TABLE a (v TEXT DEFAULT ';x')`]);
+      expect(() => assertAdditive('x.sql', `CREATE TABLE a (v TEXT DEFAULT ';--/*');`)).not.toThrow();
+    });
+    it('doubled quotes are escapes: a statement cannot end early inside \'it\'\'s;\'', () => {
+      expect(statements(`CREATE TABLE a (v TEXT DEFAULT 'it''s;'); DROP TABLE h`)).toHaveLength(2);
+      rejects(`CREATE TABLE a (v TEXT DEFAULT 'it''s;'); DROP TABLE h`);
+    });
+    it('an unterminated string, identifier or block comment is an error, never partly read', () => {
+      for (const sql of [`CREATE TABLE a (v TEXT DEFAULT 'oops); DROP TABLE h;`, 'CREATE TABLE "a (x); DROP TABLE h;', 'CREATE TABLE a (x); /* DROP TABLE h;']) {
+        expect(() => tokenize(sql), sql).toThrow(/unterminated/);
+        rejects(sql);
+      }
+    });
+    it('a trailing line comment and a block comment between statements are fine', () => {
+      expect(() => assertAdditive('x.sql', 'CREATE TABLE a (x INTEGER); -- done\n/* more */ CREATE INDEX i ON a (x);')).not.toThrow();
+    });
+    it('the executed text and the validated text are the same statements: every real migration tokenizes with no leftovers', () => {
+      for (const m of PLAN) {
+        const p = join(root, MIG, m.file);
+        if (!existsSync(p)) continue;
+        const sql = readFileSync(p, 'utf8');
+        expect(tokenize(sql).map((t) => t.v).join(''), m.file).toBe(sql);             // lossless
+        expect(statements(sql).length, m.file).toBeGreaterThan(0);
+      }
+    });
+  });
+
+  describe('canonical form compares what defines the object', () => {
+    it('is case-sensitive for string literals and quoted identifiers', () => {
+      expect(normalizeSql(`CREATE TABLE a (v TEXT DEFAULT 'A')`)).not.toBe(normalizeSql(`CREATE TABLE a (v TEXT DEFAULT 'a')`));
+      expect(normalizeSql('CREATE TABLE a ("V" TEXT)')).not.toBe(normalizeSql('CREATE TABLE a ("v" TEXT)'));
+      expect(normalizeSql(`CREATE TABLE a (v TEXT CHECK (v IN ('OK','FAILED')))`)).not.toBe(normalizeSql(`CREATE TABLE a (v TEXT CHECK (v IN ('ok','failed')))`));
+    });
+    it('ignores keyword case, whitespace, comments and IF NOT EXISTS', () => {
+      const a = normalizeSql(`CREATE TABLE IF NOT EXISTS Foo (\n  id INTEGER PRIMARY KEY, -- note\n  Name TEXT NOT NULL DEFAULT 'x y'\n)`);
+      const b = normalizeSql(`create table foo(id integer primary key,name text not null default 'x y')`);
+      expect(a).toBe(b);
+    });
+    it('still distinguishes different columns, types, constraints and index columns', () => {
+      const base = normalizeSql('CREATE TABLE a (id INTEGER PRIMARY KEY, n TEXT NOT NULL)');
+      for (const other of ['CREATE TABLE a (id INTEGER PRIMARY KEY, m TEXT NOT NULL)', 'CREATE TABLE a (id INTEGER PRIMARY KEY, n INTEGER NOT NULL)', 'CREATE TABLE a (id INTEGER PRIMARY KEY, n TEXT)', 'CREATE TABLE a (id INTEGER, n TEXT NOT NULL)']) expect(normalizeSql(other)).not.toBe(base);
+      expect(normalizeSql('CREATE INDEX i ON a (x)')).not.toBe(normalizeSql('CREATE UNIQUE INDEX i ON a (x)'));
+      expect(normalizeSql('CREATE INDEX i ON a (x)')).not.toBe(normalizeSql('CREATE INDEX i ON a (y)'));
+    });
+    it('a table whose only difference is a case-sensitive default literal is reported as drift', () => {
+      const h = harness({ overrides: { [`${MIG}/0026_d1_usage_daily.sql`]: "CREATE TABLE IF NOT EXISTS d1_usage_daily (day TEXT NOT NULL DEFAULT 'A');" } });
+      h.tables.set('table:d1_usage_daily', "CREATE TABLE d1_usage_daily (day TEXT NOT NULL DEFAULT 'a')");
+      expect(() => h.run()).toThrow(/table d1_usage_daily.*schema drift/);
+      expect(executed(h.calls)).toEqual([]);
+    });
+  });
+
   it('ignores comments (a commented DROP is not a statement)', () => {
     expect(statements('-- DROP TABLE x;\nCREATE TABLE a (x); /* DELETE FROM a */')).toEqual(['CREATE TABLE a (x)']);
   });

@@ -28,6 +28,15 @@ describe('sv2-staging-run.yml', () => {
     expect(code).not.toMatch(/(echo|printf)[^\n]*\$\{?STAGING_ADMIN\b/);
     expect(code).not.toMatch(/set -x/);
   });
+  it('fails the job when a requested step failed or was skipped, not only on a non-200 (Codex P2)', () => {
+    expect(code).toContain("elif res.get('ok') is not True: bad.append");
+    expect(code).toContain("elif res.get('skipped'): bad.append");
+    expect(code).toMatch(/if bad:[\s\S]*sys\.exit\(1\)/);
+  });
+  it('reads evidence with a per-run cache key so it cannot show pre-run evidence (Codex P2)', () => {
+    expect(code).toContain('LIMIT=$(( 51 + GITHUB_RUN_NUMBER % 50 ))');
+    expect(code).toContain('/api/sentiment-v2/evidence?hours=24&limit=${LIMIT}');
+  });
   it('offers only the V2 steps the Worker accepts; GLM probe is not offered', () => {
     const opts = [...code.matchAll(/^\s+- ((?:sync|v2|collect)(?:,(?:sync|v2|collect))*)$/gm)].map((m) => m[1]);
     expect(opts).toEqual(['collect', 'sync,v2', 'sync,v2,collect']);

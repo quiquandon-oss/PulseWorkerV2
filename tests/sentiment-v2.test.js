@@ -437,6 +437,10 @@ describe('AI: validation, quota, unavailability, zero paid fallback', () => {
     const v2 = (figures) => S.sv2ValidateAiOutput({ ...base, entities: [], figures }, ids, t2);
     expect(v2([{ id: 'evidence:e2', value: 1500 }, { id: 'evidence:e2', value: '1,500' }]).ok).toBe(true);
     expect(v2([{ id: 'evidence:e2', value: 15000 }]).ok).toBe(false);
+    // ...and its parts are not separate values: 500 and 1 are not grounded by "1,500" (Codex P2).
+    expect(v2([{ id: 'evidence:e2', value: '500' }]).ok).toBe(false);
+    expect(v2([{ id: 'evidence:e2', value: '1' }]).ok).toBe(false);
+    expect(S.sv2UngroundedNumbers(['500', '1'], 'outflows of 1,500 BTC')).toEqual(['500', '1']);
     expect(S.sv2UngroundedNumbers(['Outflows of 1,500 BTC', 'outflows of 1500 BTC'], JSON.stringify({ title: t2['evidence:e2'] }))).toEqual([]);
     // A figure is one numeric literal: no units or ranges riding along with a grounded number (Codex P2).
     expect(v([], [{ id: 'evidence:e1', value: '150 BTC' }]).ok).toBe(false);

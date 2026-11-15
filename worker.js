@@ -12728,9 +12728,13 @@ function sv2UngroundedNumbers(texts, pkgText) {
     .replace(/(?:US)?[$€£¥]\s?-(?=\d)/g, '-');
   // Package side: every plain value, plus every comma-grouped value read whole (a title's "1,500" grounds 1500 and "1,500";
   // Codex P2). The plain pass is kept so nothing that was grounded before stops being grounded.
+  // A grouped value is read whole and then blanked out, so its parts ("1" and "500" of "1,500") never count as separate
+  // values (Codex P2); every remaining plain value is read as before.
   const src = signs(pkgText);
-  const have = new Set([...src.matchAll(/(?<![\w.])-?\d+(?:\.\d+)?(?![\d.])/g), ...src.matchAll(/(?<![\w.,])-?\d{1,3}(?:,\d{3})+(?:\.\d+)?(?![\d.,])/g)]
-    .map(m => norm(m[0])).filter(Boolean));
+  const GROUPED = /(?<![\w.,])-?\d{1,3}(?:,\d{3})+(?:\.\d+)?(?![\d.,])/g;
+  const grouped = [...src.matchAll(GROUPED)].map(m => m[0]);
+  const plain = [...src.replace(GROUPED, ' ').matchAll(/(?<![\w.])-?\d+(?:\.\d+)?(?![\d.])/g)].map(m => m[0]);
+  const have = new Set([...grouped, ...plain].map(norm).filter(Boolean));
   const bad = [];
   for (const t of texts) {
     for (const m of signs(t).matchAll(/(?<![\w.,])-?\d{1,3}(?:,\d{3})+(?:\.\d+)?(?![\d.,])|(?<![\w.,])-?\d+(?:\.\d+)?(?![\d.])|(?<=\w)\d+(?:\.\d+)?(?![\d.])/g)) {

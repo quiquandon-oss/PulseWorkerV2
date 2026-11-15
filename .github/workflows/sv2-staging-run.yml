@@ -49,10 +49,17 @@ jobs:
           sleep 2
           # /status is edge-cached for up to 5 min; run.json above is the authoritative result of this run.
           curl -sS -o status.json "$BASE/api/sentiment-v2/status"
-          # The evidence route is edge-cached for 5 min per (hours, limit). A limit derived from the run number gives this
-          # read its own cache key (51..100; the panel uses 12), so it cannot return evidence from before this run.
-          LIMIT=$(( 51 + GITHUB_RUN_NUMBER % 50 ))
-          curl -sS -o evidence.json "$BASE/api/sentiment-v2/evidence?hours=24&limit=${LIMIT}"
+          # The evidence route is edge-cached for 5 min per (hours, limit), and the run does not invalidate it. Accept an
+          # evidence response only if it was generated after this run (generated_at >= run.json ran_at): try up to 10
+          # cache keys (limit 51..100, the panel uses 12) and say so plainly if none is fresh.
+          RAN_AT=$(python3 -c "import json;print(json.load(open('run.json')).get('ran_at') or 0)")
+          EVIDENCE_FRESH=0
+          for i in $(seq 0 9); do
+            LIMIT=$(( 51 + ( $(date +%s) + i * 7 ) % 50 ))
+            curl -sS -o evidence.json "$BASE/api/sentiment-v2/evidence?hours=24&limit=${LIMIT}"
+            if python3 -c "import json,sys;sys.exit(0 if (json.load(open('evidence.json')).get('generated_at') or 0) >= $RAN_AT else 1)"; then EVIDENCE_FRESH=1; break; fi
+          done
+          export EVIDENCE_FRESH
           python3 - <<'PY'
           import json
           s = json.load(open('status.json'))
@@ -63,7 +70,10 @@ jobs:
           for r in s.get('runs', [])[:5]:
               print('  run %s seen=%s new=%s dup=%s subrequests=%s bytes=%s errors=%s' % (r['run_ts'], r['items_seen'], r['items_new'], r['items_duplicate'], r['subrequests'], r['bytes'], r['errors']))
           e = json.load(open('evidence.json'))
-          print('EVIDENCE ok=%s available=%s items=%d' % (e.get('ok'), e.get('available'), len(e.get('items', []))))
+          import os
+          fresh = os.environ.get('EVIDENCE_FRESH') == '1'
+          print('EVIDENCE (%s) ok=%s available=%s items=%d' % ('generated after this run' if fresh else 'NOT FRESH: every read was an edge-cached response from before this run',
+                e.get('ok'), e.get('available'), len(e.get('items', []))))
           for it in e.get('items', [])[:25]:
               print('  [%s] %+d/%d %s' % (it['source_id'], it.get('lexicon_score', 0), it.get('lexicon_hits', 0), it['title'][:110]))
           PY

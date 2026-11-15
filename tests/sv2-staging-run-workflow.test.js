@@ -33,9 +33,11 @@ describe('sv2-staging-run.yml', () => {
     expect(code).toContain("elif res.get('skipped'): bad.append");
     expect(code).toMatch(/if bad:[\s\S]*sys\.exit\(1\)/);
   });
-  it('reads evidence with a per-run cache key so it cannot show pre-run evidence (Codex P2)', () => {
-    expect(code).toContain('LIMIT=$(( 51 + GITHUB_RUN_NUMBER % 50 ))');
+  it('accepts evidence only if generated after this run, otherwise labels it not fresh (Codex P2 x2)', () => {
     expect(code).toContain('/api/sentiment-v2/evidence?hours=24&limit=${LIMIT}');
+    expect(code).toMatch(/get\('generated_at'\) or 0\) >= \$RAN_AT/);
+    expect(code).toContain("NOT FRESH: every read was an edge-cached response from before this run");
+    expect(code).not.toContain('GITHUB_RUN_NUMBER');
   });
   it('offers only the V2 steps the Worker accepts; GLM probe is not offered', () => {
     const opts = [...code.matchAll(/^\s+- ((?:sync|v2|collect)(?:,(?:sync|v2|collect))*)$/gm)].map((m) => m[1]);

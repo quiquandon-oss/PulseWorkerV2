@@ -65,6 +65,16 @@ describe('deploy-sv2-staging workflow', () => {
     expect(step('Deploy to the staging Worker').raw).not.toMatch(/SEC_UA|EVENT_SEC_USER_AGENT/);
   });
 
+  it('binds credentials only as step-level env entries: no workflow- or job-level env, no `with:` inputs, no other use', () => {
+    const head = code.slice(0, code.indexOf('    steps:\n'));
+    expect(head, 'workflow/job level').not.toMatch(/secrets\./);
+    expect(head, 'workflow/job level').not.toMatch(/^\s*env:/m);
+    const usesLines = code.split('\n').filter((l) => /secrets\./.test(l));
+    expect(usesLines.length).toBeGreaterThan(0);
+    for (const l of usesLines) expect(l, l).toMatch(/^ {10}[A-Z0-9_]+: \$\{\{ secrets\.[A-Z0-9_]+ \}\}$/);   // an `env:` entry of a step, nothing else
+    for (const st of all) expect(st.raw, st.name).not.toMatch(/^ {8}with:[\s\S]*secrets\./m);
+  });
+
   it('sets the User-Agent as a Worker secret through stdin, never as a --var or argument', () => {
     const s = step('Set the staging SEC User-Agent');
     expect(s.run).toContain(`printf '%s' "$SEC_UA" | npx --yes wrangler@4 secret put EVENT_SEC_USER_AGENT -c wrangler.staging.toml`);

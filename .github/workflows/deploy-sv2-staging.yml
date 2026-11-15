@@ -28,8 +28,10 @@ jobs:
     # branch's copy). GitHub enforces it instead: the staging secrets live in the protected Environment "sv2-staging",
     # whose deployment-branch policy allows only main. Owner setup (Settings -> Environments -> sv2-staging):
     #   1. Deployment branches and tags: Selected -> main only.
-    #   2. Environment secrets: STAGE7_STAGING_CLOUDFLARE_API_TOKEN, STAGE7_STAGING_ADMIN_TOKEN.
-    #   3. Remove the repository-level copies of those two secrets (any branch's workflow can read repository secrets).
+    #   2. Environment secrets: STAGE7_STAGING_CLOUDFLARE_API_TOKEN, STAGE7_STAGING_ADMIN_TOKEN, EVENT_SEC_USER_AGENT
+    #      (a SECRET, so Actions masks it; a variable is printed in the log's env header). Delete the old
+    #      EVENT_SEC_USER_AGENT *variable*.
+    #   3. Remove the repository-level copies of those secrets (any branch's workflow can read repository secrets).
     environment: sv2-staging
     steps:
       - name: Verify the staging-only secrets are configured

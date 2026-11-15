@@ -64,15 +64,24 @@ const ADDITIVE = [
   /^CREATE\s+TABLE\s+(IF\s+NOT\s+EXISTS\s+)?[\w"`]+\s*\(/i,
   /^ALTER\s+TABLE\s+[\w"`]+\s+ADD\s+COLUMN\s+/i,
 ];
-// Throws unless every statement is additive. Returns the objects the SQL creates: [{ type: 'table' | 'index', name }].
+// Canonical form of a CREATE statement for comparison: comments, IF NOT EXISTS (SQLite does not store it), case and
+// whitespace around punctuation are ignored; everything that defines the object (columns, types, constraints, index
+// columns, uniqueness) is compared.
+export function normalizeSql(sql) {
+  const one = statements(sql)[0] || '';
+  return one.replace(/\bIF\s+NOT\s+EXISTS\b/i, '').replace(/\s+/g, ' ').replace(/\s*([(),])\s*/g, '$1').trim().toLowerCase();
+}
+
+// Throws unless every statement is additive. Returns the objects the SQL creates and their canonical definitions:
+// [{ type: 'table' | 'index', name, sql }].
 export function assertAdditive(file, sql) {
   const objects = [];
   for (const st of statements(sql)) {
     if (!ADDITIVE.some((re) => re.test(st))) throw new Error(`${file}: not an additive statement: ${st.slice(0, 60).replace(/\s+/g, ' ')}`);
     const t = st.match(/^CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?[`"]?(\w+)/i);
-    if (t) objects.push({ type: 'table', name: t[1] });
+    if (t) objects.push({ type: 'table', name: t[1], sql: normalizeSql(st) });
     const i = st.match(/^CREATE\s+(?:UNIQUE\s+)?INDEX\s+(?:IF\s+NOT\s+EXISTS\s+)?[`"]?(\w+)/i);
-    if (i) objects.push({ type: 'index', name: i[1] });
+    if (i) objects.push({ type: 'index', name: i[1], sql: normalizeSql(st) });
   }
   return objects;
 }
@@ -135,15 +144,34 @@ export function applyMigrations({ dir = '.ai/migrations', config = 'wrangler.sta
   log.push(`target verified: ${STAGING.database_name} ${STAGING.database_id}`);
 
   const query = (sql) => parseJson(run(['d1', 'execute', STAGING.database_name, '--remote', ...base, '--json', '--command', sql]), 'd1 query');
-  const objectExists = (o) => allStrings(query(`SELECT name FROM sqlite_master WHERE type='${o.type}' AND name='${o.name}'`)).includes(o.name);
+  // One query returns the stored definition of every object the plan creates (names are \w+ only, from the SQL files).
+  const rowsOf = (json) => (Array.isArray(json) ? json : [json]).flatMap((r) => (r && Array.isArray(r.results) ? r.results : []));
+  const snapshot = () => {
+    const names = [...new Set(expected.map((o) => `'${o.name}'`))].join(',');
+    const have = new Map();
+    for (const r of rowsOf(query(`SELECT type, name, sql FROM sqlite_master WHERE type IN ('table','index') AND name IN (${names})`))) {
+      have.set(`${r.type}:${r.name}`, normalizeSql(String(r.sql || '')));
+    }
+    return have;
+  };
+  // 'absent', 'match' or 'drift' (exists with a different definition than the reviewed migration).
+  const state = (have, o) => (!have.has(`${o.type}:${o.name}`) ? 'absent' : have.get(`${o.type}:${o.name}`) === o.sql ? 'match' : 'drift');
+  const assertNoDrift = (have, when) => {
+    const drift = expected.filter((o) => state(have, o) === 'drift').map((o) => `${o.type} ${o.name}`);
+    if (drift.length) throw new Error(`${when}: ${drift.join(', ')} exist on staging with a definition that differs from the reviewed migration (schema drift). Refusing to continue or deploy; repair the staging database by hand, then rerun.`);
+  };
+
+  // Before anything runs: an existing object whose definition differs would be silently left alone by CREATE ... IF NOT EXISTS.
+  const before = snapshot();
+  assertNoDrift(before, 'before the migrations');
 
   for (const m of plan) {
     if (m.guardTable) {
       // Not idempotent (no IF NOT EXISTS): decide from the database state, for EVERY object the file creates. A partial
       // state (for example the table without an index after an interrupted run) is never treated as done.
       const objects = objectsOf.get(m.file);
-      const present = objects.filter(objectExists);
-      if (present.length === objects.length) { log.push(`kept ${m.file} (all ${objects.length} objects exist)`); continue; }
+      const present = objects.filter((o) => state(before, o) === 'match');
+      if (present.length === objects.length) { log.push(`kept ${m.file} (all ${objects.length} objects exist with the reviewed definition)`); continue; }
       if (present.length > 0) {
         const missing = objects.filter((o) => !present.includes(o)).map((o) => `${o.type} ${o.name}`).join(', ');
         throw new Error(`${m.file} is partially applied on staging (missing: ${missing}). Refusing to continue or deploy; repair the staging database by hand, then rerun.`);
@@ -153,8 +181,10 @@ export function applyMigrations({ dir = '.ai/migrations', config = 'wrangler.sta
     log.push(`applied ${m.file}`);
   }
 
-  for (const o of expected) if (!objectExists(o)) throw new Error(`expected ${o.type} ${o.name} does not exist after the migrations`);
-  log.push(`verified ${expected.length} tables and indexes`);
+  const after = snapshot();
+  assertNoDrift(after, 'after the migrations');
+  for (const o of expected) if (state(after, o) !== 'match') throw new Error(`expected ${o.type} ${o.name} does not exist after the migrations`);
+  log.push(`verified ${expected.length} tables and indexes against the reviewed definitions`);
   return log;
 }
 

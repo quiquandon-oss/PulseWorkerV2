@@ -29,7 +29,31 @@ function harness({ collector = false, overrides = {}, failOn = null, infoJson = 
   for (const [k, v] of Object.entries(overrides)) { if (v === null) files.delete(k); else files.set(k, v); }
 
   const calls = [];
-  const tables = new Set();
+  // A fake sqlite_master: "type:name" -> the stored CREATE text. SQLite keeps the statement text as written (inline
+  // comments included) but drops IF NOT EXISTS; the fake does the same, so the comparison is realistic.
+  const tables = new Map();
+  const stored = (chunk) => chunk.slice(chunk.search(/CREATE\s+(UNIQUE\s+)?(TABLE|INDEX)\b/i)).trim().replace(/^(CREATE\s+(?:UNIQUE\s+)?(?:TABLE|INDEX))\s+IF\s+NOT\s+EXISTS/i, '$1');
+  // Splits on ';' outside `-- comments`, keeping the comments in each statement's text, as SQLite stores them.
+  const splitKeepingComments = (sql) => {
+    const out = []; let cur = ''; let inComment = false;
+    for (const ch of sql) {
+      if (inComment) { cur += ch; if (ch === '\n') inComment = false; continue; }
+      if (ch === '-' && cur.endsWith('-')) inComment = true;
+      if (ch === ';') { out.push(cur); cur = ''; continue; }
+      cur += ch;
+    }
+    out.push(cur);
+    return out;
+  };
+  const applyFile = (file) => {
+    const sql = files.get(file) || '';
+    for (const chunk of splitKeepingComments(sql)) {
+      const t = chunk.replace(/--[^\n]*/g, '').match(/CREATE\s+(UNIQUE\s+)?(TABLE|INDEX)\s+(?:IF\s+NOT\s+EXISTS\s+)?(\w+)/i);
+      if (!t || createsNothing === t[3]) continue;
+      const key = `${t[2].toLowerCase()}:${t[3]}`;
+      if (!tables.has(key)) tables.set(key, stored(chunk));          // CREATE ... IF NOT EXISTS leaves an existing object as it is
+    }
+  };
   const wrangler = (args) => {
     calls.push(args);
     const sub = args.slice(0, 2).join(' ');
@@ -41,18 +65,18 @@ function harness({ collector = false, overrides = {}, failOn = null, infoJson = 
       const cmd = ci >= 0 ? args[ci + 1] : '';
       if (file) {
         if (failOn && file.endsWith(failOn)) throw new Error('simulated D1 failure');
-        const sql = files.get(file) || '';
-        for (const t of sql.matchAll(/CREATE TABLE(?: IF NOT EXISTS)?\s+(\w+)/gi)) if (createsNothing !== t[1]) tables.add(`table:${t[1]}`);
-        for (const t of sql.matchAll(/CREATE (?:UNIQUE )?INDEX(?: IF NOT EXISTS)?\s+(\w+)/gi)) if (createsNothing !== t[1]) tables.add(`index:${t[1]}`);
+        applyFile(file);
         return '[]';
       }
-      const m = cmd.match(/type='(\w+)' AND name='(\w+)'/);
-      return JSON.stringify([{ results: m && tables.has(`${m[1]}:${m[2]}`) ? [{ name: m[2] }] : [] }]);
+      const names = new Set([...cmd.matchAll(/'(\w+)'/g)].map((m) => m[1]));
+      const results = [...tables].map(([k, sql]) => ({ type: k.split(':')[0], name: k.split(':')[1], sql })).filter((r) => names.has(r.name));
+      return JSON.stringify([{ results, success: true }]);
     }
     throw new Error(`unexpected wrangler command: ${sub}`);
   };
   const run = () => applyMigrations({ readText: (p) => { if (!files.has(p)) throw new Error(`ENOENT ${p}`); return files.get(p); }, exists: (p) => files.has(p), wrangler });
-  return { run, calls, tables, files };
+  const apply = (name) => applyFile(`${MIG}/${name}`);
+  return { run, calls, tables, files, apply };
 }
 const executed = (calls) => calls.filter((a) => a[1] === 'execute' && a.includes('--file')).map((a) => a[a.indexOf('--file') + 1].split('/').pop());
 
@@ -114,7 +138,7 @@ describe('target: staging only, production rejected', () => {
   });
   it('every command targets the staging database with the staging config, never the production id', () => {
     const h = harness({ collector: true }); h.run();
-    expect(h.calls.length).toBeGreaterThan(8);
+    expect(h.calls.length).toBeGreaterThanOrEqual(8);   // d1 info + two schema snapshots + five migration files
     for (const a of h.calls) {
       expect(a.slice(0, 2)).toSatisfy((s) => s[0] === 'd1');
       expect(a[2]).toBe(STAGING.database_name);
@@ -172,17 +196,54 @@ describe('fail closed and idempotent', () => {
   it('runs the non-idempotent 0015 only when NONE of its objects exist, decided by queries rather than an error message', () => {
     const h = harness(); h.run();
     expect(executed(h.calls)).toContain('0015_experiment5_sentiment_archive.sql');
-    const again = harness(); ALL_0015.forEach((k) => again.tables.add(k)); const log = again.run();
+    const again = harness(); again.apply('0015_experiment5_sentiment_archive.sql'); const log = again.run();
     expect(executed(again.calls)).not.toContain('0015_experiment5_sentiment_archive.sql');
     expect(log.some((l) => l.startsWith('kept 0015'))).toBe(true);
   });
-  for (const [name, present] of [['the table without its indexes', ALL_0015.slice(0, 1)], ['the table with one index', ALL_0015.slice(0, 2)], ['an index without the table', ALL_0015.slice(1, 2)]]) {
+  for (const [name, drop] of [['the table without its indexes', ALL_0015.slice(1)], ['the table with one index', ALL_0015.slice(2)], ['an index without the table', [ALL_0015[0], ALL_0015[2]]]]) {
     it(`treats a partially applied 0015 (${name}) as a failure: nothing is executed and nothing deploys`, () => {
-      const h = harness(); present.forEach((k) => h.tables.add(k));
+      const h = harness(); h.apply('0015_experiment5_sentiment_archive.sql'); drop.forEach((k) => h.tables.delete(k));
       expect(() => h.run()).toThrow(/0015_experiment5_sentiment_archive\.sql is partially applied on staging \(missing: .+\)/);
       expect(executed(h.calls)).toEqual([]);
     });
   }
+  describe('schema drift: an existing object with a different definition is never accepted', () => {
+    const drifted = (key, from, to, applyFirst) => {
+      const h = harness(); applyFirst.forEach((f) => h.apply(f));
+      h.tables.set(key, h.tables.get(key).replace(from, to));
+      return h;
+    };
+    it('0015 table missing a column is rejected before anything is executed', () => {
+      const h = drifted('table:research_sentiment_archive', 'observation_ts', 'obs_ts', ['0015_experiment5_sentiment_archive.sql']);
+      expect(() => h.run()).toThrow(/differs from the reviewed migration \(schema drift\)/);
+      expect(executed(h.calls)).toEqual([]);
+    });
+    it('an index on different columns is rejected', () => {
+      const real0015 = real(`${MIG}/0015_experiment5_sentiment_archive.sql`);
+      expect(real0015).toMatch(/idx_research_sentiment_archive_archived_ts/);
+      const h = harness(); h.apply('0015_experiment5_sentiment_archive.sql');
+      h.tables.set('index:idx_research_sentiment_archive_archived_ts', 'CREATE INDEX idx_research_sentiment_archive_archived_ts ON research_sentiment_archive(score)');
+      expect(() => h.run()).toThrow(/idx_research_sentiment_archive_archived_ts.*schema drift/);
+      expect(executed(h.calls)).toEqual([]);
+    });
+    it('an IF NOT EXISTS table that already exists with different columns is caught (the SQL would silently leave it alone)', () => {
+      const h = harness(); h.apply('0023_event_detection.sql');
+      const k = 'table:event_ledger';
+      h.tables.set(k, h.tables.get(k).replace(/event_id/i, 'evt_id'));
+      expect(() => h.run()).toThrow(/table event_ledger.*schema drift/);
+      expect(executed(h.calls)).toEqual([]);
+    });
+    it('is still accepted when only whitespace, comments, case or IF NOT EXISTS differ', () => {
+      const h = harness(); h.apply('0023_event_detection.sql');
+      for (const [k, v] of [...h.tables]) h.tables.set(k, `-- stored with a comment\n${v.replace(/\s+/g, '  ').replace(/CREATE TABLE/i, 'create table')}`);
+      expect(() => h.run()).not.toThrow();
+    });
+    it('a second run on a correctly migrated database passes and applies nothing non-idempotent', () => {
+      const h = harness({ collector: true }); h.run(); h.calls.length = 0;
+      expect(() => h.run()).not.toThrow();
+      expect(executed(h.calls)).not.toContain('0015_experiment5_sentiment_archive.sql');
+    });
+  });
   it('is safe to run twice: the second run re-applies only IF NOT EXISTS migrations', () => {
     const h = harness({ collector: true });
     h.run();

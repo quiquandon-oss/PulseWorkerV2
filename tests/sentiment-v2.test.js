@@ -12,11 +12,11 @@ import { sv2EvidenceReadings, sv2ScoreHeadline, SV2_EVIDENCE_RULES } from '../se
 const FUNCS = ['sv2Config', 'sv2Finite', 'sv2ParseSources', 'sv2History', 'sv2AttachPrices', 'sv2IndexAtOrBefore', 'sv2PriceAt',
   'sv2SourceStatus', 'sv2Pearson', 'sv2FamilyOf', 'sv2Redundancy', 'sv2Families', 'sv2EventFamily', 'sv2EventReactions',
   'sv2Events', 'sv2Regime', 'sv2Profile', 'sv2Analogues', 'sv2Classify', 'sv2Compute', 'sv2AiPackage',
-  'sv2ValidateAiOutput', 'sv2RunAi', 'sv2Row', 'runSentimentV2Cycle', 'sv2AlignSeries', 'sv2SeriesStatus',
+  'sv2ValidateAiOutput', 'sv2RunAi', 'sv2HexSha256', 'sv2Row', 'runSentimentV2Cycle', 'sv2AlignSeries', 'sv2SeriesStatus',
   'getSentimentV2Comparison', 'getSentimentV2ComparisonCached', 'sv2EvidenceSummary', 'sv2EvidenceItemsForAi', 'sv2AiBudget',
   'sv2AiEstimateNeurons', 'sv2UngroundedNumbers', 'sv2LatestView'];
 const CONSTS = ['SENTIMENT_V2_VERSION', 'SV2_VERSIONS_SHOWN', 'SV2_INSERT_SQL', 'SV2_PERIODS_MS', 'SV2_MAX_POINTS', 'SV2_MAX_ROWS', 'SV2_MAX_PRICE_ROWS', 'SV2_STALE_MS', 'sv2ComparisonCache',
-  'SV2_AI_PRICING', 'SV2_AI_MAX_OUTPUT_TOKENS', 'SV2_AI_RESERVE_SQL', 'SV2_AI_TEMPLATE_TOKENS', 'SV2_CYCLE_QUERIES_FIXED', 'SV2_CYCLE_QUERIES_PER_READING'];
+  'SV2_AI_PRICING', 'SV2_AI_MAX_OUTPUT_TOKENS', 'SV2_AI_RESERVE_SQL', 'SV2_AI_TEMPLATE_TOKENS', 'SV2_AI_PROMPT_VERSION', 'SV2_CYCLE_QUERIES_FIXED', 'SV2_CYCLE_QUERIES_PER_READING'];
 const GLOBALS = { SV2_SOURCE_REGISTRY, sv2EvidenceReadings, sv2ScoreHeadline, SV2_EVIDENCE_RULES };
 const SRC = extractConstants(...CONSTS) + '\n' + extractFunctions(...FUNCS);
 const fresh = () => evalInScope(SRC, GLOBALS);

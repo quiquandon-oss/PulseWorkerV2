@@ -317,10 +317,10 @@ describe('deterministic evidence scoring', () => {
 const FUNCS = ['sv2Config', 'sv2Finite', 'sv2ParseSources', 'sv2History', 'sv2AttachPrices', 'sv2IndexAtOrBefore', 'sv2PriceAt', 'sv2SourceStatus',
   'sv2Pearson', 'sv2FamilyOf', 'sv2Redundancy', 'sv2Families', 'sv2EventFamily', 'sv2EventReactions', 'sv2Events', 'sv2Regime', 'sv2Profile',
   'sv2Analogues', 'sv2Classify', 'sv2EvidenceSummary', 'sv2Compute', 'sv2EvidenceItemsForAi', 'sv2AiPackage', 'sv2ValidateAiOutput', 'sv2AiBudget',
-  'sv2AiEstimateNeurons', 'sv2UngroundedNumbers', 'sv2RunAi', 'sv2Row', 'runSentimentV2Cycle', 'sv2AlignSeries', 'sv2SeriesStatus', 'sv2LatestView',
+  'sv2AiEstimateNeurons', 'sv2UngroundedNumbers', 'sv2RunAi', 'sv2HexSha256', 'sv2Row', 'runSentimentV2Cycle', 'sv2AlignSeries', 'sv2SeriesStatus', 'sv2LatestView',
   'getSentimentV2Comparison', 'getSentimentV2Status', 'getSentimentV2Evidence', 'sv2GlmProbe', 'sv2SchemaCheck', 'sv2ReadError'];
 const CONSTS = ['SENTIMENT_V2_VERSION', 'SV2_VERSIONS_SHOWN', 'SV2_INSERT_SQL', 'SV2_PERIODS_MS', 'SV2_MAX_POINTS', 'SV2_MAX_ROWS', 'SV2_MAX_PRICE_ROWS',
-  'SV2_STALE_MS', 'SV2_AI_PRICING', 'SV2_AI_MAX_OUTPUT_TOKENS', 'SV2_AI_RESERVE_SQL', 'SV2_AI_TEMPLATE_TOKENS', 'SV2_CYCLE_QUERIES_FIXED', 'SV2_CYCLE_QUERIES_PER_READING', 'SV2_SCHEMA_TABLES', 'SV2_SCHEMA_MIGRATION'];
+  'SV2_STALE_MS', 'SV2_AI_PRICING', 'SV2_AI_MAX_OUTPUT_TOKENS', 'SV2_AI_RESERVE_SQL', 'SV2_AI_TEMPLATE_TOKENS', 'SV2_AI_PROMPT_VERSION', 'SV2_CYCLE_QUERIES_FIXED', 'SV2_CYCLE_QUERIES_PER_READING', 'SV2_SCHEMA_TABLES', 'SV2_SCHEMA_MIGRATION'];
 const S = evalInScope(extractConstants(...CONSTS) + '\n' + extractFunctions(...FUNCS), {
   SV2_SOURCE_REGISTRY: C.SV2_SOURCE_REGISTRY, SV2_COLLECTOR_LIMITS: C.SV2_COLLECTOR_LIMITS, SV2_COLLECTOR_VERSION: C.SV2_COLLECTOR_VERSION,
   sv2EvidenceReadings: E.sv2EvidenceReadings, sv2ScoreHeadline: E.sv2ScoreHeadline, SV2_EVIDENCE_RULES: E.SV2_EVIDENCE_RULES, SV2_LEXICON_SOURCE: E.SV2_LEXICON_SOURCE });
@@ -488,6 +488,22 @@ describe('status and evidence API health (production 2026-11-15: ok:true with ra
 
 describe('GLM Neuron ledger on real SQLite', () => {
   const GLM = '@cf/zai-org/glm-4.7-flash';
+  it('every AI result carries the prompt version and the sha256 of the exact prompt and evidence package sent', async () => {
+    const sent = [];
+    const env = { SENTIMENT_V2_AI_MODEL: GLM, SV2_GLM_DAILY_NEURONS: '1000',
+      AI: { run: async (_m, o) => { sent.push(o.messages); return { response: JSON.stringify({ summary: 'ok', cited_ids: ['ev:a'], contradictions: [], event_relevance: [], uncertainty: 'low' }), usage: { prompt_tokens: 100, completion_tokens: 50 } }; } } };
+    const ledger = { reserveNeurons: async () => 1, recordNeurons: async () => {}, accountLimitedToday: async () => false };
+    const pkg = { decision_ts: 1, evidence: [{ id: 'ev:a', title: 'x' }] };
+    const r = await S.sv2RunAi(env, pkg, new Set(['ev:a']), ledger);
+    const hex = (s) => createHash('sha256').update(s).digest('hex');
+    expect(r.status).toBe('ok');
+    expect(r).toMatchObject({ prompt_version: 'sv2-ai-prompt-1', prompt_sha256: hex(sent[0][0].content), package_sha256: hex(sent[0][1].content) });
+    expect(sent[0][1].content).toBe(JSON.stringify(pkg));
+    // Budget stops and failures are traceable too; the hashes are persisted in ai_json.
+    const stopped = await S.sv2RunAi(env, pkg, new Set(['ev:a']), { ...ledger, reserveNeurons: async () => null });
+    expect(stopped).toMatchObject({ status: 'quota_guard', package_sha256: r.package_sha256 });
+    expect(WORKER).toMatch(/prompt_version: ai\.prompt_version \?\? null, prompt_sha256: ai\.prompt_sha256 \?\? null, package_sha256: ai\.package_sha256 \?\? null/);
+  });
   it('pricing matches the published GLM-4.7-flash Neuron rates', () => {
     expect(S.SV2_AI_PRICING[GLM]).toEqual({ neurons_per_m_input: 5500, neurons_per_m_output: 36400 });
   });

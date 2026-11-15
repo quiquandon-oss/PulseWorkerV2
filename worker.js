@@ -12642,6 +12642,11 @@ function sv2UngroundedNumbers(texts, pkgText) {
   return bad;
 }
 
+const SV2_AI_PROMPT_VERSION = 'sv2-ai-prompt-1';     // bump whenever the system prompt text changes
+async function sv2HexSha256(text) {
+  const d = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(String(text)));
+  return [...new Uint8Array(d)].map(b => b.toString(16).padStart(2, '0')).join('');
+}
 async function sv2RunAi(env, pkg, allowedIds, ledger) {
   // The only AI route: the account's Workers AI binding, a priced model and a daily Neuron budget. No other provider,
   // no paid fallback, no retries. The annotation never sets or changes a number in the result.
@@ -12658,11 +12663,14 @@ async function sv2RunAi(env, pkg, allowedIds, ledger) {
     'uncertainty. Cite only identifiers present in the package. Separate observed facts from inference. Do not output any score, ' +
     'price target or forecast, and do not write any number that does not appear in the package. Use only the package; do not add outside facts.';
   const user = JSON.stringify(pkg);
+  // Traceability: every result from here on carries the hashes of the exact system prompt and evidence package sent to
+  // the model, and the prompt version, so an annotation can be tied to its inputs and reproduced or audited later.
+  const trace = { prompt_version: SV2_AI_PROMPT_VERSION, prompt_sha256: await sv2HexSha256(system), package_sha256: await sv2HexSha256(user) };
   const estimate = sv2AiEstimateNeurons(pricing, new TextEncoder().encode(system).length + new TextEncoder().encode(user).length);
   let slot;
   try { slot = await ledger.reserveNeurons(budget, estimate, model); }
-  catch (err) { return { status: 'quota_guard', model, counted: false, reason: 'reservation failed: ' + String((err && err.message) || err).slice(0, 120) }; }
-  if (slot === null || slot === undefined) return { status: 'quota_guard', model, counted: false, reason: `daily Neuron budget ${budget} would be exceeded (this call reserves ${estimate})` };
+  catch (err) { return { status: 'quota_guard', model, ...trace, counted: false, reason: 'reservation failed: ' + String((err && err.message) || err).slice(0, 120) }; }
+  if (slot === null || slot === undefined) return { status: 'quota_guard', model, ...trace, counted: false, reason: `daily Neuron budget ${budget} would be exceeded (this call reserves ${estimate})` };
   const record = async (u) => { try { await ledger.recordNeurons(slot, u); } catch (_e) { /* the reservation still bounds the budget */ } };
   let raw;
   try {
@@ -12672,7 +12680,7 @@ async function sv2RunAi(env, pkg, allowedIds, ledger) {
     const msg = String((err && err.message) || err);
     const status = /3036|daily free allocation|neurons/i.test(msg) ? 'account_limited' : 'error';
     await record({ status });
-    return { status, model, counted: true, reserved_neurons: estimate, reason: msg.slice(0, 200) };
+    return { status, model, ...trace, counted: true, reserved_neurons: estimate, reason: msg.slice(0, 200) };
   }
   const usage = raw && raw.usage ? raw.usage : null;
   const inTok = usage ? Number(usage.prompt_tokens) : null, outTok = usage ? Number(usage.completion_tokens) : null;
@@ -12683,14 +12691,14 @@ async function sv2RunAi(env, pkg, allowedIds, ledger) {
   const meta = { reserved_neurons: estimate, input_tokens: Number.isFinite(inTok) ? inTok : null, output_tokens: Number.isFinite(outTok) ? outTok : null, actual_neurons: actual };
   if (typeof obj === 'string') {
     try { obj = JSON.parse(obj.trim().replace(/^```(?:json)?\s*/, '').replace(/```$/, '').trim()); }
-    catch (e) { await record({ ...meta, status: 'invalid_output' }); return { status: 'invalid_output', model, counted: true, ...meta, reason: 'output is not JSON' }; }
+    catch (e) { await record({ ...meta, status: 'invalid_output' }); return { status: 'invalid_output', model, ...trace, counted: true, ...meta, reason: 'output is not JSON' }; }
   }
   const v = sv2ValidateAiOutput(obj, allowedIds);
-  if (!v.ok) { await record({ ...meta, status: 'invalid_output' }); return { status: 'invalid_output', model, counted: true, ...meta, reason: v.errors.slice(0, 3).join('; ') }; }
+  if (!v.ok) { await record({ ...meta, status: 'invalid_output' }); return { status: 'invalid_output', model, ...trace, counted: true, ...meta, reason: v.errors.slice(0, 3).join('; ') }; }
   const ungrounded = sv2UngroundedNumbers([v.value.summary, v.value.uncertainty, ...v.value.contradictions.map(c => c.note)], user);
-  if (ungrounded.length) { await record({ ...meta, status: 'invalid_output' }); return { status: 'invalid_output', model, counted: true, ...meta, reason: `numbers not in the evidence package: ${ungrounded.slice(0, 5).join(', ')}` }; }
+  if (ungrounded.length) { await record({ ...meta, status: 'invalid_output' }); return { status: 'invalid_output', model, ...trace, counted: true, ...meta, reason: `numbers not in the evidence package: ${ungrounded.slice(0, 5).join(', ')}` }; }
   await record({ ...meta, status: 'ok' });
-  return { status: 'ok', model, counted: true, ...meta, output: v.value };
+  return { status: 'ok', model, ...trace, counted: true, ...meta, output: v.value };
 }
 
 function sv2Row(result, ai, usage, nowTs) {
@@ -12705,7 +12713,8 @@ function sv2Row(result, ai, usage, nowTs) {
     JSON.stringify(result.predictive), JSON.stringify({ families: result.families, composite_before_events: result.composite_before_events ?? null,
       redundancy: result.redundancy, evidence: result.evidence ?? null, evidence_status: result.evidence_status ?? null }),
     JSON.stringify(result.supporting_ids), JSON.stringify(result.contradicting_ids), JSON.stringify(result.missing),
-    ai ? ai.model : null, ai ? ai.status : 'disabled', JSON.stringify(ai ? { reason: ai.reason || null, output: ai.output || null, reserved_neurons: ai.reserved_neurons ?? null, actual_neurons: ai.actual_neurons ?? null, input_tokens: ai.input_tokens ?? null, output_tokens: ai.output_tokens ?? null } : {}),
+    ai ? ai.model : null, ai ? ai.status : 'disabled', JSON.stringify(ai ? { reason: ai.reason || null, output: ai.output || null, reserved_neurons: ai.reserved_neurons ?? null, actual_neurons: ai.actual_neurons ?? null, input_tokens: ai.input_tokens ?? null, output_tokens: ai.output_tokens ?? null,
+      prompt_version: ai.prompt_version ?? null, prompt_sha256: ai.prompt_sha256 ?? null, package_sha256: ai.package_sha256 ?? null } : {}),
     JSON.stringify(usage), nowTs];
 }
 

@@ -13239,7 +13239,10 @@ async function getSentimentV2Evidence(env, nowTs, hours, limit) {
   if (schema.ready === false) return { ok: true, available: false, health: 'schema_missing', schema, generated_at: nowTs, items: [],
     reason: `evidence storage not set up (apply migration ${SV2_SCHEMA_MIGRATION})` };
   try {
-    const r = await env.DB.prepare('SELECT evidence_id, source_id, family, canonical_url, title, published_ts, retrieved_ts, content_hash, collector_version FROM sv2_evidence WHERE retrieved_ts >= ? AND dup_of IS NULL ORDER BY retrieved_ts DESC LIMIT ?')
+    // Newest first by evidence time (as the scorer defines it), not by retrieved_ts alone: every item of one collection
+    // run shares retrieved_ts, so that order listed a run's oldest backlog items first (staging, 2026-11-15). The
+    // retrieved_ts window keeps the sort bounded by the index.
+    const r = await env.DB.prepare('SELECT evidence_id, source_id, family, canonical_url, title, published_ts, retrieved_ts, content_hash, collector_version FROM sv2_evidence WHERE retrieved_ts >= ? AND dup_of IS NULL ORDER BY (CASE WHEN published_ts IS NOT NULL AND published_ts <= retrieved_ts THEN published_ts ELSE retrieved_ts END) DESC, evidence_id LIMIT ?')
       .bind(since, limit).all();
     const names = Object.fromEntries(SV2_SOURCE_REGISTRY.map(s => [s.id, s.name]));
     return { ok: true, available: true, health: 'ok', generated_at: nowTs, hours, limit, items: (r.results || []).map(x => {

@@ -464,6 +464,16 @@ describe('status and evidence API health (production 2026-11-15: ok:true with ra
     expect(r['ev:decrypt'].state).not.toBe('stale');
     expect(r['ev:fed_press'].state).toBe('stale');
   });
+  it('the evidence route lists newest evidence first, not a run\'s oldest backlog items (staging 2026-11-15)', async () => {
+    const d1 = makeD1(DDL);
+    const run = NOW - H;
+    addEvidence(d1, 'sec_press', 'Backlog item from two months ago', run, NOW - 59 * 24 * H);
+    addEvidence(d1, 'sec_press', 'Item from last week', run, NOW - 7 * 24 * H);
+    addEvidence(d1, 'decrypt', 'Bitcoin rally record', run - H, NOW - 3 * H);
+    addEvidence(d1, 'sec_press', 'One item from yesterday', run, NOW - 20 * H);
+    const ev = await S.getSentimentV2Evidence({ DB: d1.binding }, NOW, 24, 3);
+    expect(ev.items.map(x => x.title)).toEqual(['Bitcoin rally record', 'One item from yesterday', 'Item from last week']);
+  });
   it('failing collector sources are operational, not a schema or API fault', async () => {
     const d1 = makeD1(DDL);
     d1.db.prepare("INSERT INTO sv2_source_state (source_id, last_attempt_ts, last_status, last_error, consecutive_failures, ok_count, fail_count) VALUES ('decrypt', ?, 'HTTP_ERROR', 'HTTP 503', 3, 1, 3)").run(NOW - H);

@@ -11772,7 +11772,9 @@ function instrumentD1(db, usage) {
 // whether an invocation wrote. D1_USAGE_LOG = "0" only silences the log line.
 function withD1Usage(env, usage) {
   if (!env || !env.DB) return env;
-  return { ...env, DB: instrumentD1(env.DB, usage) };
+  // __d1Usage: this invocation's live counters, so a guard inside the invocation can add usage not yet recorded in
+  // d1_usage_daily (recording happens after the invocation's work settles).
+  return { ...env, DB: instrumentD1(env.DB, usage), __d1Usage: usage };
 }
 
 function logD1Usage(usage, fields, env) {
@@ -11792,16 +11794,19 @@ const D1_USAGE_TABLE_RETRY_MS = 10 * 60 * 1000;
 let d1UsageTableUnavailableUntil = 0;
 
 // Automatic stop for the evidence collector: before a collection run, one bounded read of today's recorded D1 usage
-// (d1_usage_daily, written by every invocation). At or above the stop thresholds (default 70% of the Workers Free
-// daily allowance: 5,000,000 rows read, 100,000 rows written) the collector does not run; V1, predictions, event
-// detection and V2 scoring are never affected. Thresholds can be lowered (never raised past the allowance) with
-// SV2_COLLECTOR_D1_READ_STOP / SV2_COLLECTOR_D1_WRITE_STOP. If usage cannot be read, the collector also does not run.
+// (d1_usage_daily) plus this invocation's own live counters (not yet recorded). At or above the stop thresholds the
+// collector does not run; V1, predictions, event detection and V2 scoring are never affected. The recorded total is
+// a LOWER bound of the account's real usage: .first() reads record no rows, and other Workers on the account (V1's
+// sentiment-ff75) do not record here. The default stop is therefore conservative, 50% of the Workers Free daily
+// allowance (5,000,000 rows read, 100,000 rows written), leaving half for what is not counted. Thresholds can be
+// lowered (never raised past the allowance) with SV2_COLLECTOR_D1_READ_STOP / SV2_COLLECTOR_D1_WRITE_STOP. If usage
+// cannot be read, the collector does not run.
 const SV2_D1_DAILY_READS = 5000000;
 const SV2_D1_DAILY_WRITES = 100000;
 function sv2CollectorD1Stops(env) {
   const lim = (v, def, cap) => { const n = Number(v); return Number.isFinite(n) && n > 0 ? Math.min(n, cap) : def; };
-  return { reads: lim(env.SV2_COLLECTOR_D1_READ_STOP, 0.7 * SV2_D1_DAILY_READS, SV2_D1_DAILY_READS),
-    writes: lim(env.SV2_COLLECTOR_D1_WRITE_STOP, 0.7 * SV2_D1_DAILY_WRITES, SV2_D1_DAILY_WRITES) };
+  return { reads: lim(env.SV2_COLLECTOR_D1_READ_STOP, 0.5 * SV2_D1_DAILY_READS, SV2_D1_DAILY_READS),
+    writes: lim(env.SV2_COLLECTOR_D1_WRITE_STOP, 0.5 * SV2_D1_DAILY_WRITES, SV2_D1_DAILY_WRITES) };
 }
 async function sv2CollectGuarded(env, nowTs, budgetFn) {
   if (String(env.SV2_COLLECTOR_ENABLED || '0') !== '1') return sv2CollectEvidence(env, { nowTs, queryBudget: budgetFn() });
@@ -11815,7 +11820,8 @@ async function sv2CollectGuarded(env, nowTs, budgetFn) {
     console.error('sv2 collector usage guard: read failed:', String((err && err.message) || err));
     return { ok: false, skipped: true, auto_stop: 'usage_unreadable', reason: 'collector stopped: daily D1 usage could not be read' };
   }
-  const r = Number(used && used.r) || 0, w = Number(used && used.w) || 0;
+  const live = env.__d1Usage || {};
+  const r = (Number(used && used.r) || 0) + (Number(live.rows_read) || 0), w = (Number(used && used.w) || 0) + (Number(live.rows_written) || 0);
   if (r >= stops.reads || w >= stops.writes) {
     const reason = `collector stopped: daily D1 usage ${r} rows read / ${w} written reached the stop (${stops.reads} / ${stops.writes})`;
     console.warn('sv2 collector usage guard:', reason);

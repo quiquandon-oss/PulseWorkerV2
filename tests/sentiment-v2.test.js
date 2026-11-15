@@ -453,6 +453,19 @@ describe('AI: validation, quota, unavailability, zero paid fallback', () => {
     expect(res.prompt_sha256).toBe(await S.sv2HexSha256(sent[0].content));
     expect(res.prompt_version).toBe('sv2-ai-prompt-2');
   });
+  it('the stored row and the API view keep model, status, tokens, Neurons, cited evidence and the exact-input hashes', async () => {
+    const res = await S.sv2RunAi({ SENTIMENT_V2_AI_MODEL: GLM, SV2_GLM_DAILY_NEURONS: '1000', AI: { run: async () => okResp(good) } }, pkg, allowedIds, ledgerFor());
+    const row = S.sv2Row({ ...r, status: 'OK' }, res, {}, 1);
+    const aiModel = row.find(x => x === GLM);
+    const aiJson = JSON.parse(row.find(x => typeof x === 'string' && x.includes('"prompt_sha256"')));
+    expect(aiModel).toBe(GLM);
+    expect(row[3]).toBe('OK');
+    const view = S.sv2LatestView({ asset: 'BTC', status: 'OK', ai_model: GLM, ai_status: 'ok', ai_json: JSON.stringify(aiJson), family_json: '{}' });
+    expect(view.ai_annotation.cited_ids).toEqual(good.cited_ids);
+    expect(view.ai_usage).toMatchObject({ input_tokens: 900, output_tokens: 300, reserved_neurons: res.reserved_neurons, actual_neurons: res.actual_neurons });
+    expect(view.ai_trace).toEqual({ prompt_version: 'sv2-ai-prompt-2', prompt_sha256: res.prompt_sha256, package_sha256: res.package_sha256 });
+    expect(S.sv2LatestView({ asset: 'BTC', ai_json: '{}', family_json: '{}' }).ai_trace).toBe(null);
+  });
   it('a model rate limit or capacity error is its own degraded state: recorded against the reservation, never retried', async () => {
     for (const msg of ['3040: Capacity temporarily exceeded', 'HTTP 429 Too Many Requests', 'Out of capacity']) {
       let calls = 0;

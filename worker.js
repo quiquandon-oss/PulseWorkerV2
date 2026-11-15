@@ -13161,7 +13161,11 @@ function sv2LatestView(row) {
   try { fam = JSON.parse(row.family_json || '{}'); } catch (_e) { fam = null; }
   const { ai_json, family_json, ...rest } = row;
   return { ...rest, ai_annotation: ai && ai.output ? ai.output : null,
-    ai_usage: ai ? { reserved_neurons: ai.reserved_neurons ?? null, actual_neurons: ai.actual_neurons ?? null, reason: ai.reason ?? null } : null,
+    ai_usage: ai ? { reserved_neurons: ai.reserved_neurons ?? null, actual_neurons: ai.actual_neurons ?? null,
+      input_tokens: ai.input_tokens ?? null, output_tokens: ai.output_tokens ?? null, reason: ai.reason ?? null } : null,
+    // Which exact prompt and evidence package produced (or was refused for) this annotation.
+    ai_trace: ai && ai.prompt_sha256 ? { prompt_version: ai.prompt_version ?? null, prompt_sha256: ai.prompt_sha256,
+      package_sha256: ai.package_sha256 ?? null } : null,
     evidence: fam && fam.evidence ? fam.evidence : null, evidence_status: fam ? fam.evidence_status ?? null : null };
 }
 

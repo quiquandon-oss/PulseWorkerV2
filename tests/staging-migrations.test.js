@@ -41,11 +41,13 @@ function harness({ collector = false, overrides = {}, failOn = null, infoJson = 
       const cmd = ci >= 0 ? args[ci + 1] : '';
       if (file) {
         if (failOn && file.endsWith(failOn)) throw new Error('simulated D1 failure');
-        for (const t of [...(files.get(file) || '').matchAll(/CREATE TABLE(?: IF NOT EXISTS)?\s+(\w+)/gi)]) if (createsNothing !== t[1]) tables.add(t[1]);
+        const sql = files.get(file) || '';
+        for (const t of sql.matchAll(/CREATE TABLE(?: IF NOT EXISTS)?\s+(\w+)/gi)) if (createsNothing !== t[1]) tables.add(`table:${t[1]}`);
+        for (const t of sql.matchAll(/CREATE (?:UNIQUE )?INDEX(?: IF NOT EXISTS)?\s+(\w+)/gi)) if (createsNothing !== t[1]) tables.add(`index:${t[1]}`);
         return '[]';
       }
-      const m = cmd.match(/name='(\w+)'/);
-      return JSON.stringify([{ results: m && tables.has(m[1]) ? [{ name: m[1] }] : [] }]);
+      const m = cmd.match(/type='(\w+)' AND name='(\w+)'/);
+      return JSON.stringify([{ results: m && tables.has(`${m[1]}:${m[2]}`) ? [{ name: m[2] }] : [] }]);
     }
     throw new Error(`unexpected wrangler command: ${sub}`);
   };
@@ -158,20 +160,36 @@ describe('fail closed and idempotent', () => {
     const h = harness({ createsNothing: 'event_ledger' });
     expect(() => h.run()).toThrow(/expected table event_ledger does not exist/);
   });
-  it('runs the non-idempotent 0015 only when its table is absent, decided by a query rather than an error message', () => {
+  it('fails when an index the SQL creates does not exist afterwards', () => {
+    const h = harness({ createsNothing: 'idx_event_ledger_detected' });
+    expect(() => h.run()).toThrow(/expected index idx_event_ledger_detected does not exist/);
+  });
+  const ALL_0015 = ['table:research_sentiment_archive', 'index:idx_research_sentiment_archive_observation_ts', 'index:idx_research_sentiment_archive_archived_ts'];
+  it('derives the objects 0015 creates from its SQL: the table and both indexes', () => {
+    const objs = assertAdditive('0015', real(`${MIG}/0015_experiment5_sentiment_archive.sql`)).map((o) => `${o.type}:${o.name}`);
+    expect(objs.sort()).toEqual([...ALL_0015].sort());
+  });
+  it('runs the non-idempotent 0015 only when NONE of its objects exist, decided by queries rather than an error message', () => {
     const h = harness(); h.run();
     expect(executed(h.calls)).toContain('0015_experiment5_sentiment_archive.sql');
-    const again = harness(); again.tables.add('research_sentiment_archive'); const log = again.run();
+    const again = harness(); ALL_0015.forEach((k) => again.tables.add(k)); const log = again.run();
     expect(executed(again.calls)).not.toContain('0015_experiment5_sentiment_archive.sql');
     expect(log.some((l) => l.startsWith('kept 0015'))).toBe(true);
   });
+  for (const [name, present] of [['the table without its indexes', ALL_0015.slice(0, 1)], ['the table with one index', ALL_0015.slice(0, 2)], ['an index without the table', ALL_0015.slice(1, 2)]]) {
+    it(`treats a partially applied 0015 (${name}) as a failure: nothing is executed and nothing deploys`, () => {
+      const h = harness(); present.forEach((k) => h.tables.add(k));
+      expect(() => h.run()).toThrow(/0015_experiment5_sentiment_archive\.sql is partially applied on staging \(missing: .+\)/);
+      expect(executed(h.calls)).toEqual([]);
+    });
+  }
   it('is safe to run twice: the second run re-applies only IF NOT EXISTS migrations', () => {
     const h = harness({ collector: true });
     h.run();
     h.calls.length = 0;
     const log = h.run();
     expect(executed(h.calls)).not.toContain('0015_experiment5_sentiment_archive.sql');
-    expect(log.at(-1)).toMatch(/verified \d+ tables/);
+    expect(log.at(-1)).toMatch(/verified \d+ tables and indexes/);
     for (const m of PLAN.filter((x) => !x.guardTable)) {
       const text = h.files.get(`${MIG}/${m.file}`);
       expect(text, m.file).toMatch(/IF NOT EXISTS/i);

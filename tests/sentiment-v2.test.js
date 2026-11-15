@@ -12,11 +12,11 @@ import { sv2EvidenceReadings, sv2ScoreHeadline, SV2_EVIDENCE_RULES } from '../se
 const FUNCS = ['sv2Config', 'sv2Finite', 'sv2ParseSources', 'sv2History', 'sv2AttachPrices', 'sv2IndexAtOrBefore', 'sv2PriceAt',
   'sv2SourceStatus', 'sv2Pearson', 'sv2FamilyOf', 'sv2Redundancy', 'sv2Families', 'sv2EventFamily', 'sv2EventReactions',
   'sv2Events', 'sv2Regime', 'sv2Profile', 'sv2Analogues', 'sv2Classify', 'sv2Compute', 'sv2AiPackage',
-  'sv2ValidateAiOutput', 'sv2RunAi', 'sv2Row', 'runSentimentV2Cycle', 'sv2AlignSeries', 'sv2SeriesStatus',
+  'sv2ValidateAiOutput', 'sv2RunAi', 'sv2HexSha256', 'sv2Row', 'runSentimentV2Cycle', 'sv2AlignSeries', 'sv2SeriesStatus',
   'getSentimentV2Comparison', 'getSentimentV2ComparisonCached', 'sv2EvidenceSummary', 'sv2EvidenceItemsForAi', 'sv2AiBudget',
   'sv2AiEstimateNeurons', 'sv2UngroundedNumbers', 'sv2LatestView'];
 const CONSTS = ['SENTIMENT_V2_VERSION', 'SV2_VERSIONS_SHOWN', 'SV2_INSERT_SQL', 'SV2_PERIODS_MS', 'SV2_MAX_POINTS', 'SV2_MAX_ROWS', 'SV2_MAX_PRICE_ROWS', 'SV2_STALE_MS', 'sv2ComparisonCache',
-  'SV2_AI_PRICING', 'SV2_AI_MAX_OUTPUT_TOKENS', 'SV2_AI_RESERVE_SQL', 'SV2_AI_TEMPLATE_TOKENS', 'SV2_CYCLE_QUERIES_FIXED', 'SV2_CYCLE_QUERIES_PER_READING'];
+  'SV2_AI_PRICING', 'SV2_AI_MAX_OUTPUT_TOKENS', 'SV2_AI_RESERVE_SQL', 'SV2_AI_TEMPLATE_TOKENS', 'SV2_AI_PROMPT_VERSION', 'SV2_CYCLE_QUERIES_FIXED', 'SV2_CYCLE_QUERIES_PER_READING'];
 const GLOBALS = { SV2_SOURCE_REGISTRY, sv2EvidenceReadings, sv2ScoreHeadline, SV2_EVIDENCE_RULES };
 const SRC = extractConstants(...CONSTS) + '\n' + extractFunctions(...FUNCS);
 const fresh = () => evalInScope(SRC, GLOBALS);
@@ -346,7 +346,7 @@ describe('AI: validation, quota, unavailability, zero paid fallback', () => {
   const r = S.sv2Compute(hist, hist.length - 1, [], cfg);
   const { pkg, allowedIds } = S.sv2AiPackage(r);
   const yes = async () => true, no = async () => false;
-  const good = { summary: 'Families mostly bearish.', cited_ids: [allowedIds[0]], contradictions: [], event_relevance: [], uncertainty: 'Small sample.' };
+  const good = { summary: 'Families mostly bearish.', cited_ids: [allowedIds[0]], contradictions: [], event_relevance: [], uncertainty: 'Small sample.', entities: [], figures: [] };
   it('accepts schema-valid output citing package identifiers only', () => {
     expect(S.sv2ValidateAiOutput(good, allowedIds).ok).toBe(true);
   });
@@ -414,6 +414,118 @@ describe('AI: validation, quota, unavailability, zero paid fallback', () => {
     const invented = await S.sv2RunAi({ ...env, AI: { run: async () => okResp({ ...good, summary: 'BTC will reach 123456 next week.' }) } }, pkg, allowedIds, ledgerFor());
     expect(invented.status).toBe('invalid_output');
     expect(invented.reason).toMatch(/numbers not in the evidence package: 123456/);
+  });
+  it('entities and figures must come from the title of a cited evidence item, figures as whole values only', () => {
+    const ids = ['evidence:e1', 'evidence:e2', 'event:x1'];
+    const titles = { 'evidence:e1': 'SEC approves spot ETF from BlackRock with 150 million inflows', 'evidence:e2': 'Fed holds rates' };
+    const base = { summary: 'ok', cited_ids: ['evidence:e1'], contradictions: [], event_relevance: [], uncertainty: 'low' };
+    const v = (entities, figures) => S.sv2ValidateAiOutput({ ...base, entities, figures }, ids, titles);
+    expect(v([{ id: 'evidence:e1', name: 'BlackRock', kind: 'organization' }, { id: 'evidence:e1', name: 'sec', kind: 'regulator' }],
+      [{ id: 'evidence:e1', value: 150 }, { id: 'evidence:e1', value: '150' }]).ok).toBe(true);
+    expect(v([{ id: 'evidence:e2', name: 'BlackRock', kind: 'organization' }], []).ok).toBe(false);     // not in that item's title
+    expect(v([{ id: 'event:x1', name: 'ETF', kind: 'instrument' }], []).ok).toBe(false);                // events have no source title
+    expect(v([{ id: 'evidence:zz', name: 'SEC', kind: 'regulator' }], []).ok).toBe(false);             // not in the package
+    expect(v([{ id: 'evidence:e1', name: 'SEC', kind: 'exchange' }], []).ok).toBe(false);              // unknown kind
+    expect(v([], [{ id: 'evidence:e1', value: 50 }]).ok).toBe(false);                                   // fragment of 150
+    expect(v([], [{ id: 'evidence:e1', value: -150 }]).ok).toBe(false);                                 // sign matters
+    expect(v([], [{ id: 'evidence:e2', value: 150 }]).ok).toBe(false);                                  // other item's figure
+    expect(v([], [{ id: 'evidence:e1', value: 'many' }]).ok).toBe(false);                               // not a number
+    expect(v(Array.from({ length: 21 }, () => ({ id: 'evidence:e1', name: 'SEC', kind: 'regulator' })), []).ok).toBe(false);
+    expect(S.sv2ValidateAiOutput({ ...base, entities: [] }, ids, titles).ok).toBe(false);             // figures required
+    // Comma-grouped figures in a title are whole values (Codex P2): 1,500 grounds 1500 and "1,500", never 500 or 15000.
+    const t2 = { ...titles, 'evidence:e2': 'Exchange outflows reach 1,500 BTC as Fed holds rates' };
+    const v2 = (figures) => S.sv2ValidateAiOutput({ ...base, entities: [], figures }, ids, t2);
+    expect(v2([{ id: 'evidence:e2', value: 1500 }, { id: 'evidence:e2', value: '1,500' }]).ok).toBe(true);
+    expect(v2([{ id: 'evidence:e2', value: 15000 }]).ok).toBe(false);
+    // ...and its parts are not separate values: 500 and 1 are not grounded by "1,500" (Codex P2).
+    expect(v2([{ id: 'evidence:e2', value: '500' }]).ok).toBe(false);
+    expect(v2([{ id: 'evidence:e2', value: '1' }]).ok).toBe(false);
+    expect(S.sv2UngroundedNumbers(['500', '1'], 'outflows of 1,500 BTC')).toEqual(['500', '1']);
+    expect(S.sv2UngroundedNumbers(['Outflows of 1,500 BTC', 'outflows of 1500 BTC'], JSON.stringify({ title: t2['evidence:e2'] }))).toEqual([]);
+    // A figure is one numeric literal: no units or ranges riding along with a grounded number (Codex P2).
+    expect(v([], [{ id: 'evidence:e1', value: '150 BTC' }]).ok).toBe(false);
+    expect(v([], [{ id: 'evidence:e1', value: '150 to 150' }]).ok).toBe(false);
+    expect(v([], [{ id: 'evidence:e1', value: ' 150 ' }]).ok).toBe(true);
+    // Only validated fields survive: an extra nested field is dropped, never persisted or shown (Codex P2).
+    const extra = S.sv2ValidateAiOutput({ ...base, entities: [{ id: 'evidence:e1', name: 'SEC', kind: 'regulator', score: 99 }],
+      figures: [{ id: 'evidence:e1', value: 150, unit: 'BTC' }], contradictions: [{ ids: ['evidence:e1'], note: 'n', score: 1 }],
+      event_relevance: [{ id: 'event:x1', relevance: 'low', overlap: 'none', score: 2 }] }, ids, titles);
+    expect(extra.ok).toBe(true);
+    expect(extra.value.entities).toEqual([{ id: 'evidence:e1', name: 'SEC', kind: 'regulator' }]);
+    expect(extra.value.figures).toEqual([{ id: 'evidence:e1', value: 150 }]);
+    expect(extra.value.contradictions).toEqual([{ ids: ['evidence:e1'], note: 'n' }]);
+    expect(extra.value.event_relevance).toEqual([{ id: 'event:x1', relevance: 'low', overlap: 'none' }]);
+    expect(JSON.stringify(extra.value)).not.toMatch(/score|unit/);
+    // Entity names match whole terms only (Codex P2): ETH is not named by "whether", Fed is not named by "federal".
+    const t3 = { ...titles, 'evidence:e2': 'Analysts ask whether federal policy shifts; ETH and S&P 500 react' };
+    const ent = (name) => S.sv2ValidateAiOutput({ ...base, entities: [{ id: 'evidence:e2', name, kind: 'other' }], figures: [] }, ids, t3).ok;
+    expect(ent('ETH')).toBe(true);
+    expect(ent('S&P 500')).toBe(true);
+    expect(ent('fed')).toBe(false);
+    const t4 = { ...titles, 'evidence:e2': 'Fed holds rates' };
+    expect(S.sv2ValidateAiOutput({ ...base, entities: [{ id: 'evidence:e2', name: 'ETH', kind: 'asset' }], figures: [] }, ids,
+      { 'evidence:e2': 'Investors weigh whether to buy' }).ok).toBe(false);
+    expect(S.sv2ValidateAiOutput({ ...base, entities: [{ id: 'evidence:e2', name: 'Fed', kind: 'regulator' }], figures: [] }, ids, t4).ok).toBe(true);
+    // Exact decimal comparison, no float rounding (Codex P2).
+    expect(S.sv2UngroundedNumbers(['9007199254740993'], 'supply 9007199254740992')).toEqual(['9007199254740993']);
+    expect(S.sv2UngroundedNumbers(['9007199254740992', '1500.0', '01500'], 'supply 9007199254740992 and 1,500')).toEqual([]);
+    expect(S.sv2UngroundedNumbers(['-0', '0.50'], 'from 0 to 0.5')).toEqual([]);
+    // Unsafe integers: as a string the exact digits are grounded; as a JSON number (already rounded by parsing) it is
+    // refused rather than grounded against a different value (Codex P2).
+    const big = { 'evidence:e1': 'Supply counter reads 9007199254740993 units' };
+    const fig = (value) => S.sv2ValidateAiOutput({ ...base, entities: [], figures: [{ id: 'evidence:e1', value }] }, ids, big).ok;
+    expect(fig('9007199254740993')).toBe(true);
+    expect(fig(JSON.parse('9007199254740993'))).toBe(false);
+    expect(fig('9007199254740992')).toBe(false);
+    expect(readFileSync(new URL('../worker.js', import.meta.url), 'utf8')).toMatch(/figures \(array of \{id, value\}, value a string holding one number copied exactly from the title/);
+  });
+  it('the evidence package carries each item\'s source, published and retrieved time, and the hash covers exactly what is sent', async () => {
+    const rr = { ...r, evidence_items: [
+      { id: 'evidence:a1', source: 'decrypt', family: 'market_sentiment_news', title: 'BTC ETF inflows rise', evidence_ts: 1000, published_ts: 1000, retrieved_ts: 2000 },
+      { id: 'evidence:a2', source: 'fed_press', family: 'macro_policy', title: 'Fed statement', evidence_ts: 3000, published_ts: null, retrieved_ts: 3000 }] };
+    const { pkg: p2, allowedIds: ids2 } = S.sv2AiPackage(rr);
+    expect(p2.evidence).toEqual([
+      { id: 'evidence:a1', source: 'decrypt', family: 'market_sentiment_news', title: 'BTC ETF inflows rise', evidence_ts: 1000, published_ts: 1000, retrieved_ts: 2000 },
+      { id: 'evidence:a2', source: 'fed_press', family: 'macro_policy', title: 'Fed statement', evidence_ts: 3000, published_ts: null, retrieved_ts: 3000 }]);
+    expect(ids2).toEqual(expect.arrayContaining(['evidence:a1', 'evidence:a2']));
+    let sent = null;
+    const out = { summary: 'ETF inflows rise.', cited_ids: ['evidence:a1'], contradictions: [], event_relevance: [], uncertainty: 'low',
+      entities: [{ id: 'evidence:a1', name: 'ETF', kind: 'instrument' }], figures: [] };
+    const res = await S.sv2RunAi({ SENTIMENT_V2_AI_MODEL: GLM, SV2_GLM_DAILY_NEURONS: '1000', AI: { run: async (_m, o) => { sent = o.messages; return okResp(out); } } }, p2, ids2, ledgerFor());
+    expect(res.status).toBe('ok');
+    expect(res.output.entities).toEqual(out.entities);
+    expect(sent[1].content).toBe(JSON.stringify(p2));
+    expect(res.package_sha256).toBe(await S.sv2HexSha256(JSON.stringify(p2)));
+    expect(res.prompt_sha256).toBe(await S.sv2HexSha256(sent[0].content));
+    expect(res.prompt_version).toBe('sv2-ai-prompt-3');
+  });
+  it('the stored row and the API view keep model, status, tokens, Neurons, cited evidence and the exact-input hashes', async () => {
+    const res = await S.sv2RunAi({ SENTIMENT_V2_AI_MODEL: GLM, SV2_GLM_DAILY_NEURONS: '1000', AI: { run: async () => okResp(good) } }, pkg, allowedIds, ledgerFor());
+    const row = S.sv2Row({ ...r, status: 'OK' }, res, {}, 1);
+    const aiModel = row.find(x => x === GLM);
+    const aiJson = JSON.parse(row.find(x => typeof x === 'string' && x.includes('"prompt_sha256"')));
+    expect(aiModel).toBe(GLM);
+    expect(row[3]).toBe('OK');
+    const view = S.sv2LatestView({ asset: 'BTC', status: 'OK', ai_model: GLM, ai_status: 'ok', ai_json: JSON.stringify(aiJson), family_json: '{}' });
+    expect(view.ai_annotation.cited_ids).toEqual(good.cited_ids);
+    expect(view.ai_usage).toMatchObject({ input_tokens: 900, output_tokens: 300, reserved_neurons: res.reserved_neurons, actual_neurons: res.actual_neurons });
+    expect(view.ai_trace).toEqual({ prompt_version: 'sv2-ai-prompt-3', prompt_sha256: res.prompt_sha256, package_sha256: res.package_sha256 });
+    expect(S.sv2LatestView({ asset: 'BTC', ai_json: '{}', family_json: '{}' }).ai_trace).toBe(null);
+  });
+  it('a model rate limit or capacity error is its own degraded state: recorded against the reservation, never retried', async () => {
+    for (const msg of ['3040: Capacity temporarily exceeded', 'HTTP 429 Too Many Requests', 'Out of capacity']) {
+      let calls = 0;
+      const led = ledgerFor();
+      const res = await S.sv2RunAi({ SENTIMENT_V2_AI_MODEL: GLM, SV2_GLM_DAILY_NEURONS: '1000', AI: { run: async () => { calls++; throw new Error(msg); } } }, pkg, allowedIds, led);
+      expect(res).toMatchObject({ status: 'rate_limited', counted: true });
+      expect(res.prompt_sha256).toMatch(/^[0-9a-f]{64}$/);
+      expect(calls).toBe(1);
+      expect(led.rows).toHaveLength(1);
+      expect(led.rows[0].status).toBe('rate_limited');
+    }
+    const row = S.sv2Row({ ...r, status: 'OK' }, { status: 'rate_limited', model: GLM }, {}, 1);
+    expect(row[3]).toBe('DEGRADED');
+    expect(row[4]).toBe('ai_rate_limited');
   });
   it('an AI failure degrades the cycle but never changes the score', async () => {
     const rows = archive(150);

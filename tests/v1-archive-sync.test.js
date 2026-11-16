@@ -27,7 +27,7 @@ const EVENTS_DDL = `CREATE TABLE event_ledger (event_id TEXT, dedup_key TEXT, co
 const SYNC = ['v1ArchivePyJson', 'v1ArchiveContentHash', 'v1ArchiveInvalidReason', 'syncV1ArchiveFromHistory'];
 const SYNC_CONSTS = ['V1_ARCHIVE_SYNC_WINDOW_MS', 'V1_ARCHIVE_SYNC_MAX_ROWS', 'V1_ARCHIVE_WRITTEN_BY', 'V1_ARCHIVE_SOURCE_WEIGHTS_VERSION',
   'V1_ARCHIVE_SCHEMA_VERSION', 'V1_ARCHIVE_FUTURE_SKEW_MS', 'V1_ARCHIVE_INSERT_SQL', 'V1_ARCHIVE_FALLBACK_MAX_ROWS'];
-const V2 = ['sv2Config', 'sv2Finite', 'sv2ParseSources', 'sv2History', 'sv2ServerInputEnabled', 'sv2ServerV1Rows', 'sv2MergeV1Inputs', 'sv2AttachPrices', 'sv2IndexAtOrBefore', 'sv2PriceAt',
+const V2 = ['sv2Config', 'sv2Finite', 'sv2ParseSources', 'sv2History', 'sv2ServerInputEnabled', 'sv2ServerV1Rows', 'sv2MergeV1Inputs', 'sv2ServerDecisionHist', 'sv2AttachPrices', 'sv2IndexAtOrBefore', 'sv2PriceAt',
   'sv2SourceStatus', 'sv2Pearson', 'sv2FamilyOf', 'sv2Redundancy', 'sv2Families', 'sv2EventFamily', 'sv2EventReactions',
   'sv2Events', 'sv2Regime', 'sv2Profile', 'sv2Analogues', 'sv2Classify', 'sv2Compute', 'sv2AiPackage',
   'sv2ValidateAiOutput', 'sv2RunAi', 'sv2HexSha256', 'sv2Row', 'runSentimentV2Cycle', 'sv2AlignSeries', 'sv2SeriesStatus', 'getSentimentV2Comparison',

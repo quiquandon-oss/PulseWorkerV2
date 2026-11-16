@@ -13034,33 +13034,40 @@ async function syncV1ArchiveFromHistory(env, { nowTs, queryBudget = Infinity } =
 // ---- V1 server readings as a second V2 input (2026-11-16, owner decision) ----
 // V1's composite reaches `history` (and so the archive) only while a browser has V1 open: about 6 readings a day.
 // sentiment-ff75 also computes the V1 composite server-side every hour (scomp-v1, server_composite_readings; V1 default
-// weights, sources reachable from a Worker only). With SV2_V1_SERVER_INPUT = "1" the V2 cycle scores those hourly
-// readings too, read directly from server_composite_readings (read-only: nothing is copied into
-// research_sentiment_archive, whose Experiment 5 / PEV-1 population stays browser-only, and nothing into `history`).
-// A reading below the completeness floor (below_floor = 1) or without a composite is not a V1 reading and is skipped.
-// Each V2 result records which input it scored (family_json.v1_input: origin browser | server). An archive observation
-// at exactly the same millisecond wins. sources_json is assembled in SQL from provenance_json.sources (the same
-// {source_id: 0-100 score} shape as the archive), so the Worker never parses the full provenance.
+// weights, sources reachable from a Worker only). With SV2_V1_SERVER_INPUT = "1" the V2 cycle scores those readings too,
+// read directly from server_composite_readings (read-only: nothing is copied into research_sentiment_archive, whose
+// Experiment 5 / PEV-1 population stays browser-only, and nothing into `history`).
+// Method kept at its calibrated density: V2's context rules count OBSERVATIONS (a source unchanged for 10 observations
+// is stale; redundancy uses the last 120), calibrated on the archive's density. Interleaving hourly rows would mark
+// daily sources (fng, foufi) stale most of the day and change V2 for app readings too. So the context is always the
+// archive: an app reading is scored exactly as before, and a server reading is scored as ONE extra observation appended
+// to the archive context before it. Server readings never become context for any other decision.
+// Point in time: a server reading's time is its computed_ts (after every source was fetched), not its hour slot.
+// Skipped: below-floor (below_floor = 1) and composite-less readings. An archive row at the same millisecond wins.
+// sources_json is assembled in SQL from provenance_json.sources (the archive's {source_id: 0-100} shape), so the Worker
+// never parses the full provenance. Each result records its input in family_json.v1_input (browser | server).
 const SV2_SERVER_V1_COLLECTOR = 'scomp-v1';
 const SV2_SERVER_V1_MAX_ROWS = 2000;
-// At most one server reading is scored per V2 run (the newest not yet decided). Measured 2026-11-16: one decision costs
-// ~3.6 ms CPU with the hourly 31-day context (~2.6 ms archive-only), and the cron invocation has 10 ms on Workers Free,
-// shared with event detection and the evidence collector. V2 runs on 16 non-tick hours a day, so up to 16 server
-// readings a day are scored; slots of the prediction-tick hours are left unscored (never back-filled, never imputed).
+// At most one server reading is scored per V2 run (the newest not yet decided): one decision costs ~2.6 ms CPU
+// (measured 2026-11-16, 31-day archive context) and the cron invocation has 10 ms on Workers Free, shared with event
+// detection and the evidence collector. V2 runs on 16 non-tick hours a day, so up to 16 server readings a day are
+// scored; the others are left unscored (never back-filled, never imputed).
 const SV2_SERVER_V1_PER_CYCLE = 1;
 const SV2_SERVER_V1_SOURCES_SQL = "(SELECT json_group_object(json_extract(j.value, '$.id'), json_extract(j.value, '$.score')) " +
   "FROM json_each(s.provenance_json, '$.sources') j)";
 function sv2ServerInputEnabled(env) { return String((env && env.SV2_V1_SERVER_INPUT) || '0') === '1'; }
-// Rows in the archive's shape (observation_ts, score, btc_price, sources_json) plus v1_origin and completeness, oldest
-// first. withSources = false skips the per-source JSON (the comparison chart needs only the composite). Never throws:
-// a missing table (staging, or V1 migration 0002 not applied) or a read error returns { rows: [], error }.
+// Server readings whose computed_ts is in (lo, hi], newest `newest`, returned oldest first in the archive's shape
+// (observation_ts = computed_ts, score, btc_price null, sources_json) plus slot_ts and v1_origin. The slot_ts bound
+// (primary key) keeps the read indexed; computed_ts follows its slot by seconds. withSources = false skips the
+// per-source JSON (the comparison chart needs only the composite). Never throws: a missing table (staging) or a read
+// error returns { rows: [], error }.
 async function sv2ServerV1Rows(env, lo, hi, { withSources = true, newest = SV2_SERVER_V1_MAX_ROWS } = {}) {
   try {
-    const r = await env.DB.prepare(`SELECT s.slot_ts AS observation_ts, s.composite AS score, s.completeness${withSources ? ', ' + SV2_SERVER_V1_SOURCES_SQL + ' AS sources_json' : ''} ` +
-      'FROM server_composite_readings s WHERE s.slot_ts >= ? AND s.slot_ts <= ? AND s.composite IS NOT NULL AND s.below_floor = 0 ' +
-      'ORDER BY s.slot_ts DESC LIMIT ?').bind(lo, hi, newest).all();
-    const rows = (r.results || []).map(x => ({ observation_ts: Number(x.observation_ts), score: x.score, btc_price: null,
-      ...(withSources ? { sources_json: x.sources_json } : {}), completeness: x.completeness, v1_origin: 'server' })).reverse();
+    const r = await env.DB.prepare(`SELECT s.slot_ts, s.computed_ts, s.composite AS score${withSources ? ', ' + SV2_SERVER_V1_SOURCES_SQL + ' AS sources_json' : ''} ` +
+      'FROM server_composite_readings s WHERE s.slot_ts > ? AND s.slot_ts <= ? AND s.computed_ts > ? AND s.computed_ts <= ? ' +
+      'AND s.composite IS NOT NULL AND s.below_floor = 0 ORDER BY s.slot_ts DESC LIMIT ?').bind(lo - 3600000, hi, lo, hi, newest).all();
+    const rows = (r.results || []).map(x => ({ observation_ts: Number(x.computed_ts), slot_ts: Number(x.slot_ts), score: x.score, btc_price: null,
+      ...(withSources ? { sources_json: x.sources_json } : {}), v1_origin: 'server' })).reverse();
     return { rows, error: null, truncated: rows.length >= newest };
   } catch (err) {
     return { rows: [], error: String((err && err.message) || err).slice(0, 160), truncated: false };
@@ -13074,16 +13081,23 @@ function sv2MergeV1Inputs(archiveRows, serverRows) {
   for (const r of serverRows || []) if (!seen.has(Number(r.observation_ts))) out.push(r);
   return out.sort((a, b) => Number(a.observation_ts) - Number(b.observation_ts));
 }
+// The context for one server reading: the archive observations strictly before it, then the reading itself.
+function sv2ServerDecisionHist(archiveRows, serverRow, priceRows, toleranceMs) {
+  const ts = Number(serverRow.observation_ts);
+  const h = sv2History((archiveRows || []).filter(r => Number(r.observation_ts) < ts).concat([serverRow]));
+  sv2AttachPrices(h, priceRows, toleranceMs);
+  return h;
+}
 
 // Workers Free: D1 allows 50 queries per Worker invocation (a db.batch() counts as one). The non-tick cron chain counts
 // its top-level D1 calls so the last step (the evidence collector) only uses the remaining headroom.
 const SV2_D1_QUERIES_PER_INVOCATION = 50;
 const SV2_D1_QUERY_RESERVE = 3;                  // d1_usage_daily recording and slack
-// Worst-case top-level D1 calls of one V2 cycle: 6 reads + 1 grouped and up to 8 per-source evidence reads + 2 server
-// V1 reading reads (17 fixed)
+// Worst-case top-level D1 calls of one V2 cycle: 6 reads + 1 grouped and up to 8 per-source evidence reads + 1 server
+// V1 reading read (16 fixed)
 // + 5 per pending reading (AI reserve, slot, settle, limit check, insert) x maxCatchUp 3 = 30. Kept free for V2 by the
 // sync; the cycle itself checks the budget it is given and defers readings it could not finish (never a partial write).
-const SV2_CYCLE_QUERIES_FIXED = 17;              // includes the 2 server-reading reads (SV2_V1_SERVER_INPUT)
+const SV2_CYCLE_QUERIES_FIXED = 16;              // includes the server-reading read (SV2_V1_SERVER_INPUT)
 const SV2_CYCLE_QUERIES_PER_READING = 5;
 const SV2_CYCLE_QUERY_HEADROOM = SV2_CYCLE_QUERIES_FIXED + 3 * SV2_CYCLE_QUERIES_PER_READING;
 function sv2CountingDb(db, counter) {
@@ -13121,14 +13135,18 @@ async function runSentimentV2Cycle(env, { nowTs, queryBudget = Infinity } = {}) 
     .bind(lastTs === null ? 0 : lastTs, now, pendLimit).all();
   let pendTs = (pend.results || []).map(r => Number(r.observation_ts));
   rowsRead += pendTs.length + 1;
-  // Hourly V1 server readings are candidates on the same terms (newer than the last decision, newest maxCatchUp kept).
+  // Hourly V1 server readings are candidates on the same terms (newer than the last decision; newest maxCatchUp kept),
+  // at most SV2_SERVER_V1_PER_CYCLE of them. An archive observation at the same millisecond wins.
   const serverOn = sv2ServerInputEnabled(env);
   let serverError = null;
+  const serverByTs = new Map();
   if (serverOn) {
-    const sp = await sv2ServerV1Rows(env, lastTs === null ? 0 : lastTs + 1, now, { withSources: false, newest: Math.min(pendLimit, SV2_SERVER_V1_PER_CYCLE) });
+    const sp = await sv2ServerV1Rows(env, lastTs === null ? 0 : lastTs, now, { newest: Math.min(pendLimit, SV2_SERVER_V1_PER_CYCLE) });
     serverError = sp.error;
     rowsRead += sp.rows.length;
-    pendTs = [...new Set(pendTs.concat(sp.rows.map(r => r.observation_ts)))].sort((a, b) => b - a).slice(0, pendLimit);
+    const archived = new Set(pendTs);
+    for (const r of sp.rows) if (!archived.has(r.observation_ts)) serverByTs.set(r.observation_ts, r);
+    pendTs = pendTs.concat([...serverByTs.keys()]).sort((a, b) => b - a).slice(0, pendLimit);
   }
   const pending = pendTs.sort((a, b) => a - b);
   if (!pending.length) return { ok: true, written: 0, reason: 'no new V1 observation' };
@@ -13138,12 +13156,7 @@ async function runSentimentV2Cycle(env, { nowTs, queryBudget = Infinity } = {}) 
   const lo = pending[0] - cfg.historyMs, hi = pending[pending.length - 1];
   const histRes = await env.DB.prepare('SELECT observation_ts, score, btc_price, sources_json FROM research_sentiment_archive WHERE observation_ts >= ? AND observation_ts <= ? ORDER BY observation_ts ASC')
     .bind(lo, hi).all();
-  let histRows = histRes.results || [];
-  if (serverOn) {
-    const sh = await sv2ServerV1Rows(env, lo, hi);
-    if (sh.error) serverError = serverError || sh.error;
-    histRows = sv2MergeV1Inputs(histRows, sh.rows);
-  }
+  const histRows = histRes.results || [];
   const hist = sv2History(histRows);
   rowsRead += hist.length;
   if (serverError) console.warn('sentiment v2: V1 server readings unavailable, archive only:', serverError);
@@ -13221,13 +13234,16 @@ async function runSentimentV2Cycle(env, { nowTs, queryBudget = Infinity } = {}) 
   let written = 0;
   const decisions = [];
   for (const ts of pending) {
-    const i = sv2IndexAtOrBefore(hist, ts);
-    if (i < 0 || hist[i].ts !== ts) continue;
+    // A server reading is scored on the archive context before it plus itself; an app reading on the archive as before.
+    const srv = serverByTs.get(ts);
+    const dh = srv ? sv2ServerDecisionHist(histRows, srv, priceRows, cfg.priceToleranceMs) : hist;
+    const i = sv2IndexAtOrBefore(dh, ts);
+    if (i < 0 || dh[i].ts !== ts) continue;
     const evidence = evidenceRows ? sv2EvidenceReadings(evidenceRows, ts, SV2_SOURCE_REGISTRY, SV2_EVIDENCE_RULES) : null;
-    const result = sv2Compute(hist, i, events, cfg, evidence);
+    const result = sv2Compute(dh, i, events, cfg, evidence);
     result.evidence_status = evidenceStatus;
-    result.v1_input = hist[i].origin === 'server'
-      ? { origin: 'server', collector: SV2_SERVER_V1_COLLECTOR, table: 'server_composite_readings' }
+    result.v1_input = srv
+      ? { origin: 'server', collector: SV2_SERVER_V1_COLLECTOR, table: 'server_composite_readings', slot_ts: srv.slot_ts, context: 'archive + this reading' }
       : { origin: 'browser', table: 'research_sentiment_archive' };
     if (evidenceRows) result.evidence_items = sv2EvidenceItemsForAi(evidenceRows, ts, evidence);
     if (evidenceError) { result.evidence_error = evidenceError; if (result.status === 'OK') { result.status = 'DEGRADED'; result.degraded_reason = 'evidence_unavailable'; } }

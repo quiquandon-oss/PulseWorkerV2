@@ -1,8 +1,9 @@
 // V1 hourly server readings (sentiment-ff75 scomp-v1, server_composite_readings) as a second V2 input
 // (SV2_V1_SERVER_INPUT, owner decision 2026-11-16). Real SQLite (node:sqlite) with the production DDL of every table.
-// Checks: flag off = archive only; flag on = server slots scored and labelled; below-floor / no-composite slots skipped;
-// archive wins an exact tie; nothing written to V1 or research tables; missing server table never fails the cycle;
-// the comparison series carries the server points with their origin.
+// Checks: flag off = archive only; flag on = server readings scored at their computed_ts and labelled; app readings
+// scored exactly as without the flag (context = archive only); a server reading's context = archive + itself (so the
+// observation-count rules keep the archive density); below-floor / no-composite skipped; archive wins an exact tie;
+// nothing written to V1 or research tables; missing server table never fails the cycle; comparison points labelled.
 import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
@@ -29,7 +30,7 @@ const SERVER_DDL = `CREATE TABLE server_composite_readings (slot_ts INTEGER PRIM
   CREATE TRIGGER server_composite_readings_no_update BEFORE UPDATE ON server_composite_readings
   BEGIN SELECT RAISE(ABORT, 'server_composite_readings is append-only'); END;`;
 
-const V2 = ['sv2Config', 'sv2Finite', 'sv2ParseSources', 'sv2History', 'sv2ServerInputEnabled', 'sv2ServerV1Rows', 'sv2MergeV1Inputs',
+const V2 = ['sv2Config', 'sv2Finite', 'sv2ParseSources', 'sv2History', 'sv2ServerInputEnabled', 'sv2ServerV1Rows', 'sv2MergeV1Inputs', 'sv2ServerDecisionHist',
   'sv2AttachPrices', 'sv2IndexAtOrBefore', 'sv2PriceAt', 'sv2SourceStatus', 'sv2Pearson', 'sv2FamilyOf', 'sv2Redundancy', 'sv2Families',
   'sv2EventFamily', 'sv2EventReactions', 'sv2Events', 'sv2Regime', 'sv2Profile', 'sv2Analogues', 'sv2Classify', 'sv2Compute', 'sv2AiPackage',
   'sv2ValidateAiOutput', 'sv2RunAi', 'sv2HexSha256', 'sv2Row', 'runSentimentV2Cycle', 'sv2AlignSeries', 'sv2SeriesStatus',
@@ -43,6 +44,7 @@ const S = evalInScope(extractConstants(...CONSTS) + '\n' + extractFunctions(...V
   { SV2_SOURCE_REGISTRY, sv2EvidenceReadings, sv2ScoreHeadline, SV2_EVIDENCE_RULES });
 
 const H = 3600000;
+const C = 20000;                       // computed_ts = slot_ts + 20 s in these fixtures (the decision time)
 const NOW = Date.UTC(2026, 10, 16, 20, 0, 0);
 const KEYS = ['fng', 'cryptonews', 'foufi', 'funding', 'longshort', 'hypefunding', 'hloi', 'onchain', 'macrogeo', 'usd', 'oil',
   'gold', 'ninemag', 'regulatory', 'geopolitics', 'strc'];
@@ -82,12 +84,13 @@ describe('V2 cycle with V1 server readings', () => {
   it('flag on: the newest hourly server slot is scored and labelled server; one server reading per run (CPU bound)', async () => {
     const d1 = setup({ archive: ctxArchive(), server: ctxServer() });
     const first = await S.runSentimentV2Cycle(env(d1), { nowTs: NOW - 3 * H });
-    expect(first.decisions.map(x => [x.decision_ts, x.v1_origin])).toEqual([[NOW - 3 * H, 'server']]);
-    const next = await S.runSentimentV2Cycle(env(d1), { nowTs: NOW });     // NOW-2h is left unscored, never back-filled
-    expect(next.decisions.map(x => [x.decision_ts, x.v1_origin])).toEqual([[NOW - H, 'server']]);
+    expect(first.decisions.map(x => [x.decision_ts, x.v1_origin])).toEqual([[NOW - 4 * H + C, 'server']]);   // NOW-3h computed after nowTs
+    const next = await S.runSentimentV2Cycle(env(d1), { nowTs: NOW });     // NOW-3h, NOW-2h left unscored, never back-filled
+    expect(next.decisions.map(x => [x.decision_ts, x.v1_origin])).toEqual([[NOW - H + C, 'server']]);
     expect(S.SV2_SERVER_V1_PER_CYCLE).toBe(1);
     const rows = results(d1);
     expect(rows.every(x => x.input.origin === 'server' && x.input.collector === 'scomp-v1' && x.input.table === 'server_composite_readings')).toBe(true);
+    expect(rows.map(x => x.input.slot_ts)).toEqual([NOW - 4 * H, NOW - H]);
   });
 
   it('browser and server candidates are merged, oldest first, each with its own origin', async () => {
@@ -95,16 +98,51 @@ describe('V2 cycle with V1 server readings', () => {
     const d1 = setup({ archive: [...ctxArchive(), { ts: t1, i: 998 }, { ts: t2, i: 999 }], server: ctxServer() });
     await S.runSentimentV2Cycle(env(d1), { nowTs: NOW - 4 * H });
     const r = await S.runSentimentV2Cycle(env(d1), { nowTs: NOW });
-    expect(r.decisions.map(x => [x.decision_ts, x.v1_origin])).toEqual([[t1, 'browser'], [NOW - H, 'server'], [t2, 'browser']]);
+    expect(r.decisions.map(x => [x.decision_ts, x.v1_origin])).toEqual([[t1, 'browser'], [NOW - H + C, 'server'], [t2, 'browser']]);
   });
 
   it('skips below-floor and composite-less slots; an archive row at the same timestamp wins', async () => {
     const server = [...ctxServer().slice(0, 69), { ts: NOW - 3 * H, i: 1, below: true }, { ts: NOW - 2 * H, i: 2, composite: null },
       { ts: NOW - H, i: 3 }];
-    const d1 = setup({ archive: [...ctxArchive(), { ts: NOW - H, i: 4, score: 55 }], server });
+    const d1 = setup({ archive: [...ctxArchive(), { ts: NOW - H + C, i: 4, score: 55 }], server });
     await S.runSentimentV2Cycle(env(d1), { nowTs: NOW - 4 * H });
     const r = await S.runSentimentV2Cycle(env(d1), { nowTs: NOW });
-    expect(r.decisions.map(x => [x.decision_ts, x.v1_origin])).toEqual([[NOW - H, 'browser']]);
+    expect(r.decisions.map(x => [x.decision_ts, x.v1_origin])).toEqual([[NOW - H + C, 'browser']]);
+  });
+
+  it('an app reading is scored exactly as without the flag (server readings never enter its context)', async () => {
+    const t = NOW - 30 * 60000;
+    const cols = 'decision_ts, status, degraded_reason, sentiment_score, sentiment_class, confidence, evidence_coverage, market_regime, regime_json, event_json, predictive_json, missing_json';
+    const run = async (on) => {
+      const d1 = setup({ archive: [...ctxArchive(), { ts: t, i: 999 }], server: on ? ctxServer() : [] });
+      await S.runSentimentV2Cycle(env(d1, on), { nowTs: NOW });
+      return d1.db.prepare(`SELECT ${cols}, family_json FROM sentiment_v2_results WHERE decision_ts = ?`).get(t);
+    };
+    const off = await run(false), on = await run(true);
+    const fam = (r) => { const f = JSON.parse(r.family_json); delete f.v1_input; return f; };
+    expect({ ...on, family_json: fam(on) }).toEqual({ ...off, family_json: fam(off) });
+    expect(JSON.parse(on.family_json).v1_input.origin).toBe('browser');
+  });
+
+  it('a server reading is scored on the archive density: a daily source unchanged across hourly readings is not stale', async () => {
+    // fng is constant across all 72 hourly server readings but changes in every archive observation.
+    const server = ctxServer().map((r) => ({ ...r }));
+    const d1 = setup({ archive: ctxArchive(), server });
+    d1.db.exec("DROP TRIGGER server_composite_readings_no_update");
+    const rows = d1.db.prepare('SELECT slot_ts, provenance_json FROM server_composite_readings').all();
+    for (const r of rows) {
+      const p = JSON.parse(r.provenance_json);
+      p.sources = p.sources.map((x) => (x.id === 'fng' ? { ...x, score: 12 } : x));
+      d1.db.prepare('UPDATE server_composite_readings SET provenance_json = ? WHERE slot_ts = ?').run(JSON.stringify(p), r.slot_ts);
+    }
+    await S.runSentimentV2Cycle(env(d1), { nowTs: NOW });
+    const res = d1.db.prepare('SELECT missing_json, family_json FROM sentiment_v2_results').get();
+    expect(JSON.parse(res.missing_json).stale || []).not.toContain('fng');
+    expect(JSON.parse(res.family_json).families.market_sentiment_news.sources_fresh).toContain('fng');
+    const dh = S.sv2ServerDecisionHist(ctxArchive().map(a => ({ observation_ts: a.ts, score: 40, sources_json: '{}' })),
+      { observation_ts: NOW, score: 38, sources_json: '{"fng":12}', v1_origin: 'server' }, [], 0);
+    expect(dh.length).toBe(81);
+    expect(dh.at(-1)).toMatchObject({ ts: NOW, origin: 'server' });
   });
 
   it('writes only sentiment_v2_results: archive, history and server tables are unchanged', async () => {
@@ -130,10 +168,11 @@ describe('V2 cycle with V1 server readings', () => {
     const d1 = setup({ server: ctxServer() });
     const { rows, error } = await S.sv2ServerV1Rows({ DB: d1.binding }, NOW - 2 * H, NOW);
     expect(error).toBeNull();
-    expect(rows.map(r => r.observation_ts)).toEqual([NOW - 2 * H, NOW - H]);
+    expect(rows.map(r => [r.observation_ts, r.slot_ts])).toEqual([[NOW - 2 * H + C, NOW - 2 * H], [NOW - H + C, NOW - H]]);
     expect(JSON.parse(rows[1].sources_json)).toEqual(srcObj(100 + 71));
     expect(rows[1]).toMatchObject({ score: 38, btc_price: null, v1_origin: 'server' });
     expect(S.sv2History(rows)[1]).toMatchObject({ origin: 'server', v1: 38, src: srcObj(171) });
+    expect((await S.sv2ServerV1Rows({ DB: d1.binding }, NOW - H + C, NOW)).rows).toEqual([]);   // (lo, hi] on computed_ts
   });
 
   it('stays within the declared D1 query budget with the server reads included', async () => {
@@ -153,14 +192,14 @@ describe('V2 cycle with V1 server readings', () => {
 describe('comparison API with V1 server readings', () => {
   it('flag on: server readings appear on the V1 line with v1_origin server, V2 joined on them', async () => {
     const d1 = setup({ archive: ctxArchive(), server: ctxServer() });
-    await S.runSentimentV2Cycle(env(d1), { nowTs: NOW - 2 * H });
+    await S.runSentimentV2Cycle(env(d1), { nowTs: NOW - H });
     const c = await S.getSentimentV2Comparison(env(d1), '24h', NOW);
     const server = c.points.filter(p => p.v1_origin === 'server');
     expect(server.length).toBe(24);
-    expect(c.points.find(p => p.ts === NOW - 2 * H)).toMatchObject({ v1: 38, v1_origin: 'server', v2_status: expect.any(String) });
-    expect(c.points.find(p => p.ts === NOW - 2 * H).btc).toBeGreaterThan(0);          // price attached from btc_data
+    expect(c.points.find(p => p.ts === NOW - 2 * H + C)).toMatchObject({ v1: 38, v1_origin: 'server', v2_status: expect.any(String) });
+    expect(c.points.find(p => p.ts === NOW - 2 * H + C).btc).toBeGreaterThan(0);          // price attached from btc_data
     expect(c.v1_server_input).toEqual({ enabled: true, collector: 'scomp-v1', readings_in_period: 24, error: null });
-    expect(c.series_status.v1.last_ts).toBe(NOW - H);
+    expect(c.series_status.v1.last_ts).toBe(NOW - H + C);
   });
 
   it('flag off: no server points, same payload as before plus the disabled marker', async () => {

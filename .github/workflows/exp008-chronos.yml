@@ -88,6 +88,14 @@ jobs:
           /usr/bin/time -v -o "$RUNNER_TEMP/exp008-time.txt" python exp008-chronos/run_experiment.py --store ../data/exp008_chronos
           echo "rc=$?" >> "$GITHUB_OUTPUT"
 
+      # Derived index for the CryptoPulseV2 Forecasting Lab: merges forecasts/ and resolutions/ into
+      # exp008_chronos/derived/ledger.json (rebuilt each run; the immutable files are only read). Never blocks
+      # collection: a failure here leaves the previous ledger in place and the run's own files are still committed.
+      - name: "Rebuild the derived ledger (read-only over the store)"
+        if: always() && steps.run.outcome != 'skipped'
+        continue-on-error: true
+        run: python code/exp008-chronos/build_ledger.py --store data/exp008_chronos
+
       # Free-allowance measurement (no effect on the experiment).
       - name: Resource and version report
         if: always()

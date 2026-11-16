@@ -42,6 +42,7 @@ rewritten.
 | `forecasts/BTC/{12,24}h/<origin>.json` | forecast, quantiles, model id and revision, runtime versions, context hash, anchor |
 | `resolutions/BTC/{12,24}h/<origin>.json` | actual price and return, direction, correct, persistence_correct, errors |
 | `runs/<time>.json` | per-run record: resolved, pending, forecasts made, notes, errors |
+| `derived/ledger.json` | **derived, rebuilt every run** by `build_ledger.py`: each forecast merged with its resolution (fields copied verbatim, file paths kept for traceability), sealed origins excluded. Read by the CryptoPulseV2 Forecasting Lab. |
 
 **Duplicate prevention:** an origin that already has a forecast file is skipped, and the model isn't loaded.
 

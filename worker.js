@@ -13241,7 +13241,10 @@ async function sv2GlmProbe(env, now) {
   try {
     const r = await env.DB.prepare('SELECT evidence_id, source_id, family, title, published_ts, retrieved_ts FROM sv2_evidence WHERE dup_of IS NULL AND retrieved_ts <= ? ORDER BY retrieved_ts DESC, evidence_id LIMIT 6').bind(now).all();
     rows = (r && r.results) || [];
-  } catch (_e) { rows = []; }
+  } catch (e) {
+    // A read failure (missing table, D1 outage) is not an empty table: report it as an error, distinct from the skip.
+    return { status: 'error', counted: false, reason: `evidence read failed: ${String((e && e.message) || e).slice(0, 200)}` };
+  }
   if (!rows.length) return { status: 'skipped', counted: false, reason: 'no stored evidence to build a probe package from' };
   const evidence = rows.map(x => {
     const pub = x.published_ts === null || x.published_ts === undefined ? null : Number(x.published_ts);

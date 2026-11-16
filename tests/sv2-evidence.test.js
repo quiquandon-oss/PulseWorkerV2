@@ -608,6 +608,12 @@ describe('GLM Neuron ledger on real SQLite', () => {
     // No stored evidence: the probe builds nothing and never calls the model (no invented package).
     expect(await S.sv2GlmProbe(env, NOW)).toMatchObject({ status: 'skipped', counted: false });
     expect(calls).toBe(0);
+    // A failed evidence read (missing table, D1 outage) is an error, not an empty table (Codex P2).
+    const broken = { ...env, DB: { prepare: () => { throw new Error('no such table: sv2_evidence'); } } };
+    const failed = await S.sv2GlmProbe(broken, NOW);
+    expect(failed).toMatchObject({ status: 'error', counted: false });
+    expect(failed.reason).toMatch(/evidence read failed: no such table: sv2_evidence/);
+    expect(calls).toBe(0);
     addEvidence(d1, 'cftc_press', 'CFTC Sues Louisiana After State Court Blocks CFTC-Regulated Exchanges', NOW - 3600000);
     addEvidence(d1, 'decrypt', 'Bitcoin ETFs Lose $2.1 Billion in November as Outflow Streak Hits Seven Days', NOW - 7200000);
     const results = [];

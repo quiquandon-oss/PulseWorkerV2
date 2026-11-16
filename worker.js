@@ -11732,7 +11732,24 @@ const pulseWorkerHandlers = {
 // silence the log line.
 // =====================================================================
 function newD1Usage() {
-  return { statements: 0, rows_read: 0, rows_written: 0, writes: 0, first_calls: 0, without_meta: 0 };
+  const usage = { statements: 0, rows_read: 0, rows_written: 0, writes: 0, first_calls: 0, without_meta: 0 };
+  // Per-statement attribution (2026-11-16): rows read/written per SQL signature, kept off the enumerable fields so the
+  // log line and every existing consumer of `usage` are unchanged. Read by recordD1UsageDaily for scheduled runs.
+  Object.defineProperty(usage, 'bySig', { value: new Map(), enumerable: false });
+  return usage;
+}
+// A statement's signature: its SQL text with whitespace collapsed, capped. Never includes bound values.
+function d1Sig(sql) {
+  return String(sql == null ? '' : sql).replace(/\s+/g, ' ').trim().slice(0, 100);
+}
+function noteD1Sig(usage, sig, result, firstCall) {
+  if (!usage || !usage.bySig || sig === undefined) return;
+  const e = usage.bySig.get(sig) || { calls: 0, rows_read: 0, rows_written: 0, first_calls: 0 };
+  e.calls++;
+  if (firstCall) e.first_calls++;
+  const meta = result && result.meta;
+  if (meta) { e.rows_read += Number(meta.rows_read) || 0; e.rows_written += Number(meta.rows_written) || 0; }
+  usage.bySig.set(sig, e);
 }
 
 function noteD1Result(usage, result) {
@@ -11746,13 +11763,14 @@ function noteD1Result(usage, result) {
   }
 }
 
-function instrumentD1Statement(stmt, usage) {
+function instrumentD1Statement(stmt, usage, sig) {
   return {
     __d1Statement: stmt,
-    bind: (...args) => instrumentD1Statement(stmt.bind(...args), usage),
-    first: async (...args) => { usage.statements++; usage.first_calls++; return stmt.first(...args); },
-    all: async (...args) => { const r = await stmt.all(...args); noteD1Result(usage, r); return r; },
-    run: async (...args) => { const r = await stmt.run(...args); usage.writes++; noteD1Result(usage, r); return r; },
+    __d1Sig: sig,
+    bind: (...args) => instrumentD1Statement(stmt.bind(...args), usage, sig),
+    first: async (...args) => { usage.statements++; usage.first_calls++; noteD1Sig(usage, sig, null, true); return stmt.first(...args); },
+    all: async (...args) => { const r = await stmt.all(...args); noteD1Result(usage, r); noteD1Sig(usage, sig, r); return r; },
+    run: async (...args) => { const r = await stmt.run(...args); usage.writes++; noteD1Result(usage, r); noteD1Sig(usage, sig, r); return r; },
     raw: async (...args) => { usage.statements++; usage.without_meta++; return stmt.raw(...args); },
   };
 }
@@ -11760,12 +11778,12 @@ function instrumentD1Statement(stmt, usage) {
 function instrumentD1(db, usage) {
   return new Proxy(db, {
     get(target, prop) {
-      if (prop === 'prepare') return (sql) => instrumentD1Statement(target.prepare(sql), usage);
+      if (prop === 'prepare') return (sql) => instrumentD1Statement(target.prepare(sql), usage, d1Sig(sql));
       if (prop === 'batch') {
         return async (statements) => {
           const results = await target.batch(statements.map((s) => (s && s.__d1Statement ? s.__d1Statement : s)));
           usage.writes += statements.length;
-          for (const r of results || []) noteD1Result(usage, r);
+          (results || []).forEach((r, i) => { noteD1Result(usage, r); noteD1Sig(usage, statements[i] && statements[i].__d1Sig, r); });
           return results;
         };
       }
@@ -11797,6 +11815,8 @@ function logD1Usage(usage, fields, env) {
 // least D1_USAGE_RECORD_MIN_ROWS rows (cheap cached or snapshot reads are left out, so this adds no write to
 // them). Without the table the recording is skipped. D1_USAGE_TABLE = "0" disables it. Never throws.
 const D1_USAGE_RECORD_MIN_ROWS = 50;
+const D1_USAGE_STMT_TOP = 12;          // per scheduled run: the heaviest statements recorded under kind 'stmt'
+const D1_USAGE_STMT_MIN_ROWS = 500;    // ... and only those that read at least this many rows in the run
 const D1_USAGE_TABLE_RETRY_MS = 10 * 60 * 1000;
 let d1UsageTableUnavailableUntil = 0;
 
@@ -11827,8 +11847,8 @@ async function sv2CollectGuarded(env, nowTs, budgetFn, { requireFresh = true } =
     // Today's totals, and the newest record of today or yesterday (every hourly invocation writes one), so a table that
     // has stopped being updated is detected instead of trusted.
     const today = new Date(nowTs).toISOString().slice(0, 10), yesterday = new Date(nowTs - 86400000).toISOString().slice(0, 10);
-    used = await env.DB.prepare('SELECT COALESCE(SUM(CASE WHEN day = ? THEN rows_read END), 0) AS r, COALESCE(SUM(CASE WHEN day = ? THEN rows_written END), 0) AS w, MAX(last_ts) AS t FROM d1_usage_daily WHERE day >= ? LIMIT 1')
-      .bind(today, today, yesterday).first();
+    used = await env.DB.prepare('SELECT COALESCE(SUM(CASE WHEN day = ? THEN rows_read END), 0) AS r, COALESCE(SUM(CASE WHEN day = ? THEN rows_written END), 0) AS w, MAX(last_ts) AS t FROM d1_usage_daily WHERE day >= ? AND kind <> ? LIMIT 1')
+      .bind(today, today, yesterday, 'stmt').first();     // per-statement rows (kind 'stmt') are already inside their run's total
   } catch (err) {
     console.error('sv2 collector usage guard: read failed:', String((err && err.message) || err));
     return { ok: false, skipped: true, auto_stop: 'usage_unreadable', reason: 'collector stopped: daily D1 usage could not be read' };
@@ -11864,6 +11884,22 @@ async function recordD1UsageDaily(env, usage, kind, key, now = Date.now()) {
          rows_read = rows_read + excluded.rows_read, rows_written = rows_written + excluded.rows_written,
          max_rows_read = MAX(max_rows_read, excluded.max_rows_read), last_ts = excluded.last_ts`
     ).bind(day, kind, String(key || 'unknown').slice(0, 120), usage.statements, usage.rows_read, usage.rows_written, usage.rows_read, now).run();
+    // Scheduled runs also record their heaviest statements (kind 'stmt', key '<cron>|<SQL signature>'), so the cost of a
+    // tick can be attributed per query. These rows are excluded from every total (the /d1-usage day totals and the
+    // collector's daily stop), so nothing is counted twice. At most D1_USAGE_STMT_TOP rows, one batch.
+    if (kind === 'scheduled' && usage.bySig && usage.bySig.size) {
+      const top = [...usage.bySig].filter(([, e]) => e.rows_read >= D1_USAGE_STMT_MIN_ROWS)
+        .sort((a, b) => b[1].rows_read - a[1].rows_read).slice(0, D1_USAGE_STMT_TOP);
+      if (top.length) {
+        await env.DB.batch(top.map(([sig, e]) => env.DB.prepare(
+          `INSERT INTO d1_usage_daily (day, kind, key, invocations, statements, rows_read, rows_written, max_rows_read, last_ts)
+           VALUES (?,'stmt',?,1,?,?,?,?,?)
+           ON CONFLICT(day, kind, key) DO UPDATE SET invocations = invocations + 1, statements = statements + excluded.statements,
+             rows_read = rows_read + excluded.rows_read, rows_written = rows_written + excluded.rows_written,
+             max_rows_read = MAX(max_rows_read, excluded.max_rows_read), last_ts = excluded.last_ts`
+        ).bind(day, `${String(key || 'unknown')}|${sig}`.slice(0, 120), e.calls, e.rows_read, e.rows_written, e.rows_read, now)));
+      }
+    }
     return true;
   } catch (err) {
     if (/no such table/i.test(String(err && err.message || err))) d1UsageTableUnavailableUntil = Date.now() + D1_USAGE_TABLE_RETRY_MS;
@@ -11891,8 +11927,15 @@ async function getD1UsageSummary(env, days = 7, now = Date.now()) {
   }
   const byDay = new Map();
   for (const r of results || []) {
-    if (!byDay.has(r.day)) byDay.set(r.day, { day: r.day, rows_read: 0, rows_written: 0, invocations: 0, pct_of_daily_read_limit: 0, entries: [] });
+    if (!byDay.has(r.day)) byDay.set(r.day, { day: r.day, rows_read: 0, rows_written: 0, invocations: 0, pct_of_daily_read_limit: 0, entries: [], statements_top: [] });
     const d = byDay.get(r.day);
+    // Per-statement rows already count inside their run's totals: listed separately, never added again.
+    if (r.kind === 'stmt') {
+      const cut = String(r.key).indexOf('|');
+      d.statements_top.push({ run: cut >= 0 ? r.key.slice(0, cut) : '', sql: cut >= 0 ? r.key.slice(cut + 1) : r.key, runs: r.invocations,
+        calls: r.statements, rows_read: r.rows_read, rows_written: r.rows_written, max_rows_read_per_run: r.max_rows_read, last_ts: r.last_ts });
+      continue;
+    }
     d.rows_read += r.rows_read; d.rows_written += r.rows_written; d.invocations += r.invocations;
     d.entries.push({ kind: r.kind, key: r.key, invocations: r.invocations, statements: r.statements, rows_read: r.rows_read,
       rows_written: r.rows_written, max_rows_read: r.max_rows_read, last_ts: r.last_ts });

@@ -538,6 +538,11 @@ describe('collector automatic stop on the daily D1 allowance', () => {
     expect(reads.ran).toBeUndefined();
     expect(await G.sv2CollectGuarded({ DB: withUsage(10, 50_000).binding, SV2_COLLECTOR_ENABLED: '1' }, NOW, () => 40)).toMatchObject({ auto_stop: 'd1_daily_budget' });
   });
+  it('per-statement rows (kind stmt) are not counted twice toward the stop', async () => {
+    const d1 = withUsage(1_400_000, 1_000);
+    d1.db.prepare('INSERT INTO d1_usage_daily VALUES (?, ?, ?, 1, 1, ?, ?, 0, ?)').run(day, 'stmt', '0 * * * *|SELECT * FROM btc_data', 1_300_000, 0, NOW - 30 * 60000);
+    expect(await G.sv2CollectGuarded({ DB: d1.binding, SV2_COLLECTOR_ENABLED: '1' }, NOW, () => 40)).toMatchObject({ ran: true });
+  });
   it('adds this invocation\'s live, not yet recorded usage (Codex P2)', async () => {
     const env = { DB: withUsage(2_400_000, 0).binding, SV2_COLLECTOR_ENABLED: '1', __d1Usage: { rows_read: 150_000, rows_written: 0 } };
     expect(await G.sv2CollectGuarded(env, NOW, () => 40)).toMatchObject({ auto_stop: 'd1_daily_budget', d1_today: { rows_read: 2_550_000 } });

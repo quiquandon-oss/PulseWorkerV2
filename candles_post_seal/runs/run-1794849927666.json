@@ -1,0 +1,46 @@
+{
+ "assets": {
+  "BTC": {
+   "appended": 168,
+   "first_open_ts": 1791579600000,
+   "gaps": 0,
+   "last_open_ts": 1794844800000,
+   "received": 218,
+   "requested_from": 1794067200000,
+   "requested_to": 1794849927666,
+   "revisions": 0,
+   "total": 908
+  },
+  "ETH": {
+   "appended": 168,
+   "first_open_ts": 1791579600000,
+   "gaps": 0,
+   "last_open_ts": 1794844800000,
+   "received": 218,
+   "requested_from": 1794067200000,
+   "requested_to": 1794849927666,
+   "revisions": 0,
+   "total": 908
+  },
+  "LINK": {
+   "appended": 168,
+   "first_open_ts": 1791579600000,
+   "gaps": 0,
+   "last_open_ts": 1794844800000,
+   "received": 218,
+   "requested_from": 1794067200000,
+   "requested_to": 1794849927666,
+   "revisions": 0,
+   "total": 908
+  }
+ },
+ "collector_version": "pev1p-candle-archive-v1",
+ "finished_at": 1794849928386,
+ "run_id": "run-1794849927666",
+ "sha256": {
+  "BTC/observations.jsonl": "11e2a978eeef850e3273c84d1f37fa69a97bde1c50b0a93ec672dfac66b90319",
+  "ETH/observations.jsonl": "4ebd2013b14bf0c860604a04b4874d880624f023b9b5414bb4d6dd0393bffb63",
+  "LINK/observations.jsonl": "9a0b11783215cf943b33cc18bc70c1db41e3f36199fd11505118ecb80e2b6eef"
+ },
+ "started_at": 1794849927666
+}

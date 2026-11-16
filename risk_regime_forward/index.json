@@ -117,12 +117,12 @@
     "2026-11-13": "7ba1122cfd6665fe361a94d7acf67cab3eda0f8572b029a2e0d2f80de6bcfd9f",
     "2026-11-14": "fc6650c48a2407d5d49f8244b53c7ee3a1fdc7d3a0657b29b4f46586afb04810",
     "2026-11-15": "7c8d97dcee40ac6565ccd40312de66985b8cc28ef89098fcaa4fceab9a62ef9a",
-    "2026-11-16": "927d521849fc27d40073a5a69fadae903e81bee9a1ebf78fc000d71fea74a427"
+    "2026-11-16": "03994585471ff033f9763a811c178f1078243a7b62e64b2de34aa3d1567b7b0a"
    },
    "first": "2026-10-06",
    "last": "2026-11-16",
    "latest_complete": "2026-11-15",
-   "observations": 1980,
+   "observations": 1982,
    "partitions": 42,
    "retention": "fundingHistory: full history",
    "stale": false,

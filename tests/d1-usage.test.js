@@ -28,7 +28,7 @@ function fakeDb() {
 }
 
 describe('instrumentD1 (unit)', () => {
-  const scope = evalInScope(extractFunctions('newD1Usage', 'noteD1Result', 'instrumentD1Statement', 'instrumentD1', 'withD1Usage'), {});
+  const scope = evalInScope(extractFunctions('newD1Usage', 'd1Sig', 'noteD1Sig', 'noteD1Result', 'instrumentD1Statement', 'instrumentD1', 'withD1Usage'), {});
 
   it('returns results unchanged and sums rows read and written', async () => {
     const db = fakeDb(); const usage = scope.newD1Usage(); const w = scope.instrumentD1(db, usage);
@@ -53,6 +53,26 @@ describe('instrumentD1 (unit)', () => {
     expect(results).toHaveLength(2);
     expect(db.calls).toEqual([['batch', ['A', 'B']]]);
     expect(usage).toMatchObject({ statements: 2, rows_read: 10, rows_written: 2 });
+  });
+
+  it('attributes rows to each statement signature (never bound values), off the logged fields', async () => {
+    const db = fakeDb(); const usage = scope.newD1Usage(); const w = scope.instrumentD1(db, usage);
+    await w.prepare('SELECT  *\n FROM btc_data WHERE ts > ?').bind(1794000000000).all();
+    await w.prepare('SELECT  *\n FROM btc_data WHERE ts > ?').bind(5).all();
+    await w.prepare('UPDATE t SET x=?').bind('secret-value').run();
+    await w.prepare('SELECT n').first();
+    await w.batch([w.prepare('A').bind(1), w.prepare('B')]);
+    expect(Object.fromEntries(usage.bySig)).toEqual({
+      'SELECT * FROM btc_data WHERE ts > ?': { calls: 2, rows_read: 80, rows_written: 0, first_calls: 0 },
+      'UPDATE t SET x=?': { calls: 1, rows_read: 3, rows_written: 2, first_calls: 0 },
+      'SELECT n': { calls: 1, rows_read: 0, rows_written: 0, first_calls: 1 },
+      A: { calls: 1, rows_read: 5, rows_written: 1, first_calls: 0 },
+      B: { calls: 1, rows_read: 5, rows_written: 1, first_calls: 0 },
+    });
+    expect(JSON.stringify([...usage.bySig])).not.toMatch(/secret-value|1794000000000/);
+    expect(Object.keys(usage)).toEqual(['statements', 'rows_read', 'rows_written', 'writes', 'first_calls', 'without_meta']);
+    expect(JSON.parse(JSON.stringify(usage))).not.toHaveProperty('bySig');
+    expect(scope.d1Sig('x'.repeat(300))).toHaveLength(100);
   });
 
   it('other binding methods pass straight through', async () => {

@@ -22,6 +22,25 @@ describe('d1_usage_daily, table present', () => {
     for (const r of sched) { expect(r.rows_read).toBeGreaterThan(0); expect(r.max_rows_read).toBeLessThanOrEqual(r.rows_read); }
   });
 
+  it('scheduled runs also record their heaviest statements (kind stmt): keyed by cron, capped, never for requests', () => {
+    const all = rows(w), stmt = all.filter((r) => r.kind === 'stmt');
+    expect(stmt.length).toBeGreaterThan(0);
+    for (const r of stmt) {
+      expect(r.key.startsWith('0 * * * *|')).toBe(true);
+      expect(r.key.length).toBeLessThanOrEqual(120);
+      expect(r.max_rows_read).toBeGreaterThanOrEqual(500);     // only statements that read >= 500 rows in a run
+      expect(r.max_rows_read).toBeLessThanOrEqual(r.rows_read);
+    }
+    // per run at most 12, and every statement's rows are within that run's own total
+    const sched = all.filter((r) => r.kind === 'scheduled');
+    for (const day of new Set(stmt.map((r) => r.day))) {
+      const runs = sched.filter((r) => r.day === day).reduce((a, r) => a + r.invocations, 0);
+      const s = stmt.filter((r) => r.day === day);
+      expect(s.reduce((a, r) => a + r.invocations, 0)).toBeLessThanOrEqual(12 * runs);
+      expect(s.reduce((a, r) => a + r.rows_read, 0)).toBeLessThanOrEqual(sched.filter((r) => r.day === day).reduce((a, r) => a + r.rows_read, 0));
+    }
+  });
+
   it('a request that reads many rows is recorded by method and path, and repeats accumulate', async () => {
     w.env.ROUTE_CACHE = '0';
     try {
@@ -54,7 +73,9 @@ describe('d1_usage_daily, table present', () => {
     expect(body).toMatchObject({ ok: true, recording: true, daily_read_limit: 5000000 });
     expect(body.days.map((d) => d.day)).toEqual([...new Set(table.map((r) => r.day))].sort().reverse());
     for (const d of body.days) {
-      const mine = table.filter((r) => r.day === d.day);
+      // Per-statement rows (kind 'stmt') are already inside their run's totals: listed apart, never added again.
+      const mine = table.filter((r) => r.day === d.day && r.kind !== 'stmt');
+      expect(d.statements_top).toHaveLength(table.filter((r) => r.day === d.day && r.kind === 'stmt').length);
       expect(d.rows_read).toBe(mine.reduce((a, r) => a + r.rows_read, 0));
       expect(d.rows_written).toBe(mine.reduce((a, r) => a + r.rows_written, 0));
       expect(d.entries).toHaveLength(mine.length);

@@ -497,7 +497,7 @@ describe('AI: validation, quota, unavailability, zero paid fallback', () => {
     expect(sent[1].content).toBe(JSON.stringify(p2));
     expect(res.package_sha256).toBe(await S.sv2HexSha256(JSON.stringify(p2)));
     expect(res.prompt_sha256).toBe(await S.sv2HexSha256(sent[0].content));
-    expect(res.prompt_version).toBe('sv2-ai-prompt-3');
+    expect(res.prompt_version).toBe('sv2-ai-prompt-4');
   });
   it('the stored row and the API view keep model, status, tokens, Neurons, cited evidence and the exact-input hashes', async () => {
     const res = await S.sv2RunAi({ SENTIMENT_V2_AI_MODEL: GLM, SV2_GLM_DAILY_NEURONS: '1000', AI: { run: async () => okResp(good) } }, pkg, allowedIds, ledgerFor());
@@ -509,7 +509,7 @@ describe('AI: validation, quota, unavailability, zero paid fallback', () => {
     const view = S.sv2LatestView({ asset: 'BTC', status: 'OK', ai_model: GLM, ai_status: 'ok', ai_json: JSON.stringify(aiJson), family_json: '{}' });
     expect(view.ai_annotation.cited_ids).toEqual(good.cited_ids);
     expect(view.ai_usage).toMatchObject({ input_tokens: 900, output_tokens: 300, reserved_neurons: res.reserved_neurons, actual_neurons: res.actual_neurons });
-    expect(view.ai_trace).toEqual({ prompt_version: 'sv2-ai-prompt-3', prompt_sha256: res.prompt_sha256, package_sha256: res.package_sha256 });
+    expect(view.ai_trace).toEqual({ prompt_version: 'sv2-ai-prompt-4', prompt_sha256: res.prompt_sha256, package_sha256: res.package_sha256 });
     expect(S.sv2LatestView({ asset: 'BTC', ai_json: '{}', family_json: '{}' }).ai_trace).toBe(null);
   });
   it('asks GLM for a JSON object with thinking off, and an empty answer says why instead of "not an object"', async () => {
@@ -526,6 +526,26 @@ describe('AI: validation, quota, unavailability, zero paid fallback', () => {
     const ok = await S.sv2RunAi({ SENTIMENT_V2_AI_MODEL: GLM, SV2_GLM_DAILY_NEURONS: '1000',
       AI: { run: async () => ({ choices: [{ finish_reason: 'stop', message: { content: JSON.stringify(good) } }], usage: { prompt_tokens: 220, completion_tokens: 80 } }) } }, pkg, allowedIds, ledgerFor());
     expect(ok.status).toBe('ok');
+  });
+  it('the package lists citable_ids up front; the prompt requires citing one or more of them; anything else is rejected', async () => {
+    expect(pkg.citable_ids).toEqual(allowedIds);
+    expect(new Set(pkg.citable_ids).size).toBe(pkg.citable_ids.length);
+    let sys = null;
+    const run = (out) => S.sv2RunAi({ SENTIMENT_V2_AI_MODEL: GLM, SV2_GLM_DAILY_NEURONS: '1000', AI: { run: async (_m, o) => { sys = o.messages[0].content; return okResp(out); } } }, pkg, allowedIds, ledgerFor());
+    const valid = await run({ ...good, cited_ids: [allowedIds[0]] });
+    expect(valid.status).toBe('ok');
+    expect(sys).toMatch(/cited_ids must hold one or more identifiers copied exactly from the package field citable_ids/);
+    expect(valid.prompt_version).toBe('sv2-ai-prompt-4');
+    const missing = await run({ ...good, cited_ids: [] });
+    expect(missing).toMatchObject({ status: 'invalid_output' });
+    expect(missing.reason).toMatch(/cited_ids must be a non-empty array/);
+    const unknown = await run({ ...good, cited_ids: ['evidence:not-in-package'] });
+    expect(unknown).toMatchObject({ status: 'invalid_output' });
+    expect(unknown.reason).toMatch(/cited id not in the evidence package/);
+    const mixed = await run({ ...good, cited_ids: [allowedIds[0], 'v1:made_up@1'] });
+    expect(mixed.status).toBe('invalid_output');
+    const badContradiction = await run({ ...good, contradictions: [{ ids: ['evidence:zz'], note: 'x' }] });
+    expect(badContradiction.status).toBe('invalid_output');
   });
   it('a model rate limit or capacity error is its own degraded state: recorded against the reservation, never retried', async () => {
     for (const msg of ['3040: Capacity temporarily exceeded', 'HTTP 429 Too Many Requests', 'Out of capacity']) {

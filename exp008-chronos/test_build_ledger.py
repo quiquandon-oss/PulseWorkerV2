@@ -86,3 +86,16 @@ def test_unreadable_files_are_reported_not_fatal_and_sources_are_not_modified(tm
 def test_empty_store_builds_an_empty_ledger(tmp_path):
     led = bl.build(tmp_path / "exp008_chronos", now_ms=NOV2)
     assert led["forecasts"] == [] and led["skipped"] == [] and led["recent_runs"] == []
+
+
+def test_unchanged_store_keeps_the_existing_ledger_byte_for_byte(tmp_path):
+    s = tmp_path / "exp008_chronos"
+    _write(s, "forecasts/BTC/12h/a.json", _fc(NOV2))
+    assert bl.main(["--store", str(s)]) == 0
+    out = s / "derived" / "ledger.json"
+    first = out.read_bytes()
+    assert bl.main(["--store", str(s)]) == 0          # a later run, new generated_ts, same content
+    assert out.read_bytes() == first
+    _write(s, "resolutions/BTC/12h/a.json", {"actual_price": 1.5, "actual_return_pct": 0.1, "correct": 1})
+    assert bl.main(["--store", str(s)]) == 0          # a real change is written
+    assert json.loads(out.read_text())["forecasts"][0]["status"] == "resolved"

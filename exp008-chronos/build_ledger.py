@@ -97,6 +97,15 @@ def main(argv=None):
     args = ap.parse_args(argv)
     ledger = build(args.store)
     out = Path(args.store) / "derived" / "ledger.json"
+    # Only generated_ts would differ on a run that changed nothing: keep the existing file then, so the data branch
+    # gets no commit that carries no information (the commit step finds nothing to commit, as before this file).
+    try:
+        prev = json.loads(out.read_text(encoding="utf-8"))
+        if {k: v for k, v in prev.items() if k != "generated_ts"} == {k: v for k, v in ledger.items() if k != "generated_ts"}:
+            print(f"ledger unchanged ({len(ledger['forecasts'])} forecasts): {out} kept")
+            return 0
+    except (OSError, ValueError):
+        pass
     out.parent.mkdir(parents=True, exist_ok=True)
     tmp = out.with_suffix(".tmp")
     tmp.write_text(json.dumps(ledger, indent=1, sort_keys=True) + "\n", encoding="utf-8")

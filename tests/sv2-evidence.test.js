@@ -356,7 +356,7 @@ describe('deterministic evidence scoring', () => {
 const FUNCS = ['sv2Config', 'sv2Finite', 'sv2ParseSources', 'sv2History', 'sv2AttachPrices', 'sv2IndexAtOrBefore', 'sv2PriceAt', 'sv2SourceStatus',
   'sv2Pearson', 'sv2FamilyOf', 'sv2Redundancy', 'sv2Families', 'sv2EventFamily', 'sv2EventReactions', 'sv2Events', 'sv2Regime', 'sv2Profile',
   'sv2Analogues', 'sv2Classify', 'sv2EvidenceSummary', 'sv2Compute', 'sv2EvidenceItemsForAi', 'sv2AiPackage', 'sv2ValidateAiOutput', 'sv2AiBudget',
-  'sv2AiEstimateNeurons', 'sv2UngroundedNumbers', 'sv2RunAi', 'sv2HexSha256', 'sv2Row', 'runSentimentV2Cycle', 'sv2AlignSeries', 'sv2SeriesStatus', 'sv2LatestView',
+  'sv2AiEstimateNeurons', 'sv2UngroundedNumbers', 'sv2RunAi', 'sv2HexSha256', 'sv2Row', 'runSentimentV2Cycle', 'sv2AlignSeries', 'sv2SeriesStatus', 'sv2StructuredAnnotation', 'sv2LatestView',
   'getSentimentV2Comparison', 'getSentimentV2Status', 'getSentimentV2Evidence', 'sv2GlmProbe', 'sv2SchemaCheck', 'sv2ReadError'];
 const CONSTS = ['SENTIMENT_V2_VERSION', 'SV2_VERSIONS_SHOWN', 'SV2_INSERT_SQL', 'SV2_PERIODS_MS', 'SV2_MAX_POINTS', 'SV2_MAX_ROWS', 'SV2_MAX_PRICE_ROWS',
   'SV2_STALE_MS', 'SV2_AI_PRICING', 'SV2_AI_MAX_OUTPUT_TOKENS', 'SV2_AI_RESERVE_SQL', 'SV2_AI_TEMPLATE_TOKENS', 'SV2_AI_PROMPT_VERSION', 'SV2_CYCLE_QUERIES_FIXED', 'SV2_CYCLE_QUERIES_PER_READING', 'SV2_SCHEMA_TABLES', 'SV2_SCHEMA_MIGRATION'];
@@ -583,13 +583,13 @@ describe('GLM Neuron ledger on real SQLite', () => {
   it('every AI result carries the prompt version and the sha256 of the exact prompt and evidence package sent', async () => {
     const sent = [];
     const env = { SENTIMENT_V2_AI_MODEL: GLM, SV2_GLM_DAILY_NEURONS: '1000',
-      AI: { run: async (_m, o) => { sent.push(o.messages); return { response: JSON.stringify({ summary: 'ok', cited_ids: ['ev:a'], contradictions: [], event_relevance: [], uncertainty: 'low', entities: [], figures: [] }), usage: { prompt_tokens: 100, completion_tokens: 50 } }; } } };
+      AI: { run: async (_m, o) => { sent.push(o.messages); return { response: JSON.stringify({ cited_ids: ['ev:a'], contradictions: [], event_relevance: [], entities: [], figures: [] }), usage: { prompt_tokens: 100, completion_tokens: 50 } }; } } };
     const ledger = { reserveNeurons: async () => 1, recordNeurons: async () => {}, accountLimitedToday: async () => false };
     const pkg = { decision_ts: 1, evidence: [{ id: 'ev:a', title: 'x' }] };
     const r = await S.sv2RunAi(env, pkg, new Set(['ev:a']), ledger);
     const hex = (s) => createHash('sha256').update(s).digest('hex');
     expect(r.status).toBe('ok');
-    expect(r).toMatchObject({ prompt_version: 'sv2-ai-prompt-5', prompt_sha256: hex(sent[0][0].content), package_sha256: hex(sent[0][1].content) });
+    expect(r).toMatchObject({ prompt_version: 'sv2-ai-prompt-6', prompt_sha256: hex(sent[0][0].content), package_sha256: hex(sent[0][1].content) });
     expect(sent[0][1].content).toBe(JSON.stringify(pkg));
     // Budget stops and failures are traceable too; the hashes are persisted in ai_json.
     const stopped = await S.sv2RunAi(env, pkg, new Set(['ev:a']), { ...ledger, reserveNeurons: async () => null });
@@ -604,7 +604,7 @@ describe('GLM Neuron ledger on real SQLite', () => {
     let calls = 0;
     const env = { DB: d1.binding, SENTIMENT_V2_AI_MODEL: GLM, SV2_GLM_DAILY_NEURONS: '150',
       AI: { run: async (_m, o) => { calls++; const sent = JSON.parse(o.messages[1].content);
-        return { response: JSON.stringify({ summary: 'ok', cited_ids: [sent.citable_ids[0]], contradictions: [], event_relevance: [], uncertainty: 'probe', entities: [], figures: [] }), usage: { prompt_tokens: 400, completion_tokens: 200 } }; } } };
+        return { response: JSON.stringify({ cited_ids: [sent.citable_ids[0]], contradictions: [], event_relevance: [], entities: [], figures: [] }), usage: { prompt_tokens: 400, completion_tokens: 200 } }; } } };
     // No stored evidence: the probe builds nothing and never calls the model (no invented package).
     expect(await S.sv2GlmProbe(env, NOW)).toMatchObject({ status: 'skipped', counted: false });
     expect(calls).toBe(0);

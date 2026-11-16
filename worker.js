@@ -12626,6 +12626,16 @@ function sv2AiPackage(result) {
     stale: result.missing.stale, missing: result.missing.missing }, allowedIds: citable };
 }
 
+// The structured fields an annotation may expose (API and storage); anything else in an older stored row is dropped.
+function sv2StructuredAnnotation(out) {
+  if (!out || typeof out !== 'object') return null;
+  const arr = (x) => (Array.isArray(x) ? x : []);
+  return { cited_ids: arr(out.cited_ids).filter(x => typeof x === 'string'),
+    contradictions: arr(out.contradictions).map(c => ({ ids: [...new Set(arr(c && c.ids).filter(x => typeof x === 'string'))] })).filter(c => c.ids.length >= 2),
+    event_relevance: arr(out.event_relevance).map(e => ({ id: e && e.id, relevance: e && e.relevance, overlap: e && e.overlap })),
+    entities: arr(out.entities).map(e => ({ id: e && e.id, name: e && e.name, kind: e && e.kind })),
+    figures: arr(out.figures).map(f => ({ id: f && f.id, value: f && f.value })) };
+}
 // Entity kinds the AI may assign. Entities and figures are extracted from stored evidence titles only: each must name an
 // evidence item of the package and occur in that item's own title (an entity name as a case-insensitive substring, a
 // figure as a whole numeric value), so nothing can be attributed to a source that did not say it.
@@ -12636,15 +12646,18 @@ function sv2ValidateAiOutput(obj, allowedIds, titles = {}) {
   const allowed = new Set(allowedIds || []);
   const isStr = (x, max) => typeof x === 'string' && x.trim().length > 0 && x.length <= max;
   if (!obj || typeof obj !== 'object' || Array.isArray(obj)) return { ok: false, errors: ['not an object'] };
-  const extra = Object.keys(obj).filter(k => !['summary', 'cited_ids', 'contradictions', 'event_relevance', 'uncertainty', 'entities', 'figures'].includes(k));
-  if (extra.length) errors.push(`unexpected fields: ${extra.join(',')}`);      // e.g. a numeric score the AI may not set
-  if (!isStr(obj.summary, 800)) errors.push('summary must be a non-empty string <= 800 chars');
-  if (!isStr(obj.uncertainty, 400)) errors.push('uncertainty must be a non-empty string <= 400 chars');
+  // Structured output only (owner decision 2026-11-16, after staging probe #14 wrote an unsupported claim in its free-text
+  // summary): no summary, uncertainty or other free text is accepted, so nothing the validator cannot ground is stored.
+  const SV2_AI_OUTPUT_KEYS = ['cited_ids', 'contradictions', 'event_relevance', 'entities', 'figures'];
+  const extra = Object.keys(obj).filter(k => !SV2_AI_OUTPUT_KEYS.includes(k));
+  if (extra.length) errors.push(`unexpected fields: ${extra.join(',')}`);      // e.g. a summary, uncertainty or score
   if (!Array.isArray(obj.cited_ids) || !obj.cited_ids.length) errors.push('cited_ids must be a non-empty array');
   else for (const id of obj.cited_ids) if (!allowed.has(id)) errors.push(`cited id not in the evidence package: ${String(id).slice(0, 60)}`);
   if (!Array.isArray(obj.contradictions)) errors.push('contradictions must be an array');
   else for (const c of obj.contradictions) {
-    if (!c || !Array.isArray(c.ids) || !c.ids.every(id => allowed.has(id)) || !isStr(c.note, 300)) { errors.push('invalid contradiction entry'); break; }
+    // A contradiction is two or more distinct package ids, nothing else (no free-text note).
+    if (!c || typeof c !== 'object' || Object.keys(c).some(k => k !== 'ids') || !Array.isArray(c.ids) || new Set(c.ids).size < 2
+        || c.ids.length !== new Set(c.ids).size || !c.ids.every(id => allowed.has(id))) { errors.push('invalid contradiction entry'); break; }
   }
   if (!Array.isArray(obj.event_relevance)) errors.push('event_relevance must be an array');
   else for (const e of obj.event_relevance) {
@@ -12674,10 +12687,9 @@ function sv2ValidateAiOutput(obj, allowedIds, titles = {}) {
   // The accepted output is rebuilt from the validated fields only, so an extra nested field (e.g. a "score" inside an
   // entity) can never be persisted or shown (Codex P2).
   return errors.length ? { ok: false, errors } : { ok: true, value: {
-    summary: obj.summary, cited_ids: [...obj.cited_ids],
-    contradictions: obj.contradictions.map(c => ({ ids: [...c.ids], note: c.note })),
+    cited_ids: [...obj.cited_ids],
+    contradictions: obj.contradictions.map(c => ({ ids: [...c.ids] })),
     event_relevance: obj.event_relevance.map(e => ({ id: e.id, relevance: e.relevance, overlap: e.overlap })),
-    uncertainty: obj.uncertainty,
     entities: obj.entities.map(e => ({ id: e.id, name: e.name, kind: e.kind })),
     figures: obj.figures.map(f => ({ id: f.id, value: f.value })) } };
 }
@@ -12748,7 +12760,7 @@ function sv2UngroundedNumbers(texts, pkgText) {
   return bad;
 }
 
-const SV2_AI_PROMPT_VERSION = 'sv2-ai-prompt-5';     // bump whenever the system prompt text changes
+const SV2_AI_PROMPT_VERSION = 'sv2-ai-prompt-6';     // bump whenever the system prompt text changes
 async function sv2HexSha256(text) {
   const d = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(String(text)));
   return [...new Uint8Array(d)].map(b => b.toString(16).padStart(2, '0')).join('');
@@ -12764,17 +12776,17 @@ async function sv2RunAi(env, pkg, allowedIds, ledger) {
   if (!env.AI || typeof env.AI.run !== 'function') return { status: 'unavailable', model, counted: false, reason: 'Workers AI binding unavailable' };
   try { if (await ledger.accountLimitedToday()) return { status: 'quota_guard', model, counted: false, reason: 'account free allocation reported exhausted today' }; }
   catch (err) { return { status: 'quota_guard', model, counted: false, reason: 'Neuron ledger unavailable: ' + String((err && err.message) || err).slice(0, 120) }; }
-  const system = 'You annotate a crypto sentiment evidence package. Return ONLY a JSON object with keys summary, cited_ids, ' +
-    'contradictions (array of {ids, note}), event_relevance (array of {id, relevance: low|medium|high, overlap: none|partial|full}), ' +
-    'uncertainty, entities (array of {id, name, kind: asset|organization|regulator|person|instrument|other}, name copied from the ' +
+  const system = 'You extract structured references from a crypto sentiment evidence package. Return ONLY a JSON object with ' +
+    'exactly the keys cited_ids, contradictions (array of {ids}: two or more ids of items that conflict), event_relevance ' +
+    '(array of {id, relevance: low|medium|high, overlap: none|partial|full}), entities (array of {id, name, kind: asset|organization|regulator|person|instrument|other}, name copied from the ' +
     'title of evidence item id), figures (array of {id, value}, value a string holding one number copied exactly from the title of evidence item id: ' +
     'digits only, with an optional leading minus sign, thousands commas and decimal point; never a unit, percent sign, ' +
     'currency symbol, word or suffix such as K, M or B. Example: from "succeeding 92% of the time" the value is "92"; ' +
     'from "Lose $2.1 Billion" the value is "2.1". The unit stays in the cited title). ' +
-    'cited_ids must hold one or more identifiers copied exactly from the package field citable_ids: the items your summary ' +
-    'relies on. Every id you write anywhere (cited_ids, contradictions, event_relevance, entities, figures) must be one of ' +
-    'citable_ids. Separate observed facts from inference. Do not output any score, ' +
-    'price target or forecast, and do not write any number that does not appear in the package. Use only the package; do not add outside facts.';
+    'cited_ids must hold one or more identifiers copied exactly from the package field citable_ids: the items that matter for ' +
+    'crypto sentiment. Every id you write anywhere (cited_ids, contradictions, event_relevance, entities, figures) must be one of ' +
+    'citable_ids. Write no summary, explanation, note, uncertainty or confidence rating and no other key or free text. Do not ' +
+    'output any score, price target or forecast. Use only the package; do not add outside facts.';
   const user = JSON.stringify(pkg);
   // Traceability: every result from here on carries the hashes of the exact system prompt and evidence package sent to
   // the model, and the prompt version, so an annotation can be tied to its inputs and reproduced or audited later.
@@ -12824,8 +12836,6 @@ async function sv2RunAi(env, pkg, allowedIds, ledger) {
   const titles = Object.fromEntries(((pkg && pkg.evidence) || []).map(x => [x.id, x.title]));
   const v = sv2ValidateAiOutput(obj, allowedIds, titles);
   if (!v.ok) { await record({ ...meta, status: 'invalid_output' }); return { status: 'invalid_output', model, ...trace, counted: true, ...meta, reason: v.errors.slice(0, 3).join('; ') }; }
-  const ungrounded = sv2UngroundedNumbers([v.value.summary, v.value.uncertainty, ...v.value.contradictions.map(c => c.note)], user);
-  if (ungrounded.length) { await record({ ...meta, status: 'invalid_output' }); return { status: 'invalid_output', model, ...trace, counted: true, ...meta, reason: `numbers not in the evidence package: ${ungrounded.slice(0, 5).join(', ')}` }; }
   await record({ ...meta, status: 'ok' });
   return { status: 'ok', model, ...trace, counted: true, ...meta, output: v.value };
 }
@@ -13279,7 +13289,7 @@ function sv2LatestView(row) {
   try { ai = JSON.parse(row.ai_json || '{}'); } catch (_e) { ai = null; }
   try { fam = JSON.parse(row.family_json || '{}'); } catch (_e) { fam = null; }
   const { ai_json, family_json, ...rest } = row;
-  return { ...rest, ai_annotation: ai && ai.output ? ai.output : null,
+  return { ...rest, ai_annotation: ai && ai.output ? sv2StructuredAnnotation(ai.output) : null,
     ai_usage: ai ? { reserved_neurons: ai.reserved_neurons ?? null, actual_neurons: ai.actual_neurons ?? null,
       input_tokens: ai.input_tokens ?? null, output_tokens: ai.output_tokens ?? null, reason: ai.reason ?? null } : null,
     // Which exact prompt and evidence package produced (or was refused for) this annotation.

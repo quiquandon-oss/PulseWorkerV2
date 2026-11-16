@@ -12748,7 +12748,7 @@ function sv2UngroundedNumbers(texts, pkgText) {
   return bad;
 }
 
-const SV2_AI_PROMPT_VERSION = 'sv2-ai-prompt-4';     // bump whenever the system prompt text changes
+const SV2_AI_PROMPT_VERSION = 'sv2-ai-prompt-5';     // bump whenever the system prompt text changes
 async function sv2HexSha256(text) {
   const d = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(String(text)));
   return [...new Uint8Array(d)].map(b => b.toString(16).padStart(2, '0')).join('');
@@ -12767,7 +12767,10 @@ async function sv2RunAi(env, pkg, allowedIds, ledger) {
   const system = 'You annotate a crypto sentiment evidence package. Return ONLY a JSON object with keys summary, cited_ids, ' +
     'contradictions (array of {ids, note}), event_relevance (array of {id, relevance: low|medium|high, overlap: none|partial|full}), ' +
     'uncertainty, entities (array of {id, name, kind: asset|organization|regulator|person|instrument|other}, name copied from the ' +
-    'title of evidence item id), figures (array of {id, value}, value a string holding one number copied exactly from the title of evidence item id). ' +
+    'title of evidence item id), figures (array of {id, value}, value a string holding one number copied exactly from the title of evidence item id: ' +
+    'digits only, with an optional leading minus sign, thousands commas and decimal point; never a unit, percent sign, ' +
+    'currency symbol, word or suffix such as K, M or B. Example: from "succeeding 92% of the time" the value is "92"; ' +
+    'from "Lose $2.1 Billion" the value is "2.1". The unit stays in the cited title). ' +
     'cited_ids must hold one or more identifiers copied exactly from the package field citable_ids: the items your summary ' +
     'relies on. Every id you write anywhere (cited_ids, contradictions, event_relevance, entities, figures) must be one of ' +
     'citable_ids. Separate observed facts from inference. Do not output any score, ' +

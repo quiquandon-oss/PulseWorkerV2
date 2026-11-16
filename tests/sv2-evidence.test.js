@@ -709,14 +709,14 @@ describe('SEC submissions source (MSTR 8-K)', () => {
   const row = (i, form = '8-K', over = {}) => ({ accessionNumber: `0001193125-26-${String(400000 - i).padStart(6, '0')}`, filingDate: '2026-11-10',
     reportDate: '2026-11-09', acceptanceDateTime: '2026-11-10T08:05:12.000Z', form, items: form.startsWith('8-K') ? '7.01,8.01' : '',
     primaryDocument: `d${i}d8k.htm`, primaryDocDescription: form, ...over });
-  const MSTR = C.SV2_SOURCE_REGISTRY.find(s => s.id === 'mstr_8k');
+  const MSTR = C.SV2_SOURCE_REGISTRY.find(s => s.id === 'mstr_8k_json');
 
   it('uses the documented data.sec.gov submissions API, not the legacy browse-edgar feed, with the SEC User-Agent', () => {
     expect(MSTR).toMatchObject({ kind: 'sec_submissions', url: 'https://data.sec.gov/submissions/CIK0001050446.json', forms: ['8-K', '8-K/A'], ua: 'sec', interval_min: 720 });
     expect(C.SV2_SOURCE_REGISTRY.some(s => /browse-edgar/.test(s.url))).toBe(false);
     expect(HOSTS.has('data.sec.gov')).toBe(true);
     expect(MSTR.max_bytes).toBeLessThanOrEqual(C.SV2_SOURCE_MAX_BYTES_CAP);
-    expect(C.SV2_SOURCE_REGISTRY.filter(s => s.max_bytes).map(s => s.id)).toEqual(['mstr_8k']);   // only this source
+    expect(C.SV2_SOURCE_REGISTRY.filter(s => s.max_bytes).map(s => s.id)).toEqual(['mstr_8k_json']);   // only this source
   });
 
   it('keeps only 8-K and 8-K/A, newest first, with links, dates and accession numbers taken from the listed fields', () => {
@@ -766,10 +766,10 @@ describe('SEC submissions source (MSTR 8-K)', () => {
     let ua = null;
     const f = async (u, init) => { ua = init.headers['User-Agent']; return new Response(big, { headers: { 'content-type': 'application/json' } }); };
     const r1 = await C.sv2CollectEvidence(env(d1, { EVENT_SEC_USER_AGENT: 'Test App test@example.invalid' }), { nowTs: NOW, fetchImpl: f, registry: reg, sleep: noSleep });
-    expect(r1.sources[0]).toMatchObject({ id: 'mstr_8k', status: 'OK', new: 2, matched: 2, truncated: 0, malformed: 0 });
+    expect(r1.sources[0]).toMatchObject({ id: 'mstr_8k_json', status: 'OK', new: 2, matched: 2, truncated: 0, malformed: 0 });
     expect(r1.sources[0].bytes).toBe(big.length);
     expect(ua).toBe('Test App test@example.invalid');
-    const rows = d1.db.prepare("SELECT evidence_id, canonical_url, title, content_hash, published_ts, retrieved_ts FROM sv2_evidence WHERE source_id = 'mstr_8k' ORDER BY canonical_url").all();
+    const rows = d1.db.prepare("SELECT evidence_id, canonical_url, title, content_hash, published_ts, retrieved_ts FROM sv2_evidence WHERE source_id = 'mstr_8k_json' ORDER BY canonical_url").all();
     expect(rows.map(x => x.canonical_url)).toEqual(['https://sec.gov/Archives/edgar/data/1050446/000119312526399998/d2d8k.htm', 'https://sec.gov/Archives/edgar/data/1050446/000119312526399999/d1d8k.htm']);
     for (const x of rows) {
       expect(x.evidence_id).toBe('ev_' + createHash('sha256').update(x.canonical_url).digest('hex').slice(0, 32));
@@ -778,7 +778,7 @@ describe('SEC submissions source (MSTR 8-K)', () => {
     }
     const r2 = await C.sv2CollectEvidence(env(d1, { EVENT_SEC_USER_AGENT: 'Test App test@example.invalid' }), { nowTs: NOW + 13 * H, fetchImpl: f, registry: reg, sleep: noSleep });
     expect(r2.sources[0]).toMatchObject({ status: 'OK', new: 0 });
-    expect(d1.db.prepare("SELECT COUNT(*) AS n FROM sv2_evidence WHERE source_id = 'mstr_8k'").get().n).toBe(2);
+    expect(d1.db.prepare("SELECT COUNT(*) AS n FROM sv2_evidence WHERE source_id = 'mstr_8k_json'").get().n).toBe(2);
   });
 
   it('above its own allowance the response is TOO_LARGE; default feeds keep the 256 KB cap', async () => {

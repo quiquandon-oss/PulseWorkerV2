@@ -26,7 +26,7 @@ export const SV2_SOURCE_REGISTRY = [
   // SEC EDGAR submissions API (data.sec.gov, documented, JSON). The legacy cgi-bin/browse-edgar Atom feed gave no response
   // to Workers fetches in 3/3 attempts (8 s and 25 s timeouts, staging and production, 2026-11-15/16) while www.sec.gov
   // answered in the same runs. Only the forms listed are kept; max_bytes is this source's own response allowance.
-  { id: 'mstr_8k', name: 'Strategy (MSTR) 8-K filings, SEC EDGAR', family: 'corporate_treasury_catalysts', kind: 'sec_submissions', url: 'https://data.sec.gov/submissions/CIK0001050446.json', forms: ['8-K', '8-K/A'], max_bytes: 1024 * 1024, interval_min: 720, freshness_h: 720, ua: 'sec', v1_overlap: null },
+  { id: 'mstr_8k_json', name: 'Strategy (MSTR) 8-K filings, SEC EDGAR (staging probe)', family: 'corporate_treasury_catalysts', kind: 'sec_submissions', url: 'https://data.sec.gov/submissions/CIK0001050446.json', forms: ['8-K', '8-K/A'], max_bytes: 1024 * 1024, interval_min: 720, freshness_h: 720, ua: 'sec', v1_overlap: null },
 ];
 
 // ---- Explicit budgets (Workers Free) ------------------------------------------------------------------------------

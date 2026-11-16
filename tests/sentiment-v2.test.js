@@ -662,6 +662,21 @@ describe('comparison API: alignment, periods, empty history', () => {
     expect(out.points[out.points.length - 1].ts).toBe(1199);
     for (const p of out.points) expect(p.v1).toBe(p.ts % 100);
   });
+  it('downsampling keeps every V2 point, thins only V1/BTC-only points, and stays within the budget', () => {
+    // Production ALL range (2026-11-16): stride sampling showed 7 of the 16 V2 results.
+    const v1 = Array.from({ length: 1200 }, (_, i) => ({ observation_ts: i, score: i % 100, btc_price: 100 + i }));
+    const v2 = [3, 101, 102, 557, 900, 901, 902, 1198].map(ts => ({ decision_ts: ts, sentiment_score: ts % 97, status: 'OK' }));
+    const out = S.sv2AlignSeries(v1, v2, 500);
+    expect(out.downsampled).toBe(true);
+    expect(out.points.length).toBeLessThanOrEqual(501);
+    expect(out.points.filter(p => p.v2 !== null).map(p => p.ts)).toEqual([3, 101, 102, 557, 900, 901, 902, 1198]);
+    for (const p of out.points) { expect(p.v1).toBe(p.ts % 100); if (p.v2 !== null) expect(p.v2).toBe(p.ts % 97); }
+    expect(out.points[out.points.length - 1].ts).toBe(1199);
+    expect(out.points.map(p => p.ts)).toEqual([...out.points.map(p => p.ts)].sort((a, b) => a - b));
+    // More V2 points than the budget: falls back to the plain stride, still bounded.
+    const dense = S.sv2AlignSeries(v1, v1.map(r => ({ decision_ts: r.observation_ts, sentiment_score: 50, status: 'OK' })), 500);
+    expect(dense.points.length).toBeLessThanOrEqual(501);
+  });
   it('supports exactly the five periods', () => {
     expect(Object.keys(S.SV2_PERIODS_MS)).toEqual(['24h', '7d', '30d', '90d', 'all']);
   });

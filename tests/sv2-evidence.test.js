@@ -211,6 +211,20 @@ describe('collection run (real SQLite, migration 0029)', () => {
     const r = await C.sv2CollectEvidence(env(d1), { nowTs: NOW, fetchImpl: async () => { calls++; return resp(rss([])); }, registry: sec, sleep: noSleep });
     expect([r.sources[0].status, calls, r.ok]).toEqual(['NOT_CONFIGURED', 0, true]);
   });
+  it('a source can set its own timeout (MSTR 8-K: EDGAR timed out at 8 s in 2/2 attempts); the error names the limit', async () => {
+    const d1 = makeD1(DDL);
+    const timeoutErr = () => { const e = new Error('The operation was aborted due to timeout'); e.name = 'TimeoutError'; throw e; };
+    const reg = [{ ...REG[0], id: 'slow', timeout_ms: 25000 }, { ...REG[0], id: 'plain', url: 'https://news.example.net/b.xml' }, { ...REG[0], id: 'capped', url: 'https://cdn.example.org/c.xml', timeout_ms: 600000 }];
+    const r = await C.sv2CollectEvidence(env(d1), { nowTs: NOW, fetchImpl: async () => timeoutErr(), registry: reg, sleep: noSleep });
+    const byId = Object.fromEntries(r.sources.map(s => [s.id, s]));
+    expect(byId.slow).toMatchObject({ status: 'NETWORK_ERROR', error: 'timeout (25000 ms)' });
+    expect(byId.plain).toMatchObject({ status: 'NETWORK_ERROR', error: 'timeout (8000 ms)' });   // default unchanged
+    expect(byId.capped.error).toBe('timeout (30000 ms)');                                      // never above 30 s
+    const mstr = C.SV2_SOURCE_REGISTRY.find(s => s.id === 'mstr_8k');
+    expect(mstr.timeout_ms).toBe(25000);
+    expect(C.SV2_SOURCE_REGISTRY.filter(s => s.timeout_ms).map(s => s.id)).toEqual(['mstr_8k']);
+    expect(C.SV2_COLLECTOR_LIMITS.timeoutMs).toBe(8000);
+  });
   it('is off unless SV2_COLLECTOR_ENABLED = "1", and fails visibly when the tables are missing', async () => {
     const d1 = makeD1(DDL);
     let calls = 0;

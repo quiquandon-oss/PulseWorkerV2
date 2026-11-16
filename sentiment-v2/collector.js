@@ -23,7 +23,10 @@ export const SV2_SOURCE_REGISTRY = [
   { id: 'cftc_press', name: 'CFTC press releases', family: 'regulation_geopolitics', kind: 'rss', url: 'https://www.cftc.gov/RSS/RSSGP/rssgp.xml', interval_min: 480, freshness_h: 168, v1_overlap: null },
   { id: 'fed_press', name: 'Federal Reserve press releases', family: 'macroeconomic', kind: 'rss', url: 'https://www.federalreserve.gov/feeds/press_all.xml', interval_min: 480, freshness_h: 168, v1_overlap: null },
   { id: 'ecb_press', name: 'ECB press releases', family: 'macroeconomic', kind: 'rss', url: 'https://www.ecb.europa.eu/rss/press.html', interval_min: 480, freshness_h: 168, v1_overlap: null },
-  { id: 'mstr_8k', name: 'Strategy (MSTR) 8-K filings, SEC EDGAR', family: 'corporate_treasury_catalysts', kind: 'atom', url: 'https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK=0001050446&type=8-K&dateb=&owner=include&count=20&output=atom', interval_min: 720, freshness_h: 720, ua: 'sec', v1_overlap: null },
+  { id: 'mstr_8k', name: 'Strategy (MSTR) 8-K filings, SEC EDGAR', family: 'corporate_treasury_catalysts', kind: 'atom', url: 'https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK=0001050446&type=8-K&dateb=&owner=include&count=20&output=atom', interval_min: 720, freshness_h: 720, ua: 'sec', v1_overlap: null,
+    // EDGAR browse-edgar did not answer within the 8 s default in 2/2 attempts (staging 2026-11-15 12:10, production
+    // 2026-11-16 13:00) while sec_press on www.sec.gov succeeded in the same runs: allow it 25 s.
+    timeout_ms: 25000 },
 ];
 
 // ---- Explicit budgets (Workers Free) ------------------------------------------------------------------------------
@@ -122,7 +125,7 @@ export async function sv2SafeFetch(url, { allowedHosts, budget, fetchImpl = fetc
         headers: { 'User-Agent': SV2_COLLECTOR_USER_AGENT, Accept: 'application/rss+xml, application/atom+xml, application/xml;q=0.9, text/xml;q=0.8', ...headers } });
     } catch (e) {
       if (attempt < limits.retries) { attempt++; await wait(500); continue; }
-      return { ok: false, status: 'NETWORK_ERROR', error: e && e.name === 'TimeoutError' ? 'timeout' : String((e && e.message) || e).slice(0, 160), redirects };
+      return { ok: false, status: 'NETWORK_ERROR', error: e && e.name === 'TimeoutError' ? `timeout (${limits.timeoutMs} ms)` : String((e && e.message) || e).slice(0, 160), redirects };
     }
     if (res.status >= 300 && res.status < 400 && res.status !== 304) {
       const loc = res.headers.get('location');
@@ -329,7 +332,9 @@ export async function sv2CollectEvidence(env, { nowTs, fetchImpl, registry = SV2
       if (st.last_modified) headers['If-Modified-Since'] = st.last_modified;
       // Any unexpected throw stays with this source (recorded as FETCH_ERROR) so later due feeds and the run record proceed.
       let res;
-      try { res = await sv2SafeFetch(s.url, { allowedHosts, budget, fetchImpl, headers, limits, sleep }); }
+      // A source may set its own timeout_ms (fetch wait is wall time, not Worker CPU); the other limits are shared.
+      const srcLimits = Number.isFinite(s.timeout_ms) && s.timeout_ms > 0 ? { ...limits, timeoutMs: Math.min(30000, s.timeout_ms) } : limits;
+      try { res = await sv2SafeFetch(s.url, { allowedHosts, budget, fetchImpl, headers, limits: srcLimits, sleep }); }
       catch (e) { res = { ok: false, status: 'FETCH_ERROR', error: String((e && e.message) || e).slice(0, 160) }; }
       out.bytes = res.bytes || 0;
       if (!res.ok) { out.status = res.status; out.error = res.error; }

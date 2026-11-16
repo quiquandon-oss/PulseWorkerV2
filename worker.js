@@ -12626,19 +12626,19 @@ function sv2AiPackage(result) {
     stale: result.missing.stale, missing: result.missing.missing }, allowedIds: citable };
 }
 
-// Entity kinds the AI may assign. Entities and figures are extracted from stored evidence titles only: each must name an
-// evidence item of the package and occur in that item's own title (an entity name as a case-insensitive substring, a
-// figure as a whole numeric value), so nothing can be attributed to a source that did not say it.
 // The structured fields an annotation may expose (API and storage); anything else in an older stored row is dropped.
 function sv2StructuredAnnotation(out) {
   if (!out || typeof out !== 'object') return null;
   const arr = (x) => (Array.isArray(x) ? x : []);
   return { cited_ids: arr(out.cited_ids).filter(x => typeof x === 'string'),
-    contradictions: arr(out.contradictions).map(c => ({ ids: arr(c && c.ids).filter(x => typeof x === 'string') })),
+    contradictions: arr(out.contradictions).map(c => ({ ids: [...new Set(arr(c && c.ids).filter(x => typeof x === 'string'))] })).filter(c => c.ids.length >= 2),
     event_relevance: arr(out.event_relevance).map(e => ({ id: e && e.id, relevance: e && e.relevance, overlap: e && e.overlap })),
     entities: arr(out.entities).map(e => ({ id: e && e.id, name: e && e.name, kind: e && e.kind })),
     figures: arr(out.figures).map(f => ({ id: f && f.id, value: f && f.value })) };
 }
+// Entity kinds the AI may assign. Entities and figures are extracted from stored evidence titles only: each must name an
+// evidence item of the package and occur in that item's own title (an entity name as a case-insensitive substring, a
+// figure as a whole numeric value), so nothing can be attributed to a source that did not say it.
 function sv2ValidateAiOutput(obj, allowedIds, titles = {}) {
   const SV2_AI_ENTITY_KINDS = ['asset', 'organization', 'regulator', 'person', 'instrument', 'other'];
   const SV2_AI_MAX_EXTRACTED = 20;

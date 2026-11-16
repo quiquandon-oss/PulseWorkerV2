@@ -605,6 +605,8 @@ describe('AI: validation, quota, unavailability, zero paid fallback', () => {
     const view = S.sv2LatestView({ asset: 'BTC', status: 'OK', ai_status: 'ok', ai_json: JSON.stringify(legacy), family_json: '{}' });
     expect(view.ai_annotation).toEqual({ cited_ids: ['evidence:e1'], contradictions: [{ ids: ['evidence:e1', 'evidence:e2'] }], event_relevance: [], entities: [], figures: [] });
     expect(JSON.stringify(view)).not.toMatch(/old free text|"uncertainty"|"note"/);
+    // Older rows with a one-id or repeated-id contradiction are not shown as a contradiction.
+    expect(S.sv2StructuredAnnotation({ cited_ids: [], contradictions: [{ ids: ['evidence:e1'] }, { ids: ['evidence:e1', 'evidence:e1'] }] }).contradictions).toEqual([]);
   });
   it('a model rate limit or capacity error is its own degraded state: recorded against the reservation, never retried', async () => {
     for (const msg of ['3040: Capacity temporarily exceeded', 'HTTP 429 Too Many Requests', 'Out of capacity']) {

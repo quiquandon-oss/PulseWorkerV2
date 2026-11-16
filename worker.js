@@ -12255,8 +12255,10 @@ function sv2History(rows) {
   // A price stored on the archive row belongs to that observation, so its timestamp is the row's own.
   return (rows || []).map(r => {
     const ts = Number(r.observation_ts), btc = sv2Finite(r.btc_price);
-    return { ts, v1: sv2Finite(r.score), btc: btc !== null && btc > 0 ? btc : null, btc_ts: btc !== null && btc > 0 ? ts : null,
+    const h = { ts, v1: sv2Finite(r.score), btc: btc !== null && btc > 0 ? btc : null, btc_ts: btc !== null && btc > 0 ? ts : null,
       src: sv2ParseSources(r.sources_json) };
+    if (r.v1_origin) h.origin = r.v1_origin;
+    return h;
   }).filter(r => Number.isFinite(r.ts)).sort((a, b) => a.ts - b.ts);
 }
 
@@ -12899,7 +12901,8 @@ function sv2Row(result, ai, usage, nowTs) {
     JSON.stringify({ direction_balance: result.events.direction_balance, adjustment: result.events.adjustment,
       events: result.events.events, excluded: result.events.excluded, n_raw: result.events.n_raw }),
     JSON.stringify(result.predictive), JSON.stringify({ families: result.families, composite_before_events: result.composite_before_events ?? null,
-      redundancy: result.redundancy, evidence: result.evidence ?? null, evidence_status: result.evidence_status ?? null }),
+      redundancy: result.redundancy, evidence: result.evidence ?? null, evidence_status: result.evidence_status ?? null,
+      ...(result.v1_input ? { v1_input: result.v1_input } : {}) }),
     JSON.stringify(result.supporting_ids), JSON.stringify(result.contradicting_ids), JSON.stringify(result.missing),
     ai ? ai.model : null, ai ? ai.status : 'disabled', JSON.stringify(ai ? { reason: ai.reason || null, output: ai.output || null, reserved_neurons: ai.reserved_neurons ?? null, actual_neurons: ai.actual_neurons ?? null, input_tokens: ai.input_tokens ?? null, output_tokens: ai.output_tokens ?? null,
       prompt_version: ai.prompt_version ?? null, prompt_sha256: ai.prompt_sha256 ?? null, package_sha256: ai.package_sha256 ?? null } : {}),
@@ -13028,14 +13031,73 @@ async function syncV1ArchiveFromHistory(env, { nowTs, queryBudget = Infinity } =
   return out;
 }
 
+// ---- V1 server readings as a second V2 input (2026-11-16, owner decision) ----
+// V1's composite reaches `history` (and so the archive) only while a browser has V1 open: about 6 readings a day.
+// sentiment-ff75 also computes the V1 composite server-side every hour (scomp-v1, server_composite_readings; V1 default
+// weights, sources reachable from a Worker only). With SV2_V1_SERVER_INPUT = "1" the V2 cycle scores those readings too,
+// read directly from server_composite_readings (read-only: nothing is copied into research_sentiment_archive, whose
+// Experiment 5 / PEV-1 population stays browser-only, and nothing into `history`).
+// Method kept at its calibrated density: V2's context rules count OBSERVATIONS (a source unchanged for 10 observations
+// is stale; redundancy uses the last 120), calibrated on the archive's density. Interleaving hourly rows would mark
+// daily sources (fng, foufi) stale most of the day and change V2 for app readings too. So the context is always the
+// archive: an app reading is scored exactly as before, and a server reading is scored as ONE extra observation appended
+// to the archive context before it. Server readings never become context for any other decision.
+// Point in time: a server reading's time is its computed_ts (after every source was fetched), not its hour slot.
+// Skipped: below-floor (below_floor = 1) and composite-less readings. An archive row at the same millisecond wins.
+// sources_json is assembled in SQL from provenance_json.sources (the archive's {source_id: 0-100} shape), so the Worker
+// never parses the full provenance. Each result records its input in family_json.v1_input (browser | server).
+const SV2_SERVER_V1_COLLECTOR = 'scomp-v1';
+const SV2_SERVER_V1_MAX_ROWS = 2000;
+// At most one server reading is scored per V2 run (the newest not yet decided): one decision costs ~2.6 ms CPU
+// (measured 2026-11-16, 31-day archive context) and the cron invocation has 10 ms on Workers Free, shared with event
+// detection and the evidence collector. V2 runs on 16 non-tick hours a day, so up to 16 server readings a day are
+// scored; the others are left unscored (never back-filled, never imputed).
+const SV2_SERVER_V1_PER_CYCLE = 1;
+const SV2_SERVER_V1_SOURCES_SQL = "(SELECT json_group_object(json_extract(j.value, '$.id'), json_extract(j.value, '$.score')) " +
+  "FROM json_each(s.provenance_json, '$.sources') j)";
+function sv2ServerInputEnabled(env) { return String((env && env.SV2_V1_SERVER_INPUT) || '0') === '1'; }
+// Server readings whose computed_ts is in (lo, hi], newest `newest`, returned oldest first in the archive's shape
+// (observation_ts = computed_ts, score, btc_price null, sources_json) plus slot_ts and v1_origin. The slot_ts bound
+// (primary key) keeps the read indexed; computed_ts follows its slot by seconds. withSources = false skips the
+// per-source JSON (the comparison chart needs only the composite). Never throws: a missing table (staging) or a read
+// error returns { rows: [], error }.
+async function sv2ServerV1Rows(env, lo, hi, { withSources = true, newest = SV2_SERVER_V1_MAX_ROWS } = {}) {
+  try {
+    const r = await env.DB.prepare(`SELECT s.slot_ts, s.computed_ts, s.composite AS score${withSources ? ', ' + SV2_SERVER_V1_SOURCES_SQL + ' AS sources_json' : ''} ` +
+      'FROM server_composite_readings s WHERE s.slot_ts > ? AND s.slot_ts <= ? AND s.computed_ts > ? AND s.computed_ts <= ? ' +
+      'AND s.composite IS NOT NULL AND s.below_floor = 0 ORDER BY s.slot_ts DESC LIMIT ?').bind(lo - 3600000, hi, lo, hi, newest).all();
+    const rows = (r.results || []).map(x => ({ observation_ts: Number(x.computed_ts), slot_ts: Number(x.slot_ts), score: x.score, btc_price: null,
+      ...(withSources ? { sources_json: x.sources_json } : {}), v1_origin: 'server' })).reverse();
+    return { rows, error: null, truncated: rows.length >= newest };
+  } catch (err) {
+    return { rows: [], error: String((err && err.message) || err).slice(0, 160), truncated: false };
+  }
+}
+// Archive rows (origin browser) and server rows merged by timestamp; on an exact tie the archive row is kept.
+function sv2MergeV1Inputs(archiveRows, serverRows) {
+  const seen = new Set();
+  const out = [];
+  for (const r of archiveRows || []) { seen.add(Number(r.observation_ts)); out.push({ ...r, v1_origin: r.v1_origin || 'browser' }); }
+  for (const r of serverRows || []) if (!seen.has(Number(r.observation_ts))) out.push(r);
+  return out.sort((a, b) => Number(a.observation_ts) - Number(b.observation_ts));
+}
+// The context for one server reading: the archive observations strictly before it, then the reading itself.
+function sv2ServerDecisionHist(archiveRows, serverRow, priceRows, toleranceMs) {
+  const ts = Number(serverRow.observation_ts);
+  const h = sv2History((archiveRows || []).filter(r => Number(r.observation_ts) < ts).concat([serverRow]));
+  sv2AttachPrices(h, priceRows, toleranceMs);
+  return h;
+}
+
 // Workers Free: D1 allows 50 queries per Worker invocation (a db.batch() counts as one). The non-tick cron chain counts
 // its top-level D1 calls so the last step (the evidence collector) only uses the remaining headroom.
 const SV2_D1_QUERIES_PER_INVOCATION = 50;
 const SV2_D1_QUERY_RESERVE = 3;                  // d1_usage_daily recording and slack
-// Worst-case top-level D1 calls of one V2 cycle: 6 reads + 1 grouped and up to 8 per-source evidence reads (15 fixed)
+// Worst-case top-level D1 calls of one V2 cycle: 6 reads + 1 grouped and up to 8 per-source evidence reads + 1 server
+// V1 reading read (16 fixed)
 // + 5 per pending reading (AI reserve, slot, settle, limit check, insert) x maxCatchUp 3 = 30. Kept free for V2 by the
 // sync; the cycle itself checks the budget it is given and defers readings it could not finish (never a partial write).
-const SV2_CYCLE_QUERIES_FIXED = 15;
+const SV2_CYCLE_QUERIES_FIXED = 16;              // includes the server-reading read (SV2_V1_SERVER_INPUT)
 const SV2_CYCLE_QUERIES_PER_READING = 5;
 const SV2_CYCLE_QUERY_HEADROOM = SV2_CYCLE_QUERIES_FIXED + 3 * SV2_CYCLE_QUERIES_PER_READING;
 function sv2CountingDb(db, counter) {
@@ -13068,10 +13130,25 @@ async function runSentimentV2Cycle(env, { nowTs, queryBudget = Infinity } = {}) 
   const last = await env.DB.prepare('SELECT MAX(decision_ts) AS t FROM sentiment_v2_results WHERE asset = ? AND calc_version = ?')
     .bind(asset, cfg.version).first();
   const lastTs = last && last.t !== null && last.t !== undefined ? Number(last.t) : null;
+  const pendLimit = lastTs === null ? 1 : cfg.maxCatchUp;
   const pend = await env.DB.prepare('SELECT observation_ts FROM research_sentiment_archive WHERE observation_ts > ? AND observation_ts <= ? ORDER BY observation_ts DESC LIMIT ?')
-    .bind(lastTs === null ? 0 : lastTs, now, lastTs === null ? 1 : cfg.maxCatchUp).all();
-  const pending = (pend.results || []).map(r => Number(r.observation_ts)).sort((a, b) => a - b);
-  rowsRead += pending.length + 1;
+    .bind(lastTs === null ? 0 : lastTs, now, pendLimit).all();
+  let pendTs = (pend.results || []).map(r => Number(r.observation_ts));
+  rowsRead += pendTs.length + 1;
+  // Hourly V1 server readings are candidates on the same terms (newer than the last decision; newest maxCatchUp kept),
+  // at most SV2_SERVER_V1_PER_CYCLE of them. An archive observation at the same millisecond wins.
+  const serverOn = sv2ServerInputEnabled(env);
+  let serverError = null;
+  const serverByTs = new Map();
+  if (serverOn) {
+    const sp = await sv2ServerV1Rows(env, lastTs === null ? 0 : lastTs, now, { newest: Math.min(pendLimit, SV2_SERVER_V1_PER_CYCLE) });
+    serverError = sp.error;
+    rowsRead += sp.rows.length;
+    const archived = new Set(pendTs);
+    for (const r of sp.rows) if (!archived.has(r.observation_ts)) serverByTs.set(r.observation_ts, r);
+    pendTs = pendTs.concat([...serverByTs.keys()]).sort((a, b) => b - a).slice(0, pendLimit);
+  }
+  const pending = pendTs.sort((a, b) => a - b);
   if (!pending.length) return { ok: true, written: 0, reason: 'no new V1 observation' };
   // Oldest first, as many as the remaining D1 budget allows; the rest stay pending (> the new MAX(decision_ts)).
   const fitReadings = Math.floor((queryBudget - SV2_CYCLE_QUERIES_FIXED) / SV2_CYCLE_QUERIES_PER_READING);
@@ -13079,8 +13156,10 @@ async function runSentimentV2Cycle(env, { nowTs, queryBudget = Infinity } = {}) 
   const lo = pending[0] - cfg.historyMs, hi = pending[pending.length - 1];
   const histRes = await env.DB.prepare('SELECT observation_ts, score, btc_price, sources_json FROM research_sentiment_archive WHERE observation_ts >= ? AND observation_ts <= ? ORDER BY observation_ts ASC')
     .bind(lo, hi).all();
-  const hist = sv2History(histRes.results);
+  const histRows = histRes.results || [];
+  const hist = sv2History(histRows);
   rowsRead += hist.length;
+  if (serverError) console.warn('sentiment v2: V1 server readings unavailable, archive only:', serverError);
   // Newest first, so a cap can only cut the oldest context; reaching a cap is recorded and degrades the result.
   const PRICE_CAP = 20000, EVENT_CAP = 2000, EVIDENCE_CAP = 3000;
   const priceRes = await env.DB.prepare('SELECT ts, btc_price FROM btc_data WHERE ts >= ? AND ts <= ? ORDER BY ts DESC LIMIT ?')
@@ -13155,11 +13234,17 @@ async function runSentimentV2Cycle(env, { nowTs, queryBudget = Infinity } = {}) 
   let written = 0;
   const decisions = [];
   for (const ts of pending) {
-    const i = sv2IndexAtOrBefore(hist, ts);
-    if (i < 0 || hist[i].ts !== ts) continue;
+    // A server reading is scored on the archive context before it plus itself; an app reading on the archive as before.
+    const srv = serverByTs.get(ts);
+    const dh = srv ? sv2ServerDecisionHist(histRows, srv, priceRows, cfg.priceToleranceMs) : hist;
+    const i = sv2IndexAtOrBefore(dh, ts);
+    if (i < 0 || dh[i].ts !== ts) continue;
     const evidence = evidenceRows ? sv2EvidenceReadings(evidenceRows, ts, SV2_SOURCE_REGISTRY, SV2_EVIDENCE_RULES) : null;
-    const result = sv2Compute(hist, i, events, cfg, evidence);
+    const result = sv2Compute(dh, i, events, cfg, evidence);
     result.evidence_status = evidenceStatus;
+    result.v1_input = srv
+      ? { origin: 'server', collector: SV2_SERVER_V1_COLLECTOR, table: 'server_composite_readings', slot_ts: srv.slot_ts, context: 'archive + this reading' }
+      : { origin: 'browser', table: 'research_sentiment_archive' };
     if (evidenceRows) result.evidence_items = sv2EvidenceItemsForAi(evidenceRows, ts, evidence);
     if (evidenceError) { result.evidence_error = evidenceError; if (result.status === 'OK') { result.status = 'DEGRADED'; result.degraded_reason = 'evidence_unavailable'; } }
     if (eventsError) { result.events.error = eventsError; if (result.status === 'OK') { result.status = 'DEGRADED'; result.degraded_reason = 'event_ledger_unavailable'; } }
@@ -13177,9 +13262,9 @@ async function runSentimentV2Cycle(env, { nowTs, queryBudget = Infinity } = {}) 
     const res = await env.DB.prepare(SV2_INSERT_SQL).bind(...sv2Row(result, ai, usage, now)).run();
     const changes = res && res.meta ? Number(res.meta.changes || 0) : 0;
     written += changes;
-    decisions.push({ decision_ts: ts, status: result.status, score: result.sentiment_score, inserted: changes > 0 });
+    decisions.push({ decision_ts: ts, status: result.status, score: result.sentiment_score, inserted: changes > 0, v1_origin: result.v1_input.origin });
   }
-  return { ok: true, written, decisions, rows_read: rowsRead,
+  return { ok: true, written, decisions, rows_read: rowsRead, ...(serverError ? { v1_server_error: serverError } : {}),
     ...(deferredReadings.length ? { deferred_d1_budget: true, deferred_readings: deferredReadings } : {}) };
 }
 
@@ -13202,6 +13287,7 @@ function sv2AlignSeries(v1Rows, v2Rows, maxPoints) {
     const v2 = v2By.get(ts);
     const pt = { ts, v1: sv2Finite(r.score), btc: sv2Finite(r.btc_price),
       v2: v2 ? sv2Finite(v2.sentiment_score) : null, v2_status: v2 ? v2.status : null };
+    if (r.v1_origin) pt.v1_origin = r.v1_origin;
     if (v2 && v2.calc_version) pt.v2_version = v2.calc_version;
     if (r.btc_ts !== undefined) pt.btc_ts = r.btc_ts;
     return pt;
@@ -13243,8 +13329,20 @@ async function getSentimentV2Comparison(env, period, nowTs) {
   // Newest rows first with a hard LIMIT, so every period (including `all`) reads at most SV2_MAX_ROWS rows per query.
   const v1 = await env.DB.prepare('SELECT observation_ts, score, btc_price FROM research_sentiment_archive WHERE observation_ts >= ? AND observation_ts <= ? ORDER BY observation_ts DESC LIMIT ?')
     .bind(from, nowTs, SV2_MAX_ROWS).all();
-  const v1Rows = (v1.results || []).slice().reverse();
-  const truncated = v1Rows.length >= SV2_MAX_ROWS;
+  let v1Rows = (v1.results || []).slice().reverse();
+  let truncated = v1Rows.length >= SV2_MAX_ROWS;
+  // Hourly V1 server readings (SV2_V1_SERVER_INPUT): shown on the V1 line with v1_origin 'server'. Composite only.
+  let v1ServerError = null, v1ServerN = 0;
+  if (sv2ServerInputEnabled(env)) {
+    const sr = await sv2ServerV1Rows(env, from, nowTs, { withSources: false, newest: SV2_MAX_ROWS });
+    v1ServerError = sr.error; v1ServerN = sr.rows.length;
+    // Both lists are cut to the later of the two truncation points, so the merged series has no one-sided gap.
+    let cut = null;
+    if (truncated) cut = Number(v1Rows[0].observation_ts);
+    if (sr.truncated && sr.rows.length) cut = Math.max(cut === null ? 0 : cut, sr.rows[0].observation_ts);
+    v1Rows = sv2MergeV1Inputs(v1Rows, sr.rows);
+    if (cut !== null) { v1Rows = v1Rows.filter(r => Number(r.observation_ts) >= cut); truncated = true; }
+  }
   let v2Rows = [], meta = { n: 0, first_ts: null, last_ts: null }, latest = null, v2Error = null, versionSince = null;
   try {
     const v2From = truncated ? Number(v1Rows[0].observation_ts) : from;
@@ -13301,7 +13399,8 @@ async function getSentimentV2Comparison(env, period, nowTs) {
     truncated, truncated_from_ts: truncated ? Number(v1Rows[0].observation_ts) : null,
     btc_truncated: btcTruncated, btc_from_ts: btcTruncated ? btcFrom : null,
     series_status: sv2SeriesStatus(aligned.points, meta, nowTs), v2_latest: latest, v2_error: v2Error,
-    v1_history_last_ts: v1HistoryLastTs, current_calc_version: SENTIMENT_V2_VERSION, current_version_since: versionSince };
+    v1_history_last_ts: v1HistoryLastTs, current_calc_version: SENTIMENT_V2_VERSION, current_version_since: versionSince,
+    v1_server_input: { enabled: sv2ServerInputEnabled(env), collector: SV2_SERVER_V1_COLLECTOR, readings_in_period: v1ServerN, error: v1ServerError } };
 }
 
 // One minimal GLM call through the real Neuron ledger (same reservation SQL, same budget, same validation).

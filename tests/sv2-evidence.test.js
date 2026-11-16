@@ -697,3 +697,106 @@ describe('wiring', () => {
     expect(t).toMatch(/\[ai\]\nbinding = "AI"/);
   });
 });
+
+// ---- MSTR 8-K via the SEC EDGAR submissions API (data.sec.gov) ----
+describe('SEC submissions source (MSTR 8-K)', () => {
+  const env = (d1, extra = {}) => ({ DB: d1.binding, SV2_COLLECTOR_ENABLED: '1', ...extra });
+  const sub = (rows, over = {}) => {
+    const r = { accessionNumber: [], filingDate: [], reportDate: [], acceptanceDateTime: [], form: [], items: [], primaryDocument: [], primaryDocDescription: [] };
+    for (const x of rows) for (const k of Object.keys(r)) r[k].push(x[k] ?? '');
+    return JSON.stringify({ cik: '0001050446', name: 'Strategy Inc', filings: { recent: r, files: [] }, ...over });
+  };
+  const row = (i, form = '8-K', over = {}) => ({ accessionNumber: `0001193125-26-${String(400000 - i).padStart(6, '0')}`, filingDate: '2026-11-10',
+    reportDate: '2026-11-09', acceptanceDateTime: '2026-11-10T08:05:12.000Z', form, items: form.startsWith('8-K') ? '7.01,8.01' : '',
+    primaryDocument: `d${i}d8k.htm`, primaryDocDescription: form, ...over });
+  const MSTR = C.SV2_SOURCE_REGISTRY.find(s => s.id === 'mstr_8k');
+
+  it('uses the documented data.sec.gov submissions API, not the legacy browse-edgar feed, with the SEC User-Agent', () => {
+    expect(MSTR).toMatchObject({ kind: 'sec_submissions', url: 'https://data.sec.gov/submissions/CIK0001050446.json', forms: ['8-K', '8-K/A'], ua: 'sec', interval_min: 720 });
+    expect(C.SV2_SOURCE_REGISTRY.some(s => /browse-edgar/.test(s.url))).toBe(false);
+    expect(HOSTS.has('data.sec.gov')).toBe(true);
+    expect(MSTR.max_bytes).toBe(384 * 1024);                     // ~2.4x the 157,305 bytes measured on staging
+    expect(MSTR.max_bytes).toBeLessThanOrEqual(C.SV2_SOURCE_MAX_BYTES_CAP);
+    expect(C.SV2_SOURCE_REGISTRY.filter(s => s.max_bytes).map(s => s.id)).toEqual(['mstr_8k']);   // only this source
+  });
+
+  it('keeps only 8-K and 8-K/A, newest first, with links, dates and accession numbers taken from the listed fields', () => {
+    const p = C.sv2ParseSecSubmissions(sub([row(1), row(2, '4'), row(3, '8-K/A', { acceptanceDateTime: '' }), row(4, '424B5'), row(5, '10-Q')]));
+    expect(p).toMatchObject({ ok: true, format: 'sec_submissions', matched: 2, truncated: 0, malformed: 0, rows: 5 });
+    expect(p.items).toEqual([
+      { title: 'Strategy Inc 8-K (Items 7.01,8.01) filed 2026-11-10', link: 'https://www.sec.gov/Archives/edgar/data/1050446/000119312526399999/d1d8k.htm',
+        published_ts: Date.parse('2026-11-10T08:05:12.000Z'), summary: 'Accession 0001193125-26-399999; form 8-K; filed 2026-11-10; report date 2026-11-09; 8-K' },
+      { title: 'Strategy Inc 8-K/A (Items 7.01,8.01) filed 2026-11-10', link: 'https://www.sec.gov/Archives/edgar/data/1050446/000119312526399997/d3d8k.htm',
+        published_ts: Date.parse('2026-11-10T00:00:00Z'),   // no acceptance time listed: the filing date, never invented
+        summary: 'Accession 0001193125-26-399997; form 8-K/A; filed 2026-11-10; report date 2026-11-09; 8-K/A' },
+    ]);
+  });
+
+  it('skips and counts malformed rows, keeps a duplicated accession once, and counts filings beyond the item cap', () => {
+    const bad = C.sv2ParseSecSubmissions(sub([row(1, '8-K', { accessionNumber: '12-34' }), row(2, '8-K', { primaryDocument: '../../etc/passwd' }),
+      row(3, '8-K', { filingDate: 'yesterday' }), row(4), row(4)]));
+    expect([bad.matched, bad.malformed, bad.items.length]).toEqual([1, 3, 1]);
+    expect(bad.items[0].link).toMatch(/\/d4d8k\.htm$/);
+    const many = C.sv2ParseSecSubmissions(sub(Array.from({ length: 30 }, (_, i) => row(i))), { maxItems: 25 });
+    expect([many.items.length, many.matched, many.truncated]).toEqual([25, 30, 5]);
+    expect(many.items[0].link).toMatch(/\/d0d8k\.htm$/);   // newest kept
+  });
+
+  it('rejects non-JSON, a non-submissions document and mismatched arrays without throwing', () => {
+    expect(C.sv2ParseSecSubmissions('<html>')).toMatchObject({ ok: false, error: 'not JSON', items: [] });
+    expect(C.sv2ParseSecSubmissions('{"cik":"x","filings":{}}')).toMatchObject({ ok: false, error: 'not an SEC submissions document' });
+    expect(C.sv2ParseSecSubmissions(JSON.stringify({ cik: '0001050446', filings: { recent: { accessionNumber: ['a'], form: [], filingDate: [], primaryDocument: [] } } })))
+      .toMatchObject({ ok: false, error: 'SEC submissions arrays differ in length' });
+    expect(C.sv2ParseSecSubmissions('null').ok).toBe(false);
+  });
+
+  it('a source runs alone when it has its own byte allowance; others wait without a recorded attempt', () => {
+    const reg = [{ ...REG[0], id: 'feed1' }, { ...REG[0], id: 'big', max_bytes: 600000 }, { ...REG[0], id: 'feed2' }];
+    const st = (ago) => ({ last_attempt_ts: NOW - ago, consecutive_failures: 0 });
+    // big most overdue: alone
+    expect(C.sv2DueSources(reg, { feed1: st(2 * H), big: st(10 * H), feed2: st(3 * H) }, NOW).map(s => s.id)).toEqual(['big']);
+    // big due but not most overdue: the other feeds run, big waits
+    expect(C.sv2DueSources(reg, { feed1: st(20 * H), big: st(2 * H), feed2: st(3 * H) }, NOW).map(s => s.id)).toEqual(['feed1', 'feed2']);
+  });
+
+  it('end to end: its own byte allowance admits the JSON, filings are stored once, a repeat run stores nothing new', async () => {
+    const d1 = makeD1(DDL);
+    const reg = [MSTR];
+    const big = sub([row(1), row(2), ...Array.from({ length: 2600 }, (_, i) => row(100 + i, '4'))]);   // > 256 KB, like a busy filer
+    expect(big.length).toBeGreaterThan(C.SV2_COLLECTOR_LIMITS.maxBytesPerResponse);
+    let ua = null;
+    const f = async (u, init) => { ua = init.headers['User-Agent']; return new Response(big, { headers: { 'content-type': 'application/json' } }); };
+    const r1 = await C.sv2CollectEvidence(env(d1, { EVENT_SEC_USER_AGENT: 'Test App test@example.invalid' }), { nowTs: NOW, fetchImpl: f, registry: reg, sleep: noSleep });
+    expect(r1.sources[0]).toMatchObject({ id: 'mstr_8k', status: 'OK', new: 2, matched: 2, truncated: 0, malformed: 0 });
+    expect(r1.sources[0].bytes).toBe(big.length);
+    expect(ua).toBe('Test App test@example.invalid');
+    const rows = d1.db.prepare("SELECT evidence_id, canonical_url, title, content_hash, published_ts, retrieved_ts FROM sv2_evidence WHERE source_id = 'mstr_8k' ORDER BY canonical_url").all();
+    expect(rows.map(x => x.canonical_url)).toEqual(['https://sec.gov/Archives/edgar/data/1050446/000119312526399998/d2d8k.htm', 'https://sec.gov/Archives/edgar/data/1050446/000119312526399999/d1d8k.htm']);
+    for (const x of rows) {
+      expect(x.evidence_id).toBe('ev_' + createHash('sha256').update(x.canonical_url).digest('hex').slice(0, 32));
+      expect(x.content_hash).toMatch(/^[0-9a-f]{64}$/);
+      expect(x.published_ts).toBeLessThanOrEqual(x.retrieved_ts);
+    }
+    const r2 = await C.sv2CollectEvidence(env(d1, { EVENT_SEC_USER_AGENT: 'Test App test@example.invalid' }), { nowTs: NOW + 13 * H, fetchImpl: f, registry: reg, sleep: noSleep });
+    expect(r2.sources[0]).toMatchObject({ status: 'OK', new: 0 });
+    expect(d1.db.prepare("SELECT COUNT(*) AS n FROM sv2_evidence WHERE source_id = 'mstr_8k'").get().n).toBe(2);
+  });
+
+  it('above its own allowance the response is TOO_LARGE; default feeds keep the 256 KB cap', async () => {
+    const d1 = makeD1(DDL);
+    const huge = 'x'.repeat(MSTR.max_bytes + 10);
+    const r = await C.sv2CollectEvidence(env(d1, { EVENT_SEC_USER_AGENT: 'T t@example.invalid' }), { nowTs: NOW, fetchImpl: async () => new Response(huge, { headers: { 'content-type': 'application/json' } }), registry: [MSTR], sleep: noSleep });
+    expect(r.sources[0].status).toBe('TOO_LARGE');
+    const d2 = makeD1(DDL);
+    const big = rss([]).replace('</channel>', 'x'.repeat(300000) + '</channel>');
+    const r2 = await C.sv2CollectEvidence(env(d2), { nowTs: NOW, fetchImpl: async () => resp(big), registry: [REG[0]], sleep: noSleep });
+    expect(r2.sources[0].status).toBe('TOO_LARGE');
+  });
+
+  it('without the SEC User-Agent the source is NOT_CONFIGURED and makes no request', async () => {
+    const d1 = makeD1(DDL);
+    let calls = 0;
+    const r = await C.sv2CollectEvidence(env(d1), { nowTs: NOW, fetchImpl: async () => { calls++; }, registry: [MSTR], sleep: noSleep });
+    expect([r.sources[0].status, calls]).toEqual(['NOT_CONFIGURED', 0]);
+  });
+});

@@ -23,7 +23,12 @@ export const SV2_SOURCE_REGISTRY = [
   { id: 'cftc_press', name: 'CFTC press releases', family: 'regulation_geopolitics', kind: 'rss', url: 'https://www.cftc.gov/RSS/RSSGP/rssgp.xml', interval_min: 480, freshness_h: 168, v1_overlap: null },
   { id: 'fed_press', name: 'Federal Reserve press releases', family: 'macroeconomic', kind: 'rss', url: 'https://www.federalreserve.gov/feeds/press_all.xml', interval_min: 480, freshness_h: 168, v1_overlap: null },
   { id: 'ecb_press', name: 'ECB press releases', family: 'macroeconomic', kind: 'rss', url: 'https://www.ecb.europa.eu/rss/press.html', interval_min: 480, freshness_h: 168, v1_overlap: null },
-  { id: 'mstr_8k', name: 'Strategy (MSTR) 8-K filings, SEC EDGAR', family: 'corporate_treasury_catalysts', kind: 'atom', url: 'https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK=0001050446&type=8-K&dateb=&owner=include&count=20&output=atom', interval_min: 720, freshness_h: 720, ua: 'sec', v1_overlap: null },
+  // SEC EDGAR submissions API (data.sec.gov, documented, JSON). The legacy cgi-bin/browse-edgar Atom feed gave no response
+  // to Workers fetches in 3/3 attempts (8 s and 25 s timeouts, staging and production, 2026-11-15/16) while www.sec.gov
+  // answered in the same runs. Only the forms listed are kept. max_bytes is this source's own response allowance:
+  // staging measured 157,305 bytes (2026-11-16 17:10); EDGAR's recent block is bounded (1,000 filings or one year),
+  // so 384 KiB is ~2.4x the measured size.
+  { id: 'mstr_8k', name: 'Strategy (MSTR) 8-K filings, SEC EDGAR', family: 'corporate_treasury_catalysts', kind: 'sec_submissions', url: 'https://data.sec.gov/submissions/CIK0001050446.json', forms: ['8-K', '8-K/A'], max_bytes: 384 * 1024, interval_min: 720, freshness_h: 720, ua: 'sec', v1_overlap: null },
 ];
 
 // ---- Explicit budgets (Workers Free) ------------------------------------------------------------------------------
@@ -43,7 +48,9 @@ export const SV2_COLLECTOR_LIMITS = {
   dupWindowMs: 7 * 86400000,    // same normalised title from another source within 7 days = duplicate
 };
 
-const ALLOWED_CONTENT = /^(application\/(rss\+xml|atom\+xml|xml|rdf\+xml)|text\/(xml|html|plain))\b/i;
+const ALLOWED_CONTENT = /^(application\/(rss\+xml|atom\+xml|xml|rdf\+xml|json)|text\/(xml|html|plain))\b/i;
+// A source's own response allowance (max_bytes) may raise the per-response cap up to this, never more.
+export const SV2_SOURCE_MAX_BYTES_CAP = 1024 * 1024;
 
 export function sv2RegistryHosts(registry = SV2_SOURCE_REGISTRY) {
   return new Set(registry.map(s => new URL(s.url).hostname.toLowerCase()));
@@ -242,6 +249,50 @@ export function sv2ParseFeed(xml, { maxItems = SV2_COLLECTOR_LIMITS.maxItemsPerF
   return { ok: true, format: isAtom ? 'atom' : 'rss', items };
 }
 
+// ---- SEC EDGAR submissions JSON (data.sec.gov/submissions/CIK##########.json) -------------------------------------
+// filings.recent holds parallel arrays, newest first. Only rows whose form is in `forms` are kept; each becomes one item
+// whose link is the filing's primary document under www.sec.gov/Archives (built from the CIK, the accession number and
+// the primary document name exactly as listed; rows with a malformed accession or document name are skipped and
+// counted, never repaired). Title and summary are made only of listed fields. Duplicated accessions are kept once.
+// More matching filings than maxItems: the newest maxItems are kept and the rest counted in `truncated`.
+const SEC_ACCESSION = /^\d{10}-\d{2}-\d{6}$/;
+const SEC_DOCUMENT = /^[A-Za-z0-9][A-Za-z0-9._-]{0,199}$/;
+export function sv2ParseSecSubmissions(text, { forms = ['8-K', '8-K/A'], maxItems = SV2_COLLECTOR_LIMITS.maxItemsPerFeed, titleMax = SV2_COLLECTOR_LIMITS.titleMax, summaryMax = SV2_COLLECTOR_LIMITS.summaryMax } = {}) {
+  let doc;
+  try { doc = JSON.parse(text); } catch (_e) { return { ok: false, error: 'not JSON', items: [] }; }
+  const r = doc && doc.filings && doc.filings.recent;
+  const cik = doc && typeof doc.cik === 'string' && /^\d{1,10}$/.test(doc.cik) ? String(Number(doc.cik)) : null;
+  const need = ['accessionNumber', 'form', 'filingDate', 'primaryDocument'];
+  if (!cik || !r || typeof r !== 'object' || !need.every(k => Array.isArray(r[k]))) return { ok: false, error: 'not an SEC submissions document', items: [] };
+  const n = r.accessionNumber.length;
+  if (!need.every(k => r[k].length === n)) return { ok: false, error: 'SEC submissions arrays differ in length', items: [] };
+  const col = (k, i) => (Array.isArray(r[k]) && r[k].length === n && typeof r[k][i] === 'string' ? r[k][i] : '');
+  const wanted = new Set(forms);
+  const name = typeof doc.name === 'string' ? doc.name.slice(0, 120) : 'CIK ' + cik;
+  const items = [], seen = new Set();
+  let matched = 0, malformed = 0, truncated = 0;
+  for (let i = 0; i < n; i++) {
+    const form = col('form', i);
+    if (!wanted.has(form)) continue;
+    const acc = col('accessionNumber', i), docName = col('primaryDocument', i), filed = col('filingDate', i);
+    if (!SEC_ACCESSION.test(acc) || !SEC_DOCUMENT.test(docName) || !/^\d{4}-\d{2}-\d{2}$/.test(filed)) { malformed++; continue; }
+    if (seen.has(acc)) continue;
+    seen.add(acc);
+    matched++;
+    if (items.length >= maxItems) { truncated++; continue; }
+    const accepted = Date.parse(col('acceptanceDateTime', i));
+    const published = Number.isFinite(accepted) ? accepted : Date.parse(filed + 'T00:00:00Z');
+    const itemCodes = col('items', i), report = col('reportDate', i), desc = col('primaryDocDescription', i);
+    items.push({
+      title: `${name} ${form}${itemCodes ? ` (Items ${itemCodes})` : ''} filed ${filed}`.slice(0, titleMax),
+      link: `https://www.sec.gov/Archives/edgar/data/${cik}/${acc.replace(/-/g, '')}/${docName}`,
+      published_ts: Number.isFinite(published) ? published : null,
+      summary: `Accession ${acc}; form ${form}; filed ${filed}${report ? '; report date ' + report : ''}${desc ? '; ' + desc : ''}`.slice(0, summaryMax),
+    });
+  }
+  return { ok: true, format: 'sec_submissions', items, matched, truncated, malformed, rows: n };
+}
+
 // ---- Canonical URLs, hashing, duplicates -------------------------------------------------------------------------
 const TRACKING = /^(utm_[a-z]+|fbclid|gclid|mc_cid|mc_eid|ref|ref_src|cmpid|guccounter|guce_[a-z_]+|_hs[a-z]+|mkt_tok)$/i;
 export function sv2CanonicalUrl(raw) {
@@ -278,7 +329,12 @@ export function sv2DueSources(registry, stateById, now, limits = SV2_COLLECTOR_L
     if (now >= next) due.push({ s, overdue: now - next });
   }
   due.sort((a, b) => b.overdue - a.overdue || (a.s.id < b.s.id ? -1 : 1));
-  return due.slice(0, limits.maxSourcesPerRun).map(d => d.s);
+  // A source with its own byte allowance (max_bytes above the default per-response cap) runs alone: in a run where it is
+  // the most overdue it is the only feed; otherwise it waits (no attempt, so no failure or backoff is recorded) and
+  // becomes the most overdue within a few runs. This keeps the run's parse CPU near the default budget.
+  const big = (s) => Number.isFinite(s.max_bytes) && s.max_bytes > limits.maxBytesPerResponse;
+  if (due.length && big(due[0].s)) return [due[0].s];
+  return due.filter(d => !big(d.s)).slice(0, limits.maxSourcesPerRun).map(d => d.s);
 }
 
 // ---- One collection run --------------------------------------------------------------------------------------------
@@ -313,6 +369,11 @@ export async function sv2CollectEvidence(env, { nowTs, fetchImpl, registry = SV2
   // itself is skipped when it would not. The run therefore never exceeds the query budget it was given.
   let q = 1;                                           // the source-state read above
   const RUN_RECORD = 1;
+  // A due source with its own max_bytes raises this run's byte budget by exactly its extra allowance over the default
+  // per-response cap, so the other feeds keep their usual budget. Capped at SV2_SOURCE_MAX_BYTES_CAP per source.
+  const extraBytes = (src) => (Number.isFinite(src.max_bytes) && src.max_bytes > limits.maxBytesPerResponse
+    ? Math.min(SV2_SOURCE_MAX_BYTES_CAP, src.max_bytes) - limits.maxBytesPerResponse : 0);
+  const runLimits = { ...limits, maxBytesPerRun: limits.maxBytesPerRun + due.reduce((t, src) => t + extraBytes(src), 0) };
   for (const s of due) {
     if (q + 3 + RUN_RECORD > queryBudget) { (run.deferred_for_d1_budget = run.deferred_for_d1_budget || []).push(s.id); continue; }
     const st = stateById[s.id] || {};
@@ -329,15 +390,20 @@ export async function sv2CollectEvidence(env, { nowTs, fetchImpl, registry = SV2
       if (st.last_modified) headers['If-Modified-Since'] = st.last_modified;
       // Any unexpected throw stays with this source (recorded as FETCH_ERROR) so later due feeds and the run record proceed.
       let res;
-      try { res = await sv2SafeFetch(s.url, { allowedHosts, budget, fetchImpl, headers, limits, sleep }); }
+      const srcLimits = extraBytes(s) ? { ...runLimits, maxBytesPerResponse: limits.maxBytesPerResponse + extraBytes(s) } : runLimits;
+      try { res = await sv2SafeFetch(s.url, { allowedHosts, budget, fetchImpl, headers, limits: srcLimits, sleep }); }
       catch (e) { res = { ok: false, status: 'FETCH_ERROR', error: String((e && e.message) || e).slice(0, 160) }; }
       out.bytes = res.bytes || 0;
       if (!res.ok) { out.status = res.status; out.error = res.error; }
       else if (res.notModified) out.status = 'NOT_MODIFIED';
       else {
-        parsed = sv2ParseFeed(res.text, limits);
+        parsed = s.kind === 'sec_submissions' ? sv2ParseSecSubmissions(res.text, { ...limits, forms: s.forms }) : sv2ParseFeed(res.text, limits);
         if (!parsed.ok) { out.status = 'PARSE_ERROR'; out.error = parsed.error; }
-        else { out.status = 'OK'; out.etag = res.etag; out.lastModified = res.lastModified; }
+        else {
+          out.status = 'OK'; out.etag = res.etag; out.lastModified = res.lastModified;
+          // Submissions JSON: how many filings matched the forms, how many fell beyond the item cap, how many were malformed.
+          if (s.kind === 'sec_submissions') { out.matched = parsed.matched; out.truncated = parsed.truncated; out.malformed = parsed.malformed; }
+        }
       }
     }
     if (parsed && parsed.ok) {
@@ -432,7 +498,7 @@ export async function sv2CollectEvidence(env, { nowTs, fetchImpl, registry = SV2
     delete out.etag; delete out.lastModified;
     run.sources.push(out);
   }
-  run.budget = { subrequests: budget.subrequests, subrequest_limit: limits.maxSubrequestsPerRun, bytes: budget.bytes, byte_limit: limits.maxBytesPerRun,
+  run.budget = { subrequests: budget.subrequests, subrequest_limit: limits.maxSubrequestsPerRun, bytes: budget.bytes, byte_limit: runLimits.maxBytesPerRun,
     sources_due_run: due.length, source_limit: limits.maxSourcesPerRun, d1_queries: q + RUN_RECORD, d1_query_budget: Number.isFinite(queryBudget) ? queryBudget : null };
   try {
     await env.DB.prepare('INSERT OR IGNORE INTO sv2_collection_runs (run_ts, collector_version, sources_json, items_seen, items_new, items_duplicate, subrequests, bytes, errors_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)')

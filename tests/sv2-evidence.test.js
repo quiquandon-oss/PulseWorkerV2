@@ -715,6 +715,7 @@ describe('SEC submissions source (MSTR 8-K)', () => {
     expect(MSTR).toMatchObject({ kind: 'sec_submissions', url: 'https://data.sec.gov/submissions/CIK0001050446.json', forms: ['8-K', '8-K/A'], ua: 'sec', interval_min: 720 });
     expect(C.SV2_SOURCE_REGISTRY.some(s => /browse-edgar/.test(s.url))).toBe(false);
     expect(HOSTS.has('data.sec.gov')).toBe(true);
+    expect(MSTR.max_bytes).toBe(384 * 1024);                     // ~2.4x the 157,305 bytes measured on staging
     expect(MSTR.max_bytes).toBeLessThanOrEqual(C.SV2_SOURCE_MAX_BYTES_CAP);
     expect(C.SV2_SOURCE_REGISTRY.filter(s => s.max_bytes).map(s => s.id)).toEqual(['mstr_8k']);   // only this source
   });

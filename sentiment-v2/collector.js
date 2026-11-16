@@ -25,8 +25,10 @@ export const SV2_SOURCE_REGISTRY = [
   { id: 'ecb_press', name: 'ECB press releases', family: 'macroeconomic', kind: 'rss', url: 'https://www.ecb.europa.eu/rss/press.html', interval_min: 480, freshness_h: 168, v1_overlap: null },
   // SEC EDGAR submissions API (data.sec.gov, documented, JSON). The legacy cgi-bin/browse-edgar Atom feed gave no response
   // to Workers fetches in 3/3 attempts (8 s and 25 s timeouts, staging and production, 2026-11-15/16) while www.sec.gov
-  // answered in the same runs. Only the forms listed are kept; max_bytes is this source's own response allowance.
-  { id: 'mstr_8k', name: 'Strategy (MSTR) 8-K filings, SEC EDGAR', family: 'corporate_treasury_catalysts', kind: 'sec_submissions', url: 'https://data.sec.gov/submissions/CIK0001050446.json', forms: ['8-K', '8-K/A'], max_bytes: 1024 * 1024, interval_min: 720, freshness_h: 720, ua: 'sec', v1_overlap: null },
+  // answered in the same runs. Only the forms listed are kept. max_bytes is this source's own response allowance:
+  // staging measured 157,305 bytes (2026-11-16 17:10); EDGAR's recent block is bounded (1,000 filings or one year),
+  // so 384 KiB is ~2.4x the measured size.
+  { id: 'mstr_8k', name: 'Strategy (MSTR) 8-K filings, SEC EDGAR', family: 'corporate_treasury_catalysts', kind: 'sec_submissions', url: 'https://data.sec.gov/submissions/CIK0001050446.json', forms: ['8-K', '8-K/A'], max_bytes: 384 * 1024, interval_min: 720, freshness_h: 720, ua: 'sec', v1_overlap: null },
 ];
 
 // ---- Explicit budgets (Workers Free) ------------------------------------------------------------------------------

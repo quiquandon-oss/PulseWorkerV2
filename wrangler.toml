@@ -36,6 +36,10 @@ SV2_GLM_DAILY_NEURONS = "0"
 SV2_COLLECTOR_ENABLED = "1"
 # Bitcoin Magazine's feed redirects to plain http://bitcoinmagazine.com/feed (refused: https only), seen on staging.
 SV2_SOURCES_DISABLED = "bitcoinmagazine"
+# V1 hourly server readings (sentiment-ff75 scomp-v1, server_composite_readings) as a second V2 input (worker.js
+# sv2ServerV1Rows; owner decision 2026-11-16). Read-only: nothing is copied into research_sentiment_archive or `history`.
+# Each V2 result records its input in family_json.v1_input (browser | server). "0" returns V2 to archive-only input.
+SV2_V1_SERVER_INPUT = "1"
 # Hourly copy of new V1 `history` readings into research_sentiment_archive before each V2 cycle (worker.js
 # syncV1ArchiveFromHistory). "0" stops the copy; the GitHub live-evidence-collection job still archives as before.
 V1_ARCHIVE_SYNC_ENABLED = "1"

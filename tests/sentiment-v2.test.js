@@ -497,7 +497,7 @@ describe('AI: validation, quota, unavailability, zero paid fallback', () => {
     expect(sent[1].content).toBe(JSON.stringify(p2));
     expect(res.package_sha256).toBe(await S.sv2HexSha256(JSON.stringify(p2)));
     expect(res.prompt_sha256).toBe(await S.sv2HexSha256(sent[0].content));
-    expect(res.prompt_version).toBe('sv2-ai-prompt-4');
+    expect(res.prompt_version).toBe('sv2-ai-prompt-5');
   });
   it('the stored row and the API view keep model, status, tokens, Neurons, cited evidence and the exact-input hashes', async () => {
     const res = await S.sv2RunAi({ SENTIMENT_V2_AI_MODEL: GLM, SV2_GLM_DAILY_NEURONS: '1000', AI: { run: async () => okResp(good) } }, pkg, allowedIds, ledgerFor());
@@ -509,7 +509,7 @@ describe('AI: validation, quota, unavailability, zero paid fallback', () => {
     const view = S.sv2LatestView({ asset: 'BTC', status: 'OK', ai_model: GLM, ai_status: 'ok', ai_json: JSON.stringify(aiJson), family_json: '{}' });
     expect(view.ai_annotation.cited_ids).toEqual(good.cited_ids);
     expect(view.ai_usage).toMatchObject({ input_tokens: 900, output_tokens: 300, reserved_neurons: res.reserved_neurons, actual_neurons: res.actual_neurons });
-    expect(view.ai_trace).toEqual({ prompt_version: 'sv2-ai-prompt-4', prompt_sha256: res.prompt_sha256, package_sha256: res.package_sha256 });
+    expect(view.ai_trace).toEqual({ prompt_version: 'sv2-ai-prompt-5', prompt_sha256: res.prompt_sha256, package_sha256: res.package_sha256 });
     expect(S.sv2LatestView({ asset: 'BTC', ai_json: '{}', family_json: '{}' }).ai_trace).toBe(null);
   });
   it('asks GLM for a JSON object with thinking off, and an empty answer says why instead of "not an object"', async () => {
@@ -535,7 +535,7 @@ describe('AI: validation, quota, unavailability, zero paid fallback', () => {
     const valid = await run({ ...good, cited_ids: [allowedIds[0]] });
     expect(valid.status).toBe('ok');
     expect(sys).toMatch(/cited_ids must hold one or more identifiers copied exactly from the package field citable_ids/);
-    expect(valid.prompt_version).toBe('sv2-ai-prompt-4');
+    expect(valid.prompt_version).toBe('sv2-ai-prompt-5');
     const missing = await run({ ...good, cited_ids: [] });
     expect(missing).toMatchObject({ status: 'invalid_output' });
     expect(missing.reason).toMatch(/cited_ids must be a non-empty array/);
@@ -546,6 +546,29 @@ describe('AI: validation, quota, unavailability, zero paid fallback', () => {
     expect(mixed.status).toBe('invalid_output');
     const badContradiction = await run({ ...good, contradictions: [{ ids: ['evidence:zz'], note: 'x' }] });
     expect(badContradiction.status).toBe('invalid_output');
+  });
+  it('figures: the prompt asks for the bare number (v5); "92%" is still rejected, "92" grounded in the title is accepted', async () => {
+    // Staging probe 2026-11-16 (prompt v4) returned the figure "92%" from a real CryptoSlate title and was correctly
+    // rejected. v5 changes only the prompt; the validator is unchanged.
+    const ids = ['evidence:ev_robots'];
+    const titles = { 'evidence:ev_robots': 'Robots now run AI-written code without an AI calling the shots, succeeding 92% of the time' };
+    const base = { summary: 'One item on AI robotics.', cited_ids: ids, contradictions: [], event_relevance: [], uncertainty: 'single item', entities: [] };
+    const fig = (value, id = ids[0]) => S.sv2ValidateAiOutput({ ...base, figures: [{ id, value }] }, ids, titles);
+    expect(fig('92%').ok).toBe(false);
+    expect(fig('92%').errors.join()).toMatch(/invalid or ungrounded figure: 92%/);
+    expect(fig('92').ok).toBe(true);
+    expect(fig('92').value.figures).toEqual([{ id: ids[0], value: '92' }]);
+    expect(fig('93').ok).toBe(false);                                   // a number the title does not contain
+    expect(fig('9').ok).toBe(false);                                    // a fragment of 92
+    expect(fig('92', 'evidence:unknown').ok).toBe(false);               // figure attributed to an id outside the package
+    expect(S.sv2ValidateAiOutput({ ...base, cited_ids: [], figures: [] }, ids, titles).ok).toBe(false);
+    expect(S.sv2ValidateAiOutput({ ...base, cited_ids: ['evidence:made_up'], figures: [] }, ids, titles).ok).toBe(false);
+    expect(S.sv2ValidateAiOutput({ ...base, contradictions: [{ ids: ['evidence:zz'], note: 'x' }], figures: [] }, ids, titles).ok).toBe(false);
+    expect(S.sv2ValidateAiOutput({ ...base, event_relevance: [{ id: ids[0], relevance: 'huge', overlap: 'none' }], figures: [] }, ids, titles).ok).toBe(false);
+    let sys = null;
+    await S.sv2RunAi({ SENTIMENT_V2_AI_MODEL: GLM, SV2_GLM_DAILY_NEURONS: '1000', AI: { run: async (_m, o) => { sys = o.messages[0].content; return okResp(good); } } }, pkg, allowedIds, ledgerFor());
+    expect(sys).toMatch(/digits only, with an optional leading minus sign, thousands commas and decimal point; never a unit, percent sign/);
+    expect(sys).toMatch(/from "succeeding 92% of the time" the value is "92"/);
   });
   it('a model rate limit or capacity error is its own degraded state: recorded against the reservation, never retried', async () => {
     for (const msg of ['3040: Capacity temporarily exceeded', 'HTTP 429 Too Many Requests', 'Out of capacity']) {

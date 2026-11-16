@@ -589,7 +589,7 @@ describe('GLM Neuron ledger on real SQLite', () => {
     const r = await S.sv2RunAi(env, pkg, new Set(['ev:a']), ledger);
     const hex = (s) => createHash('sha256').update(s).digest('hex');
     expect(r.status).toBe('ok');
-    expect(r).toMatchObject({ prompt_version: 'sv2-ai-prompt-4', prompt_sha256: hex(sent[0][0].content), package_sha256: hex(sent[0][1].content) });
+    expect(r).toMatchObject({ prompt_version: 'sv2-ai-prompt-5', prompt_sha256: hex(sent[0][0].content), package_sha256: hex(sent[0][1].content) });
     expect(sent[0][1].content).toBe(JSON.stringify(pkg));
     // Budget stops and failures are traceable too; the hashes are persisted in ai_json.
     const stopped = await S.sv2RunAi(env, pkg, new Set(['ev:a']), { ...ledger, reserveNeurons: async () => null });

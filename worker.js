@@ -12619,8 +12619,11 @@ function sv2AiPackage(result) {
   });
   const evidence = (result.evidence_items || []).map(x => { ids.push(x.id); return { id: x.id, source: x.source, family: x.family, title: x.title, evidence_ts: x.evidence_ts,
     published_ts: x.published_ts ?? null, retrieved_ts: x.retrieved_ts ?? null }; });
-  return { pkg: { decision_ts: result.decision_ts, regime: result.market_regime, families: fams, events, evidence,
-    stale: result.missing.stale, missing: result.missing.missing }, allowedIds: ids };
+  // citable_ids: the exact identifiers the model may cite, listed once up front (staging probe 2026-11-15: with the only id
+  // buried in a family's source list the model returned an empty cited_ids).
+  const citable = [...new Set(ids)];
+  return { pkg: { decision_ts: result.decision_ts, regime: result.market_regime, citable_ids: citable, families: fams, events, evidence,
+    stale: result.missing.stale, missing: result.missing.missing }, allowedIds: citable };
 }
 
 // Entity kinds the AI may assign. Entities and figures are extracted from stored evidence titles only: each must name an
@@ -12745,7 +12748,7 @@ function sv2UngroundedNumbers(texts, pkgText) {
   return bad;
 }
 
-const SV2_AI_PROMPT_VERSION = 'sv2-ai-prompt-3';     // bump whenever the system prompt text changes
+const SV2_AI_PROMPT_VERSION = 'sv2-ai-prompt-4';     // bump whenever the system prompt text changes
 async function sv2HexSha256(text) {
   const d = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(String(text)));
   return [...new Uint8Array(d)].map(b => b.toString(16).padStart(2, '0')).join('');
@@ -12765,7 +12768,9 @@ async function sv2RunAi(env, pkg, allowedIds, ledger) {
     'contradictions (array of {ids, note}), event_relevance (array of {id, relevance: low|medium|high, overlap: none|partial|full}), ' +
     'uncertainty, entities (array of {id, name, kind: asset|organization|regulator|person|instrument|other}, name copied from the ' +
     'title of evidence item id), figures (array of {id, value}, value a string holding one number copied exactly from the title of evidence item id). ' +
-    'Cite only identifiers present in the package. Separate observed facts from inference. Do not output any score, ' +
+    'cited_ids must hold one or more identifiers copied exactly from the package field citable_ids: the items your summary ' +
+    'relies on. Every id you write anywhere (cited_ids, contradictions, event_relevance, entities, figures) must be one of ' +
+    'citable_ids. Separate observed facts from inference. Do not output any score, ' +
     'price target or forecast, and do not write any number that does not appear in the package. Use only the package; do not add outside facts.';
   const user = JSON.stringify(pkg);
   // Traceability: every result from here on carries the hashes of the exact system prompt and evidence package sent to
@@ -13230,7 +13235,25 @@ async function getSentimentV2Comparison(env, period, nowTs) {
 // One minimal GLM call through the real Neuron ledger (same reservation SQL, same budget, same validation).
 async function sv2GlmProbe(env, now) {
   const day = new Date(now).toISOString().slice(0, 10);
-  const pkg = { decision_ts: now, regime: 'probe', families: { probe: { score: 50, sources: ['probe:a'] } }, events: [], evidence: [], stale: [], missing: [] };
+  // A realistic package: the newest stored, non-duplicate evidence items (real titles, sources and timestamps), cited by
+  // their evidence ids. Nothing is invented: with no stored evidence the probe does not call the model.
+  let rows = [];
+  try {
+    const r = await env.DB.prepare('SELECT evidence_id, source_id, family, title, published_ts, retrieved_ts FROM sv2_evidence WHERE dup_of IS NULL AND retrieved_ts <= ? ORDER BY retrieved_ts DESC, evidence_id LIMIT 6').bind(now).all();
+    rows = (r && r.results) || [];
+  } catch (e) {
+    // A read failure (missing table, D1 outage) is not an empty table: report it as an error, distinct from the skip.
+    return { status: 'error', counted: false, reason: `evidence read failed: ${String((e && e.message) || e).slice(0, 200)}` };
+  }
+  if (!rows.length) return { status: 'skipped', counted: false, reason: 'no stored evidence to build a probe package from' };
+  const evidence = rows.map(x => {
+    const pub = x.published_ts === null || x.published_ts === undefined ? null : Number(x.published_ts);
+    const retr = Number(x.retrieved_ts);
+    return { id: `evidence:${x.evidence_id}`, source: x.source_id, family: x.family, title: String(x.title || '').slice(0, 200),
+      evidence_ts: pub !== null && pub <= retr ? pub : retr, published_ts: pub, retrieved_ts: retr };
+  });
+  const ids = evidence.map(x => x.id);
+  const pkg = { decision_ts: now, regime: 'probe', citable_ids: ids, families: {}, events: [], evidence, stale: [], missing: [] };
   const ledger = {
     async accountLimitedToday() { return !!(await env.DB.prepare("SELECT 1 AS x FROM sv2_ai_neurons WHERE day = ? AND status = 'account_limited' LIMIT 1").bind(day).first()); },
     async reserveNeurons(budget, est, model) {
@@ -13244,7 +13267,7 @@ async function sv2GlmProbe(env, now) {
         .bind(u.input_tokens ?? null, u.output_tokens ?? null, u.actual_neurons ?? null, u.status, day, slot).run();
     },
   };
-  return sv2RunAi(env, pkg, ['probe:a'], ledger);
+  return sv2RunAi(env, pkg, ids, ledger);
 }
 
 // Compact view of the newest V2 result for the API: parsed AI annotation and usage, evidence summary; no raw JSON.

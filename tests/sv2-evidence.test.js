@@ -589,7 +589,7 @@ describe('GLM Neuron ledger on real SQLite', () => {
     const r = await S.sv2RunAi(env, pkg, new Set(['ev:a']), ledger);
     const hex = (s) => createHash('sha256').update(s).digest('hex');
     expect(r.status).toBe('ok');
-    expect(r).toMatchObject({ prompt_version: 'sv2-ai-prompt-3', prompt_sha256: hex(sent[0][0].content), package_sha256: hex(sent[0][1].content) });
+    expect(r).toMatchObject({ prompt_version: 'sv2-ai-prompt-4', prompt_sha256: hex(sent[0][0].content), package_sha256: hex(sent[0][1].content) });
     expect(sent[0][1].content).toBe(JSON.stringify(pkg));
     // Budget stops and failures are traceable too; the hashes are persisted in ai_json.
     const stopped = await S.sv2RunAi(env, pkg, new Set(['ev:a']), { ...ledger, reserveNeurons: async () => null });
@@ -603,7 +603,19 @@ describe('GLM Neuron ledger on real SQLite', () => {
     const d1 = makeD1(DDL);
     let calls = 0;
     const env = { DB: d1.binding, SENTIMENT_V2_AI_MODEL: GLM, SV2_GLM_DAILY_NEURONS: '150',
-      AI: { run: async () => { calls++; return { response: JSON.stringify({ summary: 'ok', cited_ids: ['probe:a'], contradictions: [], event_relevance: [], uncertainty: 'probe', entities: [], figures: [] }), usage: { prompt_tokens: 400, completion_tokens: 200 } }; } } };
+      AI: { run: async (_m, o) => { calls++; const sent = JSON.parse(o.messages[1].content);
+        return { response: JSON.stringify({ summary: 'ok', cited_ids: [sent.citable_ids[0]], contradictions: [], event_relevance: [], uncertainty: 'probe', entities: [], figures: [] }), usage: { prompt_tokens: 400, completion_tokens: 200 } }; } } };
+    // No stored evidence: the probe builds nothing and never calls the model (no invented package).
+    expect(await S.sv2GlmProbe(env, NOW)).toMatchObject({ status: 'skipped', counted: false });
+    expect(calls).toBe(0);
+    // A failed evidence read (missing table, D1 outage) is an error, not an empty table (Codex P2).
+    const broken = { ...env, DB: { prepare: () => { throw new Error('no such table: sv2_evidence'); } } };
+    const failed = await S.sv2GlmProbe(broken, NOW);
+    expect(failed).toMatchObject({ status: 'error', counted: false });
+    expect(failed.reason).toMatch(/evidence read failed: no such table: sv2_evidence/);
+    expect(calls).toBe(0);
+    addEvidence(d1, 'cftc_press', 'CFTC Sues Louisiana After State Court Blocks CFTC-Regulated Exchanges', NOW - 3600000);
+    addEvidence(d1, 'decrypt', 'Bitcoin ETFs Lose $2.1 Billion in November as Outflow Streak Hits Seven Days', NOW - 7200000);
     const results = [];
     for (let k = 0; k < 10; k++) results.push(await S.sv2GlmProbe(env, NOW));
     const rows = d1.db.prepare('SELECT * FROM sv2_ai_neurons').all();
@@ -612,6 +624,9 @@ describe('GLM Neuron ledger on real SQLite', () => {
     expect(rows.length).toBe(calls);
     expect(results.filter(r => r.status === 'quota_guard').length).toBe(10 - calls);
     expect(rows[0]).toMatchObject({ status: 'ok', input_tokens: 400, output_tokens: 200 });
+    // The probe package is the stored evidence, cited by evidence id, with citable_ids listing exactly those ids.
+    const okRes = results.find(r => r.status === 'ok');
+    expect(okRes.output.cited_ids[0]).toMatch(/^evidence:/);
     expect(rows[0].actual_neurons).toBeCloseTo((400 * 5500 + 200 * 36400) / 1e6, 3);
     const st = await S.getSentimentV2Status(env, NOW);
     expect(st.ai.calls).toBe(calls);

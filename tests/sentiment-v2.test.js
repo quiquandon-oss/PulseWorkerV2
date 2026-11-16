@@ -14,7 +14,7 @@ const FUNCS = ['sv2Config', 'sv2Finite', 'sv2ParseSources', 'sv2History', 'sv2At
   'sv2Events', 'sv2Regime', 'sv2Profile', 'sv2Analogues', 'sv2Classify', 'sv2Compute', 'sv2AiPackage',
   'sv2ValidateAiOutput', 'sv2RunAi', 'sv2HexSha256', 'sv2Row', 'runSentimentV2Cycle', 'sv2AlignSeries', 'sv2SeriesStatus',
   'getSentimentV2Comparison', 'getSentimentV2ComparisonCached', 'sv2EvidenceSummary', 'sv2EvidenceItemsForAi', 'sv2AiBudget',
-  'sv2AiEstimateNeurons', 'sv2UngroundedNumbers', 'sv2LatestView'];
+  'sv2AiEstimateNeurons', 'sv2UngroundedNumbers', 'sv2StructuredAnnotation', 'sv2LatestView'];
 const CONSTS = ['SENTIMENT_V2_VERSION', 'SV2_VERSIONS_SHOWN', 'SV2_INSERT_SQL', 'SV2_PERIODS_MS', 'SV2_MAX_POINTS', 'SV2_MAX_ROWS', 'SV2_MAX_PRICE_ROWS', 'SV2_STALE_MS', 'sv2ComparisonCache',
   'SV2_AI_PRICING', 'SV2_AI_MAX_OUTPUT_TOKENS', 'SV2_AI_RESERVE_SQL', 'SV2_AI_TEMPLATE_TOKENS', 'SV2_AI_PROMPT_VERSION', 'SV2_CYCLE_QUERIES_FIXED', 'SV2_CYCLE_QUERIES_PER_READING'];
 const GLOBALS = { SV2_SOURCE_REGISTRY, sv2EvidenceReadings, sv2ScoreHeadline, SV2_EVIDENCE_RULES };
@@ -346,7 +346,7 @@ describe('AI: validation, quota, unavailability, zero paid fallback', () => {
   const r = S.sv2Compute(hist, hist.length - 1, [], cfg);
   const { pkg, allowedIds } = S.sv2AiPackage(r);
   const yes = async () => true, no = async () => false;
-  const good = { summary: 'Families mostly bearish.', cited_ids: [allowedIds[0]], contradictions: [], event_relevance: [], uncertainty: 'Small sample.', entities: [], figures: [] };
+  const good = { cited_ids: [allowedIds[0]], contradictions: [], event_relevance: [], entities: [], figures: [] };
   it('accepts schema-valid output citing package identifiers only', () => {
     expect(S.sv2ValidateAiOutput(good, allowedIds).ok).toBe(true);
   });
@@ -411,14 +411,15 @@ describe('AI: validation, quota, unavailability, zero paid fallback', () => {
     expect((await S.sv2RunAi({ ...env, AI: { run: async () => ({ choices: [{ message: { content: JSON.stringify(good) } }], usage: { prompt_tokens: 1, completion_tokens: 1 } }) } }, pkg, allowedIds, ledgerFor())).status).toBe('ok');
     expect((await S.sv2RunAi({ ...env, AI: { run: async () => ({ response: 'Sentiment is 72.' }) } }, pkg, allowedIds, ledgerFor())).status).toBe('invalid_output');
     expect((await S.sv2RunAi({ ...env, AI: { run: async () => ({ response: { ...good, score: 9 } }) } }, pkg, allowedIds, ledgerFor())).status).toBe('invalid_output');
+    // Free text is not accepted at all (structured-only output, prompt v6): a summary is an unexpected field.
     const invented = await S.sv2RunAi({ ...env, AI: { run: async () => okResp({ ...good, summary: 'BTC will reach 123456 next week.' }) } }, pkg, allowedIds, ledgerFor());
     expect(invented.status).toBe('invalid_output');
-    expect(invented.reason).toMatch(/numbers not in the evidence package: 123456/);
+    expect(invented.reason).toMatch(/unexpected fields: summary/);
   });
   it('entities and figures must come from the title of a cited evidence item, figures as whole values only', () => {
     const ids = ['evidence:e1', 'evidence:e2', 'event:x1'];
     const titles = { 'evidence:e1': 'SEC approves spot ETF from BlackRock with 150 million inflows', 'evidence:e2': 'Fed holds rates' };
-    const base = { summary: 'ok', cited_ids: ['evidence:e1'], contradictions: [], event_relevance: [], uncertainty: 'low' };
+    const base = { cited_ids: ['evidence:e1'], contradictions: [], event_relevance: [] };
     const v = (entities, figures) => S.sv2ValidateAiOutput({ ...base, entities, figures }, ids, titles);
     expect(v([{ id: 'evidence:e1', name: 'BlackRock', kind: 'organization' }, { id: 'evidence:e1', name: 'sec', kind: 'regulator' }],
       [{ id: 'evidence:e1', value: 150 }, { id: 'evidence:e1', value: '150' }]).ok).toBe(true);
@@ -448,12 +449,12 @@ describe('AI: validation, quota, unavailability, zero paid fallback', () => {
     expect(v([], [{ id: 'evidence:e1', value: ' 150 ' }]).ok).toBe(true);
     // Only validated fields survive: an extra nested field is dropped, never persisted or shown (Codex P2).
     const extra = S.sv2ValidateAiOutput({ ...base, entities: [{ id: 'evidence:e1', name: 'SEC', kind: 'regulator', score: 99 }],
-      figures: [{ id: 'evidence:e1', value: 150, unit: 'BTC' }], contradictions: [{ ids: ['evidence:e1'], note: 'n', score: 1 }],
+      figures: [{ id: 'evidence:e1', value: 150, unit: 'BTC' }], contradictions: [{ ids: ['evidence:e1', 'evidence:e2'] }],
       event_relevance: [{ id: 'event:x1', relevance: 'low', overlap: 'none', score: 2 }] }, ids, titles);
     expect(extra.ok).toBe(true);
     expect(extra.value.entities).toEqual([{ id: 'evidence:e1', name: 'SEC', kind: 'regulator' }]);
     expect(extra.value.figures).toEqual([{ id: 'evidence:e1', value: 150 }]);
-    expect(extra.value.contradictions).toEqual([{ ids: ['evidence:e1'], note: 'n' }]);
+    expect(extra.value.contradictions).toEqual([{ ids: ['evidence:e1', 'evidence:e2'] }]);
     expect(extra.value.event_relevance).toEqual([{ id: 'event:x1', relevance: 'low', overlap: 'none' }]);
     expect(JSON.stringify(extra.value)).not.toMatch(/score|unit/);
     // Entity names match whole terms only (Codex P2): ETH is not named by "whether", Fed is not named by "federal".
@@ -489,7 +490,7 @@ describe('AI: validation, quota, unavailability, zero paid fallback', () => {
       { id: 'evidence:a2', source: 'fed_press', family: 'macro_policy', title: 'Fed statement', evidence_ts: 3000, published_ts: null, retrieved_ts: 3000 }]);
     expect(ids2).toEqual(expect.arrayContaining(['evidence:a1', 'evidence:a2']));
     let sent = null;
-    const out = { summary: 'ETF inflows rise.', cited_ids: ['evidence:a1'], contradictions: [], event_relevance: [], uncertainty: 'low',
+    const out = { cited_ids: ['evidence:a1'], contradictions: [], event_relevance: [], 
       entities: [{ id: 'evidence:a1', name: 'ETF', kind: 'instrument' }], figures: [] };
     const res = await S.sv2RunAi({ SENTIMENT_V2_AI_MODEL: GLM, SV2_GLM_DAILY_NEURONS: '1000', AI: { run: async (_m, o) => { sent = o.messages; return okResp(out); } } }, p2, ids2, ledgerFor());
     expect(res.status).toBe('ok');
@@ -497,7 +498,7 @@ describe('AI: validation, quota, unavailability, zero paid fallback', () => {
     expect(sent[1].content).toBe(JSON.stringify(p2));
     expect(res.package_sha256).toBe(await S.sv2HexSha256(JSON.stringify(p2)));
     expect(res.prompt_sha256).toBe(await S.sv2HexSha256(sent[0].content));
-    expect(res.prompt_version).toBe('sv2-ai-prompt-5');
+    expect(res.prompt_version).toBe('sv2-ai-prompt-6');
   });
   it('the stored row and the API view keep model, status, tokens, Neurons, cited evidence and the exact-input hashes', async () => {
     const res = await S.sv2RunAi({ SENTIMENT_V2_AI_MODEL: GLM, SV2_GLM_DAILY_NEURONS: '1000', AI: { run: async () => okResp(good) } }, pkg, allowedIds, ledgerFor());
@@ -509,7 +510,7 @@ describe('AI: validation, quota, unavailability, zero paid fallback', () => {
     const view = S.sv2LatestView({ asset: 'BTC', status: 'OK', ai_model: GLM, ai_status: 'ok', ai_json: JSON.stringify(aiJson), family_json: '{}' });
     expect(view.ai_annotation.cited_ids).toEqual(good.cited_ids);
     expect(view.ai_usage).toMatchObject({ input_tokens: 900, output_tokens: 300, reserved_neurons: res.reserved_neurons, actual_neurons: res.actual_neurons });
-    expect(view.ai_trace).toEqual({ prompt_version: 'sv2-ai-prompt-5', prompt_sha256: res.prompt_sha256, package_sha256: res.package_sha256 });
+    expect(view.ai_trace).toEqual({ prompt_version: 'sv2-ai-prompt-6', prompt_sha256: res.prompt_sha256, package_sha256: res.package_sha256 });
     expect(S.sv2LatestView({ asset: 'BTC', ai_json: '{}', family_json: '{}' }).ai_trace).toBe(null);
   });
   it('asks GLM for a JSON object with thinking off, and an empty answer says why instead of "not an object"', async () => {
@@ -535,7 +536,7 @@ describe('AI: validation, quota, unavailability, zero paid fallback', () => {
     const valid = await run({ ...good, cited_ids: [allowedIds[0]] });
     expect(valid.status).toBe('ok');
     expect(sys).toMatch(/cited_ids must hold one or more identifiers copied exactly from the package field citable_ids/);
-    expect(valid.prompt_version).toBe('sv2-ai-prompt-5');
+    expect(valid.prompt_version).toBe('sv2-ai-prompt-6');
     const missing = await run({ ...good, cited_ids: [] });
     expect(missing).toMatchObject({ status: 'invalid_output' });
     expect(missing.reason).toMatch(/cited_ids must be a non-empty array/);
@@ -552,7 +553,7 @@ describe('AI: validation, quota, unavailability, zero paid fallback', () => {
     // rejected. v5 changes only the prompt; the validator is unchanged.
     const ids = ['evidence:ev_robots'];
     const titles = { 'evidence:ev_robots': 'Robots now run AI-written code without an AI calling the shots, succeeding 92% of the time' };
-    const base = { summary: 'One item on AI robotics.', cited_ids: ids, contradictions: [], event_relevance: [], uncertainty: 'single item', entities: [] };
+    const base = { cited_ids: ids, contradictions: [], event_relevance: [], entities: [] };
     const fig = (value, id = ids[0]) => S.sv2ValidateAiOutput({ ...base, figures: [{ id, value }] }, ids, titles);
     expect(fig('92%').ok).toBe(false);
     expect(fig('92%').errors.join()).toMatch(/invalid or ungrounded figure: 92%/);
@@ -569,6 +570,41 @@ describe('AI: validation, quota, unavailability, zero paid fallback', () => {
     await S.sv2RunAi({ SENTIMENT_V2_AI_MODEL: GLM, SV2_GLM_DAILY_NEURONS: '1000', AI: { run: async (_m, o) => { sys = o.messages[0].content; return okResp(good); } } }, pkg, allowedIds, ledgerFor());
     expect(sys).toMatch(/digits only, with an optional leading minus sign, thousands commas and decimal point; never a unit, percent sign/);
     expect(sys).toMatch(/from "succeeding 92% of the time" the value is "92"/);
+  });
+  it('structured output only (v6): summary, uncertainty, notes and any free text are rejected; grounding unchanged', async () => {
+    // Owner decision 2026-11-16 after staging probe #14: its summary attributed a BitMine loss to "Ethereum mining", which no
+    // title says. Nothing the validator cannot ground is accepted, stored or shown.
+    const ids = ['evidence:e1', 'evidence:e2'];
+    const titles = { 'evidence:e1': 'Is Ethereum the "worst asset of all time," amid estimated $8.83 billion BitMine loss ?', 'evidence:e2': 'Tether wants its gold token to rival ETFs' };
+    const base = { cited_ids: ['evidence:e1'], contradictions: [], event_relevance: [], entities: [], figures: [{ id: 'evidence:e1', value: '8.83' }] };
+    const val = (o) => S.sv2ValidateAiOutput(o, ids, titles);
+    expect(val(base).ok).toBe(true);
+    expect(Object.keys(val(base).value).sort()).toEqual(['cited_ids', 'contradictions', 'entities', 'event_relevance', 'figures']);
+    expect(val({ ...base, summary: 'Losses associated with Ethereum mining.' }).errors.join()).toMatch(/unexpected fields: summary/);
+    expect(val({ ...base, uncertainty: 'low' }).errors.join()).toMatch(/unexpected fields: uncertainty/);
+    expect(val({ ...base, confidence: 0.9 }).ok).toBe(false);
+    // A contradiction is two or more distinct package ids and nothing else.
+    expect(val({ ...base, contradictions: [{ ids: ['evidence:e1', 'evidence:e2'] }] }).ok).toBe(true);
+    expect(val({ ...base, contradictions: [{ ids: ['evidence:e1', 'evidence:e2'], note: 'they disagree' }] }).ok).toBe(false);
+    expect(val({ ...base, contradictions: [{ ids: ['evidence:e1'] }] }).ok).toBe(false);
+    expect(val({ ...base, contradictions: [{ ids: ['evidence:e1', 'evidence:e1'] }] }).ok).toBe(false);
+    expect(val({ ...base, contradictions: [{ ids: ['evidence:e1', 'evidence:zz'] }] }).ok).toBe(false);
+    // Grounding is unchanged: empty or invented citations, ungrounded figures and entities are still rejected.
+    expect(val({ ...base, cited_ids: [] }).ok).toBe(false);
+    expect(val({ ...base, cited_ids: ['evidence:made_up'] }).ok).toBe(false);
+    expect(val({ ...base, figures: [{ id: 'evidence:e1', value: '8.83%' }] }).ok).toBe(false);
+    expect(val({ ...base, figures: [{ id: 'evidence:e1', value: '9' }] }).ok).toBe(false);
+    expect(val({ ...base, entities: [{ id: 'evidence:e1', name: 'Ethereum mining', kind: 'other' }] }).ok).toBe(false);
+    expect(val({ ...base, entities: [{ id: 'evidence:e1', name: 'BitMine', kind: 'organization' }] }).ok).toBe(true);
+    // The prompt asks for no free text; the API view drops free text from any older stored annotation.
+    let sys = null;
+    await S.sv2RunAi({ SENTIMENT_V2_AI_MODEL: GLM, SV2_GLM_DAILY_NEURONS: '1000', AI: { run: async (_m, o) => { sys = o.messages[0].content; return okResp(good); } } }, pkg, allowedIds, ledgerFor());
+    expect(sys).toMatch(/Write no summary, explanation, note, uncertainty or confidence rating and no other key or free text/);
+    expect(sys).not.toMatch(/keys summary/);
+    const legacy = { output: { summary: 'old free text', uncertainty: 'low', cited_ids: ['evidence:e1'], contradictions: [{ ids: ['evidence:e1', 'evidence:e2'], note: 'n' }], event_relevance: [], entities: [], figures: [] } };
+    const view = S.sv2LatestView({ asset: 'BTC', status: 'OK', ai_status: 'ok', ai_json: JSON.stringify(legacy), family_json: '{}' });
+    expect(view.ai_annotation).toEqual({ cited_ids: ['evidence:e1'], contradictions: [{ ids: ['evidence:e1', 'evidence:e2'] }], event_relevance: [], entities: [], figures: [] });
+    expect(JSON.stringify(view)).not.toMatch(/old free text|"uncertainty"|"note"/);
   });
   it('a model rate limit or capacity error is its own degraded state: recorded against the reservation, never retried', async () => {
     for (const msg of ['3040: Capacity temporarily exceeded', 'HTTP 429 Too Many Requests', 'Out of capacity']) {

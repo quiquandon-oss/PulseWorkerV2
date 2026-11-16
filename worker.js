@@ -4678,6 +4678,13 @@ async function getChallengerRecent(env, limit = 20) {
 // use the (coin, horizon_hours, ts) index from .ai/migrations/0002 --
 // bounded LIMIT on the row query, a single aggregate COUNT on the summary,
 // neither is a full-table scan.
+// Row limit for /research/timesfm-recent: default 20, clamped to 1..500. A non-numeric value falls back to the default
+// (it used to reach SQL as NaN). 500 covers the frozen EXP-004 checkpoint plus replication (2 x 100 origins per
+// horizon) with room; the Forecasting Lab reads the full post-seal history per horizon.
+function timesfmRecentLimit(raw) {
+  const n = parseInt(raw == null ? '' : String(raw), 10);
+  return Number.isFinite(n) ? Math.min(500, Math.max(1, n)) : 20;
+}
 async function getTimesFmRecent(env, coin, horizonHours, limit = 20) {
   const summaryRow = await env.DB.prepare(
     `SELECT COUNT(*) AS total,
@@ -10984,8 +10991,7 @@ const pulseWorkerHandlers = {
         if (![12, 24].includes(horizon)) {
           return new Response(JSON.stringify({ ok: false, error: 'horizon must be 12 or 24' }), { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
         }
-        const limit = Math.min(100, parseInt(url.searchParams.get('limit') || '20', 10));
-        const result = await getTimesFmRecent(env, 'BTC', horizon, limit);
+        const result = await getTimesFmRecent(env, 'BTC', horizon, timesfmRecentLimit(url.searchParams.get('limit')));
         return new Response(JSON.stringify(result), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
       } catch (err) {
         return new Response(JSON.stringify({ ok: false, error: String(err) }), { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
@@ -13160,9 +13166,19 @@ function sv2AlignSeries(v1Rows, v2Rows, maxPoints) {
   for (const [ts, v2] of v2By) if (!seen.has(ts)) pts.push({ ts, v1: null, btc: null, v2: sv2Finite(v2.sentiment_score), v2_status: v2.status });
   pts.sort((a, b) => a.ts - b.ts);
   if (pts.length <= maxPoints) return { points: pts, downsampled: false };
-  const step = Math.ceil(pts.length / maxPoints);
-  const kept = pts.filter((p, idx) => idx % step === 0 || idx === pts.length - 1);
-  return { points: kept, downsampled: true, step };
+  // Every point that carries a V2 value is kept (V2 is the sparse series under comparison; a stride used to drop most
+  // of them on long periods), plus the newest point. The V1/BTC-only points are thinned evenly into the remaining
+  // budget. If V2 points alone exceed the budget, the plain stride applies to all points. Never above maxPoints + 1.
+  const last = pts.length - 1;
+  const must = new Set(pts.map((p, idx) => (p.v2 !== null || idx === last ? idx : -1)).filter(idx => idx >= 0));
+  if (must.size >= maxPoints) {
+    const step = Math.ceil(pts.length / maxPoints);
+    return { points: pts.filter((p, idx) => idx % step === 0 || idx === last), downsampled: true, step };
+  }
+  const others = pts.map((p, idx) => idx).filter(idx => !must.has(idx));
+  const step = Math.ceil(others.length / (maxPoints - must.size));
+  const keep = new Set([...must, ...others.filter((idx, j) => j % step === 0)]);
+  return { points: pts.filter((p, idx) => keep.has(idx)), downsampled: true, step };
 }
 
 function sv2SeriesStatus(points, v2Meta, nowTs) {

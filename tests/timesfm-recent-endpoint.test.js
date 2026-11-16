@@ -71,3 +71,14 @@ describe('getTimesFmRecent — Experiment 4 (TimesFM) read-only summary + recent
     expect(rowQuery).toMatch(/LIMIT \?/);
   });
 });
+
+describe('timesfmRecentLimit — /research/timesfm-recent row limit', () => {
+  let scope;
+  beforeAll(() => { scope = evalInScope(extractFunctions('timesfmRecentLimit')); });
+  it('defaults to 20, clamps to 1..500, and never passes NaN to SQL', () => {
+    const f = scope.timesfmRecentLimit;
+    expect([f(null), f(undefined), f(''), f('abc')]).toEqual([20, 20, 20, 20]);
+    expect([f('100'), f('500'), f('501'), f('100000')]).toEqual([100, 500, 500, 500]);
+    expect([f('0'), f('-5'), f('1')]).toEqual([1, 1, 1]);
+  });
+});

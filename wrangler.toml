@@ -49,6 +49,13 @@ V1_ARCHIVE_SYNC_ENABLED = "1"
 # (25+ days of real sentiment/technical/regime data) from day one, and a place
 # to write new V2-only tables (predictions, calibration log) without touching
 # anything the original app depends on. See CryptoPulseV2 README for context.
+# Scheduled research stopped (owner decision 2026-11-17; worker.js scheduledResearchEnabled, 07:00 UTC cron):
+# Gemini daily BTC/LINK narrative, EXP-002 anomaly gate, EXP-003 momentum overlay. "1" (or removing the line) resumes.
+# Manual routes and all stored rows are unchanged.
+GEMINI_DAILY_CRON_ENABLED = "0"
+EXP002_CRON_ENABLED = "0"
+EXP003_CRON_ENABLED = "0"
+
 [[d1_databases]]
 binding = "DB"
 database_name = "sentiment-history"

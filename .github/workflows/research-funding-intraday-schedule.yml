@@ -16,8 +16,11 @@
 name: research-funding-intraday-schedule
 
 on:
-  schedule:
-    - cron: '17 * * * *'       # hourly at :17 (off the :00 peak); lateness is measured from run records, not assumed
+  # PAUSED 2026-11-17 (owner decision, EXP-023 pause): the hourly schedule is removed and the Worker's hourly dispatch is
+  # switched off (RESEARCH_FUNDING_DISPATCH_ENABLED = "0"). Data already on research-data/risk-regime-forward is
+  # untouched; the daily EXP-024 collector (research-forward-schedule.yml) keeps running. To resume, restore:
+  #   schedule:
+  #     - cron: '17 * * * *'
   # 2026-11: GitHub fired the schedule above 118 times in 624 hours (19%). The PulseWorkerV2 Worker's hourly
   # Cloudflare cron now dispatches this workflow (worker.js "Reliable trigger for the hourly research funding
   # collector"); the schedule stays as a fallback. Dispatch starts exactly the job below: same pinned code, same

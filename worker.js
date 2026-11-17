@@ -12160,6 +12160,11 @@ async function dispatchStalenessAlert(env, fetchImpl = fetch) {
   return dispatchResearchCollection(env, fetchImpl, RESEARCH_DISPATCH.alertUrl);
 }
 
+// EXP-023 pause (owner decision 2026-11-17): the hourly dispatch of research-funding-intraday-schedule.yml (EXP-023
+// v0.5.0 funding variants) is off when RESEARCH_FUNDING_DISPATCH_ENABLED = "0". The staleness-alert dispatch is
+// unaffected. Unset = enabled (unchanged behaviour).
+function researchFundingDispatchEnabled(env) { return String((env && env.RESEARCH_FUNDING_DISPATCH_ENABLED) ?? '1') !== '0'; }
+
 async function dispatchResearchCollection(env, fetchImpl = fetch, url = RESEARCH_DISPATCH.url) {
   if (!env || !env.RESEARCH_DISPATCH_TOKEN) return { dispatched: false, reason: 'no_token' };
   const controller = new AbortController();
@@ -13619,7 +13624,7 @@ export default {
       passThroughOnException() { return ctx.passThroughOnException && ctx.passThroughOnException(); },
     };
     if (event && event.cron === '0 * * * *') {
-      ctx.waitUntil(dispatchResearchCollection(env)); // independent of the tick's work; never throws
+      if (researchFundingDispatchEnabled(env)) ctx.waitUntil(dispatchResearchCollection(env)); // independent of the tick's work; never throws
       if (stalenessAlertDue(event.scheduledTime)) ctx.waitUntil(dispatchStalenessAlert(env));
     }
     let scheduledEnv = withD1Usage(env, usage);

@@ -193,7 +193,7 @@ describe('selectBestVariant — subrequest count is meaningfully reduced, decisi
 
   it('uses at most 6 D1 calls total (1 eligibility + 1 latestCore + 1 coreHistory + up to 2 scoring + 1 insert), down from up to 15 in the original per-variant-loop implementation', async () => {
     const source = extractFunctions(
-      'selectBestVariant', 'decideSelection', 'computeLcaScore', 'coreTableForCoin', 'nearestRow',
+      'selectBestVariant', 'challengerEnabled', 'selectionVariantsFor', 'decideSelection', 'computeLcaScore', 'coreTableForCoin', 'nearestRow',
       'fetchEligibilityCounts', 'fetchVariantRowsByTable'
     ) + '\n\n' + extractConstants('SELECTION_VARIANTS', 'SELECTION_MIN_HISTORY', 'SELECTION_MIN_MATCHED', 'SELECTION_CRITICAL_Z');
     const scope = evalInScope(source);
@@ -223,7 +223,7 @@ describe('selectBestVariant — subrequest count is meaningfully reduced, decisi
 
   it('decision output (chosen_variant, cleared_gate, lca) is identical whether variant rows arrive via the batched fetch or a hand-built equivalent of the old per-variant fetch', async () => {
     const source = extractFunctions(
-      'selectBestVariant', 'decideSelection', 'computeLcaScore', 'coreTableForCoin', 'nearestRow',
+      'selectBestVariant', 'challengerEnabled', 'selectionVariantsFor', 'decideSelection', 'computeLcaScore', 'coreTableForCoin', 'nearestRow',
       'fetchEligibilityCounts', 'fetchVariantRowsByTable'
     ) + '\n\n' + extractConstants('SELECTION_VARIANTS', 'SELECTION_MIN_HISTORY', 'SELECTION_MIN_MATCHED', 'SELECTION_CRITICAL_Z');
     const scope = evalInScope(source);

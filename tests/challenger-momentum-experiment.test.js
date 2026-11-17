@@ -112,7 +112,7 @@ describe('CORRECTION (post-audit): SELECTION_VARIANTS reverted -- challenger_mom
 
 describe('PROOF: selectBestVariant can never see, score, or choose challenger_momentum', () => {
   it('the eligibility loop never queries challenger_predictions.p_up_momentum at all -- it is simply not in the registry it iterates', async () => {
-    const source = extractFunctions('selectBestVariant', 'decideSelection', 'computeLcaScore', 'coreTableForCoin', 'fetchEligibilityCounts', 'fetchVariantRowsByTable') + '\n\n' +
+    const source = extractFunctions('selectBestVariant', 'challengerEnabled', 'selectionVariantsFor', 'decideSelection', 'computeLcaScore', 'coreTableForCoin', 'fetchEligibilityCounts', 'fetchVariantRowsByTable') + '\n\n' +
       extractConstants('SELECTION_VARIANTS', 'SELECTION_MIN_HISTORY', 'SELECTION_MIN_MATCHED', 'SELECTION_CRITICAL_Z');
     const counts = {
       'predictions:p_up': 100, 'predictions:p_up_experimental': 100, 'predictions:calibrated_p_up': 100,
@@ -164,7 +164,12 @@ describe('PROOF: selectBestVariant can never see, score, or choose challenger_mo
     // loop, where `eligible` is filtered from `variantDefs = SELECTION_VARIANTS[coin]`.
     // With momentum absent from that registry (proven above), it cannot enter
     // `eligible`, `scores`, or therefore `decision.chosen`.
-    expect(src).toContain('const variantDefs = SELECTION_VARIANTS[coin];');
+    // Since the challenger pause switch (2026-11-17) the pool comes from selectionVariantsFor(env, coin), which returns
+    // SELECTION_VARIANTS[coin] or a filtered subset of it -- never anything outside the registry.
+    expect(src).toContain('const variantDefs = selectionVariantsFor(env, coin);');
+    const helper = extractFunctions('selectionVariantsFor');
+    expect(helper).toContain('const defs = SELECTION_VARIANTS[coin];');
+    expect(helper).not.toContain('MOMENTUM_EXPERIMENT_VARIANT');
     expect(src).not.toContain('MOMENTUM_EXPERIMENT_VARIANT');
     expect(src).not.toContain("'challenger_momentum'");
   });

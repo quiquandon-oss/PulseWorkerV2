@@ -36,6 +36,10 @@ SV2_GLM_DAILY_NEURONS = "0"
 SV2_COLLECTOR_ENABLED = "1"
 # Bitcoin Magazine's feed redirects to plain http://bitcoinmagazine.com/feed (refused: https only), seen on staging.
 SV2_SOURCES_DISABLED = "bitcoinmagazine"
+# Challenger pause switch (worker.js challengerEnabled; owner decision 2026-11-17). "0" stops new challenger predictions
+# and the daily challenger calibration refresh and removes the 3 challenger variants from selection; pending rows still
+# resolve and all history stays. Ships "1" (unchanged); set "0" only after the production selection check.
+CHALLENGER_ENABLED = "1"
 # V1 hourly server readings (sentiment-ff75 scomp-v1, server_composite_readings) as a second V2 input (worker.js
 # sv2ServerV1Rows; owner decision 2026-11-16). Read-only: nothing is copied into research_sentiment_archive or `history`.
 # Each V2 result records its input in family_json.v1_input (browser | server). "0" returns V2 to archive-only input.

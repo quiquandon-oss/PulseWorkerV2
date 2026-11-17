@@ -1,6 +1,14 @@
 # PROPOSED amendment (not adopted): resolve at the target's own 3-hourly tick
 
-**Status: PROPOSED, 2026-11-17. Not in force.** The frozen plan
+**Status: PROPOSED, NOT ADOPTED. Owner decision 2026-11-17:**
+1. The frozen rule stays the **primary protocol** through the 100-origin checkpoint. It is not replaced on the basis
+   of interim results.
+2. The slot-aware rule is a **sensitivity analysis only**, always reported separately next to the primary result.
+3. Original outcomes stay immutable. Any alternative scoring is stored as separate, explicitly versioned records
+   (`resolution_rule: slot-v2-sensitivity`) and never overwrites a `frozen-v1` outcome.
+4. Production resolvers and research workflows are unchanged.
+
+The frozen plan
 (`2026-11-01-prospective-evaluation-plans.md`) stays the rule until the owner adopts a versioned plan. Its own change
 rule allows that only before the checkpoint it affects (100 resolved origins per horizon; 15 at 12 h and 14–15 at
 24 h on 2026-11-17).
@@ -41,7 +49,7 @@ equally affected, so paired comparisons stay paired, but they are not measured a
 - A genuine data gap still resolves on the next available price, exactly as now. That is counted and reported.
 - Every resolution would record `resolution_rule` (`frozen-v1` or `slot-v2`) and the price timestamp it used.
 
-## Options for the owner
+## Options considered (decided above: option 2 as primary, the slot rule as sensitivity analysis)
 1. **Adopt for both EXP-004 and EXP-008 before the 100-origin checkpoint.** Re-resolve every prospective origin under
    `slot-v2` as new, separate records. The immutable `frozen-v1` files and rows stay. Report both, with `slot-v2`
    primary.

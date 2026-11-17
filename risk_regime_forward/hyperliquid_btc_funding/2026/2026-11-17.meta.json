@@ -1,16 +1,16 @@
 {
  "completeness": "OPEN",
- "expected_slots": 42,
- "file_sha256": "08646878f8a8810e481c4997f6e10631fb44bbc9a246a3f89aff1fe7ccabba71",
- "fingerprint": "239528ba059d2599995a0c75705354e652bcfa3b7cee4e1f136b64007dc7e2a3",
+ "expected_slots": 44,
+ "file_sha256": "07dfb3ce52d7b6c2d616f4e1f89f9acb53a7366d733627409561a5c77f1300e7",
+ "fingerprint": "4e6b094d7749822bd941061fa542febe1aaea270dfcd35b7720f7753bf13d506",
  "first_collected_at": "2026-11-17T00:01:06.522000+00:00",
- "last_run_id": "44164752565",
- "last_written_at": "2026-11-17T20:01:14.213000+00:00",
+ "last_run_id": "44175322293",
+ "last_written_at": "2026-11-17T21:01:05.755000+00:00",
  "missing_ranges": {},
  "missing_slots": 0,
- "observations": 42,
+ "observations": 44,
  "partition": "2026-11-17",
- "raw_sha256": "ae577f03e5f506429278e35f6819cbc03dc7b9f3d46535ea0be1e231446e4530",
+ "raw_sha256": "54f77f535d9276d33ccb51510a60813c8add391a7b5b8cf99565b4c5d355a6a3",
  "source": "hyperliquid_btc_funding",
  "superseded": [
   "652a92cf47f4da06fc9455ec393b9da83524e985da2d97bd319a7294ec40fb79",
@@ -32,7 +32,8 @@
   "0ba037a4ed903182b3cb5d77c40575dc9cadf24154c46bf9d9472ca854a0f512",
   "3008932dd3e06caa856d35d70ca417d527299d794b214b2f4f537b50707c8349",
   "9526e63418fe6b38b4d383e5a56863e145a3b2028ed0ef577024c61159cb61f0",
-  "1044a4d2a57a27dad965d276bf3305c5e88eaff409c822daae1b3ff00446705e"
+  "1044a4d2a57a27dad965d276bf3305c5e88eaff409c822daae1b3ff00446705e",
+  "239528ba059d2599995a0c75705354e652bcfa3b7cee4e1f136b64007dc7e2a3"
  ],
  "units": {
   "funding_rate": "rate/1h",

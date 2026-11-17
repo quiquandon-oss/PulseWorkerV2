@@ -564,3 +564,20 @@ def test_fetch_price_history_defensive_sort_preserves_near_simultaneous_dedup_se
 ))
 def test_future_observation_after_input_end_ts_does_not_alter_an_already_computed_forecast():
     pass
+
+
+# ---- Resolve-only mode (Option B, owner decision 2026-11-17) ----
+
+def test_resolve_only_flag_is_explicit():
+    assert run_experiment.resolve_only_requested(["run_experiment.py", "--resolve-only"]) is True
+    assert run_experiment.resolve_only_requested(["run_experiment.py"]) is False
+    assert run_experiment.resolve_only_requested(["--resolve-only"]) is False   # argv[0] is the script, not a flag
+
+
+def test_resolve_only_main_never_generates_forecasts():
+    src = open(os.path.join(os.path.dirname(__file__), "run_experiment.py")).read()
+    main = src[src.index('if __name__ == "__main__":'):]
+    assert "if resolve_only_requested(sys.argv):" in main
+    branch = main[main.index("if resolve_only_requested(sys.argv):"):main.index("else:")]
+    assert "generate_forecasts" not in branch                  # no forecast in resolve-only mode
+    assert main.index("resolve_pending()") > main.index("else:")  # resolution still runs in both modes

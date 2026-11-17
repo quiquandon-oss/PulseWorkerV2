@@ -22,7 +22,16 @@ name: Experiment 4 - TimesFM Challenger (BTC only, research only)
 on:
   schedule:
     - cron: '30 7 * * *'
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      mode:
+        # resolve_only (owner decision 2026-11-17, Option B): resolve due forecasts only; no forecast, no TimesFM
+        # install. Started by the Worker cron at 07:00 and 19:00 UTC when EXP004_RESOLVE_DISPATCH = "1". The daily
+        # schedule above (and a manual dispatch with the default) still runs the full forecast + resolve.
+        description: 'full (forecast + resolve) or resolve_only'
+        type: choice
+        options: [full, resolve_only]
+        default: full
 
 permissions:
   contents: read
@@ -51,6 +60,7 @@ jobs:
       # loads the TimesFM 2.5 checkpoint google/timesfm-2.5-200m-pytorch (MODEL_VERSION timesfm-2.5-200m). Unpinned, a
       # new timesfm/torch/numpy release could change forecasts mid-experiment without any code change.
       - name: Install TimesFM (CPU, pinned)
+        if: inputs.mode != 'resolve_only'
         run: |
           pip install torch==2.15.0 --index-url https://download.pytorch.org/whl/cpu
           pip install "timesfm[torch]==3.0.2" numpy==2.4.6 huggingface_hub==2.4.0 safetensors==0.8.0
@@ -58,7 +68,10 @@ jobs:
       - name: Run Experiment 4 (forecast + resolve)
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-        run: /usr/bin/time -v -o "$RUNNER_TEMP/exp004-time.txt" python exp004-timesfm/run_experiment.py
+          EXP004_MODE: ${{ inputs.mode || 'full' }}
+        run: |
+          if [ "$EXP004_MODE" = "resolve_only" ]; then ARGS=--resolve-only; else ARGS=; fi
+          /usr/bin/time -v -o "$RUNNER_TEMP/exp004-time.txt" python exp004-timesfm/run_experiment.py $ARGS
 
       # Free-allowance measurement (no effect on the experiment): runner time, peak memory, installed versions and the
       # Hugging Face snapshot actually loaded, in the run's step summary.

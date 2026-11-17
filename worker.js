@@ -12148,6 +12148,7 @@ function makeTickReadMemo(db) {
 const RESEARCH_DISPATCH = {
   url: 'https://api.github.com/repos/quiquandon-oss/PulseWorkerV2/actions/workflows/research-funding-intraday-schedule.yml/dispatches',
   alertUrl: 'https://api.github.com/repos/quiquandon-oss/PulseWorkerV2/actions/workflows/prediction-staleness-alert.yml/dispatches',
+  exp004Url: 'https://api.github.com/repos/quiquandon-oss/PulseWorkerV2/actions/workflows/exp004-timesfm.yml/dispatches',
   ref: 'main',
   timeoutMs: 10000,
 };
@@ -12160,7 +12161,23 @@ async function dispatchStalenessAlert(env, fetchImpl = fetch) {
   return dispatchResearchCollection(env, fetchImpl, RESEARCH_DISPATCH.alertUrl);
 }
 
-async function dispatchResearchCollection(env, fetchImpl = fetch, url = RESEARCH_DISPATCH.url) {
+// EXP-004 resolve-only start (owner decision 2026-11-17, Option B; docs/TIMESFM_SCHEDULING_PROPOSAL.md). GitHub
+// released the 07:30 TimesFM schedule 4-10 h late on 40/40 days, and outcomes resolve only in a run. At 07:00 and
+// 19:00 UTC the hourly cron asks GitHub for a resolve-only run: the frozen resolution rule is unchanged and no forecast
+// is made, so origins and cadence stay those of the scheduled full run (EXP-008 follows via workflow_run and only
+// resolves too, since its newest anchor is already forecast). Off unless EXP004_RESOLVE_DISPATCH = "1".
+function exp004ResolveDue(scheduledTime) {
+  if (!Number.isFinite(scheduledTime)) return false;
+  const h = new Date(scheduledTime).getUTCHours();
+  return h === 7 || h === 19;
+}
+
+async function dispatchExp004Resolve(env, fetchImpl = fetch) {
+  if (!env || String(env.EXP004_RESOLVE_DISPATCH || '0') !== '1') return { dispatched: false, reason: 'disabled' };
+  return dispatchResearchCollection(env, fetchImpl, RESEARCH_DISPATCH.exp004Url, { mode: 'resolve_only' });
+}
+
+async function dispatchResearchCollection(env, fetchImpl = fetch, url = RESEARCH_DISPATCH.url, inputs = null) {
   if (!env || !env.RESEARCH_DISPATCH_TOKEN) return { dispatched: false, reason: 'no_token' };
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), RESEARCH_DISPATCH.timeoutMs);
@@ -12174,7 +12191,7 @@ async function dispatchResearchCollection(env, fetchImpl = fetch, url = RESEARCH
         'User-Agent': 'pulseworker-v2-research-dispatch',
         'Content-Type': 'application/json',
       },
-      body: JSON.stringify({ ref: RESEARCH_DISPATCH.ref }),
+      body: JSON.stringify(inputs ? { ref: RESEARCH_DISPATCH.ref, inputs } : { ref: RESEARCH_DISPATCH.ref }),
       signal: controller.signal,
     });
     const ok = res.status === 204;
@@ -13621,6 +13638,7 @@ export default {
     if (event && event.cron === '0 * * * *') {
       ctx.waitUntil(dispatchResearchCollection(env)); // independent of the tick's work; never throws
       if (stalenessAlertDue(event.scheduledTime)) ctx.waitUntil(dispatchStalenessAlert(env));
+      if (exp004ResolveDue(event.scheduledTime)) ctx.waitUntil(dispatchExp004Resolve(env)); // off unless EXP004_RESOLVE_DISPATCH = "1"
     }
     let scheduledEnv = withD1Usage(env, usage);
     let memo = null;

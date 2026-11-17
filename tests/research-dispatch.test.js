@@ -7,7 +7,7 @@ import { extractFunctions, extractConstants, evalInScope } from './helpers/extra
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const SRC = readFileSync(join(ROOT, 'worker.js'), 'utf8');
-const scope = evalInScope(extractConstants('RESEARCH_DISPATCH') + '\n' + extractFunctions('dispatchResearchCollection', 'dispatchStalenessAlert', 'stalenessAlertDue'), {});
+const scope = evalInScope(extractConstants('RESEARCH_DISPATCH') + '\n' + extractFunctions('dispatchResearchCollection', 'dispatchStalenessAlert', 'stalenessAlertDue', 'exp004ResolveDue', 'dispatchExp004Resolve'), {});
 const quiet = () => { const l = console.log, e = console.error; console.log = () => {}; console.error = () => {}; return () => { console.log = l; console.error = e; }; };
 
 describe('dispatchResearchCollection', () => {
@@ -57,7 +57,7 @@ describe('dispatchResearchCollection', () => {
   it('is wired to the hourly cron only, outside the tick handlers', () => {
     const start = SRC.indexOf('async scheduled(event, env, ctx) {', SRC.indexOf('export default {'));
     const body = SRC.slice(start, SRC.indexOf('\n  },\n', start));
-    expect(body).toMatch(/if \(event && event\.cron === '0 \* \* \* \*'\) \{\s*ctx\.waitUntil\(dispatchResearchCollection\(env\)\);[^\n]*\n\s*if \(stalenessAlertDue\(event\.scheduledTime\)\) ctx\.waitUntil\(dispatchStalenessAlert\(env\)\);\s*\}/);
+    expect(body).toMatch(/if \(event && event\.cron === '0 \* \* \* \*'\) \{\s*ctx\.waitUntil\(dispatchResearchCollection\(env\)\);[^\n]*\n\s*if \(stalenessAlertDue\(event\.scheduledTime\)\) ctx\.waitUntil\(dispatchStalenessAlert\(env\)\);\n\s*if \(exp004ResolveDue\(event\.scheduledTime\)\) ctx\.waitUntil\(dispatchExp004Resolve\(env\)\);[^\n]*\n\s*\}/);
   });
 });
 
@@ -74,5 +74,58 @@ describe('research-funding-intraday-schedule.yml', () => {
     expect(y).toContain('--sources hyperliquid_btc_funding okx_btc_funding --max-days 60 --open-day');
     expect(y).toContain('TARGET: research-data/risk-regime-forward');
     expect(y).toContain('group: research-forward-collection');
+  });
+});
+
+describe('EXP-004 resolve-only dispatch (Option B, owner decision 2026-11-17)', () => {
+  it('is due at 07:00 and 19:00 UTC only', () => {
+    const due = [];
+    for (let h = 0; h < 24; h++) if (scope.exp004ResolveDue(Date.UTC(2026, 10, 18, h, 0, 0))) due.push(h);
+    expect(due).toEqual([7, 19]);
+    expect(scope.exp004ResolveDue(undefined)).toBe(false);
+  });
+  it('is off unless EXP004_RESOLVE_DISPATCH is "1": no request at all', async () => {
+    let called = false;
+    for (const v of [undefined, '0', 'true', '']) {
+      const r = await scope.dispatchExp004Resolve({ RESEARCH_DISPATCH_TOKEN: 't0k', EXP004_RESOLVE_DISPATCH: v }, async () => { called = true; return { status: 204 }; });
+      expect(r).toEqual({ dispatched: false, reason: 'disabled' });
+    }
+    expect(called).toBe(false);
+  });
+  it('when on, asks GitHub for the exp004 workflow with mode resolve_only on main', async () => {
+    const restore = quiet();
+    try {
+      let seen = null;
+      const r = await scope.dispatchExp004Resolve({ RESEARCH_DISPATCH_TOKEN: 't0k', EXP004_RESOLVE_DISPATCH: '1' }, async (url, init) => { seen = { url, init }; return { status: 204 }; });
+      expect(r).toEqual({ dispatched: true, status: 204 });
+      expect(seen.url).toBe('https://api.github.com/repos/quiquandon-oss/PulseWorkerV2/actions/workflows/exp004-timesfm.yml/dispatches');
+      expect(JSON.parse(seen.init.body)).toEqual({ ref: 'main', inputs: { mode: 'resolve_only' } });
+      expect(seen.init.method).toBe('POST');
+    } finally { restore(); }
+  });
+  it('the other dispatches still send no inputs (unchanged request body)', async () => {
+    const restore = quiet();
+    try {
+      let body = null;
+      await scope.dispatchResearchCollection({ RESEARCH_DISPATCH_TOKEN: 'x' }, async (url, init) => { body = JSON.parse(init.body); return { status: 204 }; });
+      expect(body).toEqual({ ref: 'main' });
+    } finally { restore(); }
+  });
+  it('ships OFF in production and is not set on staging', () => {
+    expect(readFileSync(join(ROOT, 'wrangler.toml'), 'utf8')).toMatch(/^EXP004_RESOLVE_DISPATCH = "0"$/m);
+    expect(readFileSync(join(ROOT, 'wrangler.staging.toml'), 'utf8')).not.toMatch(/EXP004_RESOLVE_DISPATCH/);
+  });
+});
+
+describe('exp004-timesfm.yml resolve_only mode', () => {
+  const y = readFileSync(join(ROOT, '.github/workflows/exp004-timesfm.yml'), 'utf8');
+  it('keeps the daily schedule (full run) and adds a mode input defaulting to full', () => {
+    expect(y).toContain("- cron: '30 7 * * *'");
+    expect(y).toMatch(/mode:[\s\S]*options: \[full, resolve_only\][\s\S]*default: full/);
+  });
+  it('resolve_only skips the TimesFM install and passes --resolve-only; a scheduled run (no inputs) stays full', () => {
+    expect(y).toMatch(/- name: Install TimesFM \(CPU, pinned\)\n\s*if: inputs\.mode != 'resolve_only'/);
+    expect(y).toContain("EXP004_MODE: ${{ inputs.mode || 'full' }}");
+    expect(y).toContain('if [ "$EXP004_MODE" = "resolve_only" ]; then ARGS=--resolve-only; else ARGS=; fi');
   });
 });

@@ -36,6 +36,9 @@ SV2_GLM_DAILY_NEURONS = "0"
 SV2_COLLECTOR_ENABLED = "1"
 # Bitcoin Magazine's feed redirects to plain http://bitcoinmagazine.com/feed (refused: https only), seen on staging.
 SV2_SOURCES_DISABLED = "bitcoinmagazine"
+# EXP-004 resolve-only dispatch at 07:00 and 19:00 UTC (worker.js dispatchExp004Resolve; owner decision 2026-11-17,
+# Option B). Ships OFF: set to "1" only after review and owner approval. Uses the existing RESEARCH_DISPATCH_TOKEN.
+EXP004_RESOLVE_DISPATCH = "0"
 # V1 hourly server readings (sentiment-ff75 scomp-v1, server_composite_readings) as a second V2 input (worker.js
 # sv2ServerV1Rows; owner decision 2026-11-16). Read-only: nothing is copied into research_sentiment_archive or `history`.
 # Each V2 result records its input in family_json.v1_input (browser | server). "0" returns V2 to archive-only input.

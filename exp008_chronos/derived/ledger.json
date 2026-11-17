@@ -1487,10 +1487,15 @@
    "timesfm_ts": 1794754516361
   },
   {
+   "absolute_error": 0.9510513932620869,
+   "actual_direction": "UP",
+   "actual_price": 64790.0,
+   "actual_return_pct": 0.4947961098788603,
    "code_sha": "71add5b9ea7240385c0767aed2aa65bb60721c4d",
    "coin": "BTC",
    "context_length": 128,
    "context_sha256": "4bc84576a23eefae6a2620a02b3def38455257dc7df9f2d7537b61586e2961ae",
+   "correct": 0,
    "direction": "DOWN",
    "forecast_file": "forecasts/BTC/24h/2026-11-15T180102Z.json",
    "forecast_horizon_steps": 8,
@@ -1507,6 +1512,7 @@
    "model_revision": "29ec3766d36d6f73f0696f85560a422f50e8498c",
    "model_revision_resolved": "29ec3766d36d6f73f0696f85560a422f50e8498c",
    "model_version": "chronos-2",
+   "persistence_correct": 0,
    "persistence_direction": "DOWN",
    "population": "prospective",
    "predicted_return_pct": -0.4562552833832266,
@@ -1516,7 +1522,11 @@
     0.5,
     0.9
    ],
-   "status": "pending",
+   "resolution_file": "resolutions/BTC/24h/2026-11-15T180102Z.json",
+   "resolution_price_ts": 1794852062555,
+   "resolved_ts": 1794888656690,
+   "signed_error": -0.9510513932620869,
+   "status": "resolved",
    "target_ts": 1794852062399,
    "timesfm_ts": 1794765990529
   },
@@ -1556,19 +1566,9 @@
   }
  ],
  "format": "exp008-chronos-ledger-v1",
- "generated_ts": 1794849604429,
+ "generated_ts": 1794888660933,
  "prospective_start_ts": 1793491200000,
  "recent_runs": [
-  {
-   "code_sha": "793aa566b1373d983b45dbc3e18a868f90cbe71d",
-   "errors": 0,
-   "file": "runs/2026-11-08T005442Z.json",
-   "forecasts_made": 0,
-   "pending": 2,
-   "resolved": 1,
-   "run_id": "42431816214",
-   "run_ts": 1794099282016
-  },
   {
    "code_sha": "793aa566b1373d983b45dbc3e18a868f90cbe71d",
    "errors": 1,
@@ -1758,6 +1758,16 @@
    "resolved": 2,
    "run_id": "43917042077",
    "run_ts": 1794849595857
+  },
+  {
+   "code_sha": "0e64075899eee41a16bb1086a1bd8624f52cb7cd",
+   "errors": 0,
+   "file": "runs/2026-11-17T041056Z.json",
+   "forecasts_made": 0,
+   "pending": 2,
+   "resolved": 1,
+   "run_id": "44015224529",
+   "run_ts": 1794888656690
   }
  ],
  "seal_end_ts": 1791579600000,

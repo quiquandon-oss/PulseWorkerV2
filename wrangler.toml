@@ -27,6 +27,12 @@ SENTIMENT_V2_ENABLED = "1"
 # account. The account's free 10,000 Neurons/day are shared with V1 (sentiment-ff75 uses Workers AI). It never sets a score.
 SENTIMENT_V2_AI_MODEL = ""
 SV2_GLM_DAILY_NEURONS = "0"
+# Scheduled research stopped (owner decision 2026-11-17; worker.js scheduledResearchEnabled, 07:00 UTC cron):
+# Gemini daily BTC/LINK narrative, EXP-002 anomaly gate, EXP-003 momentum overlay. "1" (or removing the line) resumes.
+# Manual routes and all stored rows are unchanged.
+GEMINI_DAILY_CRON_ENABLED = "0"
+EXP002_CRON_ENABLED = "0"
+EXP003_CRON_ENABLED = "0"
 # Independent evidence collector (sentiment-v2/collector.js): "1" collects RSS/Atom/official feeds in the hourly
 # non-tick cron, within SV2_COLLECTOR_LIMITS (3 sources, 8 subrequests, 768 KiB per run, the shared 50-query D1 budget)
 # and behind the daily D1 stop (sv2CollectGuarded: 2.5M rows read / 50k written, fail-closed on missing, stale or
@@ -49,13 +55,6 @@ V1_ARCHIVE_SYNC_ENABLED = "1"
 # (25+ days of real sentiment/technical/regime data) from day one, and a place
 # to write new V2-only tables (predictions, calibration log) without touching
 # anything the original app depends on. See CryptoPulseV2 README for context.
-# Scheduled research stopped (owner decision 2026-11-17; worker.js scheduledResearchEnabled, 07:00 UTC cron):
-# Gemini daily BTC/LINK narrative, EXP-002 anomaly gate, EXP-003 momentum overlay. "1" (or removing the line) resumes.
-# Manual routes and all stored rows are unchanged.
-GEMINI_DAILY_CRON_ENABLED = "0"
-EXP002_CRON_ENABLED = "0"
-EXP003_CRON_ENABLED = "0"
-
 [[d1_databases]]
 binding = "DB"
 database_name = "sentiment-history"

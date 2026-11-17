@@ -306,12 +306,22 @@ def resolve_pending():
         print(f"[exp004] resolved id={row['id']}: predicted={row['direction']} actual={actual_direction} correct={correct}")
 
 
+def resolve_only_requested(argv):
+    """True for `--resolve-only`: the owner-approved Option B dispatch (docs/TIMESFM_SCHEDULING_PROPOSAL.md). It
+    resolves due forecasts with the unchanged frozen rule and makes no forecast, so forecast origins and cadence are
+    exactly those of the scheduled full run."""
+    return "--resolve-only" in argv[1:]
+
+
 if __name__ == "__main__":
-    try:
-        generate_forecasts()
-    except Exception as e:
-        print(f"[exp004] FORECAST GENERATION FAILED (writing nothing): {e}", file=sys.stderr)
-        sys.exit(1)
+    if resolve_only_requested(sys.argv):
+        print("[exp004] resolve-only run: no forecast is made")
+    else:
+        try:
+            generate_forecasts()
+        except Exception as e:
+            print(f"[exp004] FORECAST GENERATION FAILED (writing nothing): {e}", file=sys.stderr)
+            sys.exit(1)
 
     try:
         resolve_pending()

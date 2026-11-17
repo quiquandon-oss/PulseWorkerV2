@@ -42,8 +42,9 @@ evaluates it for every candidate row of the join: 6 `(coin, horizon)` keys × 5,
 6 × 5,350 × 5,350 + 6 × 4,319 × 4,319 ≈ 171.7M + 111.9M (upper bound)
 ```
 
-SQLite's equality filter on `coin` and `horizon_hours` cut this to the measured 28.7M (about 1/6 per key). This is
-the quadratic pattern behind the production lookup (#160), multiplied by a join over every key.
+The measured 28.7M is below that upper bound. How SQLite evaluated the subquery exactly (how often, and with what
+filtering) was not measured, and will not be, so as not to spend more reads. The mechanism is the quadratic pattern
+behind the production lookup (#160), multiplied by a join over every key.
 
 ## Why no estimate was made first
 - The `EXPLAIN QUERY PLAN` result (SCAN plus a correlated scalar subquery) and the table sizes were both already in

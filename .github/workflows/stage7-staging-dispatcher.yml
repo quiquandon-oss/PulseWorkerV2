@@ -38,8 +38,11 @@ name: Stage 7 Staging Dispatcher
 # resolved -- resolving it is a separate, explicitly-flagged decision,
 # not made silently by this file.
 on:
-  schedule:
-    - cron: '0 11 * * *'
+  # PAUSED 2026-11-17 (owner decision): the daily schedule is removed, so Stage 7 no longer runs on staging every day.
+  # Manual recovery: workflow_dispatch (unchanged, same branch guard and staging-only target). Code, staging data and
+  # the Stage 7 workflows are untouched. To resume, restore:
+  #   schedule:
+  #     - cron: '0 11 * * *'
   workflow_dispatch: {}
 
 permissions:

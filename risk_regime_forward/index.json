@@ -75,7 +75,7 @@
    "with_gaps": []
   },
   "hyperliquid_btc_funding": {
-   "complete": 41,
+   "complete": 42,
    "files": {
     "2026-10-06": "0d5d0f3af5b405a9a90ed45d30095f835bc08c3e2fcd902893e7ea50a6aa75c1",
     "2026-10-07": "ac854a9710ff0a8fa1e8b3df7cfa09c49191ba69b275713eca96ea1dee392f52",
@@ -118,13 +118,14 @@
     "2026-11-13": "7ba1122cfd6665fe361a94d7acf67cab3eda0f8572b029a2e0d2f80de6bcfd9f",
     "2026-11-14": "fc6650c48a2407d5d49f8244b53c7ee3a1fdc7d3a0657b29b4f46586afb04810",
     "2026-11-15": "7c8d97dcee40ac6565ccd40312de66985b8cc28ef89098fcaa4fceab9a62ef9a",
-    "2026-11-16": "185a5039786c2a584e5ac429b25638339c89471bcedb1992ed78d650918112d8"
+    "2026-11-16": "185a5039786c2a584e5ac429b25638339c89471bcedb1992ed78d650918112d8",
+    "2026-11-17": "23af87e9a8a673a754329af971fc2df8707c82a714c25ff395ce03594566805a"
    },
    "first": "2026-10-06",
-   "last": "2026-11-16",
-   "latest_complete": "2026-11-15",
-   "observations": 2000,
-   "partitions": 42,
+   "last": "2026-11-17",
+   "latest_complete": "2026-11-16",
+   "observations": 2002,
+   "partitions": 43,
    "retention": "fundingHistory: full history",
    "stale": false,
    "units": {
@@ -132,7 +133,7 @@
     "premium": "fraction"
    },
    "with_gaps": [
-    "2026-11-16"
+    "2026-11-17"
    ]
   },
   "hyperliquid_hip3": {
@@ -194,7 +195,7 @@
    "with_gaps": []
   },
   "okx_btc_funding": {
-   "complete": 90,
+   "complete": 91,
    "files": {
     "2026-08-18": "0d469eefb64ef5c813393681165652b0c8f6f9957ccf2554c2e05d4bb38b5177",
     "2026-08-19": "1f193fe6341a3125c047a894681ef4d473d989fb592cbe3cb733e9d262692960",
@@ -286,13 +287,14 @@
     "2026-11-13": "90c7a6e98f0e328f7d969094b268fe33582f6d0b094fd76204f356e5c9583d58",
     "2026-11-14": "4f01e998b5246f416442d37aaef4c9d1be37e666d2055f3a30ed58b1bee98c47",
     "2026-11-15": "d644572ef1721232e3f6bfaf389ffd1d339353a179f9c2e071f3e4eb2e8ef98e",
-    "2026-11-16": "9d3e18f048ccfa3a45925be49faa102fe0ed2be5f838b66bc80c6df52bc45799"
+    "2026-11-16": "9d3e18f048ccfa3a45925be49faa102fe0ed2be5f838b66bc80c6df52bc45799",
+    "2026-11-17": "4b67b849498c474786317df35c690be9f4707a69c4ce8b744971943f8e4eedee"
    },
    "first": "2026-08-18",
-   "last": "2026-11-16",
-   "latest_complete": "2026-11-15",
-   "observations": 546,
-   "partitions": 91,
+   "last": "2026-11-17",
+   "latest_complete": "2026-11-16",
+   "observations": 548,
+   "partitions": 92,
    "retention": "funding-rate-history serves recent months only (provider limit); older days are BEYOND_PROVIDER_HISTORY",
    "stale": false,
    "units": {
@@ -300,7 +302,7 @@
     "realized_rate": "rate per funding interval"
    },
    "with_gaps": [
-    "2026-11-16"
+    "2026-11-17"
    ]
   }
  }

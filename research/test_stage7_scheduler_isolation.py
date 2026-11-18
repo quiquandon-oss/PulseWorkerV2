@@ -67,9 +67,13 @@ def test_dispatcher_does_not_target_main_or_any_other_ref():
 # the feature branch itself, in test_workflow_staging_guard.py).
 # =====================================================================
 
-def test_dispatcher_has_the_daily_11_00_utc_schedule():
+def test_dispatcher_daily_schedule_is_paused_with_resume_line_kept():
+    # Owner decision 2026-11-17: Stage 7 paused. No schedule trigger; manual dispatch stays (next test); the exact
+    # daily cron is kept as a comment so resuming is a one-line restore.
     triggers = _load_dispatcher()[True]  # PyYAML parses `on:` as key True
-    assert triggers["schedule"] == [{"cron": "0 11 * * *"}]
+    assert "schedule" not in triggers
+    with open(os.path.join(REPO_ROOT, ".github", "workflows", "stage7-staging-dispatcher.yml")) as f:
+        assert "#     - cron: '0 11 * * *'" in f.read()
 
 
 def test_dispatcher_also_allows_manual_dispatch_for_testing():

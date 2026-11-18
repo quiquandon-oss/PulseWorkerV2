@@ -794,6 +794,40 @@
    "timesfm_ts": 1794849511650
   },
   {
+   "code_sha": "267f1a641c039f8ad44e460a79b901ce0d196cfe",
+   "coin": "BTC",
+   "context_length": 128,
+   "context_sha256": "e2631ba60c00aec65e72e0e3ba5281c772eaa830f2bb06dcae346c5c0daa38dd",
+   "direction": "DOWN",
+   "forecast_file": "forecasts/BTC/12h/2026-11-18T150100Z.json",
+   "forecast_horizon_steps": 4,
+   "forecast_median": 63430.15625,
+   "forecast_q10": 62690.3671875,
+   "forecast_q90": 64192.9765625,
+   "horizon_hours": 12,
+   "id": "BTC_12h_2026-11-18T150100Z",
+   "inference_backend": "torch-cpu",
+   "input_end_ts": 1795014060898,
+   "issued_ts": 1795020088257,
+   "last_tick_return_pct": -0.5037272698917689,
+   "model_id": "amazon/chronos-2",
+   "model_revision": "29ec3766d36d6f73f0696f85560a422f50e8498c",
+   "model_revision_resolved": "29ec3766d36d6f73f0696f85560a422f50e8498c",
+   "model_version": "chronos-2",
+   "persistence_direction": "DOWN",
+   "population": "prospective",
+   "predicted_return_pct": -0.5781340616624085,
+   "price_at_prediction": 63799.0,
+   "quantile_levels": [
+    0.1,
+    0.5,
+    0.9
+   ],
+   "status": "pending",
+   "target_ts": 1795057260898,
+   "timesfm_ts": 1795019997910
+  },
+  {
    "absolute_error": 0.4503000989817176,
    "actual_direction": "UP",
    "actual_price": 77576.0,
@@ -1583,22 +1617,46 @@
    "status": "resolved",
    "target_ts": 1794927667811,
    "timesfm_ts": 1794849511650
+  },
+  {
+   "code_sha": "267f1a641c039f8ad44e460a79b901ce0d196cfe",
+   "coin": "BTC",
+   "context_length": 128,
+   "context_sha256": "e2631ba60c00aec65e72e0e3ba5281c772eaa830f2bb06dcae346c5c0daa38dd",
+   "direction": "DOWN",
+   "forecast_file": "forecasts/BTC/24h/2026-11-18T150100Z.json",
+   "forecast_horizon_steps": 8,
+   "forecast_median": 63240.44140625,
+   "forecast_q10": 62161.37890625,
+   "forecast_q90": 64255.3671875,
+   "horizon_hours": 24,
+   "id": "BTC_24h_2026-11-18T150100Z",
+   "inference_backend": "torch-cpu",
+   "input_end_ts": 1795014060898,
+   "issued_ts": 1795020088257,
+   "last_tick_return_pct": -0.5037272698917689,
+   "model_id": "amazon/chronos-2",
+   "model_revision": "29ec3766d36d6f73f0696f85560a422f50e8498c",
+   "model_revision_resolved": "29ec3766d36d6f73f0696f85560a422f50e8498c",
+   "model_version": "chronos-2",
+   "persistence_direction": "DOWN",
+   "population": "prospective",
+   "predicted_return_pct": -0.8754974117932882,
+   "price_at_prediction": 63799.0,
+   "quantile_levels": [
+    0.1,
+    0.5,
+    0.9
+   ],
+   "status": "pending",
+   "target_ts": 1795100460898,
+   "timesfm_ts": 1795019997910
   }
  ],
  "format": "exp008-chronos-ledger-v1",
- "generated_ts": 1794971280993,
+ "generated_ts": 1795020094238,
  "prospective_start_ts": 1793491200000,
  "recent_runs": [
-  {
-   "code_sha": "793aa566b1373d983b45dbc3e18a868f90cbe71d",
-   "errors": 0,
-   "file": "runs/2026-11-09T174603Z.json",
-   "forecasts_made": 2,
-   "pending": 0,
-   "resolved": 0,
-   "run_id": "42667626337",
-   "run_ts": 1794246363533
-  },
   {
    "code_sha": "baeddae2b9fec3b6d84bda3ab94083f8fff36c43",
    "errors": 0,
@@ -1788,6 +1846,16 @@
    "resolved": 2,
    "run_id": "44228075681",
    "run_ts": 1794971276732
+  },
+  {
+   "code_sha": "267f1a641c039f8ad44e460a79b901ce0d196cfe",
+   "errors": 0,
+   "file": "runs/2026-11-18T164128Z.json",
+   "forecasts_made": 2,
+   "pending": 0,
+   "resolved": 0,
+   "run_id": "44349898293",
+   "run_ts": 1795020088257
   }
  ],
  "seal_end_ts": 1791579600000,

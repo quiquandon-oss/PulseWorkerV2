@@ -16,11 +16,16 @@
 # - writes: only refs/heads/research-data/exp23-evaluation, only paths under exp23_evaluation/;
 # - no Cloudflare, no D1; deploy.yml runs only on pushes to main touching worker.js / wrangler.toml / package*.json /
 #   deploy.yml. This file matches none of them, and the job never pushes to main.
+# PAUSED 2026-11-17 (owner decision): the daily schedule is removed so no new evaluation runs; the sealed forward data,
+# every evaluation already on research-data/exp23-evaluation, the frozen definition, the pinned evaluator commit and the
+# 60-event checkpoint rule are unchanged. Manual recovery: workflow_dispatch (owner only; same pinned code, same single
+# write target, same concurrency group). To resume the schedule, restore:
+#   schedule:
+#     - cron: '10 12 * * *'
 name: exp23-forward-evaluation
 
 on:
-  schedule:
-    - cron: '10 12 * * *'
+  workflow_dispatch: {}
 
 permissions:
   contents: write          # only to push to research-data/exp23-evaluation; no actions/deployments/id-token/packages

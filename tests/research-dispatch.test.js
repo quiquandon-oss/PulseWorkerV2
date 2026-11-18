@@ -7,7 +7,7 @@ import { extractFunctions, extractConstants, evalInScope } from './helpers/extra
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const SRC = readFileSync(join(ROOT, 'worker.js'), 'utf8');
-const scope = evalInScope(extractConstants('RESEARCH_DISPATCH') + '\n' + extractFunctions('dispatchResearchCollection', 'dispatchStalenessAlert', 'stalenessAlertDue'), {});
+const scope = evalInScope(extractConstants('RESEARCH_DISPATCH') + '\n' + extractFunctions('dispatchResearchCollection', 'dispatchStalenessAlert', 'stalenessAlertDue', 'researchFundingDispatchEnabled'), {});
 const quiet = () => { const l = console.log, e = console.error; console.log = () => {}; console.error = () => {}; return () => { console.log = l; console.error = e; }; };
 
 describe('dispatchResearchCollection', () => {
@@ -57,15 +57,16 @@ describe('dispatchResearchCollection', () => {
   it('is wired to the hourly cron only, outside the tick handlers', () => {
     const start = SRC.indexOf('async scheduled(event, env, ctx) {', SRC.indexOf('export default {'));
     const body = SRC.slice(start, SRC.indexOf('\n  },\n', start));
-    expect(body).toMatch(/if \(event && event\.cron === '0 \* \* \* \*'\) \{\s*ctx\.waitUntil\(dispatchResearchCollection\(env\)\);[^\n]*\n\s*if \(stalenessAlertDue\(event\.scheduledTime\)\) ctx\.waitUntil\(dispatchStalenessAlert\(env\)\);\s*\}/);
+    expect(body).toMatch(/if \(event && event\.cron === '0 \* \* \* \*'\) \{\s*if \(researchFundingDispatchEnabled\(env\)\) ctx\.waitUntil\(dispatchResearchCollection\(env\)\);[^\n]*\n\s*if \(stalenessAlertDue\(event\.scheduledTime\)\) ctx\.waitUntil\(dispatchStalenessAlert\(env\)\);\s*\}/);
   });
 });
 
 describe('research-funding-intraday-schedule.yml', () => {
   const y = readFileSync(join(ROOT, '.github/workflows/research-funding-intraday-schedule.yml'), 'utf8');
   const on = y.slice(y.indexOf('\non:'), y.indexOf('\npermissions:'));
-  it('keeps its schedule and adds only workflow_dispatch', () => {
-    expect(on).toContain("- cron: '17 * * * *'");
+  it('PAUSED (2026-11-17): no schedule trigger; workflow_dispatch only, so manual recovery stays', () => {
+    expect(on).not.toMatch(/\n  schedule:/);
+    expect(on).toContain("#     - cron: '17 * * * *'");   // the resume line is kept in the file
     expect(on).toMatch(/\n  workflow_dispatch: \{\}\n/);
     expect(on).not.toMatch(/\n  (push|pull_request|workflow_run|repository_dispatch):/);
   });
@@ -74,5 +75,29 @@ describe('research-funding-intraday-schedule.yml', () => {
     expect(y).toContain('--sources hyperliquid_btc_funding okx_btc_funding --max-days 60 --open-day');
     expect(y).toContain('TARGET: research-data/risk-regime-forward');
     expect(y).toContain('group: research-forward-collection');
+  });
+});
+
+describe('EXP-023 pause (owner decision 2026-11-17)', () => {
+  it('the funding dispatch switch is enabled unless exactly "0"', () => {
+    for (const v of [undefined, '1', '']) expect(scope.researchFundingDispatchEnabled({ RESEARCH_FUNDING_DISPATCH_ENABLED: v })).toBe(true);
+    expect(scope.researchFundingDispatchEnabled({ RESEARCH_FUNDING_DISPATCH_ENABLED: '0' })).toBe(false);
+  });
+  it('production ships the funding dispatch OFF; the staleness alert dispatch is not gated by it', () => {
+    expect(readFileSync(join(ROOT, 'wrangler.toml'), 'utf8')).toMatch(/^RESEARCH_FUNDING_DISPATCH_ENABLED = "0"$/m);
+    expect(SRC).toMatch(/\n\s*if \(stalenessAlertDue\(event\.scheduledTime\)\) ctx\.waitUntil\(dispatchStalenessAlert\(env\)\);/);
+  });
+  it('exp23-forward-evaluation.yml: no schedule, manual dispatch only, same pinned evaluator and single write target', () => {
+    const y = readFileSync(join(ROOT, '.github/workflows/exp23-forward-evaluation.yml'), 'utf8');
+    const on = y.slice(y.indexOf('\non:'), y.indexOf('\npermissions:'));
+    expect(on).not.toMatch(/\n  schedule:/);
+    expect(on).toMatch(/\n  workflow_dispatch: \{\}\n/);
+    expect(on).not.toMatch(/\n  (push|pull_request|workflow_run|repository_dispatch):/);
+    expect(y).toContain("#     - cron: '10 12 * * *'");
+    expect(y).toContain('111eea180f897ecf5eff2df2316e45c842ef00d6');
+    expect(y).toContain('research-data/exp23-evaluation');
+  });
+  it('the EXP-024 daily collector is untouched', () => {
+    expect(readFileSync(join(ROOT, '.github/workflows/research-forward-schedule.yml'), 'utf8')).toContain("- cron: '40 10 * * *'");
   });
 });

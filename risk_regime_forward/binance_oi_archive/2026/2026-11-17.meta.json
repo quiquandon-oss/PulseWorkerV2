@@ -1,0 +1,20 @@
+{
+ "completeness": "COMPLETE",
+ "expected_slots": 576,
+ "file_sha256": "d32b7d410a0056f7cd29b10deb9e94561e4975134ab17ee711272488e144f7e8",
+ "fingerprint": "d7f725c538d127af2d4c2a6efbbf0d32a244a847da09581fccf6f00b3da832e9",
+ "first_collected_at": "2026-11-18T19:00:14.330000+00:00",
+ "last_run_id": "44375755276",
+ "last_written_at": "2026-11-18T19:00:14.330000+00:00",
+ "missing_ranges": {},
+ "missing_slots": 0,
+ "observations": 576,
+ "partition": "2026-11-17",
+ "raw_sha256": "661fa5139c349d2f7cff8cbb30143e64f4c19444b58bdcab4929dd9a8b63859f",
+ "source": "binance_oi_archive",
+ "superseded": [],
+ "units": {
+  "open_interest": "BTC",
+  "open_interest_usd": "USD"
+ }
+}

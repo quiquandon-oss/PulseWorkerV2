@@ -82,7 +82,7 @@ describe('predictAndLog — orchestration and write-authorization logic', () => 
 
   let source;
   beforeAll(() => {
-    source = extractFunctions('predictAndLog', 'resolveWriteAuthorization');
+    source = extractFunctions('predictAndLog', 'resolveWriteAuthorization', 'challengerEnabled');
   });
 
   it('1. CRON (allowWrite:true) always writes with claimToken:null -- logBtcData called with null, isRecentDataStale never queried (short-circuit)', async () => {

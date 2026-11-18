@@ -965,7 +965,10 @@ async function ethPredictAndLog(env, horizonHours = 24, { allowWrite = false } =
   if (persist) await logEthData(env, claimToken);
   const result = await runEthPrediction(env, horizonHours, { persist, claimToken });
   result.backfilled_this_call = resolvedCount;
-  try {
+  if (!challengerEnabled(env)) {
+    result.challenger = { ok: true, status: 'paused', reason: 'CHALLENGER_ENABLED = "0"' };
+    result.challenger_backfilled_this_call = challengerResolvedCount;
+  } else try {
     const challengerResult = await runChallengerPrediction(env, {
       coin: 'ETH', horizonHours, priceTable: 'eth_data', priceCol: 'eth_price', priceNow: result.eth_price_now, coreResult: result,
     }, { persist, claimToken });
@@ -994,6 +997,17 @@ async function ethPredictAndLog(env, horizonHours = 24, { allowWrite = false } =
 // borrowed directly from the Deflated Sharpe Ratio literature's core insight:
 // comparing many things and picking the best inflates the winner's apparent
 // edge even with zero real skill anywhere in the pool.
+
+// Challenger pause (owner decision 2026-11-17). CHALLENGER_ENABLED = "0" stops NEW challenger predictions and the daily
+// challenger calibration refresh, and removes the three challenger variants from selection (otherwise selection would
+// keep scoring their last, stale row as "today's call"). Pending challenger rows still resolve; history is untouched.
+// Unset or any other value = enabled (unchanged behaviour).
+function challengerEnabled(env) { return String((env && env.CHALLENGER_ENABLED) ?? '1') !== '0'; }
+function selectionVariantsFor(env, coin) {
+  const defs = SELECTION_VARIANTS[coin];
+  if (!defs || challengerEnabled(env)) return defs;
+  return defs.filter(v => !v.key.startsWith('challenger_'));
+}
 
 // Registry: which variants exist for which coin.
 const SELECTION_VARIANTS = {
@@ -1220,7 +1234,7 @@ async function recordSelectionProvenance(env, selection_table, coin, horizonHour
 }
 
 async function selectBestVariant(env, coin, horizonHours) {
-  const variantDefs = SELECTION_VARIANTS[coin];
+  const variantDefs = selectionVariantsFor(env, coin);
   if (!variantDefs) return { ok: false, error: 'unknown coin' };
   const coreTable = coreTableForCoin(coin);
 
@@ -4740,7 +4754,10 @@ async function predictAndLog(env, horizonHours = 24, { allowWrite = false } = {}
   const result = await runPrediction(env, horizonHours, { persist, claimToken });
   result.backfilled_this_call = resolvedCount;
   result.gemini_bias_backfilled_this_call = geminiResolvedCount;
-  try {
+  if (!challengerEnabled(env)) {
+    result.challenger = { ok: true, status: 'paused', reason: 'CHALLENGER_ENABLED = "0"' };
+    result.challenger_backfilled_this_call = challengerResolvedCount;
+  } else try {
     const challengerResult = await runChallengerPrediction(env, {
       coin: 'BTC', horizonHours, priceTable: 'btc_data', priceCol: 'btc_price', priceNow: result.btc_price_now, coreResult: result,
     }, { persist, claimToken });
@@ -5903,7 +5920,10 @@ async function linkPredictAndLog(env, horizonHours = 24, { allowWrite = false } 
   if (persist) await logLinkData(env, claimToken);
   const result = await runLinkPrediction(env, horizonHours, { persist, claimToken });
   result.backfilled_this_call = resolvedCount;
-  try {
+  if (!challengerEnabled(env)) {
+    result.challenger = { ok: true, status: 'paused', reason: 'CHALLENGER_ENABLED = "0"' };
+    result.challenger_backfilled_this_call = challengerResolvedCount;
+  } else try {
     const challengerResult = await runChallengerPrediction(env, {
       coin: 'LINK', horizonHours, priceTable: 'link_data', priceCol: 'link_price', priceNow: result.link_price_now, coreResult: result,
     }, { persist, claimToken });
@@ -11641,7 +11661,7 @@ const pulseWorkerHandlers = {
       for (const coin of ['BTC', 'LINK', 'ETH']) {
         for (const h of [12, 24]) {
           ctx.waitUntil(refreshCalibrationCurve(env, coin, h).catch(err => console.error(`Calibration refresh ${coin}/${h}h failed:`, err)));
-          ctx.waitUntil(refreshChallengerCalibrationCurve(env, coin, h).catch(err => console.error(`Challenger calibration refresh ${coin}/${h}h failed:`, err)));
+          if (challengerEnabled(env)) ctx.waitUntil(refreshChallengerCalibrationCurve(env, coin, h).catch(err => console.error(`Challenger calibration refresh ${coin}/${h}h failed:`, err)));
           // Learning Roadmap §3 Experiments 2 and 3 -- research-only,
           // logged-only, decision-free (never call selectBestVariant or
           // decideSelection, never write to selection_decisions). Moved

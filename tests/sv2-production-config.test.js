@@ -85,6 +85,7 @@ describe('production wrangler.toml: GLM is OFF; the collector is ON behind its s
         SV2_COLLECTOR_ENABLED: '1',         // collector on (2026-11-15), behind the daily D1 stop
         SV2_SOURCES_DISABLED: 'bitcoinmagazine', // feed redirects to plain http
         V1_ARCHIVE_SYNC_ENABLED: '1',
+        CHALLENGER_ENABLED: '1',                // challenger pause switch, ON until the owner activates the pause
         SV2_V1_SERVER_INPUT: '1',               // V1 hourly server readings as a second V2 input (2026-11-16)
       },
       d1_databases: [{ binding: 'DB', database_name: 'sentiment-history', database_id: 'f91ca980-b886-423a-bd6f-f3baea46d181' }],

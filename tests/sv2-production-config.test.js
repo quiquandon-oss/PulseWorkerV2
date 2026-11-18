@@ -82,6 +82,9 @@ describe('production wrangler.toml: GLM is OFF; the collector is ON behind its s
         SENTIMENT_V2_ENABLED: '1',
         SENTIMENT_V2_AI_MODEL: '',          // GLM off, part 1: no model id
         SV2_GLM_DAILY_NEURONS: '0',         // GLM off, part 2: no Neuron budget
+        GEMINI_DAILY_CRON_ENABLED: '0',         // 07:00 Gemini narrative stopped (2026-11-17)
+        EXP002_CRON_ENABLED: '0',               // EXP-002 scheduled logging stopped
+        EXP003_CRON_ENABLED: '0',               // EXP-003 scheduled logging stopped
         SV2_COLLECTOR_ENABLED: '1',         // collector on (2026-11-15), behind the daily D1 stop
         SV2_SOURCES_DISABLED: 'bitcoinmagazine', // feed redirects to plain http
         V1_ARCHIVE_SYNC_ENABLED: '1',

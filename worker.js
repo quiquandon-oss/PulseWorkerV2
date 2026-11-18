@@ -11654,8 +11654,14 @@ const pulseWorkerHandlers = {
   // original PulseWorker already uses for its own two crons.
   async scheduled(event, env, ctx) {
     if (event.cron === '0 7 * * *') {
-      ctx.waitUntil(runGeminiDailyAnalysis(env, 'cron').catch(err => console.error('Daily Gemini analysis failed:', err)));
-      ctx.waitUntil(runLinkGeminiAnalysis(env, 'cron').catch(err => console.error('Daily LINK Gemini analysis failed:', err)));
+      // Scheduled research stops (owner decision 2026-11-17): GEMINI_DAILY_CRON_ENABLED, EXP002_CRON_ENABLED and
+      // EXP003_CRON_ENABLED = "0" skip only these SCHEDULED calls. No production prediction or selection reads their
+      // output (gemini_daily_analysis / link_gemini_analysis feed only the history route; EXP-002/003 are logged-only).
+      // Manual routes, stored rows and the resolution of past analyses are unchanged. Unset = enabled.
+      if (scheduledResearchEnabled(env, 'GEMINI_DAILY_CRON_ENABLED')) {
+        ctx.waitUntil(runGeminiDailyAnalysis(env, 'cron').catch(err => console.error('Daily Gemini analysis failed:', err)));
+        ctx.waitUntil(runLinkGeminiAnalysis(env, 'cron').catch(err => console.error('Daily LINK Gemini analysis failed:', err)));
+      }
       // Recalibration is cheap and only needs daily freshness — resolved
       // counts move by at most a handful of predictions per day.
       for (const coin of ['BTC', 'LINK', 'ETH']) {
@@ -11684,8 +11690,8 @@ const pulseWorkerHandlers = {
           // D1 access, for LINK and ETH. Independently caught exactly as
           // before -- a failure here has never been able to affect
           // production selection and still can't.
-          ctx.waitUntil(logAnomalyGateExperiment(env, coin, h).then(r => recordSelectionProvenance(env, 'selection_decisions_anomaly', coin, h, r, 'cron_daily')).catch(err => console.error(`Anomaly-gate experiment ${coin}/${h}h failed:`, err)));
-          ctx.waitUntil(logMomentumSelectionExperiment(env, coin, h).catch(err => console.error(`Momentum experiment ${coin}/${h}h failed:`, err)));
+          if (scheduledResearchEnabled(env, 'EXP002_CRON_ENABLED')) ctx.waitUntil(logAnomalyGateExperiment(env, coin, h).then(r => recordSelectionProvenance(env, 'selection_decisions_anomaly', coin, h, r, 'cron_daily')).catch(err => console.error(`Anomaly-gate experiment ${coin}/${h}h failed:`, err)));
+          if (scheduledResearchEnabled(env, 'EXP003_CRON_ENABLED')) ctx.waitUntil(logMomentumSelectionExperiment(env, coin, h).catch(err => console.error(`Momentum experiment ${coin}/${h}h failed:`, err)));
         }
       }
     } else if (event.cron === '0 * * * *') {
@@ -12171,6 +12177,9 @@ const RESEARCH_DISPATCH = {
   ref: 'main',
   timeoutMs: 10000,
 };
+
+// Switch for a scheduled research job: enabled unless the variable is exactly "0" (unset keeps prior behaviour).
+function scheduledResearchEnabled(env, name) { return String((env && env[name]) ?? '1') !== '0'; }
 
 function stalenessAlertDue(scheduledTime) {
   return Number.isFinite(scheduledTime) && new Date(scheduledTime).getUTCHours() % 3 === 1;

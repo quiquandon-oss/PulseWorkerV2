@@ -11725,7 +11725,7 @@ const pulseWorkerHandlers = {
             if (r.ok) console.log('v1 archive sync (cron):', line); else console.error('v1 archive sync (cron) FAILED:', line); })
           .catch(err => console.error('V1 archive sync (cron) failed:', err))
           .then(() => runSentimentV2Cycle(env, { nowTs: event.scheduledTime, queryBudget: SV2_D1_QUERIES_PER_INVOCATION - SV2_D1_QUERY_RESERVE - sv2Q.n }))
-          .then(r => { const line = JSON.stringify({ ok: r.ok, skipped: r.skipped || false, written: r.written || 0, reason: r.reason || null, deferred_readings: r.deferred_readings || [] });
+          .then(r => { const line = JSON.stringify({ ok: r.ok, skipped: r.skipped || false, written: r.written || 0, reason: r.reason || null, deferred_readings: r.deferred_readings || [], skipped_readings: r.skipped_readings || [] });
             if (r.deferred_d1_budget) console.warn('sentiment v2 (cron) DEFERRED (D1 budget):', line); else console.log('sentiment v2 (cron):', line); })
           .catch(err => console.error('Sentiment V2 (cron) failed:', err))
           // Independent evidence last: V2 decisions are past V1 timestamps, so evidence retrieved now could not count for them
@@ -13141,6 +13141,10 @@ const SV2_CYCLE_QUERIES_PER_READING_AI_OFF = 1;
 // CPU, not D1, is then the limit: ~2.6 ms per reading against Workers Free's 10 ms per invocation (shared with detection
 // and the evidence collector). App readings are still scored oldest first in the other slot.
 const SV2_CYCLE_MAX_READINGS_WITH_SERVER = 2;
+// Decisions only move forward (a reading older than MAX(decision_ts) is never scored), so a reading the cursor passes
+// without scoring is skipped for good. The two candidate reads return up to this many extra older rows so every such
+// reading is recorded with its reason in the usage_json of the row that passed it (no extra query; bounded).
+const SV2_SKIP_AUDIT_ROWS = 24;
 const SV2_CYCLE_QUERY_HEADROOM = SV2_CYCLE_QUERIES_FIXED + 3 * SV2_CYCLE_QUERIES_PER_READING;
 function sv2CountingDb(db, counter) {
   if (!db) return db;
@@ -13164,7 +13168,7 @@ function sv2CycleQueriesPerReading(env) {
 // Which pending readings (ascending) this run scores. Without a cap or with everything fitting: all, oldest first (the
 // previous behaviour). Otherwise the pending server reading (at most one per cycle) keeps a slot and app readings fill
 // the rest oldest first. Not chosen and older than the newest chosen reading = skipped for good (decisions only move
-// forward, as before); not chosen and newer = still pending for a later run.
+// forward, as before; recorded with reason server_slot_priority); not chosen and newer = still pending for a later run.
 function sv2SelectReadings(pending, serverByTs, limit) {
   if (pending.length <= limit) return { chosen: pending.slice(), skipped: [], deferred: [] };
   if (limit <= 0) return { chosen: [], skipped: [], deferred: pending.slice() };
@@ -13196,29 +13200,48 @@ async function runSentimentV2Cycle(env, { nowTs, queryBudget = Infinity } = {}) 
     .bind(asset, cfg.version).first();
   const lastTs = last && last.t !== null && last.t !== undefined ? Number(last.t) : null;
   const pendLimit = lastTs === null ? 1 : cfg.maxCatchUp;
+  // The first decision ever starts at the newest reading (no audit: everything before it is history, not a skip).
+  const audit = lastTs === null ? 0 : SV2_SKIP_AUDIT_ROWS;
   const pend = await env.DB.prepare('SELECT observation_ts FROM research_sentiment_archive WHERE observation_ts > ? AND observation_ts <= ? ORDER BY observation_ts DESC LIMIT ?')
-    .bind(lastTs === null ? 0 : lastTs, now, pendLimit).all();
-  let pendTs = (pend.results || []).map(r => Number(r.observation_ts));
-  rowsRead += pendTs.length + 1;
-  // Hourly V1 server readings are candidates on the same terms (newer than the last decision; newest maxCatchUp kept),
-  // at most SV2_SERVER_V1_PER_CYCLE of them. An archive observation at the same millisecond wins.
+    .bind(lastTs === null ? 0 : lastTs, now, pendLimit + audit).all();
+  const pendAll = (pend.results || []).map(r => Number(r.observation_ts));
+  let pendTs = pendAll.slice(0, pendLimit);
+  rowsRead += pendAll.length + 1;
+  // Readings this run knows of that it will not score now: ts -> { origin, reason }. Any of them older than a row this run
+  // writes is skipped for good and is recorded in that row's usage_json.
+  const notScored = new Map();
+  for (const ts of pendAll.slice(pendLimit)) notScored.set(ts, { origin: 'browser', reason: 'catch_up_window' });
+  let skipListComplete = audit > 0 && pendAll.length < pendLimit + audit;
+  // Hourly V1 server readings (newer than the last decision), at most SV2_SERVER_V1_PER_CYCLE of them, the newest. After
+  // the first decision the server reading is a candidate next to the newest maxCatchUp app readings, not inside that
+  // window: with 3 or more app readings an hour it would otherwise never be a candidate (production 2026-11-18, app
+  // readings every 15 min). An archive observation at the same millisecond wins.
   const serverOn = sv2ServerInputEnabled(env);
   let serverError = null;
   const serverByTs = new Map();
   if (serverOn) {
-    const sp = await sv2ServerV1Rows(env, lastTs === null ? 0 : lastTs, now, { newest: Math.min(pendLimit, SV2_SERVER_V1_PER_CYCLE) });
+    const keep = Math.min(pendLimit, SV2_SERVER_V1_PER_CYCLE);
+    const sp = await sv2ServerV1Rows(env, lastTs === null ? 0 : lastTs, now, { newest: keep + audit });
     serverError = sp.error;
     rowsRead += sp.rows.length;
-    const archived = new Set(pendTs);
-    for (const r of sp.rows) if (!archived.has(r.observation_ts)) serverByTs.set(r.observation_ts, r);
-    pendTs = pendTs.concat([...serverByTs.keys()]).sort((a, b) => b - a).slice(0, pendLimit);
+    const archived = new Set(pendAll);
+    // Rows are ascending: the newest `keep` are the candidates (as before; one tied with an archive row is dropped, not
+    // replaced), the older ones are only recorded.
+    const cut = Math.max(0, sp.rows.length - keep);
+    for (const r of sp.rows.slice(cut)) if (!archived.has(r.observation_ts)) serverByTs.set(r.observation_ts, r);
+    for (const r of sp.rows.slice(0, cut)) if (!archived.has(r.observation_ts)) notScored.set(r.observation_ts, { origin: 'server', reason: 'one_server_per_cycle' });
+    if (sp.rows.length >= keep + audit) skipListComplete = false;
+    pendTs = lastTs === null
+      ? pendTs.concat([...serverByTs.keys()]).sort((a, b) => b - a).slice(0, pendLimit)
+      : pendTs.concat([...serverByTs.keys()]);
   }
   const candidates = pendTs.sort((a, b) => a - b);
   if (!candidates.length) return { ok: true, written: 0, reason: 'no new V1 observation' };
   // As many as the remaining D1 budget allows (at its real per-reading cost), at most 2 while the server input is on.
   const fitReadings = Math.floor((queryBudget - SV2_CYCLE_QUERIES_FIXED) / perReading);
   const limit = serverOn ? Math.min(fitReadings, SV2_CYCLE_MAX_READINGS_WITH_SERVER) : fitReadings;
-  const { chosen: pending, skipped: skippedReadings, deferred: deferredReadings } = sv2SelectReadings(candidates, serverByTs, limit);
+  const { chosen: pending, skipped: prioritySkipped, deferred: deferredReadings } = sv2SelectReadings(candidates, serverByTs, limit);
+  for (const ts of prioritySkipped) notScored.set(ts, { origin: serverByTs.has(ts) ? 'server' : 'browser', reason: 'server_slot_priority' });
   const lo = pending[0] - cfg.historyMs, hi = pending[pending.length - 1];
   const histRes = await env.DB.prepare('SELECT observation_ts, score, btc_price, sources_json FROM research_sentiment_archive WHERE observation_ts >= ? AND observation_ts <= ? ORDER BY observation_ts ASC')
     .bind(lo, hi).all();
@@ -13299,12 +13322,14 @@ async function runSentimentV2Cycle(env, { nowTs, queryBudget = Infinity } = {}) 
   };
   let written = 0;
   const decisions = [];
+  const skippedReadings = [];
+  let cursor = lastTs;
   for (const ts of pending) {
     // A server reading is scored on the archive context before it plus itself; an app reading on the archive as before.
     const srv = serverByTs.get(ts);
     const dh = srv ? sv2ServerDecisionHist(histRows, srv, priceRows, cfg.priceToleranceMs) : hist;
     const i = sv2IndexAtOrBefore(dh, ts);
-    if (i < 0 || dh[i].ts !== ts) continue;
+    if (i < 0 || dh[i].ts !== ts) { notScored.set(ts, { origin: srv ? 'server' : 'browser', reason: 'not_computable' }); continue; }
     const evidence = evidenceRows ? sv2EvidenceReadings(evidenceRows, ts, SV2_SOURCE_REGISTRY, SV2_EVIDENCE_RULES) : null;
     const result = sv2Compute(dh, i, events, cfg, evidence);
     result.evidence_status = evidenceStatus;
@@ -13323,11 +13348,17 @@ async function runSentimentV2Cycle(env, { nowTs, queryBudget = Infinity } = {}) 
       const { pkg, allowedIds } = sv2AiPackage(result);
       ai = await sv2RunAi(env, pkg, allowedIds, { reserveNeurons, recordNeurons, accountLimitedToday });
     }
+    // This row moves the decision cursor from `cursor` to ts: readings in between that were not scored are skipped for good.
+    const passed = [...notScored].filter(([t]) => (cursor === null || t > cursor) && t < ts).sort((a, b) => a[0] - b[0])
+      .map(([t, v]) => ({ ts: t, origin: v.origin, reason: v.reason }));
     const usage = { d1_rows_read_cycle: rowsRead, ai_neurons_reserved_this_cycle: Math.round(aiNeuronsReserved * 100) / 100,
-      ai_daily_neuron_budget: sv2AiBudget(env), evidence_rows: evidenceRows ? evidenceRows.length : null };
+      ai_daily_neuron_budget: sv2AiBudget(env), evidence_rows: evidenceRows ? evidenceRows.length : null,
+      cursor_from: cursor, skipped_readings: passed, skip_list_complete: skipListComplete };
     const res = await env.DB.prepare(SV2_INSERT_SQL).bind(...sv2Row(result, ai, usage, now)).run();
     const changes = res && res.meta ? Number(res.meta.changes || 0) : 0;
     written += changes;
+    cursor = ts;
+    skippedReadings.push(...passed);
     decisions.push({ decision_ts: ts, status: result.status, score: result.sentiment_score, inserted: changes > 0, v1_origin: result.v1_input.origin });
   }
   return { ok: true, written, decisions, rows_read: rowsRead, ...(serverError ? { v1_server_error: serverError } : {}),

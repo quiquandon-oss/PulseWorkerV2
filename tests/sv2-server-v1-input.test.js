@@ -39,7 +39,7 @@ const V2 = ['sv2Config', 'sv2Finite', 'sv2ParseSources', 'sv2History', 'sv2Serve
 const CONSTS = ['SENTIMENT_V2_VERSION', 'SV2_VERSIONS_SHOWN', 'SV2_INSERT_SQL', 'SV2_PERIODS_MS', 'SV2_MAX_POINTS', 'SV2_MAX_ROWS',
   'SV2_MAX_PRICE_ROWS', 'SV2_STALE_MS', 'SV2_SERVER_V1_COLLECTOR', 'SV2_SERVER_V1_MAX_ROWS', 'SV2_SERVER_V1_PER_CYCLE', 'SV2_SERVER_V1_SOURCES_SQL', 'SV2_AI_PRICING',
   'SV2_AI_MAX_OUTPUT_TOKENS', 'SV2_AI_RESERVE_SQL', 'SV2_AI_TEMPLATE_TOKENS', 'SV2_AI_PROMPT_VERSION', 'SV2_CYCLE_QUERIES_FIXED',
-  'SV2_CYCLE_QUERIES_PER_READING', 'SV2_CYCLE_QUERIES_PER_READING_AI_OFF', 'SV2_CYCLE_MAX_READINGS_WITH_SERVER'];
+  'SV2_CYCLE_QUERIES_PER_READING', 'SV2_CYCLE_QUERIES_PER_READING_AI_OFF', 'SV2_CYCLE_MAX_READINGS_WITH_SERVER', 'SV2_SKIP_AUDIT_ROWS'];
 const S = evalInScope(extractConstants(...CONSTS) + '\n' + extractFunctions(...V2),
   { SV2_SOURCE_REGISTRY, sv2EvidenceReadings, sv2ScoreHeadline, SV2_EVIDENCE_RULES });
 
@@ -101,7 +101,9 @@ describe('V2 cycle with V1 server readings', () => {
     expect(S.SV2_CYCLE_MAX_READINGS_WITH_SERVER).toBe(2);
     expect(r.decisions.map(x => [x.decision_ts, x.v1_origin])).toEqual([[t1, 'browser'], [NOW - H + C, 'server']]);
     expect(r.deferred_readings).toEqual([t2]);                    // newer than the last decision: still pending, not lost
-    expect(r.skipped_readings).toBeUndefined();
+    // Older hourly slots passed by the cursor: one server reading per cycle (unchanged rule), now recorded, not silent.
+    expect(r.skipped_readings).toEqual([NOW - 4 * H + C, NOW - 3 * H + C, NOW - 2 * H + C]
+      .map(ts => ({ ts, origin: 'server', reason: 'one_server_per_cycle' })));
     const next = await S.runSentimentV2Cycle(env(d1), { nowTs: NOW + 60000 });
     expect(next.decisions.map(x => [x.decision_ts, x.v1_origin])).toEqual([[t2, 'browser']]);
   });
@@ -264,33 +266,172 @@ describe('V2 cycle budget: real per-reading cost, server reading keeps a slot', 
     expect(Math.floor((PROD_LEFT - S.SV2_CYCLE_QUERIES_FIXED) / S.SV2_CYCLE_QUERIES_PER_READING)).toBe(1);
   });
 
-  it('a server reading is scored in every run of a day with app readings arriving every 30 min', async () => {
-    const day0 = NOW - 24 * H;
-    const apps = Array.from({ length: 48 }, (_, k) => ({ ts: day0 + k * 30 * 60000 + 7 * 60000, i: 500 + k }));
-    const d1 = setup({ archive: [...ctxArchive(), ...apps], server: ctxServer() });
-    await S.runSentimentV2Cycle(env(d1), { nowTs: day0 - H });
-    let serverRuns = 0, runs = 0;
+  // Production timing: the cron runs exactly on the hour (nowTs = scheduledTime), so the current hour's server reading
+  // (computed at hh:00:20 here) is not yet eligible; tick hours (every 3rd) run no V2 cycle.
+  const runDay = async (d1, day0, { budget = PROD_LEFT, on = true } = {}) => {
+    const out = [];
     for (let h = 1; h <= 24; h++) {
-      if (h % 3 === 0) continue;                              // prediction tick hours run no V2 cycle
+      if (h % 3 === 0) continue;
       const c = countingDb(d1);
-      const r = await S.runSentimentV2Cycle({ DB: c.DB, SENTIMENT_V2_ENABLED: '1', SV2_V1_SERVER_INPUT: '1' }, { nowTs: day0 + h * H + 60000, queryBudget: PROD_LEFT });
-      runs++;
-      expect(c.q).toBeLessThanOrEqual(PROD_LEFT);
-      expect(r.written).toBeLessThanOrEqual(S.SV2_CYCLE_MAX_READINGS_WITH_SERVER);
-      if (r.decisions.some(x => x.v1_origin === 'server')) serverRuns++;
+      const r = await S.runSentimentV2Cycle({ DB: c.DB, SENTIMENT_V2_ENABLED: '1', ...(on ? { SV2_V1_SERVER_INPUT: '1' } : {}) }, { nowTs: day0 + h * H, queryBudget: budget });
+      out.push({ r, q: c.q });
     }
-    expect(runs).toBe(16);
-    expect(serverRuns).toBe(16);
+    return out;
+  };
+  // Lifecycle invariant: every reading eligible by the end is scored, still pending (newer than the last decision) or
+  // recorded as skipped with a reason in a written row's usage_json. Nothing disappears; nothing is scored twice.
+  const audit = (d1, from, to) => {
+    const rows = d1.db.prepare('SELECT decision_ts, usage_json FROM sentiment_v2_results WHERE decision_ts > ? ORDER BY decision_ts').all(from);
+    const scored = rows.map(r => r.decision_ts);
+    const recorded = new Map();
+    for (const r of rows) for (const x of JSON.parse(r.usage_json).skipped_readings || []) {
+      expect(recorded.has(x.ts)).toBe(false);                     // each skip recorded once
+      recorded.set(x.ts, x);
+    }
+    const cursor = scored.length ? scored[scored.length - 1] : from;
+    const app = d1.db.prepare('SELECT observation_ts AS ts FROM research_sentiment_archive WHERE observation_ts > ? AND observation_ts <= ?').all(from, to).map(r => r.ts);
+    const archived = new Set(app);
+    const srv = d1.db.prepare('SELECT computed_ts AS ts FROM server_composite_readings WHERE computed_ts > ? AND computed_ts <= ? AND composite IS NOT NULL AND below_floor = 0').all(from, to)
+      .map(r => r.ts).filter(t => !archived.has(t));
+    const scoredSet = new Set(scored);
+    const tally = (list) => {
+      const t = { eligible: list.length, scored: 0, pending: 0, skipped: {}, lost: 0 };
+      for (const ts of list) {
+        if (scoredSet.has(ts)) t.scored++;
+        else if (ts > cursor) t.pending++;
+        else if (recorded.has(ts)) t.skipped[recorded.get(ts).reason] = (t.skipped[recorded.get(ts).reason] || 0) + 1;
+        else t.lost++;
+      }
+      return t;
+    };
+    expect(new Set(scored).size).toBe(scored.length);              // no duplicate decision
+    for (const ts of recorded.keys()) expect(scoredSet.has(ts)).toBe(false);
+    return { app: tally(app), server: tally(srv), complete: rows.every(r => JSON.parse(r.usage_json).skip_list_complete !== false) };
+  };
+
+  for (const cad of [30, 15]) it(`a day with app readings every ${cad} min: the server reading is scored in every run, nothing is lost silently`, async () => {
+    const day0 = NOW - 24 * H;
+    const apps = Array.from({ length: 24 * 60 / cad }, (_, k) => ({ ts: day0 + k * cad * 60000 + 7 * 60000, i: 500 + k }));
+    const d1 = setup({ archive: [...ctxArchive(), ...apps], server: ctxServer() });
+    await S.runSentimentV2Cycle(env(d1), { nowTs: day0 });
+    const from = d1.db.prepare('SELECT MAX(decision_ts) AS t FROM sentiment_v2_results').get().t;
+    const runs = await runDay(d1, day0);
+    expect(runs.length).toBe(16);
+    for (const { r, q } of runs) {
+      expect(q).toBeLessThanOrEqual(PROD_LEFT);
+      expect(r.written).toBeLessThanOrEqual(S.SV2_CYCLE_MAX_READINGS_WITH_SERVER);
+      expect(r.decisions.some(x => x.v1_origin === 'server')).toBe(true);
+    }
+    const a = audit(d1, from, day0 + 24 * H);
+    expect(a.complete).toBe(true);
+    expect(a.server.lost).toBe(0);
+    expect(a.app.lost).toBe(0);
+    expect(a.server.scored).toBe(16);
+    // Hourly slots computed in a tick hour are passed after it: one server reading per cycle (unchanged rule), recorded.
+    expect(a.server.skipped).toEqual({ one_server_per_cycle: a.server.eligible - 16 - a.server.pending });
+  });
+
+  it('backlog larger than maxCatchUp, mixed origins, over repeated runs: the cursor always moves forward, bounded work per run', async () => {
+    const day0 = NOW - 24 * H;
+    const apps = Array.from({ length: 96 }, (_, k) => ({ ts: day0 + k * 15 * 60000 + 3 * 60000, i: 700 + k }));
+    const d1 = setup({ archive: [...ctxArchive(), ...apps], server: ctxServer() });
+    await S.runSentimentV2Cycle(env(d1), { nowTs: day0 });
+    const from = d1.db.prepare('SELECT MAX(decision_ts) AS t FROM sentiment_v2_results').get().t;
+    let prev = from;
+    for (const { r } of await runDay(d1, day0)) {
+      const last = Math.max(...r.decisions.filter(x => x.inserted).map(x => x.decision_ts));
+      expect(last).toBeGreaterThan(prev);                          // progress every run
+      prev = last;
+      expect(r.decisions.length + (r.deferred_readings || []).length).toBeLessThanOrEqual(S.SV2_CYCLE_MAX_READINGS_WITH_SERVER + 2);
+    }
+    const a = audit(d1, from, day0 + 24 * H);
+    expect(a.app.eligible).toBeGreaterThan(16 * 3);                  // the backlog exceeds what 16 runs could ever score
+    expect(a.app.lost + a.server.lost).toBe(0);
+    expect(a.app.skipped.catch_up_window).toBeGreaterThan(0);
+  });
+
+  it('server reading delayed by an exhausted budget: scored by a retry before the next slot exists', async () => {
+    const d1 = setup({ archive: ctxArchive(), server: ctxServer() });
+    await S.runSentimentV2Cycle(env(d1), { nowTs: NOW - 2 * H });
+    let q = 0;
+    const short = await S.runSentimentV2Cycle({ ...env(d1), DB: { prepare: () => { q++; throw new Error('no query expected'); } } },
+      { nowTs: NOW - 2 * H + 30 * 60000, queryBudget: S.SV2_CYCLE_QUERIES_FIXED });
+    expect(short).toMatchObject({ skipped: true, deferred_d1_budget: true });
+    expect(q).toBe(0);                                               // early exit spends nothing
+    const next = await S.runSentimentV2Cycle(env(d1), { nowTs: NOW - 2 * H + 40 * 60000, queryBudget: PROD_LEFT });
+    expect(next.decisions.map(x => [x.decision_ts, x.v1_origin])).toEqual([[NOW - 2 * H + C, 'server']]);
+  });
+
+  it('server reading delayed past the next hourly slot (production timing): superseded and recorded, not silent', async () => {
+    const d1 = setup({ archive: ctxArchive(), server: ctxServer() });
+    await S.runSentimentV2Cycle(env(d1), { nowTs: NOW - 2 * H });
+    const short = await S.runSentimentV2Cycle(env(d1), { nowTs: NOW - H, queryBudget: S.SV2_CYCLE_QUERIES_FIXED });
+    expect(short).toMatchObject({ skipped: true, deferred_d1_budget: true });
+    const next = await S.runSentimentV2Cycle(env(d1), { nowTs: NOW, queryBudget: PROD_LEFT });
+    expect(next.decisions.map(x => [x.decision_ts, x.v1_origin])).toEqual([[NOW - H + C, 'server']]);
+    expect(next.skipped_readings).toEqual([{ ts: NOW - 2 * H + C, origin: 'server', reason: 'one_server_per_cycle' }]);
+  });
+
+  it('app reading not chosen because of the cap is scored next run when newer than the scored ones', async () => {
+    const t = [NOW - 50 * 60000, NOW - 40 * 60000, NOW - 30 * 60000];   // all newer than the pending server reading
+    const d1 = setup({ archive: [...ctxArchive(), ...t.map((ts, k) => ({ ts, i: 880 + k }))], server: ctxServer() });
+    await S.runSentimentV2Cycle(env(d1), { nowTs: NOW - 90 * 60000 });
+    const r1 = await S.runSentimentV2Cycle(env(d1), { nowTs: NOW, queryBudget: PROD_LEFT });
+    expect(r1.decisions.map(x => [x.decision_ts, x.v1_origin])).toEqual([[NOW - H + C, 'server'], [t[0], 'browser']]);
+    expect(r1.deferred_readings).toEqual([t[1], t[2]]);
+    const r2 = await S.runSentimentV2Cycle(env(d1), { nowTs: NOW + 60000, queryBudget: PROD_LEFT });
+    expect(r2.decisions.map(x => x.decision_ts)).toEqual([t[1], t[2]]);
+    expect(results(d1).filter(x => t.includes(x.ts)).length).toBe(3);   // each once
+  });
+
+  it('a D1 failure mid-run loses nothing: written readings stay, the rest is retried next run', async () => {
+    const t = [NOW - 50 * 60000, NOW - 30 * 60000];
+    const d1 = setup({ archive: [...ctxArchive(), ...t.map((ts, k) => ({ ts, i: 870 + k }))], server: ctxServer() });
+    await S.runSentimentV2Cycle(env(d1), { nowTs: NOW - 90 * 60000 });
+    let inserts = 0;
+    const b = d1.binding;
+    const flaky = { ...b, prepare: (sql) => { const st = b.prepare(sql); if (!/^INSERT OR IGNORE INTO sentiment_v2_results/.test(sql)) return st;
+      const w = (o) => ({ ...o, bind: (...a) => w(o.bind(...a)), run: (...x) => { if (++inserts === 2) throw new Error('D1_ERROR: simulated'); return o.run(...x); } }); return w(st); } };
+    await expect(S.runSentimentV2Cycle({ DB: flaky, SENTIMENT_V2_ENABLED: '1', SV2_V1_SERVER_INPUT: '1' }, { nowTs: NOW, queryBudget: PROD_LEFT })).rejects.toThrow('simulated');
+    expect(results(d1).map(x => x.ts).filter(ts => ts > NOW - 90 * 60000)).toEqual([NOW - H + C]);
+    const r = await S.runSentimentV2Cycle(env(d1), { nowTs: NOW + 60000, queryBudget: PROD_LEFT });
+    expect(r.decisions.map(x => x.decision_ts)).toEqual(t);
+    expect(r.skipped_readings).toBeUndefined();
+  });
+
+  it('server-reading scoring is unchanged by the cap: identical to scoring that reading alone', async () => {
+    const apps = [{ ts: NOW - 170 * 60000, i: 981 }, { ts: NOW - 100 * 60000, i: 982 }, { ts: NOW - 20 * 60000, i: 983 }];
+    const cur = setup({ archive: [...ctxArchive(), ...apps], server: ctxServer() });
+    await S.runSentimentV2Cycle(env(cur), { nowTs: NOW - 4 * H });
+    await S.runSentimentV2Cycle(env(cur), { nowTs: NOW, queryBudget: PROD_LEFT });
+    const ref = setup({ archive: [...ctxArchive(), ...apps], server: ctxServer() });
+    await S.runSentimentV2Cycle(env(ref), { nowTs: NOW - 4 * H });
+    ref.db.prepare("UPDATE sentiment_v2_results SET decision_ts = ? WHERE decision_ts = (SELECT MAX(decision_ts) FROM sentiment_v2_results)").run(NOW - H + C - 1);
+    const alone = await S.runSentimentV2Cycle(env(ref), { nowTs: NOW - H + C });
+    expect(alone.decisions.map(x => [x.decision_ts, x.v1_origin])).toEqual([[NOW - H + C, 'server']]);
+    const cols = 'decision_ts, calc_version, status, degraded_reason, sentiment_score, sentiment_class, confidence, evidence_coverage, market_regime, regime_json, event_intensity, event_json, predictive_json, family_json, supporting_ids_json, contradicting_ids_json, missing_json, ai_model, ai_status';
+    const row = (d) => d.db.prepare(`SELECT ${cols} FROM sentiment_v2_results WHERE decision_ts = ?`).get(NOW - H + C);
+    expect(row(cur)).toEqual(row(ref));
+  });
+
+  it('declared fixed cost is exact: worst case (collector on, every source missing, server read) = 16 + 1 per reading', async () => {
+    const d1 = setup({ archive: ctxArchive(), server: ctxServer() });
+    await S.runSentimentV2Cycle(env(d1), { nowTs: NOW - 2 * H });
+    const c = countingDb(d1);
+    const r = await S.runSentimentV2Cycle({ DB: c.DB, SENTIMENT_V2_ENABLED: '1', SV2_V1_SERVER_INPUT: '1', SV2_COLLECTOR_ENABLED: '1' }, { nowTs: NOW - H + 60000 });
+    expect(r.written).toBe(1);
+    expect(SV2_SOURCE_REGISTRY.length).toBe(8);                    // 8 per-source lookups are inside the fixed 16
+    expect(c.q).toBe(S.SV2_CYCLE_QUERIES_FIXED + S.SV2_CYCLE_QUERIES_PER_READING_AI_OFF);
   });
 
   it('never exceeds the budget it is given, AI off or on, server input on or off', async () => {
     const GLM = '@cf/zai-org/glm-4.7-flash';
     const AI = { run: async () => ({ response: '{}' }) };   // invalid output: the ledger path still runs in full
-    for (const ai of [false, true]) for (const on of [false, true]) for (let budget = 0; budget <= 40; budget += 3) {
+    for (const ai of [false, true]) for (const on of [false, true]) for (let budget = 0; budget <= 40; budget += (budget < 26 ? 1 : 2)) {
       const d1 = setup({ archive: [...ctxArchive(), { ts: NOW - 170 * 60000, i: 997 }, { ts: NOW - 100 * 60000, i: 995 }, { ts: NOW - 20 * 60000, i: 996 }], server: ctxServer() });
       await S.runSentimentV2Cycle(env(d1, on), { nowTs: NOW - 4 * H });
       const c = countingDb(d1);
-      const e = { DB: c.DB, SENTIMENT_V2_ENABLED: '1', ...(on ? { SV2_V1_SERVER_INPUT: '1' } : {}),
+      const e = { DB: c.DB, SENTIMENT_V2_ENABLED: '1', SV2_COLLECTOR_ENABLED: '1', ...(on ? { SV2_V1_SERVER_INPUT: '1' } : {}),
         ...(ai ? { SENTIMENT_V2_AI_MODEL: GLM, SV2_GLM_DAILY_NEURONS: '100000', AI } : {}) };
       const r = await S.runSentimentV2Cycle(e, { nowTs: NOW, queryBudget: budget });
       expect(c.q).toBeLessThanOrEqual(budget);
@@ -310,12 +451,15 @@ describe('V2 cycle budget: real per-reading cost, server reading keeps a slot', 
     }
     const cols = 'decision_ts, calc_version, status, degraded_reason, sentiment_score, sentiment_class, confidence, evidence_coverage, market_regime, regime_json, event_intensity, event_json, predictive_json, family_json, supporting_ids_json, contradicting_ids_json, missing_json, ai_model, ai_status';
     const rows = (d) => d.db.prepare(`SELECT ${cols} FROM sentiment_v2_results WHERE decision_ts IN (${apps.map(a => a.ts).join(',')}) ORDER BY decision_ts`).all();
-    // The oldest app reading falls outside the newest-maxCatchUp (3) candidate window once the server slot is a candidate
-    // (merge rule unchanged by this fix); every app reading that is scored is byte-identical to the archive-only path.
+    // Run 1 scores the oldest app reading and the server reading (slot kept); the app reading between them is passed by the
+    // cursor (server_slot_priority, recorded); the newest follows in run 2. Every scored app reading is byte-identical to
+    // the archive-only path.
     const refBy = new Map(rows(ref).map(r => [r.decision_ts, r]));
     expect(rows(ref).length).toBe(3);
-    expect(rows(cur).map(r => r.decision_ts)).toEqual([apps[1].ts, apps[2].ts]);
+    expect(rows(cur).map(r => r.decision_ts)).toEqual([apps[0].ts, apps[2].ts]);
     for (const r of rows(cur)) expect(r).toEqual(refBy.get(r.decision_ts));
+    const usage = JSON.parse(cur.db.prepare('SELECT usage_json FROM sentiment_v2_results WHERE decision_ts = ?').get(NOW - H + C).usage_json);
+    expect(usage.skipped_readings).toContainEqual({ ts: apps[1].ts, origin: 'browser', reason: 'server_slot_priority' });
   });
 
   it('only when the budget fits a single reading does the server reading take it; the older app reading is reported as skipped', async () => {
@@ -324,7 +468,11 @@ describe('V2 cycle budget: real per-reading cost, server reading keeps a slot', 
     await S.runSentimentV2Cycle(env(d1), { nowTs: NOW - 4 * H });
     const r = await S.runSentimentV2Cycle(env(d1), { nowTs: NOW, queryBudget: S.SV2_CYCLE_QUERIES_FIXED + 1 });
     expect(r.decisions.map(x => [x.decision_ts, x.v1_origin])).toEqual([[NOW - H + C, 'server']]);
-    expect(r.skipped_readings).toEqual([tApp]);
+    expect(r.skipped_readings).toEqual([
+      { ts: NOW - 4 * H + C, origin: 'server', reason: 'one_server_per_cycle' },
+      { ts: NOW - 3 * H + C, origin: 'server', reason: 'one_server_per_cycle' },
+      { ts: tApp, origin: 'browser', reason: 'server_slot_priority' },
+      { ts: NOW - 2 * H + C, origin: 'server', reason: 'one_server_per_cycle' }]);
     const again = await S.runSentimentV2Cycle(env(d1), { nowTs: NOW + 60000 });
     expect(again.written || 0).toBe(0);                          // decisions only move forward, as before
   });

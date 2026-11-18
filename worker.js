@@ -13133,6 +13133,14 @@ const SV2_D1_QUERY_RESERVE = 3;                  // d1_usage_daily recording and
 // sync; the cycle itself checks the budget it is given and defers readings it could not finish (never a partial write).
 const SV2_CYCLE_QUERIES_FIXED = 16;              // includes the server-reading read (SV2_V1_SERVER_INPUT)
 const SV2_CYCLE_QUERIES_PER_READING = 5;
+// With the AI annotation off (no model or a "0" Neuron budget), sv2RunAi returns before any ledger query, so a reading
+// costs exactly 1 top-level D1 call: its insert. Budgeting 5 there let one waiting app reading crowd out the hourly server
+// reading (production 2026-11-16/18: ~21-25 queries left after detection and the archive sync = 1 reading per run).
+const SV2_CYCLE_QUERIES_PER_READING_AI_OFF = 1;
+// While the V1 server input is on, at most 2 readings per run, one slot kept for the server reading when one is pending.
+// CPU, not D1, is then the limit: ~2.6 ms per reading against Workers Free's 10 ms per invocation (shared with detection
+// and the evidence collector). App readings are still scored oldest first in the other slot.
+const SV2_CYCLE_MAX_READINGS_WITH_SERVER = 2;
 const SV2_CYCLE_QUERY_HEADROOM = SV2_CYCLE_QUERIES_FIXED + 3 * SV2_CYCLE_QUERIES_PER_READING;
 function sv2CountingDb(db, counter) {
   if (!db) return db;
@@ -13147,11 +13155,34 @@ function sv2CountingDb(db, counter) {
     exec: (...x) => { counter.n++; return db.exec(...x); } };
 }
 
+// D1 calls one pending reading costs: mirrors sv2RunAi's first guard exactly (no model, or a "0" daily Neuron budget,
+// returns before the ledger is touched). Any other configuration keeps the full AI-on worst case.
+function sv2CycleQueriesPerReading(env) {
+  const model = String((env && env.SENTIMENT_V2_AI_MODEL) || '').trim();
+  return (!model || sv2AiBudget(env) === 0) ? SV2_CYCLE_QUERIES_PER_READING_AI_OFF : SV2_CYCLE_QUERIES_PER_READING;
+}
+// Which pending readings (ascending) this run scores. Without a cap or with everything fitting: all, oldest first (the
+// previous behaviour). Otherwise the pending server reading (at most one per cycle) keeps a slot and app readings fill
+// the rest oldest first. Not chosen and older than the newest chosen reading = skipped for good (decisions only move
+// forward, as before); not chosen and newer = still pending for a later run.
+function sv2SelectReadings(pending, serverByTs, limit) {
+  if (pending.length <= limit) return { chosen: pending.slice(), skipped: [], deferred: [] };
+  if (limit <= 0) return { chosen: [], skipped: [], deferred: pending.slice() };
+  const srv = pending.filter(ts => serverByTs.has(ts));
+  const keep = new Set(srv.slice(-1));
+  for (const ts of pending) { if (keep.size >= limit) break; keep.add(ts); }
+  const chosen = pending.filter(ts => keep.has(ts));
+  const last = chosen[chosen.length - 1];
+  const rest = pending.filter(ts => !keep.has(ts));
+  return { chosen, skipped: rest.filter(ts => ts < last), deferred: rest.filter(ts => ts > last) };
+}
+
 async function runSentimentV2Cycle(env, { nowTs, queryBudget = Infinity } = {}) {
   if (String(env.SENTIMENT_V2_ENABLED || '0') !== '1') return { ok: true, skipped: true, reason: 'disabled' };
   // Not enough D1 queries left in this invocation (shared with event detection) for even one reading: defer the whole
   // cycle before any query. Pending readings stay in the archive and a later run computes them.
-  if (queryBudget < SV2_CYCLE_QUERIES_FIXED + SV2_CYCLE_QUERIES_PER_READING) {
+  const perReading = sv2CycleQueriesPerReading(env);
+  if (queryBudget < SV2_CYCLE_QUERIES_FIXED + perReading) {
     return { ok: true, skipped: true, deferred_d1_budget: true, reason: `deferred: D1 query budget (${Math.max(0, queryBudget)} left in this invocation)` };
   }
   const cfg = sv2Config();
@@ -13182,11 +13213,12 @@ async function runSentimentV2Cycle(env, { nowTs, queryBudget = Infinity } = {}) 
     for (const r of sp.rows) if (!archived.has(r.observation_ts)) serverByTs.set(r.observation_ts, r);
     pendTs = pendTs.concat([...serverByTs.keys()]).sort((a, b) => b - a).slice(0, pendLimit);
   }
-  const pending = pendTs.sort((a, b) => a - b);
-  if (!pending.length) return { ok: true, written: 0, reason: 'no new V1 observation' };
-  // Oldest first, as many as the remaining D1 budget allows; the rest stay pending (> the new MAX(decision_ts)).
-  const fitReadings = Math.floor((queryBudget - SV2_CYCLE_QUERIES_FIXED) / SV2_CYCLE_QUERIES_PER_READING);
-  const deferredReadings = pending.length > fitReadings ? pending.splice(fitReadings) : [];
+  const candidates = pendTs.sort((a, b) => a - b);
+  if (!candidates.length) return { ok: true, written: 0, reason: 'no new V1 observation' };
+  // As many as the remaining D1 budget allows (at its real per-reading cost), at most 2 while the server input is on.
+  const fitReadings = Math.floor((queryBudget - SV2_CYCLE_QUERIES_FIXED) / perReading);
+  const limit = serverOn ? Math.min(fitReadings, SV2_CYCLE_MAX_READINGS_WITH_SERVER) : fitReadings;
+  const { chosen: pending, skipped: skippedReadings, deferred: deferredReadings } = sv2SelectReadings(candidates, serverByTs, limit);
   const lo = pending[0] - cfg.historyMs, hi = pending[pending.length - 1];
   const histRes = await env.DB.prepare('SELECT observation_ts, score, btc_price, sources_json FROM research_sentiment_archive WHERE observation_ts >= ? AND observation_ts <= ? ORDER BY observation_ts ASC')
     .bind(lo, hi).all();
@@ -13299,7 +13331,8 @@ async function runSentimentV2Cycle(env, { nowTs, queryBudget = Infinity } = {}) 
     decisions.push({ decision_ts: ts, status: result.status, score: result.sentiment_score, inserted: changes > 0, v1_origin: result.v1_input.origin });
   }
   return { ok: true, written, decisions, rows_read: rowsRead, ...(serverError ? { v1_server_error: serverError } : {}),
-    ...(deferredReadings.length ? { deferred_d1_budget: true, deferred_readings: deferredReadings } : {}) };
+    ...(deferredReadings.length ? { deferred_d1_budget: true, deferred_readings: deferredReadings } : {}),
+    ...(skippedReadings.length ? { skipped_readings: skippedReadings } : {}) };
 }
 
 const SV2_PERIODS_MS = { '24h': 86400000, '7d': 7 * 86400000, '30d': 30 * 86400000, '90d': 90 * 86400000, all: null };

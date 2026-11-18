@@ -33,13 +33,13 @@ const SERVER_DDL = `CREATE TABLE server_composite_readings (slot_ts INTEGER PRIM
 const V2 = ['sv2Config', 'sv2Finite', 'sv2ParseSources', 'sv2History', 'sv2ServerInputEnabled', 'sv2ServerV1Rows', 'sv2MergeV1Inputs', 'sv2ServerDecisionHist',
   'sv2AttachPrices', 'sv2IndexAtOrBefore', 'sv2PriceAt', 'sv2SourceStatus', 'sv2Pearson', 'sv2FamilyOf', 'sv2Redundancy', 'sv2Families',
   'sv2EventFamily', 'sv2EventReactions', 'sv2Events', 'sv2Regime', 'sv2Profile', 'sv2Analogues', 'sv2Classify', 'sv2Compute', 'sv2AiPackage',
-  'sv2ValidateAiOutput', 'sv2RunAi', 'sv2HexSha256', 'sv2Row', 'runSentimentV2Cycle', 'sv2AlignSeries', 'sv2SeriesStatus',
+  'sv2ValidateAiOutput', 'sv2RunAi', 'sv2HexSha256', 'sv2Row', 'runSentimentV2Cycle', 'sv2CycleQueriesPerReading', 'sv2SelectReadings', 'sv2AlignSeries', 'sv2SeriesStatus',
   'getSentimentV2Comparison', 'sv2EvidenceSummary', 'sv2EvidenceItemsForAi', 'sv2AiBudget', 'sv2AiEstimateNeurons', 'sv2UngroundedNumbers',
   'sv2StructuredAnnotation', 'sv2LatestView'];
 const CONSTS = ['SENTIMENT_V2_VERSION', 'SV2_VERSIONS_SHOWN', 'SV2_INSERT_SQL', 'SV2_PERIODS_MS', 'SV2_MAX_POINTS', 'SV2_MAX_ROWS',
   'SV2_MAX_PRICE_ROWS', 'SV2_STALE_MS', 'SV2_SERVER_V1_COLLECTOR', 'SV2_SERVER_V1_MAX_ROWS', 'SV2_SERVER_V1_PER_CYCLE', 'SV2_SERVER_V1_SOURCES_SQL', 'SV2_AI_PRICING',
   'SV2_AI_MAX_OUTPUT_TOKENS', 'SV2_AI_RESERVE_SQL', 'SV2_AI_TEMPLATE_TOKENS', 'SV2_AI_PROMPT_VERSION', 'SV2_CYCLE_QUERIES_FIXED',
-  'SV2_CYCLE_QUERIES_PER_READING'];
+  'SV2_CYCLE_QUERIES_PER_READING', 'SV2_CYCLE_QUERIES_PER_READING_AI_OFF', 'SV2_CYCLE_MAX_READINGS_WITH_SERVER'];
 const S = evalInScope(extractConstants(...CONSTS) + '\n' + extractFunctions(...V2),
   { SV2_SOURCE_REGISTRY, sv2EvidenceReadings, sv2ScoreHeadline, SV2_EVIDENCE_RULES });
 
@@ -93,12 +93,17 @@ describe('V2 cycle with V1 server readings', () => {
     expect(rows.map(x => x.input.slot_ts)).toEqual([NOW - 4 * H, NOW - H]);
   });
 
-  it('browser and server candidates are merged, oldest first, each with its own origin', async () => {
+  it('browser and server candidates are merged, oldest first, each with its own origin; 2 per run, the newer one follows', async () => {
     const t1 = NOW - 150 * 60000, t2 = NOW - 30 * 60000;          // browser readings around the newest slot
     const d1 = setup({ archive: [...ctxArchive(), { ts: t1, i: 998 }, { ts: t2, i: 999 }], server: ctxServer() });
     await S.runSentimentV2Cycle(env(d1), { nowTs: NOW - 4 * H });
     const r = await S.runSentimentV2Cycle(env(d1), { nowTs: NOW });
-    expect(r.decisions.map(x => [x.decision_ts, x.v1_origin])).toEqual([[t1, 'browser'], [NOW - H + C, 'server'], [t2, 'browser']]);
+    expect(S.SV2_CYCLE_MAX_READINGS_WITH_SERVER).toBe(2);
+    expect(r.decisions.map(x => [x.decision_ts, x.v1_origin])).toEqual([[t1, 'browser'], [NOW - H + C, 'server']]);
+    expect(r.deferred_readings).toEqual([t2]);                    // newer than the last decision: still pending, not lost
+    expect(r.skipped_readings).toBeUndefined();
+    const next = await S.runSentimentV2Cycle(env(d1), { nowTs: NOW + 60000 });
+    expect(next.decisions.map(x => [x.decision_ts, x.v1_origin])).toEqual([[t2, 'browser']]);
   });
 
   it('skips below-floor and composite-less slots; an archive row at the same timestamp wins', async () => {
@@ -184,7 +189,8 @@ describe('V2 cycle with V1 server readings', () => {
       all: (...x) => { q++; return o.all(...x); }, first: (...x) => { q++; return o.first(...x); }, run: (...x) => { q++; return o.run(...x); } }); return w(st); } };
     const budget = S.SV2_CYCLE_QUERIES_FIXED + 3 * S.SV2_CYCLE_QUERIES_PER_READING;
     const r = await S.runSentimentV2Cycle({ DB: counted, SENTIMENT_V2_ENABLED: '1', SV2_V1_SERVER_INPUT: '1' }, { nowTs: NOW, queryBudget: budget });
-    expect(r.written).toBe(3);
+    expect(r.written).toBe(2);                                     // capped at 2 while the server input is on
+    expect(r.decisions.map(x => x.v1_origin)).toContain('server');
     expect(q).toBeLessThanOrEqual(budget);
   });
 });
@@ -215,5 +221,119 @@ describe('comparison API with V1 server readings', () => {
     expect(prod).toMatch(/^SV2_V1_SERVER_INPUT = "1"$/m);
     expect(stag).not.toMatch(/^SV2_V1_SERVER_INPUT/m);
     expect(WORKER).not.toMatch(/INSERT[^;]*research_sentiment_archive[^;]*server/i);
+  });
+});
+
+// Server-reading crowd-out fix (owner decision 2026-11-18). Production 2026-11-16 and 2026-11-18: with GLM off a reading
+// really costs 1 D1 call (its insert), but the cycle budgeted 5, so the ~21-25 calls left after detection and the archive
+// sync fitted one reading: an app reading waiting first meant the hourly server reading was not scored in that run.
+describe('V2 cycle budget: real per-reading cost, server reading keeps a slot', () => {
+  const countingDb = (d1) => {
+    const c = { q: 0 };
+    const b = d1.binding;
+    c.DB = { ...b, prepare: (sql) => { const st = b.prepare(sql); const w = (o) => ({ ...o, bind: (...a) => w(o.bind(...a)),
+      all: (...x) => { c.q++; return o.all(...x); }, first: (...x) => { c.q++; return o.first(...x); }, run: (...x) => { c.q++; return o.run(...x); } }); return w(st); } };
+    return c;
+  };
+  const PROD_LEFT = 22;                                    // measured headroom left for V2 in a non-tick run (21-25)
+
+  it('per-reading cost mirrors sv2RunAi: 1 call with no model or a "0" budget, the full 5 otherwise', async () => {
+    expect(S.sv2CycleQueriesPerReading({})).toBe(1);
+    expect(S.sv2CycleQueriesPerReading({ SENTIMENT_V2_AI_MODEL: '', SV2_GLM_DAILY_NEURONS: '0' })).toBe(1);        // production
+    expect(S.sv2CycleQueriesPerReading({ SENTIMENT_V2_AI_MODEL: '@cf/zai-org/glm-4.7-flash', SV2_GLM_DAILY_NEURONS: '0' })).toBe(1);
+    expect(S.sv2CycleQueriesPerReading({ SENTIMENT_V2_AI_MODEL: '', SV2_GLM_DAILY_NEURONS: '1000' })).toBe(1);
+    expect(S.sv2CycleQueriesPerReading({ SENTIMENT_V2_AI_MODEL: '@cf/zai-org/glm-4.7-flash', SV2_GLM_DAILY_NEURONS: '1000' })).toBe(5);
+    // Where the cost is 1, sv2RunAi must touch no ledger at all (any ledger call throws here).
+    const boom = () => { throw new Error('ledger touched'); };
+    const ledger = { reserveNeurons: boom, recordNeurons: boom, accountLimitedToday: boom };
+    for (const e of [{}, { SENTIMENT_V2_AI_MODEL: '@cf/zai-org/glm-4.7-flash', SV2_GLM_DAILY_NEURONS: '0' }, { SV2_GLM_DAILY_NEURONS: '1000' }]) {
+      expect(S.sv2CycleQueriesPerReading(e)).toBe(1);
+      expect((await S.sv2RunAi(e, {}, [], ledger)).status).toBe('disabled');
+    }
+  });
+
+  it('production case: app reading waiting + hourly server reading, production headroom: both scored in one run', async () => {
+    const tApp = NOW - 150 * 60000;                           // app reading before the newest server slot
+    const d1 = setup({ archive: [...ctxArchive(), { ts: tApp, i: 990 }], server: ctxServer() });
+    await S.runSentimentV2Cycle(env(d1), { nowTs: NOW - 4 * H });
+    const c = countingDb(d1);
+    const r = await S.runSentimentV2Cycle({ DB: c.DB, SENTIMENT_V2_ENABLED: '1', SV2_V1_SERVER_INPUT: '1' }, { nowTs: NOW, queryBudget: PROD_LEFT });
+    expect(r.decisions.map(x => [x.decision_ts, x.v1_origin])).toEqual([[tApp, 'browser'], [NOW - H + C, 'server']]);
+    expect(c.q).toBeLessThanOrEqual(PROD_LEFT);
+    // Before the fix this budget fitted floor((22 - 16) / 5) = 1 reading: only the app reading.
+    expect(Math.floor((PROD_LEFT - S.SV2_CYCLE_QUERIES_FIXED) / S.SV2_CYCLE_QUERIES_PER_READING)).toBe(1);
+  });
+
+  it('a server reading is scored in every run of a day with app readings arriving every 30 min', async () => {
+    const day0 = NOW - 24 * H;
+    const apps = Array.from({ length: 48 }, (_, k) => ({ ts: day0 + k * 30 * 60000 + 7 * 60000, i: 500 + k }));
+    const d1 = setup({ archive: [...ctxArchive(), ...apps], server: ctxServer() });
+    await S.runSentimentV2Cycle(env(d1), { nowTs: day0 - H });
+    let serverRuns = 0, runs = 0;
+    for (let h = 1; h <= 24; h++) {
+      if (h % 3 === 0) continue;                              // prediction tick hours run no V2 cycle
+      const c = countingDb(d1);
+      const r = await S.runSentimentV2Cycle({ DB: c.DB, SENTIMENT_V2_ENABLED: '1', SV2_V1_SERVER_INPUT: '1' }, { nowTs: day0 + h * H + 60000, queryBudget: PROD_LEFT });
+      runs++;
+      expect(c.q).toBeLessThanOrEqual(PROD_LEFT);
+      expect(r.written).toBeLessThanOrEqual(S.SV2_CYCLE_MAX_READINGS_WITH_SERVER);
+      if (r.decisions.some(x => x.v1_origin === 'server')) serverRuns++;
+    }
+    expect(runs).toBe(16);
+    expect(serverRuns).toBe(16);
+  });
+
+  it('never exceeds the budget it is given, AI off or on, server input on or off', async () => {
+    const GLM = '@cf/zai-org/glm-4.7-flash';
+    const AI = { run: async () => ({ response: '{}' }) };   // invalid output: the ledger path still runs in full
+    for (const ai of [false, true]) for (const on of [false, true]) for (let budget = 0; budget <= 40; budget += 3) {
+      const d1 = setup({ archive: [...ctxArchive(), { ts: NOW - 170 * 60000, i: 997 }, { ts: NOW - 100 * 60000, i: 995 }, { ts: NOW - 20 * 60000, i: 996 }], server: ctxServer() });
+      await S.runSentimentV2Cycle(env(d1, on), { nowTs: NOW - 4 * H });
+      const c = countingDb(d1);
+      const e = { DB: c.DB, SENTIMENT_V2_ENABLED: '1', ...(on ? { SV2_V1_SERVER_INPUT: '1' } : {}),
+        ...(ai ? { SENTIMENT_V2_AI_MODEL: GLM, SV2_GLM_DAILY_NEURONS: '100000', AI } : {}) };
+      const r = await S.runSentimentV2Cycle(e, { nowTs: NOW, queryBudget: budget });
+      expect(c.q).toBeLessThanOrEqual(budget);
+      if (on) expect(r.written || 0).toBeLessThanOrEqual(2);
+    }
+  });
+
+  it('app readings are scored exactly as before: identical rows to the uncapped archive-only path', async () => {
+    const apps = [{ ts: NOW - 170 * 60000, i: 981 }, { ts: NOW - 100 * 60000, i: 982 }, { ts: NOW - 20 * 60000, i: 983 }];
+    const ref = setup({ archive: [...ctxArchive(), ...apps], server: ctxServer() });
+    const cur = setup({ archive: [...ctxArchive(), ...apps], server: ctxServer() });
+    await S.runSentimentV2Cycle(env(ref, false), { nowTs: NOW - 4 * H });
+    await S.runSentimentV2Cycle(env(cur, true), { nowTs: NOW - 4 * H });
+    for (let k = 0; k < 4; k++) {
+      await S.runSentimentV2Cycle(env(ref, false), { nowTs: NOW + k * 60000 });
+      await S.runSentimentV2Cycle(env(cur, true), { nowTs: NOW + k * 60000, queryBudget: PROD_LEFT });
+    }
+    const cols = 'decision_ts, calc_version, status, degraded_reason, sentiment_score, sentiment_class, confidence, evidence_coverage, market_regime, regime_json, event_intensity, event_json, predictive_json, family_json, supporting_ids_json, contradicting_ids_json, missing_json, ai_model, ai_status';
+    const rows = (d) => d.db.prepare(`SELECT ${cols} FROM sentiment_v2_results WHERE decision_ts IN (${apps.map(a => a.ts).join(',')}) ORDER BY decision_ts`).all();
+    // The oldest app reading falls outside the newest-maxCatchUp (3) candidate window once the server slot is a candidate
+    // (merge rule unchanged by this fix); every app reading that is scored is byte-identical to the archive-only path.
+    const refBy = new Map(rows(ref).map(r => [r.decision_ts, r]));
+    expect(rows(ref).length).toBe(3);
+    expect(rows(cur).map(r => r.decision_ts)).toEqual([apps[1].ts, apps[2].ts]);
+    for (const r of rows(cur)) expect(r).toEqual(refBy.get(r.decision_ts));
+  });
+
+  it('only when the budget fits a single reading does the server reading take it; the older app reading is reported as skipped', async () => {
+    const tApp = NOW - 150 * 60000;
+    const d1 = setup({ archive: [...ctxArchive(), { ts: tApp, i: 990 }], server: ctxServer() });
+    await S.runSentimentV2Cycle(env(d1), { nowTs: NOW - 4 * H });
+    const r = await S.runSentimentV2Cycle(env(d1), { nowTs: NOW, queryBudget: S.SV2_CYCLE_QUERIES_FIXED + 1 });
+    expect(r.decisions.map(x => [x.decision_ts, x.v1_origin])).toEqual([[NOW - H + C, 'server']]);
+    expect(r.skipped_readings).toEqual([tApp]);
+    const again = await S.runSentimentV2Cycle(env(d1), { nowTs: NOW + 60000 });
+    expect(again.written || 0).toBe(0);                          // decisions only move forward, as before
+  });
+
+  it('server input off: no cap, all pending readings fit at the real cost (previous ordering)', async () => {
+    const apps = [{ ts: NOW - 170 * 60000, i: 981 }, { ts: NOW - 100 * 60000, i: 982 }, { ts: NOW - 20 * 60000, i: 983 }];
+    const d1 = setup({ archive: [...ctxArchive(), ...apps], server: ctxServer() });
+    await S.runSentimentV2Cycle(env(d1, false), { nowTs: NOW - 4 * H });
+    const r = await S.runSentimentV2Cycle(env(d1, false), { nowTs: NOW, queryBudget: PROD_LEFT });
+    expect(r.decisions.map(x => x.decision_ts)).toEqual(apps.map(a => a.ts));
   });
 });

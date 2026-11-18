@@ -30,10 +30,10 @@ const SYNC_CONSTS = ['V1_ARCHIVE_SYNC_WINDOW_MS', 'V1_ARCHIVE_SYNC_MAX_ROWS', 'V
 const V2 = ['sv2Config', 'sv2Finite', 'sv2ParseSources', 'sv2History', 'sv2ServerInputEnabled', 'sv2ServerV1Rows', 'sv2MergeV1Inputs', 'sv2ServerDecisionHist', 'sv2AttachPrices', 'sv2IndexAtOrBefore', 'sv2PriceAt',
   'sv2SourceStatus', 'sv2Pearson', 'sv2FamilyOf', 'sv2Redundancy', 'sv2Families', 'sv2EventFamily', 'sv2EventReactions',
   'sv2Events', 'sv2Regime', 'sv2Profile', 'sv2Analogues', 'sv2Classify', 'sv2Compute', 'sv2AiPackage',
-  'sv2ValidateAiOutput', 'sv2RunAi', 'sv2HexSha256', 'sv2Row', 'runSentimentV2Cycle', 'sv2AlignSeries', 'sv2SeriesStatus', 'getSentimentV2Comparison',
+  'sv2ValidateAiOutput', 'sv2RunAi', 'sv2HexSha256', 'sv2Row', 'runSentimentV2Cycle', 'sv2CycleQueriesPerReading', 'sv2SelectReadings', 'sv2AlignSeries', 'sv2SeriesStatus', 'getSentimentV2Comparison',
   'sv2EvidenceSummary', 'sv2EvidenceItemsForAi', 'sv2AiBudget', 'sv2AiEstimateNeurons', 'sv2UngroundedNumbers', 'sv2StructuredAnnotation', 'sv2LatestView'];
 const V2_CONSTS = ['SENTIMENT_V2_VERSION', 'SV2_VERSIONS_SHOWN', 'SV2_INSERT_SQL', 'SV2_PERIODS_MS', 'SV2_MAX_POINTS', 'SV2_MAX_ROWS', 'SV2_MAX_PRICE_ROWS', 'SV2_STALE_MS', 'SV2_SERVER_V1_COLLECTOR', 'SV2_SERVER_V1_MAX_ROWS', 'SV2_SERVER_V1_PER_CYCLE', 'SV2_SERVER_V1_SOURCES_SQL',
-  'SV2_AI_PRICING', 'SV2_AI_MAX_OUTPUT_TOKENS', 'SV2_AI_RESERVE_SQL', 'SV2_AI_TEMPLATE_TOKENS', 'SV2_AI_PROMPT_VERSION', 'SV2_CYCLE_QUERIES_FIXED', 'SV2_CYCLE_QUERIES_PER_READING'];
+  'SV2_AI_PRICING', 'SV2_AI_MAX_OUTPUT_TOKENS', 'SV2_AI_RESERVE_SQL', 'SV2_AI_TEMPLATE_TOKENS', 'SV2_AI_PROMPT_VERSION', 'SV2_CYCLE_QUERIES_FIXED', 'SV2_CYCLE_QUERIES_PER_READING', 'SV2_CYCLE_QUERIES_PER_READING_AI_OFF', 'SV2_CYCLE_MAX_READINGS_WITH_SERVER'];
 const S = evalInScope(extractConstants(...SYNC_CONSTS, ...V2_CONSTS) + '\n' + extractFunctions(...SYNC, ...V2),
   { SV2_SOURCE_REGISTRY, sv2EvidenceReadings, sv2ScoreHeadline, SV2_EVIDENCE_RULES });
 
@@ -103,10 +103,12 @@ describe('successful collection, idempotency and the regression itself', () => {
     const b = d1.binding;
     const counted = { ...b, prepare: (sql) => { const st = b.prepare(sql); const w = (o) => ({ ...o, bind: (...a) => w(o.bind(...a)),
       all: (...x) => { q++; return o.all(...x); }, first: (...x) => { q++; return o.first(...x); }, run: (...x) => { q++; return o.run(...x); } }); return w(st); } };
-    const none = await S.runSentimentV2Cycle({ DB: counted, SENTIMENT_V2_ENABLED: '1' }, { nowTs: NOW, queryBudget: S.SV2_CYCLE_QUERIES_FIXED + S.SV2_CYCLE_QUERIES_PER_READING - 1 });
+    const per = S.SV2_CYCLE_QUERIES_PER_READING_AI_OFF;                     // AI annotation off here: a reading = its insert
+    expect(per).toBe(1);
+    const none = await S.runSentimentV2Cycle({ DB: counted, SENTIMENT_V2_ENABLED: '1' }, { nowTs: NOW, queryBudget: S.SV2_CYCLE_QUERIES_FIXED + per - 1 });
     expect(none).toMatchObject({ ok: true, skipped: true, deferred_d1_budget: true });
     expect(q).toBe(0);                                                       // not a single query spent
-    const budget = S.SV2_CYCLE_QUERIES_FIXED + S.SV2_CYCLE_QUERIES_PER_READING;
+    const budget = S.SV2_CYCLE_QUERIES_FIXED + per;
     const one = await S.runSentimentV2Cycle({ DB: counted, SENTIMENT_V2_ENABLED: '1' }, { nowTs: NOW, queryBudget: budget });
     expect(one.written).toBe(1);
     expect(q).toBeLessThanOrEqual(budget);

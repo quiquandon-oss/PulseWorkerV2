@@ -72,26 +72,48 @@ export const GLM_READ_QUERIES = Object.freeze([
 
 export const GLM_READ_ROWS_BOUND = GLM_READ_QUERIES.reduce((s, q) => s + q.rowsBound, 0);
 
-// One batch, one subrequest. A failing table (e.g. not yet created) degrades only that input: D1 batches are
-// all-or-nothing, so on a batch error each query is retried alone ONCE to isolate the failure (still bounded).
+// One batch, one subrequest. D1 batches are all-or-nothing, so on a batch error:
+//  - a missing table (a permanent schema condition, e.g. staging without V1 tables) is detected once with one bounded
+//    sqlite_master lookup for exactly the needed table names; the batch is re-run once without those queries, and each
+//    missing input is reported as 'missing_table:<name>' (no per-query retries: 3 calls at most);
+//  - any other error is treated as transient: each query is tried alone ONCE to isolate it (bounded by the query count).
+export function glmQueryTable(sql) { const m = /\bFROM\s+([a-z_0-9]+)/i.exec(sql); return m ? m[1] : null; }
+
 export async function readGlmInputs(db, cutoffTs, queries = GLM_READ_QUERIES) {
-  const out = { rows: {}, errors: {}, rowsRead: 0, calls: 0 };
-  const stmts = queries.map((q) => db.prepare(q.sql).bind(...q.args(cutoffTs)));
-  try {
+  const out = { rows: {}, errors: {}, rowsRead: 0, calls: 0, missingTables: [] };
+  const runBatch = async (qs) => {
     out.calls += 1;
-    const res = await db.batch(stmts);
-    queries.forEach((q, i) => {
+    const res = await db.batch(qs.map((q) => db.prepare(q.sql).bind(...q.args(cutoffTs))));
+    qs.forEach((q, i) => {
       const r = res[i] || {};
       out.rows[q.key] = r.results || [];
       out.rowsRead += Number(r.meta?.rows_read ?? out.rows[q.key].length) || 0;
     });
-    return out;
-  } catch (e) {
-    for (let i = 0; i < queries.length; i++) {
-      const q = queries[i];
+  };
+  try { await runBatch(queries); return out; } catch (e) {
+    const msg = String(e?.message || e);
+    if (/no such table/i.test(msg)) {
+      try {
+        const names = [...new Set(queries.map((q) => glmQueryTable(q.sql)).filter(Boolean))];
+        out.calls += 1;
+        const r = await db.prepare(`SELECT name FROM sqlite_master WHERE type = 'table' AND name IN (${names.map(() => '?').join(',')})`).bind(...names).all();
+        out.rowsRead += Number(r?.meta?.rows_read ?? 0) || 0;
+        const present = new Set((r.results || []).map((x) => x.name));
+        const ok = queries.filter((q) => present.has(glmQueryTable(q.sql)));
+        for (const q of queries) if (!present.has(glmQueryTable(q.sql))) {
+          out.rows[q.key] = [];
+          out.errors[q.key] = 'missing_table:' + glmQueryTable(q.sql);
+          if (!out.missingTables.includes(glmQueryTable(q.sql))) out.missingTables.push(glmQueryTable(q.sql));
+        }
+        if (ok.length) await runBatch(ok);
+        return out;
+      } catch (_e2) { /* fall through to isolation */ }
+    }
+    for (const q of queries) {
+      if (out.errors[q.key] || (out.rows[q.key] && out.rows[q.key].length)) continue;
       try {
         out.calls += 1;
-        const r = await stmts[i].all();
+        const r = await db.prepare(q.sql).bind(...q.args(cutoffTs)).all();
         out.rows[q.key] = r.results || [];
         out.rowsRead += Number(r.meta?.rows_read ?? out.rows[q.key].length) || 0;
       } catch (err) {
@@ -142,6 +164,21 @@ export function canonicalUrl(u) {
 
 function safeJson(s) { if (s == null) return null; try { return JSON.parse(s); } catch { return undefined; } }
 
+// Record identity for stored text without a stored hash (synchronous FNV-1a 64-bit as two 32-bit lanes; identity, not
+// security). Lets an audit tie a package item to the exact stored text it was built from.
+export function contentId(s) {
+  if (s == null) return null;
+  let a = 0x811c9dc5, b = 0xcbf29ce4;
+  const str = String(s);
+  for (let i = 0; i < str.length; i++) { const c = str.charCodeAt(i); a = Math.imul(a ^ c, 0x01000193) >>> 0; b = Math.imul(b ^ c, 0x100001b3) >>> 0; }
+  return 'fnv1a:' + a.toString(16).padStart(8, '0') + b.toString(16).padStart(8, '0');
+}
+
+// V1 sources whose score is derived from an existing Gemini output (V1 worker.js at fb30da1: scompScorers.foufi maps the
+// Gemini summary's BTC score to 0-100). They belong to the Gemini evidence chain, not to independent sentiment.
+export const V1_GEMINI_DERIVED_SOURCES = Object.freeze({ foufi: 'foufi_digest (Gemini summary of a Foufi video)' });
+const GEMINI_MODEL_NOTE = 'gemini (model version not recorded per row; V1 code at fb30da1 calls gemini-3.6-flash)';
+
 // times: every known time, the first-available time and the basis it was taken from (contract §5).
 function times(t, basisOrder) {
   const out = { event_ts: null, published_ts: null, retrieved_ts: null, created_ts: null, input_cutoff_ts: null,
@@ -164,7 +201,7 @@ function item(ref, cls, o) {
     ref, provenance_class: cls, family: o.family || GLM_FAMILY_OF_CLASS[cls],
     origin: o.origin, table: o.table, record_id: o.record_id == null ? null : String(o.record_id),
     asset_scope: o.asset_scope || ['BTC'], independence_key: o.independence_key, derived_from: o.derived_from || [],
-    times: o.times, content: o.content,
+    times: o.times, content: o.content, ident: o.ident || null,
   };
 }
 
@@ -189,14 +226,24 @@ export function normV1Composite(rows) {
 
 // observed_at semantics are per source in V1 (publisher time when the API gives one, else fetch time). It is kept as
 // observed_ts with that caveat, never relabelled as a publication time.
-export function normV1SourceObs(rows) {
-  return rows.filter((r) => r.status === 'ok' && r.score != null).map((r) => item(`v1s:${r.slot_ts}:${r.source_id}`, 'v1_aggregate', {
-    origin: 'sentiment-ff75', table: 'server_source_observations', record_id: `${r.slot_ts}:${r.source_id}`,
-    independence_key: `v1src:${r.source_id}`, asset_scope: ['*'],
-    times: times({ retrieved_ts: r.fetched_at, event_ts: r.observed_at }, ['retrieved_ts']),
-    content: { kind: 'v1_source_score', source_id: String(r.source_id), score: Number(r.score),
-      observed_ts_semantics: 'publisher_time_if_given_else_fetch_time' },
-  }));
+// foufiRows (optional): the foufi_digest rows read for this package, used to tie a Gemini-derived V1 score to the
+// video it came from (V1 records the video's published_ts as observed_at). Unmatched -> its own Gemini chain key.
+export function normV1SourceObs(rows, foufiRows = []) {
+  const byPublished = new Map((foufiRows || []).filter((f) => validTs(f.published_ts) != null).map((f) => [Number(f.published_ts), f.video_id]));
+  return rows.filter((r) => r.status === 'ok' && r.score != null).map((r) => {
+    const gem = V1_GEMINI_DERIVED_SOURCES[r.source_id];
+    const vid = gem ? byPublished.get(Number(r.observed_at)) : undefined;
+    return item(`v1s:${r.slot_ts}:${r.source_id}`, 'v1_aggregate', {
+      family: gem ? 'news' : undefined,
+      origin: 'sentiment-ff75', table: 'server_source_observations', record_id: `${r.slot_ts}:${r.source_id}`,
+      independence_key: gem ? (vid ? `src:youtube:${vid}` : `gemini:${r.source_id}:${r.observed_at}`) : `v1src:${r.source_id}`, asset_scope: ['*'],
+      derived_from: gem && vid ? [`gem:foufi:${vid}`] : [],
+      times: times({ retrieved_ts: r.fetched_at, event_ts: r.observed_at }, ['retrieved_ts']),
+      content: { kind: 'v1_source_score', source_id: String(r.source_id), score: Number(r.score),
+        observed_ts_semantics: 'publisher_time_if_given_else_fetch_time',
+        ...(gem ? { ai_derived: gem, verification: vid ? 'derived_from_listed_gemini_summary' : 'gemini_summary_not_in_package' } : {}) },
+    });
+  });
 }
 
 export function normV1History(rows) {
@@ -255,14 +302,16 @@ export function normV1Foufi(rows, cutoffTs, { keep = 3 } = {}) {
       asset_scope: ['*'],
       // A summary is available when V1 fetched (generated) it, never earlier than the video itself.
       times: times({ published_ts: r.published_ts, retrieved_ts: r.fetched_ts }, ['retrieved_ts']),
-      content: s ? { kind: 'gemini_video_summary', model: 'gemini-3.6-flash', overall_lean: r.overall_lean ?? null,
+      content: s ? { kind: 'gemini_video_summary', model: GEMINI_MODEL_NOTE, content_id: contentId(r.summary_json),
+        verification: 'original_metadata_only (no transcript stored: claims cannot be checked against the video)',
+        overall_lean: r.overall_lean ?? null,
         market_summary: sanitizeText(s.market_summary),
         macro: s.macro ? { lean: s.macro.lean ?? null, text: sanitizeText(s.macro.text, 200) } : null,
         micro: s.micro ? { lean: s.micro.lean ?? null, text: sanitizeText(s.micro.text, 200) } : null,
         tradfi: s.tradfi ? { lean: s.tradfi.lean ?? null, text: sanitizeText(s.tradfi.text, 200) } : null,
         btc: btc ? { score: Number.isFinite(Number(btc.score)) && btc.score !== null ? Number(btc.score) : null, note: sanitizeText(btc.note, 200) } : null,
         dominant_driver: s.dominant_driver ?? null, major_catalyst: s.major_catalyst?.name ? sanitizeText(s.major_catalyst.name, 120) : null }
-        : { kind: 'gemini_video_summary', parse: 'malformed' },
+        : { kind: 'gemini_video_summary', parse: 'malformed', content_id: contentId(r.summary_json) },
     }));
   }
   return out;
@@ -291,7 +340,9 @@ export function normV1Catalysts(rows, cutoffTs) {
       family: 'news', origin: gemini ? 'pulseworker-v2 (historical gemini investigation)' : 'sentiment-ff75', table: 'coin_catalyst_log',
       record_id: r.id, independence_key: key, derived_from: derived,
       times: times({ created_ts: r.ts, published_ts: r.first_public_timestamp }, ['created_ts']),
-      content: { kind: 'catalyst_classification', model: gemini ? 'gemini' : '@cf/meta/llama-3.1-8b-instruct-fast',
+      content: { kind: 'catalyst_classification', model: gemini ? 'gemini (historical V2 investigation; version in gemini_investigations)' : '@cf/meta/llama-3.1-8b-instruct-fast',
+        verification: cu ? 'original_linked' : 'no_original (unverified against an original source)',
+        content_id: contentId(JSON.stringify([r.headline_matched ?? null, r.extracted_reason ?? null, r.verdict ?? null, r.direction ?? null, r.category ?? null])),
         price_move_pct: r.price_move_pct ?? null, verdict: r.verdict ?? null, category: r.category ?? null,
         direction: r.direction ?? null, confidence: r.confidence ?? null, reason: sanitizeText(r.extracted_reason, 200),
         source_grounded: r.source_grounded ?? null },
@@ -300,7 +351,27 @@ export function normV1Catalysts(rows, cutoffTs) {
   return out;
 }
 
-// Frozen V2 Gemini daily analyses: track record only (counts computed in code); never a live input after 24 h.
+// Frozen V2 Gemini daily BTC analyses (cron stopped 2026-11-17): the newest one at or before the cutoff becomes an
+// item (an AI market narrative with no original source; marked stale once older than 24 h). Its own resolved outcome is
+// shown only if resolved by the cutoff. Track-record counts are computed separately (summarizeGeminiDaily).
+export function normGeminiDaily(rows, cutoffTs) {
+  const r = rows.filter((x) => validTs(x.ts) != null && x.ts <= cutoffTs).sort((a, b) => b.ts - a.ts)[0];
+  if (!r) return [];
+  const resolved = validTs(r.resolved_ts) != null && r.resolved_ts <= cutoffTs;
+  return [item(`gem:daily:${r.id}`, 'gemini_interpretation', {
+    family: 'news', origin: 'pulseworker-v2 (historical, frozen)', table: 'gemini_daily_analysis', record_id: r.id,
+    independence_key: `gemini:daily:${r.id}`, asset_scope: ['BTC'],
+    times: times({ created_ts: r.ts }, ['created_ts']),
+    content: { kind: 'gemini_daily_analysis', model: 'gemini (historical V2 daily analysis)', bias_short: r.bias_short ?? null,
+      bias_medium: r.bias_medium ?? null, bias_long: r.bias_long ?? null, narrative: sanitizeText(r.narrative, 200),
+      content_id: contentId(JSON.stringify([r.bias_short ?? null, r.bias_medium ?? null, r.bias_long ?? null, r.narrative ?? null])),
+      verification: 'no_original (market narrative; no source documents stored)',
+      own_outcome: resolved ? (Number(r.bias_short_correct) === 1 ? 'bias_short_correct' : 'bias_short_wrong') : 'unresolved_at_cutoff',
+      stale: cutoffTs - r.ts > GLM_LIMITS.freshMs },
+  })];
+}
+
+// Frozen V2 Gemini daily analyses: track record (counts computed in code).
 export function summarizeGeminiDaily(rows, cutoffTs) {
   const resolved = rows.filter((r) => validTs(r.resolved_ts) != null && r.resolved_ts <= cutoffTs && r.bias_short_correct != null);
   const latest = rows.map((r) => validTs(r.ts)).filter((x) => x != null && x <= cutoffTs).sort((a, b) => b - a)[0] ?? null;
@@ -317,8 +388,8 @@ export function normCollector(rows) {
       independence_key: cu ? `url:${cu}` : `ev:${r.evidence_id}`, asset_scope: ['*'],
       times: times({ published_ts: r.published_ts, retrieved_ts: r.retrieved_ts }, ['retrieved_ts']),
       content: { kind: 'evidence', source_id: String(r.source_id), source_family: r.family ?? null, host: host(r.canonical_url),
-        title: sanitizeText(r.title, 200), summary: sanitizeText(r.summary), title_hash: r.title_hash ?? null,
-        content_hash: r.content_hash ?? null, dup_of: r.dup_of ?? null },
+        title: sanitizeText(r.title, 160), summary: sanitizeText(r.summary, 200), dup_of: r.dup_of ?? null },
+      ident: { title_hash: r.title_hash ?? null, content_hash: r.content_hash ?? null },
     });
   });
 }

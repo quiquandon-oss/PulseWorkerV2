@@ -175,3 +175,19 @@ describe('no new Gemini path', () => {
     expect(src).not.toMatch(/generativelanguage|GEMINI_API_KEY|callGeminiGenerateContent|googleapis/);
   });
 });
+
+describe('read failures are classified in the run record', () => {
+  it('missing table, schema mismatch (stale staging stub) and transient errors are told apart', async () => {
+    const { glmReadErrorClass } = await import('../glm/adapters.js');
+    expect(glmReadErrorClass('missing_table:history')).toBe('missing_table');
+    expect(glmReadErrorClass('D1_ERROR: no such column: target_ts: SQLITE_ERROR')).toBe('schema_mismatch');
+    expect(glmReadErrorClass('D1_ERROR: network connection lost')).toBe('transient');
+    // staging-like: V1 tables missing AND a stub predictions table without the read columns
+    const stg = makeD1([...V2_DDL, 'CREATE TABLE predictions (id INTEGER PRIMARY KEY, ts INTEGER, horizon_hours INTEGER, p_up REAL, realized_up INTEGER)']);
+    const raw = await readGlmInputs(stg.binding, CUT);
+    const p = await buildPackage({ raw, cutoffTs: CUT, chronosLedger: LEDGER, baseline: null });
+    expect(p.header.missing).toContain('read_error:v2_track:schema_mismatch');
+    expect(p.header.missing).toContain('read_error:v1_history:missing_table');
+    expect(raw.calls).toBeLessThanOrEqual(3 + GLM_READ_QUERIES.length);
+  });
+});

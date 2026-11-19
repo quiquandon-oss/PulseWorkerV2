@@ -77,6 +77,14 @@ export const GLM_READ_ROWS_BOUND = GLM_READ_QUERIES.reduce((s, q) => s + q.rowsB
 //    sqlite_master lookup for exactly the needed table names; the batch is re-run once without those queries, and each
 //    missing input is reported as 'missing_table:<name>' (no per-query retries: 3 calls at most);
 //  - any other error is treated as transient: each query is tried alone ONCE to isolate it (bounded by the query count).
+// Failure class of one input read: permanent schema conditions are reported as such and never retried.
+export function glmReadErrorClass(msg) {
+  const m = String(msg || '');
+  if (/^missing_table:/.test(m) || /no such table/i.test(m)) return 'missing_table';
+  if (/no such column|has no column named/i.test(m)) return 'schema_mismatch';
+  return 'transient';
+}
+
 export function glmQueryTable(sql) { const m = /\bFROM\s+([a-z_0-9]+)/i.exec(sql); return m ? m[1] : null; }
 
 export async function readGlmInputs(db, cutoffTs, queries = GLM_READ_QUERIES) {

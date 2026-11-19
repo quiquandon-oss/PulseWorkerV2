@@ -6,7 +6,7 @@ import {
 } from './contract.js';
 import {
   normV1Composite, normV1SourceObs, normV1History, normV1Technical, normV1RiskRegime, normV1Foufi, normV1Catalysts,
-  summarizeGeminiDaily, normGeminiDaily, normCollector, normEvents, normMarket, normV2Track, normV2Sentiment, normTimesfm, normChronos,
+  summarizeGeminiDaily, normGeminiDaily, glmReadErrorClass, normCollector, normEvents, normMarket, normV2Track, normV2Sentiment, normTimesfm, normChronos,
 } from './adapters.js';
 
 export async function sha256Hex(s) {
@@ -190,7 +190,7 @@ export async function buildPackage({ raw, cutoffTs, chronosLedger, baseline }) {
     missing: [
       ...(built.forecasts.timesfm ? [] : ['timesfm_forecast']),
       ...(built.forecasts.chronos ? [] : ['chronos_forecast' + (built.forecasts.chronos_error ? ':' + built.forecasts.chronos_error : '')]),
-      ...Object.keys(raw.errors || {}).map((k) => 'read_error:' + k),
+      ...Object.keys(raw.errors || {}).map((k) => 'read_error:' + k + ':' + glmReadErrorClass(raw.errors[k])),
     ],
   };
   // Each item is serialised once; the kept prefix (priority order) is chosen by cumulative byte size, then the prompt

@@ -91,6 +91,10 @@ describe('production wrangler.toml: GLM is OFF; the collector is ON behind its s
         V1_ARCHIVE_SYNC_ENABLED: '1',
         CHALLENGER_ENABLED: '1',                // challenger pause switch, ON until the owner activates the pause
         SV2_V1_SERVER_INPUT: '1',               // V1 hourly server readings as a second V2 input (2026-11-16)
+        GLM_SIGNAL_ENABLED: '1',                // GLM daily signal record (07:00), inference off -> status model_disabled
+        GLM_INFERENCE_ENABLED: '0',             // no GLM model call until V1 Neuron use + licence are verified
+        GLM_TICK_HOOK_ENABLED: '0',             // no per-tick GLM read/write until staging call counts are measured
+        GLM_INFLUENCE_CAP: '0',                 // shadow: served p_up never changed by GLM
       },
       d1_databases: [{ binding: 'DB', database_name: 'sentiment-history', database_id: 'f91ca980-b886-423a-bd6f-f3baea46d181' }],
       triggers: { crons: ['0 * * * *', '0 7 * * *'] },

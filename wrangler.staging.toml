@@ -53,6 +53,12 @@ SV2_GLM_DAILY_NEURONS = "200"
 SV2_USAGE_GUARD_REQUIRE_FRESH = "0"
 # Same source exclusion as production: the feed redirects to plain http.
 SV2_SOURCES_DISABLED = "bitcoinmagazine"
+# GLM evidence intelligence (glm/runner.js): same switches as production. Inference stays off on staging too: the
+# Neuron allocation is account-wide and V1's use is not yet measured. The tick hook is on (staging has no cron).
+GLM_SIGNAL_ENABLED = "1"
+GLM_INFERENCE_ENABLED = "0"
+GLM_TICK_HOOK_ENABLED = "1"
+GLM_INFLUENCE_CAP = "0"
 
 # The ONLY D1 binding in this file -- a brand-new, empty database created
 # specifically for this staging deployment. Binding name "DB" matches

@@ -82,3 +82,19 @@ describe('configuration guards', () => {
     expect(w).toMatch(/if \(steps\.includes\('glm_daily'\)\) out\.glm_daily = glmStagingProbesEnabled\(env\)/);
   });
 });
+
+describe('coverage accounting', () => {
+  it('run usage records kept/trimmed per class and exclusion reasons', async () => {
+    const { readGlmInputs } = await import('../glm/adapters.js');
+    const { buildPackage } = await import('../glm/package.js');
+    const { LEDGER } = await import('./helpers/glm-fixture.js');
+    const raw = await readGlmInputs(d1.binding, CUT);
+    const pkg = await buildPackage({ raw, cutoffTs: CUT, chronosLedger: LEDGER, baseline: null });
+    const kept = Object.values(pkg.coverage.kept_by_class).reduce((a, b) => a + b, 0);
+    const trimmed = Object.values(pkg.coverage.trimmed_by_class).reduce((a, b) => a + b, 0);
+    expect(kept).toBe(pkg.items.length);
+    expect(trimmed).toBe(pkg.trimmed);
+    expect(Object.values(pkg.coverage.excluded_by_reason).reduce((a, b) => a + b, 0)).toBe(pkg.excluded.length);
+    expect(pkg.coverage.excluded_by_reason.after_cutoff).toBeGreaterThan(0);
+  });
+});

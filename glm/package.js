@@ -188,9 +188,17 @@ export async function buildPackage({ raw, cutoffTs, chronosLedger, baseline }) {
   const user = 'DATA:\n' + JSON.stringify({ header, items: pitems });
   const bytes = enc.encode(user).length;
   const trimmed = built.items.length - items.length;
+  // Coverage accounting (owner qualification 2026-11-19): what was left out and why, per class, so a thin package is
+  // visible as such. Excluded = not admissible (temporal or format); trimmed = admissible but over the size budget.
+  const count = (arr, f) => arr.reduce((m, x) => { const k = f(x); m[k] = (m[k] || 0) + 1; return m; }, {});
+  const coverage = {
+    kept_by_class: count(items, (i) => i.provenance_class),
+    trimmed_by_class: count(built.items.slice(items.length), (i) => i.provenance_class),
+    excluded_by_reason: count(built.excluded, (e) => e.reason),
+  };
   const hash = await sha256Hex(canonicalJson({ v: [GLM_INPUT_VERSION, GLM_PROMPT_VERSION, GLM_SCHEMA_VERSION, GLM_MODEL], header, items: pitems }));
   return {
-    package_hash: hash, cutoffTs, items, excluded: built.excluded, trimmed, header, forecasts: built.forecasts,
+    package_hash: hash, cutoffTs, items, excluded: built.excluded, trimmed, coverage, header, forecasts: built.forecasts,
     prompt: { system: GLM_SYSTEM_PROMPT, user, bytes },
     refs: new Set(items.map((i) => i.ref)),
     // Compact, text-free lineage record for persistence (§10).

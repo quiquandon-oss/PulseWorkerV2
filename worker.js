@@ -8,7 +8,7 @@ import { listCandidates, getCandidate, createCandidate, updateCandidate, decideC
 import { handleEventRoutes, runAutomaticDetection } from './events/event-api.js';
 import { sv2CollectEvidence, SV2_SOURCE_REGISTRY, SV2_COLLECTOR_LIMITS, SV2_COLLECTOR_VERSION } from './sentiment-v2/collector.js';
 import { sv2EvidenceReadings, sv2ScoreHeadline, SV2_EVIDENCE_RULES, SV2_LEXICON_SOURCE } from './sentiment-v2/evidence-score.js';
-import { glmDailySignalRun, glmTickAdjust, handleGlmRoutes } from './glm/runner.js';
+import { glmDailySignalRun, glmTickAdjust, handleGlmRoutes, glmTickProbe, glmStagingProbesEnabled } from './glm/runner.js';
 // ---- BTC k-NN historical analog model ----
 // Feature vector: the 4 headline gauges already computed and logged by the
 // original CryptoPulse pipeline every cycle (sentiment composite, technical
@@ -10921,7 +10921,7 @@ const pulseWorkerHandlers = {
     // Neuron ledger to verify model availability and real Neuron use; it writes no V2 result.
     if (url.pathname === '/api/sentiment-v2/run' && request.method === 'POST') {
       let steps = ['sync', 'v2', 'collect'];
-      try { const b = await request.json(); if (b && Array.isArray(b.steps)) steps = b.steps.filter(x => ['sync', 'collect', 'v2', 'glm_probe'].includes(x)); } catch (_e) { /* defaults */ }
+      try { const b = await request.json(); if (b && Array.isArray(b.steps)) steps = b.steps.filter(x => ['sync', 'collect', 'v2', 'glm_probe', 'glm_daily', 'glm_tick_probe'].includes(x)); } catch (_e) { /* defaults */ }
       const now = Date.now(), out = { ok: true, ran_at: now, steps };
       // Same order and D1 query budget as the cron chain.
       const q = { n: 0 };
@@ -10933,6 +10933,12 @@ const pulseWorkerHandlers = {
         if (steps.includes('collect')) out.collect = await sv2CollectGuarded(renv, now, () => SV2_D1_QUERIES_PER_INVOCATION - SV2_D1_QUERY_RESERVE - q.n,
           { requireFresh: env.SV2_USAGE_GUARD_REQUIRE_FRESH !== '0' });
         if (steps.includes('glm_probe')) out.glm_probe = await sv2GlmProbe(renv, now);
+        // GLM shadow qualification probes: staging only (GLM_STAGING_PROBES = "1" is set nowhere else). The daily run here
+        // is the same function as the 07:00 cron (inference stays off unless its own flags say otherwise).
+        if (steps.includes('glm_daily')) out.glm_daily = glmStagingProbesEnabled(env)
+          ? await glmDailySignalRun(env, glmDeps(env), { scheduledTs: now })
+          : { ok: false, skipped: true, reason: 'GLM_STAGING_PROBES is not "1" (staging only)' };
+        if (steps.includes('glm_tick_probe')) out.glm_tick_probe = await glmTickProbe(env, { now });
         out.d1_queries = q.n;
       } catch (err) {
         out.ok = false; out.error = String((err && err.message) || err).slice(0, 300);

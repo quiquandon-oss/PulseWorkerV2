@@ -59,6 +59,8 @@ GLM_SIGNAL_ENABLED = "1"
 GLM_INFERENCE_ENABLED = "0"
 GLM_TICK_HOOK_ENABLED = "1"
 GLM_INFLUENCE_CAP = "0"
+# Staging-only qualification probes (POST /api/sentiment-v2/run steps glm_daily, glm_tick_probe). Never in production.
+GLM_STAGING_PROBES = "1"
 
 # The ONLY D1 binding in this file -- a brand-new, empty database created
 # specifically for this staging deployment. Binding name "DB" matches

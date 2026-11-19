@@ -8,6 +8,7 @@
 // by worker.js through `deps`.
 import {
   GLM_MODEL, GLM_LIMITS, GLM_INPUT_VERSION, GLM_PROMPT_VERSION, GLM_SCHEMA_VERSION, GLM_RULE_VERSION, GLM_ADJUST, GLM_SCOPE,
+  GLM_ELIGIBILITY, glmInferenceBlockers,
 } from './contract.js';
 import { readGlmInputs, fetchChronosLedger, headlineBaseline, GLM_READ_ROWS_BOUND } from './adapters.js';
 import { buildPackage } from './package.js';
@@ -142,6 +143,7 @@ export async function glmDailySignalRun(env, deps = {}, opts = {}) {
     ).bind(runId, 'BTC', cutoff, started, pkg.package_hash, GLM_INPUT_VERSION, GLM_PROMPT_VERSION, GLM_SCHEMA_VERSION, 'started',
       pkg.items.length, pkg.excluded.length, pkg.prompt.bytes, JSON.stringify(pkg.input_refs), JSON.stringify(pkg.header.missing),
       GLM_RULE_VERSION).run();
+    usage.d1_rows_read += Number(ins?.meta?.rows_read ?? 0) || 0;
     if (!(ins && ins.meta && Number(ins.meta.changes) > 0)) {
       return { status: 'duplicate_package', run_id: runId, package_hash: pkg.package_hash, usage };
     }
@@ -177,19 +179,23 @@ export async function glmDailySignalRun(env, deps = {}, opts = {}) {
       JSON.stringify(s.supporting_refs || []), JSON.stringify(s.contradicting_refs || []), s.timesfm_ref ?? null, s.chronos_ref ?? null,
       s.models_live ? 1 : 0, Math.round(would * 1e6) / 1e6, GLM_ADJUST.referenceCap, GLM_RULE_VERSION, finished);
     const noSignal12 = { direction: 'NO_SIGNAL', eligibility: 'NO_SIGNAL', reasons: [GLM_SCOPE.noSignalReasons[12]] };
+    // rows read by the final write batch (index lookups of the UPDATE/INSERTs) are not known until it runs; they are
+    // reported by d1_usage_daily for the invocation and returned in this function's result as final_batch_rows_read.
     const runUsage = { ...usage, d1_calls: usage.d1_calls + 1, d1_rows_written: usage.d1_rows_written + 2,
       reserved_neurons: ai.reserved_neurons ?? ai.meta?.reserved_neurons ?? 0, input_tokens: ai.meta?.input_tokens ?? null,
       output_tokens: ai.meta?.output_tokens ?? null, actual_neurons: ai.meta?.actual_neurons ?? null,
       chronos_fetch: chron.error || 'ok', package_bytes: pkg.prompt.bytes, trimmed: pkg.trimmed, wall_ms: finished - started,
       read_rows_bound: GLM_READ_ROWS_BOUND };
-    await db.batch([
+    const fin = await db.batch([
       db.prepare(`UPDATE glm_runs SET finished_ts = ?, model = ?, status = ?, reason = ?, output_json = ?, validation_errors_json = ?, usage_json = ?
                   WHERE run_id = ?`).bind(finished, ai.counted ? GLM_MODEL : null, runStatus, reason, output ? JSON.stringify(output) : null,
         validationErrors ? JSON.stringify(validationErrors) : null, JSON.stringify(runUsage), runId),
       sigRow(24, sig, wouldApply),
       sigRow(12, noSignal12, 0),
     ]);
-    return { status: runStatus, run_id: runId, signal: { direction: sig.direction, eligibility: sig.eligibility, reasons: sig.reasons }, usage: runUsage };
+    const finalRows = (fin || []).reduce((s, r) => s + (Number(r?.meta?.rows_read ?? 0) || 0), 0);
+    return { status: runStatus, run_id: runId, signal: { direction: sig.direction, eligibility: sig.eligibility, reasons: sig.reasons },
+      usage: { ...runUsage, final_batch_rows_read: finalRows, d1_rows_read_total: runUsage.d1_rows_read + finalRows } };
   } catch (e) {
     return { status: 'failed', reason: errText(e), usage };
   }
@@ -211,10 +217,11 @@ export async function glmTickAdjust(env, { coin, horizon, predictResult, selecti
     }
     if (!base || !Number.isFinite(predictionTs)) return { ...common, signal_id: null, signal_status: 'NO_SIGNAL', adjustment: 0, would_apply_adjustment: 0, final_p_up: common.baseline_p_up, reason: 'no_baseline' };
     const db = env.DB;
-    const sig = await db.prepare(
+    const sigRes = await db.prepare(
       `SELECT signal_id, asset, horizon_hours, direction, strength, eligibility, valid_from_ts, valid_until_ts FROM glm_signals
        WHERE asset = ? AND horizon_hours = ? AND decision_cutoff_ts <= ? ORDER BY decision_cutoff_ts DESC LIMIT 1`,
-    ).bind(coin, horizon, predictionTs).first();
+    ).bind(coin, horizon, predictionTs).all();
+    const sig = (sigRes && sigRes.results && sigRes.results[0]) || null;
     const r = computeAdjustment({ signal: sig, baseline_p_up: base.baseline_p_up, predictionTs, coin, horizonHours: horizon, influenceCap: flags.cap });
     await db.prepare(
       `INSERT OR IGNORE INTO glm_adjustments (coin, horizon_hours, prediction_ts, baseline_p_up, baseline_source, chosen_variant, signal_id,
@@ -242,8 +249,10 @@ export async function glmStatus(env, nowTs = Date.now()) {
     flags: { signal_enabled: f.signal, inference_enabled: f.inference, tick_hook_enabled: f.tick, influence_cap: f.cap, mode: f.mode },
     scope: { assets: GLM_SCOPE.assets, horizons: GLM_SCOPE.horizons, run: '07:00 UTC daily', note: '12 h, ETH and LINK are NO_SIGNAL' },
     adjustment: { reference_cap: GLM_ADJUST.referenceCap, hard_max_cap: GLM_ADJUST.hardMaxCap, thresholds: 'provisional, not calibrated' },
+    eligibility: GLM_ELIGIBILITY,
+    blocker_codes: [...glmInferenceBlockers(), ...(f.inference ? [] : ['inference_disabled']), ...(f.tick ? [] : ['tick_hook_disabled'])],
     blockers: [
-      ...(f.inference ? [] : ['inference disabled (GLM_INFERENCE_ENABLED != "1"): V1 Workers AI Neuron use and model licence not yet verified']),
+      ...(f.inference ? [] : ['inference disabled (GLM_INFERENCE_ENABLED != "1"): V1 Workers AI Neuron use and the 07:00 Worker CPU are not yet verified (model, free-plan eligibility and MIT licence are verified)']),
       ...(model === GLM_MODEL ? [] : ['SENTIMENT_V2_AI_MODEL is not the verified GLM model']),
       ...(f.tick ? [] : ['tick hook off (GLM_TICK_HOOK_ENABLED != "1"): adjustments not recorded yet']),
     ],
@@ -324,5 +333,55 @@ export async function handleGlmRoutes(request, env, url, corsHeaders = {}) {
     return new Response(body, { headers: { ...corsHeaders, ...JSON_HEADERS } });
   } catch (e) {
     return new Response(JSON.stringify({ ok: false, error: 'glm data unavailable', detail: errText(e) }), { status: 503, headers: { ...corsHeaders, 'Content-Type': 'application/json', 'Cache-Control': 'no-store' } });
+  }
+}
+
+// ---------- staging-only qualification probes (GLM_STAGING_PROBES = "1" exists only in wrangler.staging.toml) ----------
+
+export function glmStagingProbesEnabled(env) { return String(env.GLM_STAGING_PROBES ?? '0') === '1'; }
+
+// D1 wrapper that counts calls and the rows D1 itself reports (meta.rows_read / rows_written) for one measured step.
+function countingDb(db, c) {
+  const note = (r) => { c.rows_read += Number(r?.meta?.rows_read ?? 0) || 0; c.rows_written += Number(r?.meta?.rows_written ?? 0) || 0; };
+  const wrap = (st) => ({
+    __inner: st,
+    bind: (...a) => wrap(st.bind(...a)),
+    all: async (...a) => { c.calls += 1; const r = await st.all(...a); note(r); return r; },
+    run: async (...a) => { c.calls += 1; const r = await st.run(...a); note(r); return r; },
+    first: async (...a) => { c.calls += 1; c.first_calls += 1; return st.first(...a); },   // first() carries no meta
+  });
+  return { prepare: (sql) => wrap(db.prepare(sql)),
+    batch: async (stmts) => { c.calls += 1; const rs = await db.batch(stmts.map((s) => (s && s.__inner ? s.__inner : s))); for (const r of rs || []) note(r); return rs; } };
+}
+
+// Tick-hook probe on a SYNTHETIC BTC 24 h prediction (marked chosen_variant 'staging_probe'), run twice to prove
+// idempotency, plus an out-of-scope call (ETH) that must cost zero queries. Measures D1 calls/rows per call. Shadow only:
+// the cap is forced to 0 here whatever the environment says. Never available outside staging.
+export async function glmTickProbe(env, { now = Date.now(), baseline_p_up = 0.5 } = {}) {
+  if (!glmStagingProbesEnabled(env)) return { ok: false, skipped: true, reason: 'GLM_STAGING_PROBES is not "1" (staging only)' };
+  const predictionTs = Math.floor(now / 60000) * 60000;
+  const pr = { status: 'ok', persisted: true, ts: predictionTs, p_up: 0.5, synthetic: true };
+  const sel = { ok: true, chosen_variant: 'staging_probe', cycle_p_up: baseline_p_up };
+  const measure = async (coin) => {
+    const c = { calls: 0, first_calls: 0, rows_read: 0, rows_written: 0 };
+    const penv = { ...env, DB: countingDb(env.DB, c), GLM_TICK_HOOK_ENABLED: '1', GLM_INFLUENCE_CAP: '0' };
+    const t0 = Date.now();
+    const glm = await glmTickAdjust(penv, { coin, horizon: 24, predictResult: pr, selection: sel, now });
+    return { glm, d1: c, wall_ms: Date.now() - t0 };   // wall time includes I/O; Workers CPU time is not observable here
+  };
+  try {
+    const first = await measure('BTC');
+    const second = await measure('BTC');
+    const eth = await measure('ETH');
+    const row = await env.DB.prepare('SELECT COUNT(*) AS n FROM glm_adjustments WHERE coin = ? AND horizon_hours = ? AND prediction_ts = ?')
+      .bind('BTC', 24, predictionTs).first();
+    const ledgerRows = row ? Number(row.n) : null;
+    const baselineKept = first.glm && first.glm.final_p_up === baseline_p_up && first.glm.adjustment === 0;
+    const ok = !!first.glm && ledgerRows === 1 && second.d1.rows_written === 0 && eth.d1.calls === 0 && baselineKept;
+    return { ok, synthetic: true, prediction_ts: predictionTs, baseline_p_up, first, second, out_of_scope_eth: eth,
+      ledger_rows_for_ts: ledgerRows, idempotent: second.d1.rows_written === 0 && ledgerRows === 1, baseline_unchanged: baselineKept,
+      note: 'synthetic staging prediction; shadow cap forced to 0; wall_ms includes D1 latency, not CPU' };
+  } catch (e) {
+    return { ok: false, error: errText(e) };
   }
 }

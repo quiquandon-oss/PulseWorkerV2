@@ -70,6 +70,27 @@ export const GLM_SCOPE = Object.freeze({
   noSignalReasons: Object.freeze({ 12: 'no_live_model_forecast', ETH: 'asset_out_of_scope', LINK: 'asset_out_of_scope' }),
 });
 
+// Inference eligibility evidence (mandate §3; owner operational qualification 2026-11-19). Each item is verified only
+// with a recorded source; anything unverified is a machine-readable blocker and inference stays disabled.
+export const GLM_ELIGIBILITY = Object.freeze({
+  checked_at: '2026-11-19',
+  model_id: Object.freeze({ verified: true, value: '@cf/zai-org/glm-4.7-flash', source: 'Cloudflare Workers AI model catalogue' }),
+  availability: Object.freeze({ verified: true, source: 'not in the 2026-11-20 deprecation list (changelog 2026-11-05)' }),
+  free_plan: Object.freeze({ verified: true, source: 'listed as available on Workers Free (changelog 2026-07-28)' }),
+  licence: Object.freeze({ verified: true, value: 'MIT', source: 'huggingface.co/zai-org/GLM-4.7-Flash model card (license: mit, not gated)' }),
+  pricing: Object.freeze({ verified: true, value: '5,500 / 36,400 Neurons per M input / output tokens', source: 'Workers AI pricing page' }),
+  free_allocation: Object.freeze({ verified: true, value: '10,000 Neurons/day, account-wide, reset 00:00 UTC', source: 'Workers AI pricing page' }),
+  rate_limit: Object.freeze({ verified: true, value: '300 requests/min (text generation)', source: 'Workers AI limits page' }),
+  v1_neuron_usage: Object.freeze({ verified: false, blocker: 'v1_neuron_usage_unmeasured',
+    needed: 'Workers AI dashboard (or GraphQL aiInferenceAdaptiveGroups, Account Analytics Read) daily Neurons for the last 7-30 days' }),
+  worker_cpu: Object.freeze({ verified: false, blocker: 'worker_cpu_unverified',
+    needed: 'Workers metrics for pulseworker-v2 scheduled 0 7 * * * (CPU time, exceededCpu), dashboard or GraphQL workersInvocationsAdaptive' }),
+});
+
+export function glmInferenceBlockers() {
+  return Object.values(GLM_ELIGIBILITY).filter((v) => v && typeof v === 'object' && v.verified === false).map((v) => v.blocker);
+}
+
 export const GLM_RUN_STATUSES = Object.freeze([
   'completed', 'no_conclusion', 'insufficient_evidence', 'model_disabled', 'skipped_budget', 'quota_exhausted',
   'model_unavailable', 'timeout', 'invalid_output', 'duplicate_package', 'inputs_degraded', 'failed',

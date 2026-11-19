@@ -6,7 +6,7 @@ import {
 } from './contract.js';
 import {
   normV1Composite, normV1SourceObs, normV1History, normV1Technical, normV1RiskRegime, normV1Foufi, normV1Catalysts,
-  summarizeGeminiDaily, normGeminiDaily, glmReadErrorClass, normCollector, normEvents, normMarket, normV2Track, normV2Sentiment, normTimesfm, normChronos,
+  summarizeGeminiDaily, normGeminiDaily, glmReadErrorClass, v1SourceStatusSummary, normCollector, normEvents, normMarket, normV2Track, normV2Sentiment, normTimesfm, normChronos,
 } from './adapters.js';
 
 export async function sha256Hex(s) {
@@ -90,8 +90,10 @@ export function buildItems(raw, cutoffTs, chronosLedger) {
   const kept = [];
   for (const it of all) {
     if (!GLM_CLASSES.includes(it.provenance_class)) { excluded.push({ ref: it.ref, reason: 'unknown_class' }); continue; }
+    // Invalid records never become evidence: excluded with their reasons (kept in the run's exclusion accounting).
+    if (it.quality && it.quality.status === 'invalid') { excluded.push({ ref: it.ref, reason: 'invalid:' + (it.quality.issues || []).join('|'), table: it.table }); continue; }
     const a = admissible(it, cutoffTs);
-    if (!a.ok) { excluded.push({ ref: it.ref, reason: a.reason }); continue; }
+    if (!a.ok) { excluded.push({ ref: it.ref, reason: a.reason, table: it.table }); continue; }
     it.freshness_h = Math.round((cutoffTs - it.times.first_available_ts) / 36e3) / 100;
     kept.push(it);
   }
@@ -151,6 +153,7 @@ function promptItem(it) {
     target: utcMin(it.times.target_ts),
     uncertain: it.times.uncertain.length ? it.times.uncertain : undefined,
     age_h: it.freshness_h,
+    quality: it.quality && it.quality.status !== 'valid' ? it.quality : undefined,
     content: it.content,
   });
 }
@@ -167,6 +170,7 @@ export const GLM_SYSTEM_PROMPT = [
   '6. TimesFM and Chronos-2 are separate numerical forecasts; report whether they agree. Do not turn disagreement into certainty. TimesFM supplies no uncertainty range.',
   '7. Do not write any number that does not appear in DATA.',
   '8. If the evidence is thin, stale, contradictory or one-sided, return direction NEUTRAL or status insufficient_evidence / no_conclusion. That is a valid, useful answer.',
+  '9. header.input_quality says whether every input group was available (package_status complete / degraded) and which V1 sources failed. If it is not complete, name the degraded or missing groups in limitations and never present the analysis as complete. Items carrying a "quality" field are stale or degraded: weigh them accordingly and say so when you rely on them.',
   'Return ONLY a JSON object with exactly these keys: status, horizons, findings, forecast_comparison, gemini_vs_original, uncertainty, limitations.',
   'status: "completed" | "no_conclusion" | "insufficient_evidence".',
   'horizons: [{"horizon_hours":24,"direction":"UP"|"DOWN"|"NEUTRAL","strength":"weak"|"moderate"|"strong","supporting_refs":[..],"contradicting_refs":[..],"rationale":"<=400 chars"}] (empty array allowed when status is not completed).',
@@ -175,6 +179,48 @@ export const GLM_SYSTEM_PROMPT = [
   'gemini_vs_original: [{"gemini_ref":"..","original_ref":".."|null,"relation":"consistent"|"contradicts"|"omits"|"unsupported"|"unverifiable"|"no_original","assessment":"included"|"discounted"|"excluded","reason":"<=160 chars"}] (at most 6; original_ref null only with unverifiable or no_original).',
   'uncertainty: "low"|"medium"|"high". limitations: [strings <=160 chars] (at most 6).',
 ].join('\n');
+
+// Input groups of the mandate (A V1 incl. its stored Gemini outputs, B collector, C market/V2, D TimesFM, E Chronos)
+// plus frozen V2 historical AI outputs. Per group: kept items by quality, invalid, temporally excluded, trimmed,
+// duplicates and read errors. package_status: complete (every required group has a usable item and no read error),
+// degraded (some group missing/erroring/only stale-degraded), insufficient (< 3 usable required groups or no usable
+// model forecast) -> no model call (runner). An incomplete package is never presented as complete.
+const GROUP_OF_TABLE = {
+  server_composite_readings: 'v1', server_source_observations: 'v1', history: 'v1', technical_eval: 'v1', risk_regime_readings: 'v1',
+  foufi_digest: 'v1', coin_catalyst_log: 'v1', sv2_evidence: 'collector', event_ledger: 'collector', btc_data: 'market_v2',
+  predictions: 'market_v2', sentiment_v2_results: 'market_v2', experiment_4_timesfm: 'timesfm', 'research-data/exp008-chronos': 'chronos',
+  gemini_daily_analysis: 'v2_historical_ai',
+};
+const GROUP_OF_READ_KEY = (k) => (k.startsWith('v1_') ? 'v1' : k === 'collector' || k === 'events' ? 'collector'
+  : k === 'timesfm' ? 'timesfm' : k === 'v2_gemini_daily' ? 'v2_historical_ai' : 'market_v2');
+export const GLM_REQUIRED_GROUPS = Object.freeze(['v1', 'collector', 'market_v2', 'timesfm', 'chronos']);
+
+export function inputQuality({ raw, kept, trimmedItems, excluded, forecasts, v1Sources }) {
+  const groups = {};
+  const g = (k) => (groups[k] = groups[k] || { kept: 0, valid: 0, stale: 0, degraded: 0, invalid: 0, excluded_temporal: 0, trimmed: 0, duplicates: 0, read_errors: [] });
+  for (const k of [...GLM_REQUIRED_GROUPS, 'v2_historical_ai']) g(k);
+  for (const it of kept) {
+    const e = g(GROUP_OF_TABLE[it.table] || 'other');
+    e.kept += 1; e[it.quality?.status || 'valid'] = (e[it.quality?.status || 'valid'] || 0) + 1;
+    if (it.duplicate_of) e.duplicates += 1;
+  }
+  for (const it of trimmedItems) g(GROUP_OF_TABLE[it.table] || 'other').trimmed += 1;
+  for (const x of excluded) {
+    const e = g(GROUP_OF_TABLE[x.table] || 'other');
+    if (String(x.reason).startsWith('invalid:')) e.invalid += 1; else e.excluded_temporal += 1;
+  }
+  for (const [k, msg] of Object.entries(raw.errors || {})) g(GROUP_OF_READ_KEY(k)).read_errors.push(k + ':' + glmReadErrorClass(msg));
+  if (forecasts && forecasts.chronos_error) g('chronos').read_errors.push(String(forecasts.chronos_error));
+  const usable = (k) => groups[k].valid + groups[k].stale + groups[k].degraded > 0;
+  const missing_groups = GLM_REQUIRED_GROUPS.filter((k) => !usable(k));
+  const degraded_groups = GLM_REQUIRED_GROUPS.filter((k) => usable(k) && (groups[k].read_errors.length > 0 || groups[k].valid === 0 || groups[k].invalid > 0));
+  const usableRequired = GLM_REQUIRED_GROUPS.filter(usable).length;
+  const package_status = usableRequired < 3 || (!usable('timesfm') && !usable('chronos')) ? 'insufficient'
+    : missing_groups.length || degraded_groups.length ? 'degraded' : 'complete';
+  const notOk = {};
+  for (const [st, ids] of Object.entries((v1Sources && v1Sources.by_status) || {})) if (st !== 'ok') notOk[st] = ids;
+  return { package_status, missing_groups, degraded_groups, groups, v1_sources_not_ok: notOk, v1_source_slot_ts: v1Sources?.slot_ts ?? null };
+}
 
 // Builds the bounded package and prompt. Items are trimmed (lowest priority last) until the prompt fits.
 export async function buildPackage({ raw, cutoffTs, chronosLedger, baseline }) {
@@ -200,9 +246,14 @@ export async function buildPackage({ raw, cutoffTs, chronosLedger, baseline }) {
   const sizes = allP.map((p) => enc.encode(JSON.stringify(p)).length + 1);
   const overhead = enc.encode('DATA:\n' + JSON.stringify({ header, items: [] })).length;
   let n = 0, total = overhead;
-  while (n < allP.length && total + sizes[n] <= GLM_LIMITS.maxPromptBytes) { total += sizes[n]; n += 1; }
+  // 1 KiB of the budget is reserved for header.input_quality, which depends on what is kept.
+  while (n < allP.length && total + sizes[n] <= GLM_LIMITS.maxPromptBytes - 1024) { total += sizes[n]; n += 1; }
   items = items.slice(0, n);
   const pitems = allP.slice(0, n);
+  const quality = inputQuality({ raw, kept: items, trimmedItems: built.items.slice(items.length), excluded: built.excluded,
+    forecasts: built.forecasts, v1Sources: v1SourceStatusSummary((raw.rows || {}).v1_source_obs || []) });
+  header.input_quality = { package_status: quality.package_status, degraded_groups: quality.degraded_groups,
+    missing_groups: quality.missing_groups, v1_sources_not_ok: quality.v1_sources_not_ok };
   const user = 'DATA:\n' + JSON.stringify({ header, items: pitems });
   const bytes = enc.encode(user).length;
   const trimmed = built.items.length - items.length;
@@ -216,7 +267,7 @@ export async function buildPackage({ raw, cutoffTs, chronosLedger, baseline }) {
   };
   const hash = await sha256Hex(canonicalJson({ v: [GLM_INPUT_VERSION, GLM_PROMPT_VERSION, GLM_SCHEMA_VERSION, GLM_MODEL], header, items: pitems }));
   return {
-    package_hash: hash, cutoffTs, items, excluded: built.excluded, trimmed, coverage, header, forecasts: built.forecasts,
+    package_hash: hash, cutoffTs, items, excluded: built.excluded, trimmed, coverage, quality, header, forecasts: built.forecasts,
     prompt: { system: GLM_SYSTEM_PROMPT, user, bytes },
     refs: new Set(items.map((i) => i.ref)),
     // Compact, text-free lineage record for persistence (§10).

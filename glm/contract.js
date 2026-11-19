@@ -2,10 +2,10 @@
 // Pure constants only. Any change to a value that alters a package, a signal or an adjustment must bump the matching
 // version, because the versions are part of the package hash (idempotency) and of every stored record.
 
-export const GLM_INPUT_VERSION = 'glm-input-2';   // 2: Gemini-chain keys for derived V1 scores, Gemini daily items, compact items
-export const GLM_PROMPT_VERSION = 'glm-prompt-2'; // 2: Gemini assessment duties, compact item fields
+export const GLM_INPUT_VERSION = 'glm-input-3';   // 3: item quality (valid/stale/degraded/invalid), per-group input quality, package status
+export const GLM_PROMPT_VERSION = 'glm-prompt-3'; // 3: package_status / item quality duties (2: Gemini assessment duties)
 export const GLM_SCHEMA_VERSION = 'glm-signal-2'; // 2: ai_interpretation/unknown findings, Gemini assessment fields
-export const GLM_RULE_VERSION = 'glm-qual-0.2';            // PROVISIONAL; 0.2: AI-only chains never corroborate            // PROVISIONAL: not calibrated (see §8 of the contract)
+export const GLM_RULE_VERSION = 'glm-qual-0.3';            // PROVISIONAL; 0.3: insufficient package -> no model call, NO_SIGNAL (0.2: AI-only chains never corroborate)
 export const GLM_MODEL = '@cf/zai-org/glm-4.7-flash';
 
 // Provenance classes (§2). Every input item carries exactly one.
@@ -43,6 +43,7 @@ export const GLM_LIMITS = Object.freeze({
   maxCompletionTokens: 1500,
   evidenceLookbackMs: 48 * 3600e3,
   freshMs: 24 * 3600e3,          // a supporting item must be at most this old at the cutoff
+  v1SourceStaleMs: 36 * 3600e3,  // a V1 per-source observation older than this at fetch time is flagged stale
   staleForecastMs: 36 * 3600e3,  // forecast row older than this at the cutoff = stale
   signalValidityMs: 24 * 3600e3,
   persistenceGapMs: [18 * 3600e3, 30 * 3600e3], // previous signal cutoff must be 24 h ± 6 h earlier

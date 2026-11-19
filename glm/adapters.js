@@ -29,7 +29,7 @@ export const GLM_READ_QUERIES = Object.freeze([
     'SELECT ts, version, status, score, regime, generated_ts FROM risk_regime_readings WHERE ts <= ? ORDER BY ts DESC LIMIT 1',
     args: (c) => [c] },
   { key: 'v1_foufi', rowsBound: 10, sql:
-    'SELECT video_id, published_ts, title, url, transcript_status, summary_json, overall_lean, fetched_ts, video_type, special_edition ' +
+    'SELECT video_id, published_ts, title, url, transcript_status, summary_json, overall_lean, fetched_ts, video_type, special_edition, error_message ' +
     'FROM foufi_digest ORDER BY rowid DESC LIMIT 10',
     args: () => [] },
   { key: 'v1_catalysts', rowsBound: 20, sql:
@@ -210,6 +210,7 @@ function item(ref, cls, o) {
     origin: o.origin, table: o.table, record_id: o.record_id == null ? null : String(o.record_id),
     asset_scope: o.asset_scope || ['BTC'], independence_key: o.independence_key, derived_from: o.derived_from || [],
     times: o.times, content: o.content, ident: o.ident || null,
+    quality: o.quality || { status: 'valid', issues: [] },
   };
 }
 
@@ -218,12 +219,20 @@ function item(ref, cls, o) {
 export function normV1Composite(rows) {
   return rows.map((r) => {
     const prov = safeJson(r.provenance_json);
+    const issues = [];
+    let status = 'valid';
+    const c = Number(r.composite);
+    if (r.composite == null || !Number.isFinite(c) || c < 0 || c > 100) { status = 'invalid'; issues.push('composite_missing_or_out_of_range'); }
+    if (prov === undefined) issues.push('provenance_malformed');
+    if (Number(r.below_floor) === 1) issues.push('below_v1_floor');
+    if (r.completeness != null && Number(r.completeness) < 0.5) issues.push('low_completeness');
+    if (status === 'valid' && issues.length) status = 'degraded';
     const sources = Array.isArray(prov?.sources)
       ? prov.sources.slice(0, 20).map((s) => ({ id: String(s.id), score: Number.isFinite(Number(s.score)) ? Number(s.score) : null }))
       : null;
     return item(`v1c:${r.slot_ts}`, 'v1_aggregate', {
       origin: 'sentiment-ff75', table: 'server_composite_readings', record_id: r.slot_ts, independence_key: 'v1agg',
-      asset_scope: ['*'],
+      asset_scope: ['*'], quality: { status, issues },
       times: times({ created_ts: r.computed_ts, event_ts: r.slot_ts }, ['created_ts']),
       content: { kind: 'v1_server_composite', version: r.version ?? null, composite: r.composite ?? null,
         completeness: r.completeness ?? null, below_floor: r.below_floor ?? null, n_ok: r.n_ok ?? null,
@@ -241,7 +250,16 @@ export function normV1SourceObs(rows, foufiRows = []) {
   return rows.filter((r) => r.status === 'ok' && r.score != null).map((r) => {
     const gem = V1_GEMINI_DERIVED_SOURCES[r.source_id];
     const vid = gem ? byPublished.get(Number(r.observed_at)) : undefined;
+    const sc = Number(r.score);
+    const issues = [];
+    let status = 'valid';
+    if (!Number.isFinite(sc) || sc < 0 || sc > 100) { status = 'invalid'; issues.push('score_out_of_range'); }
+    const age = validTs(r.fetched_at) != null && validTs(r.observed_at) != null ? r.fetched_at - r.observed_at : null;
+    if (age != null && age < -60e3) issues.push('observed_after_fetch');
+    if (status === 'valid' && age != null && age > GLM_LIMITS.v1SourceStaleMs) { status = 'stale'; issues.push('observation_older_than_36h'); }
+    if (status === 'valid' && issues.length) status = 'degraded';
     return item(`v1s:${r.slot_ts}:${r.source_id}`, 'v1_aggregate', {
+      quality: { status, issues },
       family: gem ? 'news' : undefined,
       origin: 'sentiment-ff75', table: 'server_source_observations', record_id: `${r.slot_ts}:${r.source_id}`,
       independence_key: gem ? (vid ? `src:youtube:${vid}` : `gemini:${r.source_id}:${r.observed_at}`) : `v1src:${r.source_id}`, asset_scope: ['*'],
@@ -257,8 +275,12 @@ export function normV1SourceObs(rows, foufiRows = []) {
 export function normV1History(rows) {
   return rows.map((r) => {
     const src = safeJson(r.sources_json);
+    const sc = Number(r.score);
+    const bad = r.score == null || !Number.isFinite(sc) || sc < 0 || sc > 100;
+    const quality = bad ? { status: 'invalid', issues: ['score_missing_or_out_of_range'] }
+      : src === undefined ? { status: 'degraded', issues: ['sources_json_malformed'] } : { status: 'valid', issues: [] };
     return item(`v1h:${r.id}`, 'v1_aggregate', {
-      origin: 'sentiment-ff75', table: 'history', record_id: r.id, independence_key: 'v1agg', asset_scope: ['*'],
+      origin: 'sentiment-ff75', table: 'history', record_id: r.id, independence_key: 'v1agg', asset_scope: ['*'], quality,
       times: times({ created_ts: r.ts }, ['created_ts']),
       content: { kind: 'v1_composite_reading', score: r.score ?? null, technical_score: r.technical_score ?? null,
         regime_mag: r.regime_mag ?? null, bottom_score: r.bottom_score ?? null, gold_regime: r.gold_regime ?? null,
@@ -286,12 +308,23 @@ export function normV1RiskRegime(rows) {
   }));
 }
 
+// Per-source status of V1's last server slot (ok / stale / error / timeout / unavailable): failed sources are reported,
+// never silently dropped (V1 records them with status and no score).
+export function v1SourceStatusSummary(rows) {
+  const by = {};
+  for (const r of rows || []) { const st = String(r.status || 'unknown'); (by[st] = by[st] || []).push(String(r.source_id)); }
+  for (const k of Object.keys(by)) by[k].sort();
+  return { slot_ts: rows && rows.length ? Math.max(...rows.map((r) => Number(r.slot_ts) || 0)) : null, by_status: by };
+}
+
 // Foufi: the Gemini summary is an interpretation; the video itself is the original source (metadata only: there is no
 // stored transcript, so none is claimed). Both share one independence key: one confirmation, not two.
 export function normV1Foufi(rows, cutoffTs, { keep = 3 } = {}) {
   const out = [];
+  // The newest `keep` videos are considered whatever the state of their summary, so a failed or malformed Gemini summary
+  // is reported (as an invalid item, excluded with its reason) instead of silently disappearing.
   const usable = rows
-    .filter((r) => validTs(r.published_ts) != null && r.summary_json)
+    .filter((r) => validTs(r.published_ts) != null)
     .sort((a, b) => b.published_ts - a.published_ts)
     .slice(0, keep);
   for (const r of usable) {
@@ -305,7 +338,16 @@ export function normV1Foufi(rows, cutoffTs, { keep = 3 } = {}) {
     }));
     const s = safeJson(r.summary_json);
     const btc = s && s.coins && s.coins.BTC ? s.coins.BTC : null;
+    const btcScore = btc && btc.score !== null && btc.score !== undefined && Number.isFinite(Number(btc.score)) ? Number(btc.score) : null;
+    const issues = [];
+    let status = 'valid';
+    if (r.summary_json == null) { status = 'invalid'; issues.push('summary_missing' + (r.transcript_status ? ':' + String(r.transcript_status).slice(0, 20) : '')); }
+    else if (s === undefined) { status = 'invalid'; issues.push('summary_malformed'); }
+    else if (!s || typeof s !== 'object' || !s.coins || r.transcript_status === 'unstructured') { status = 'invalid'; issues.push('summary_unstructured'); }
+    else if (btcScore != null && (btcScore < -2 || btcScore > 2)) { status = 'invalid'; issues.push('btc_score_out_of_range'); }
+    else if (btcScore == null) { status = 'degraded'; issues.push('btc_score_missing'); }
     out.push(item(`gem:foufi:${r.video_id}`, 'gemini_interpretation', {
+      quality: { status, issues },
       origin: 'sentiment-ff75', table: 'foufi_digest', record_id: r.video_id, independence_key: key, derived_from: [orig],
       asset_scope: ['*'],
       // A summary is available when V1 fetched (generated) it, never earlier than the video itself.
@@ -317,9 +359,10 @@ export function normV1Foufi(rows, cutoffTs, { keep = 3 } = {}) {
         macro: s.macro ? { lean: s.macro.lean ?? null, text: sanitizeText(s.macro.text, 200) } : null,
         micro: s.micro ? { lean: s.micro.lean ?? null, text: sanitizeText(s.micro.text, 200) } : null,
         tradfi: s.tradfi ? { lean: s.tradfi.lean ?? null, text: sanitizeText(s.tradfi.text, 200) } : null,
-        btc: btc ? { score: Number.isFinite(Number(btc.score)) && btc.score !== null ? Number(btc.score) : null, note: sanitizeText(btc.note, 200) } : null,
+        btc: btc ? { score: btcScore, note: sanitizeText(btc.note, 200) } : null,
         dominant_driver: s.dominant_driver ?? null, major_catalyst: s.major_catalyst?.name ? sanitizeText(s.major_catalyst.name, 120) : null }
-        : { kind: 'gemini_video_summary', parse: 'malformed', content_id: contentId(r.summary_json) },
+        : { kind: 'gemini_video_summary', parse: r.summary_json == null ? 'missing' : 'malformed', content_id: contentId(r.summary_json),
+          transcript_status: r.transcript_status ?? null, error: sanitizeText(r.error_message, 120) },
     }));
   }
   return out;
@@ -345,6 +388,7 @@ export function normV1Catalysts(rows, cutoffTs) {
     }
     const gemini = r.investigation_id != null && String(r.investigation_id) !== '';
     out.push(item(`cat:${r.id}`, gemini ? 'gemini_interpretation' : 'v1_ai_interpretation', {
+      quality: cu ? { status: 'valid', issues: [] } : { status: 'degraded', issues: ['no_original_reference'] },
       family: 'news', origin: gemini ? 'pulseworker-v2 (historical gemini investigation)' : 'sentiment-ff75', table: 'coin_catalyst_log',
       record_id: r.id, independence_key: key, derived_from: derived,
       times: times({ created_ts: r.ts, published_ts: r.first_public_timestamp }, ['created_ts']),
@@ -368,6 +412,7 @@ export function normGeminiDaily(rows, cutoffTs) {
   const resolved = validTs(r.resolved_ts) != null && r.resolved_ts <= cutoffTs;
   return [item(`gem:daily:${r.id}`, 'gemini_interpretation', {
     family: 'news', origin: 'pulseworker-v2 (historical, frozen)', table: 'gemini_daily_analysis', record_id: r.id,
+    quality: cutoffTs - r.ts > GLM_LIMITS.freshMs ? { status: 'stale', issues: ['older_than_24h'] } : { status: 'valid', issues: [] },
     independence_key: `gemini:daily:${r.id}`, asset_scope: ['BTC'],
     times: times({ created_ts: r.ts }, ['created_ts']),
     content: { kind: 'gemini_daily_analysis', model: 'gemini (historical V2 daily analysis)', bias_short: r.bias_short ?? null,
@@ -391,7 +436,11 @@ export function summarizeGeminiDaily(rows, cutoffTs) {
 export function normCollector(rows) {
   return rows.map((r) => {
     const cu = canonicalUrl(r.canonical_url);
+    const issues = [];
+    if (!r.title || !String(r.title).trim()) issues.push('missing_title');
+    if (!cu) issues.push('missing_or_invalid_url');
     return item(`ev:${r.evidence_id}`, 'collector_evidence', {
+      quality: issues.length ? { status: 'invalid', issues } : { status: 'valid', issues: [] },
       origin: String(r.source_id), table: 'sv2_evidence', record_id: r.evidence_id,
       independence_key: cu ? `url:${cu}` : `ev:${r.evidence_id}`, asset_scope: ['*'],
       times: times({ published_ts: r.published_ts, retrieved_ts: r.retrieved_ts }, ['retrieved_ts']),

@@ -370,8 +370,15 @@ export function normV2Track(rows, cutoffTs) {
 export function headlineBaseline(body) {
   if (!body || typeof body !== 'object') return null;
   const sel = body.selection;
-  if (sel && sel.ok && sel.chosen_variant && sel.chosen_variant !== 'original' && Number.isFinite(Number(sel.cycle_p_up))) {
-    return { baseline_p_up: Number(sel.cycle_p_up), baseline_source: 'cycle_p_up', chosen_variant: sel.chosen_variant };
+  // Exact mirror of CryptoPulseV2 headlineOf(): non-original -> cycle_p_up when it is a number, else chosen_p_up.
+  if (sel && sel.ok && sel.chosen_variant && sel.chosen_variant !== 'original') {
+    if (typeof sel.cycle_p_up === 'number' && Number.isFinite(sel.cycle_p_up)) {
+      return { baseline_p_up: sel.cycle_p_up, baseline_source: 'cycle_p_up', chosen_variant: sel.chosen_variant };
+    }
+    if (typeof sel.chosen_p_up === 'number' && Number.isFinite(sel.chosen_p_up)) {
+      return { baseline_p_up: sel.chosen_p_up, baseline_source: 'chosen_p_up', chosen_variant: sel.chosen_variant };
+    }
+    return null;
   }
   if (Number.isFinite(Number(body.p_up))) return { baseline_p_up: Number(body.p_up), baseline_source: 'p_up', chosen_variant: sel?.chosen_variant ?? null };
   return null;

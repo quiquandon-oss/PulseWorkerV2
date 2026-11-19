@@ -90,8 +90,16 @@ export function buildItems(raw, cutoffTs, chronosLedger) {
   const seen = new Set();
   const uniq = [];
   for (const it of kept) { if (seen.has(it.ref)) { excluded.push({ ref: it.ref, reason: 'duplicate_ref' }); continue; } seen.add(it.ref); uniq.push(it); }
-  uniq.sort((a, b) => (CLASS_PRIORITY[a.provenance_class] ?? 9) - (CLASS_PRIORITY[b.provenance_class] ?? 9)
+  // Round-robin across classes: within a class newest first; then rank 0 of every class (in class priority order), rank 1
+  // of every class, ... Trimming the tail therefore drops the oldest items of every class evenly, so no input group
+  // (e.g. V1) disappears just because another group (e.g. collector evidence) is plentiful.
+  const byClass = new Map();
+  for (const it of uniq) { if (!byClass.has(it.provenance_class)) byClass.set(it.provenance_class, []); byClass.get(it.provenance_class).push(it); }
+  for (const arr of byClass.values()) arr.sort((a, b) => b.times.first_available_ts - a.times.first_available_ts);
+  for (const arr of byClass.values()) arr.forEach((it, i) => { it._rank = i; });
+  uniq.sort((a, b) => a._rank - b._rank || (CLASS_PRIORITY[a.provenance_class] ?? 9) - (CLASS_PRIORITY[b.provenance_class] ?? 9)
     || (b.times.first_available_ts - a.times.first_available_ts));
+  for (const it of uniq) delete it._rank;
   return {
     items: uniq, excluded,
     forecasts: { timesfm: tfm.latest, chronos: chr.latest, chronos_error: chr.error || null, timesfm_track: tfm.track, chronos_track: chr.track },
@@ -99,11 +107,24 @@ export function buildItems(raw, cutoffTs, chronosLedger) {
   };
 }
 
-// Prompt-side view of an item: no table internals, independence key reduced to a short hash.
-async function promptItem(it) {
+// Short, stable display key for the model (FNV-1a, 2 x 32 bit). Not a security hash: it only lets the model see which
+// items share an independence key without exposing URLs; independence itself is computed in code (signal.js).
+export function shortKey(s) {
+  let h1 = 0x811c9dc5, h2 = 0x01000193 ^ 0x5bd1e995;
+  const str = String(s);
+  for (let i = 0; i < str.length; i++) {
+    const c = str.charCodeAt(i);
+    h1 = Math.imul(h1 ^ c, 0x01000193) >>> 0;
+    h2 = Math.imul(h2 ^ c, 0x5bd1e995) >>> 0;
+  }
+  return h1.toString(16).padStart(8, '0') + h2.toString(16).padStart(8, '0').slice(0, 4);
+}
+
+// Prompt-side view of an item: no table internals, independence key reduced to a short display key.
+function promptItem(it) {
   return {
     ref: it.ref, class: it.provenance_class, family: it.family, origin: it.origin,
-    key: (await sha256Hex(it.independence_key)).slice(0, 12),
+    key: shortKey(it.independence_key),
     derived_from: it.derived_from.length ? it.derived_from : undefined,
     duplicate_of: it.duplicate_of,
     first_available_utc: new Date(it.times.first_available_ts).toISOString(),
@@ -154,15 +175,18 @@ export async function buildPackage({ raw, cutoffTs, chronosLedger, baseline }) {
       ...Object.keys(raw.errors || {}).map((k) => 'read_error:' + k),
     ],
   };
-  let user, bytes, pitems;
-  for (;;) {
-    pitems = [];
-    for (const it of items) pitems.push(await promptItem(it));
-    user = 'DATA:\n' + JSON.stringify({ header, items: pitems });
-    bytes = new TextEncoder().encode(user).length;
-    if (bytes <= GLM_LIMITS.maxPromptBytes || items.length <= 1) break;
-    items = items.slice(0, items.length - Math.max(1, Math.ceil(items.length * 0.1)));
-  }
+  // Each item is serialised once; the kept prefix (priority order) is chosen by cumulative byte size, then the prompt
+  // is serialised once. O(items), no repeated stringify/hash passes (Workers Free CPU budget).
+  const enc = new TextEncoder();
+  const allP = items.map(promptItem);
+  const sizes = allP.map((p) => enc.encode(JSON.stringify(p)).length + 1);
+  const overhead = enc.encode('DATA:\n' + JSON.stringify({ header, items: [] })).length;
+  let n = 0, total = overhead;
+  while (n < allP.length && total + sizes[n] <= GLM_LIMITS.maxPromptBytes) { total += sizes[n]; n += 1; }
+  items = items.slice(0, n);
+  const pitems = allP.slice(0, n);
+  const user = 'DATA:\n' + JSON.stringify({ header, items: pitems });
+  const bytes = enc.encode(user).length;
   const trimmed = built.items.length - items.length;
   const hash = await sha256Hex(canonicalJson({ v: [GLM_INPUT_VERSION, GLM_PROMPT_VERSION, GLM_SCHEMA_VERSION, GLM_MODEL], header, items: pitems }));
   return {

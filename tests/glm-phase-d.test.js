@@ -358,10 +358,12 @@ describe('migration 0031 and wiring', () => {
   });
 
   it('worker.js: GLM wired only at the 07:00 cron, the read-only routes and the tick chain; no Gemini call added', () => {
-    expect(WORKER).toMatch(/import \{ glmDailySignalRun, glmTickAdjust, handleGlmRoutes \} from '\.\/glm\/runner\.js';/);
+    expect(WORKER).toMatch(/import \{ glmDailySignalRun, glmTickAdjust, handleGlmRoutes, glmTickProbe, glmStagingProbesEnabled \} from '\.\/glm\/runner\.js';/);
     const at07 = WORKER.slice(WORKER.indexOf("if (event.cron === '0 7 * * *') {"), WORKER.indexOf("if (event.cron === '0 7 * * *') {") + 2500);
     expect(at07).toMatch(/glmDailySignalRun\(env, glmDeps\(env\)/);
-    expect((WORKER.match(/glmDailySignalRun\(/g) || []).length).toBe(1);
+    // exactly two call sites: the 07:00 cron and the staging-only probe step (gated by GLM_STAGING_PROBES)
+    expect((WORKER.match(/glmDailySignalRun\(/g) || []).length).toBe(2);
+    expect(WORKER).toMatch(/glmStagingProbesEnabled\(env\)\n\s+\? await glmDailySignalRun\(env, glmDeps\(env\), \{ scheduledTs: now \}\)/);
     expect(WORKER).toMatch(/glmTickAdjust\(env, \{ coin, horizon, predictResult, selection: selectionForSnapshot \}\)/);
     const glmSrc = ['runner.js', 'adapters.js', 'package.js', 'signal.js', 'contract.js'].map((f) => readFileSync(join(ROOT, 'glm', f), 'utf8')).join('\n');
     expect(glmSrc).not.toMatch(/generativelanguage|callGeminiGenerateContent|GEMINI_API_KEY/);

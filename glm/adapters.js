@@ -56,9 +56,12 @@ export const GLM_READ_QUERIES = Object.freeze([
     'SELECT id, ts, target_ts, p_up, calibrated_p_up, realized_up, resolved_ts FROM predictions ' +
     'WHERE horizon_hours = 24 AND ts <= ? ORDER BY ts DESC LIMIT 30',
     args: (c) => [c] },
-  { key: 'v2_sentiment', rowsBound: 45, sql:
+  // NOT INDEXED: a reverse rowid scan that stops at the first match. With the (asset, calc_version, decision_ts) index the
+  // planner sorted every BTC row in a temp B-tree (production EXPLAIN 2026-11-19), which grows without bound.
+  // result_id order = insertion order = decision order (runSentimentV2Cycle inserts pending readings in time order).
+  { key: 'v2_sentiment', rowsBound: 10, sql:
     'SELECT result_id, asset, decision_ts, calc_version, status, sentiment_score, sentiment_class, confidence, evidence_coverage, created_ts ' +
-    'FROM sentiment_v2_results WHERE asset = ? AND decision_ts <= ? ORDER BY decision_ts DESC LIMIT 1',
+    'FROM sentiment_v2_results NOT INDEXED WHERE asset = ? AND decision_ts <= ? ORDER BY result_id DESC LIMIT 1',
     args: (c) => ['BTC', c] },
   { key: 'timesfm', rowsBound: 11, sql:
     'SELECT id, coin, horizon_hours, ts, input_end_ts, target_ts, price_at_prediction, forecast_price, predicted_return_pct, direction, ' +

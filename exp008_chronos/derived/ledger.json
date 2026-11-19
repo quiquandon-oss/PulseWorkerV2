@@ -1654,19 +1654,9 @@
   }
  ],
  "format": "exp008-chronos-ledger-v1",
- "generated_ts": 1795020094238,
+ "generated_ts": 1795056496209,
  "prospective_start_ts": 1793491200000,
  "recent_runs": [
-  {
-   "code_sha": "baeddae2b9fec3b6d84bda3ab94083f8fff36c43",
-   "errors": 0,
-   "file": "runs/2026-11-10T034835Z.json",
-   "forecasts_made": 0,
-   "pending": 1,
-   "resolved": 1,
-   "run_id": "42751687095",
-   "run_ts": 1794282515517
-  },
   {
    "code_sha": "baeddae2b9fec3b6d84bda3ab94083f8fff36c43",
    "errors": 0,
@@ -1856,6 +1846,16 @@
    "resolved": 0,
    "run_id": "44349898293",
    "run_ts": 1795020088257
+  },
+  {
+   "code_sha": "e7e10f4af55b1ea6c5073e01e7aa693348e977d4",
+   "errors": 0,
+   "file": "runs/2026-11-19T024813Z.json",
+   "forecasts_made": 0,
+   "pending": 2,
+   "resolved": 0,
+   "run_id": "44446787223",
+   "run_ts": 1795056493901
   }
  ],
  "seal_end_ts": 1791579600000,

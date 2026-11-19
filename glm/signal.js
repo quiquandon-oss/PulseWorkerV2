@@ -6,10 +6,11 @@ const TOP_KEYS = ['status', 'horizons', 'findings', 'forecast_comparison', 'gemi
 const STATUS = ['completed', 'no_conclusion', 'insufficient_evidence'];
 const DIR = ['UP', 'DOWN', 'NEUTRAL'];
 const STRENGTH = ['weak', 'moderate', 'strong'];
-const FTYPE = ['fact', 'source_claim', 'model_forecast', 'interpretation', 'hypothesis'];
+const FTYPE = ['fact', 'source_claim', 'ai_interpretation', 'model_forecast', 'interpretation', 'hypothesis', 'unknown'];
 const FDIR = ['UP', 'DOWN', 'FLAT', 'MISSING'];
 const AGREE = ['agree', 'disagree', 'partial', 'unavailable'];
-const REL = ['consistent', 'contradicts', 'no_original'];
+const REL = ['consistent', 'contradicts', 'omits', 'unsupported', 'unverifiable', 'no_original'];
+const ASSESS = ['included', 'discounted', 'excluded'];
 const UNC = ['low', 'medium', 'high'];
 
 function isObj(x) { return x && typeof x === 'object' && !Array.isArray(x); }
@@ -80,10 +81,15 @@ export function validateGlmOutput(raw, pkg, { ungroundedNumbers } = {}) {
   else v.gemini_vs_original.forEach((g, i) => {
     const p = `$.gemini_vs_original[${i}]`;
     if (!isObj(g)) { errs.push(`${p}: not an object`); return; }
-    exactKeys(g, ['gemini_ref', 'original_ref', 'relation'], p, errs);
+    exactKeys(g, ['gemini_ref', 'original_ref', 'relation', 'assessment', 'reason'], p, errs);
     if (typeof g.gemini_ref !== 'string' || !pr.has(g.gemini_ref)) errs.push(`${p}.gemini_ref: unknown ref`);
+    else if (pkg.items && !pkg.items.some((it) => it.ref === g.gemini_ref && it.provenance_class === 'gemini_interpretation')) errs.push(`${p}.gemini_ref: not a Gemini interpretation`);
     if (g.original_ref !== null && (typeof g.original_ref !== 'string' || !pr.has(g.original_ref))) errs.push(`${p}.original_ref: unknown ref`);
     en(g.relation, REL, `${p}.relation`, errs);
+    // A claim of consistency/contradiction needs an original; without one only unverifiable/no_original is allowed.
+    if (g.original_ref === null && !['unverifiable', 'no_original'].includes(g.relation)) errs.push(`${p}.relation: needs an original_ref`);
+    en(g.assessment, ASSESS, `${p}.assessment`, errs);
+    str(g.reason, 160, `${p}.reason`, errs);
   });
   en(v.uncertainty, UNC, '$.uncertainty', errs);
   if (!Array.isArray(v.limitations) || v.limitations.length > 6) errs.push('$.limitations: array of at most 6');
@@ -92,7 +98,7 @@ export function validateGlmOutput(raw, pkg, { ungroundedNumbers } = {}) {
   if (!errs.length && typeof ungroundedNumbers === 'function') {
     const texts = [
       ...(v.horizons || []).map((h) => h.rationale), ...(v.findings || []).map((f) => f.claim),
-      v.forecast_comparison?.note, ...(v.limitations || []),
+      v.forecast_comparison?.note, ...(v.limitations || []), ...(v.gemini_vs_original || []).map((g) => g.reason),
     ].filter((t) => typeof t === 'string');
     const bad = ungroundedNumbers(texts, pkg.prompt.user);
     if (bad && bad.length) errs.push('ungrounded_numbers: ' + bad.slice(0, 5).join(','));
@@ -100,15 +106,26 @@ export function validateGlmOutput(raw, pkg, { ungroundedNumbers } = {}) {
   return errs.length ? { ok: false, value: null, errors: errs.slice(0, 20) } : { ok: true, value: v, errors: [] };
 }
 
-// Distinct corroboration families among refs, after collapsing shared independence keys (§4).
+// AI-derived items: existing Gemini/other-AI interpretations and V1 scores computed from them. They are evidence to
+// assess, never independent confirmation on their own.
+export function isAiDerived(it) {
+  return it.provenance_class === 'gemini_interpretation' || it.provenance_class === 'v1_ai_interpretation' || !!it.content?.ai_derived;
+}
+
+// Distinct corroboration families among refs, after collapsing shared independence keys (§4). glm-qual-0.2: a chain
+// (independence key) counts only if it contains at least one non-AI item, so a Gemini summary without a checkable
+// original never corroborates anything by itself; it still appears in the refs and in gemini_vs_original.
 export function familiesOf(refList, itemsByRef) {
-  const keys = new Map();               // independence key -> family (first seen)
+  const keys = new Map();               // independence key -> { family, nonAi }
   for (const r of refList) {
     const it = itemsByRef.get(r);
     if (!it) continue;
-    if (!keys.has(it.independence_key)) keys.set(it.independence_key, it.family);
+    const e = keys.get(it.independence_key) || { family: it.family, nonAi: false };
+    if (!isAiDerived(it)) { e.nonAi = true; e.family = it.family; }
+    keys.set(it.independence_key, e);
   }
-  return { families: [...new Set(keys.values())].sort(), independentKeys: keys.size };
+  const counted = [...keys.values()].filter((e) => e.nonAi);
+  return { families: [...new Set(counted.map((e) => e.family))].sort(), independentKeys: counted.length, aiOnlyKeys: keys.size - counted.length };
 }
 
 function forecastDir(it) {
@@ -136,7 +153,11 @@ export function qualifySignal({ output, pkg, previous = null, runStatus = 'compl
   if (h.direction === 'NEUTRAL') return { ...s, reasons: ['neutral'] };
 
   const byRef = new Map(pkg.items.map((i) => [i.ref, i]));
-  const sup = familiesOf(h.supporting_refs, byRef);
+  // Gemini items the model itself discounted or excluded do not support anything.
+  const dropped = new Set((output.gemini_vs_original || []).filter((g) => g.assessment !== 'included').map((g) => g.gemini_ref));
+  const supRefs = h.supporting_refs.filter((r) => !dropped.has(r));
+  if (supRefs.length !== h.supporting_refs.length) s.reasons.push('gemini_support_discounted');
+  const sup = familiesOf(supRefs, byRef);
   const con = familiesOf(h.contradicting_refs, byRef);
   s.supporting_families = sup.families;
   s.contradicting_families = con.families;
@@ -152,10 +173,10 @@ export function qualifySignal({ output, pkg, previous = null, runStatus = 'compl
   const reasons = [];
   if (!s.models_live) reasons.push('no_live_model_forecast');
   if (sup.families.length < 2) reasons.push('corroboration_below_2_families');
-  const fresh = h.supporting_refs.some((r) => { const it = byRef.get(r); return it && (cutoff - it.times.first_available_ts) <= GLM_LIMITS.freshMs; });
+  const fresh = supRefs.some((r) => { const it = byRef.get(r); return it && (cutoff - it.times.first_available_ts) <= GLM_LIMITS.freshMs; });
   if (!fresh) reasons.push('no_fresh_support');
   if (con.families.length >= sup.families.length && con.families.length > 0) reasons.push('contradicted');
-  if (reasons.length) return { ...s, reasons };
+  if (reasons.length) return { ...s, reasons: [...s.reasons, ...reasons] };
 
   let k = ['weak', 'moderate', 'strong'].indexOf(h.strength);
   const tD = live(tfm) ? forecastDir(tfm) : null;

@@ -38,7 +38,7 @@ function validAnswer(over = {}) {
     horizons: [{ horizon_hours: 24, direction: 'DOWN', strength: 'moderate', supporting_refs: ['tfm:1', 'chr:BTC_24h_live', 'ev:ev_c'], contradicting_refs: [], rationale: 'Both models point down' }],
     findings: [{ type: 'model_forecast', claim: 'TimesFM and Chronos both forecast DOWN', refs: ['tfm:1', 'chr:BTC_24h_live'] }],
     forecast_comparison: { timesfm_direction: 'DOWN', chronos_direction: 'DOWN', agreement: 'agree', note: 'aligned' },
-    gemini_vs_original: [{ gemini_ref: 'gem:foufi:vid1', original_ref: 'src:youtube:vid1', relation: 'consistent' }],
+    gemini_vs_original: [{ gemini_ref: 'gem:foufi:vid1', original_ref: 'src:youtube:vid1', relation: 'unverifiable', assessment: 'discounted', reason: 'no transcript to check against' }],
     uncertainty: 'medium', limitations: ['thin evidence'], ...over,
   };
 }

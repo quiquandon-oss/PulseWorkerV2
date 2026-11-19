@@ -2,10 +2,10 @@
 // Pure constants only. Any change to a value that alters a package, a signal or an adjustment must bump the matching
 // version, because the versions are part of the package hash (idempotency) and of every stored record.
 
-export const GLM_INPUT_VERSION = 'glm-input-1';
-export const GLM_PROMPT_VERSION = 'glm-prompt-1';
-export const GLM_SCHEMA_VERSION = 'glm-signal-1';
-export const GLM_RULE_VERSION = 'glm-qual-0.1';            // PROVISIONAL: not calibrated (see §8 of the contract)
+export const GLM_INPUT_VERSION = 'glm-input-2';   // 2: Gemini-chain keys for derived V1 scores, Gemini daily items, compact items
+export const GLM_PROMPT_VERSION = 'glm-prompt-2'; // 2: Gemini assessment duties, compact item fields
+export const GLM_SCHEMA_VERSION = 'glm-signal-2'; // 2: ai_interpretation/unknown findings, Gemini assessment fields
+export const GLM_RULE_VERSION = 'glm-qual-0.2';            // PROVISIONAL; 0.2: AI-only chains never corroborate            // PROVISIONAL: not calibrated (see §8 of the contract)
 export const GLM_MODEL = '@cf/zai-org/glm-4.7-flash';
 
 // Provenance classes (§2). Every input item carries exactly one.

@@ -61,9 +61,10 @@ describe('read-only adapters: bounded, indexed, isolated failures', () => {
   it('a missing table degrades only that input (batch fails, each query isolated once)', async () => {
     d1.db.exec('DROP TABLE foufi_digest');
     const r = await readGlmInputs(d1.binding, CUT);
-    expect(r.errors.v1_foufi).toMatch(/no such table/);
+    expect(r.errors.v1_foufi).toBe('missing_table:foufi_digest');
+    expect(r.missingTables).toEqual(['foufi_digest']);
     expect(r.rows.collector.length).toBe(3);
-    expect(r.calls).toBe(1 + GLM_READ_QUERIES.length);
+    expect(r.calls).toBe(3);   // failed batch + one sqlite_master lookup + one batch of the present tables (no per-query retries)
   });
 
   it('empty database: every input empty, no throw', async () => {
@@ -82,7 +83,9 @@ describe('provenance: existing Gemini intelligence is used, labelled and tied to
     const items = normV1Foufi(rows, CUT);
     const gem = items.find((i) => i.provenance_class === 'gemini_interpretation' && i.record_id === 'vid1');
     const orig = items.find((i) => i.provenance_class === 'original_source' && i.record_id === 'vid1');
-    expect(gem.content.model).toBe('gemini-3.6-flash');
+    expect(gem.content.model).toMatch(/^gemini \(model version not recorded per row/);
+    expect(gem.content.content_id).toMatch(/^fnv1a:[0-9a-f]{16}$/);
+    expect(gem.content.verification).toMatch(/^original_metadata_only/);
     expect(gem.content.btc).toEqual({ score: 2, note: 'targets higher' });
     expect(gem.derived_from).toEqual([orig.ref]);
     expect(gem.independence_key).toBe(orig.independence_key);
@@ -94,7 +97,7 @@ describe('provenance: existing Gemini intelligence is used, labelled and tied to
 
   it('malformed Gemini JSON is kept as an explicitly malformed item, never parsed into facts', () => {
     const items = normV1Foufi([{ video_id: 'v', published_ts: CUT - H, fetched_ts: CUT - H, url: 'https://youtube.com/watch?v=v', summary_json: '{bad' }], CUT);
-    expect(items.find((i) => i.provenance_class === 'gemini_interpretation').content).toEqual({ kind: 'gemini_video_summary', parse: 'malformed' });
+    expect(items.find((i) => i.provenance_class === 'gemini_interpretation').content).toMatchObject({ kind: 'gemini_video_summary', parse: 'malformed' });
   });
 
   it('catalysts: Gemini-investigated rows are gemini_interpretation, others v1_ai_interpretation; URL original kept', () => {
@@ -307,7 +310,7 @@ const validOut = (over = {}) => ({
   horizons: [{ horizon_hours: 24, direction: 'DOWN', strength: 'moderate', supporting_refs: ['tfm:1', 'chr:BTC_24h_live', 'ev:ev_c'], contradicting_refs: ['gem:foufi:vid1'], rationale: 'Both models point down' }],
   findings: [{ type: 'model_forecast', claim: 'TimesFM and Chronos both forecast DOWN', refs: ['tfm:1', 'chr:BTC_24h_live'] }],
   forecast_comparison: { timesfm_direction: 'DOWN', chronos_direction: 'DOWN', agreement: 'agree', note: 'aligned' },
-  gemini_vs_original: [{ gemini_ref: 'gem:foufi:vid1', original_ref: 'src:youtube:vid1', relation: 'consistent' }],
+  gemini_vs_original: [{ gemini_ref: 'gem:foufi:vid1', original_ref: 'src:youtube:vid1', relation: 'unverifiable', assessment: 'discounted', reason: 'no transcript to check against' }],
   uncertainty: 'medium', limitations: ['thin evidence'], ...over,
 });
 

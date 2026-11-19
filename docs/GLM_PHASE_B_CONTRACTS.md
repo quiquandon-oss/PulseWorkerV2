@@ -329,3 +329,38 @@ Migration 0031 follows the 0029/0030 practice: it is applied to production D1 (a
 only) **before** the Worker that uses it is deployed. It is applied to staging first, and each apply is recorded with
 its `rows_written` and timestamp. The worker code tolerates a missing table (status `inputs_degraded`, nothing
 written), so a deploy that lands before the migration is harmless.
+
+## Revision 2026-11-19b: glm-input-2 / glm-prompt-2 / glm-signal-2 / glm-qual-0.2
+
+These changes follow the owner's clarification: existing stored Gemini outputs are usable historical AI-derived
+evidence, and V2 makes no new Gemini call. Earlier versions keep their meaning; stored runs record the version they used.
+
+- **Stored Gemini outputs actually available.**
+  - V1 `foufi_digest` (Gemini summary of each Foufi video) and the V1 `foufi` per-source score that V1 computes from it
+    (`scompScorers.foufi`, V1 `fb30da1`).
+  - Frozen V2 outputs:
+    - `gemini_daily_analysis`: the newest row becomes an item, marked stale after 24 h, with its own outcome only if
+      resolved by the cutoff;
+    - `coin_catalyst_log` rows with an `investigation_id`.
+  - V1's `/gemini-outlook` and `/trader-analysis-gemini` responses are not stored, so there is nothing to consume.
+- **Evidence chain.** A Gemini summary, its original and any V1 score computed from it share one independence key.
+  The V1 `foufi` score is matched to its video by `observed_at = published_ts`.
+- **Corroboration rule (`glm-qual-0.2`).** A chain counts toward corroboration only if it contains a non-AI item.
+  Gemini items the model marks `discounted` or `excluded` support nothing.
+- **Provenance.** Every AI-derived item carries `content_id`, a model note (the Gemini version is not recorded per row),
+  and a `verification` status: `original_linked`, `original_metadata_only`, `no_original` or
+  `gemini_summary_not_in_package`. These are also stored in `input_refs`.
+- **Output schema (`glm-signal-2`).**
+  - Findings gain the types `ai_interpretation` and `unknown`.
+  - `gemini_vs_original` entries gain `relation` values `omits`, `unsupported` and `unverifiable`, plus `assessment`
+    (`included` / `discounted` / `excluded`) and `reason`.
+  - `consistent`, `contradicts`, `omits` and `unsupported` require an original.
+- **Package (`glm-input-2`).** The 24 KiB budget is unchanged. Changes:
+  - V1 keeps the newest composite (with the full per-source list) and the oldest in 24 h (the trend), plus 2 history
+    readings.
+  - Per-source V1 scores are separate citable items.
+  - Prompt items carry minute-precision times; family, basis and hashes stay in the lineage record only.
+  - Collector title is capped at 160 characters and summary at 200.
+  - Production-scale fixture: 55 items kept vs 41, 42 trimmed vs 61, V1 items kept 21 of 24 vs 14.
+- **Missing tables fail fast.** One `sqlite_master` lookup for the needed table names, then one batch of the present
+  tables: 3 calls at most, reported as `missing_table:<name>`. Other batch errors still isolate each query once.

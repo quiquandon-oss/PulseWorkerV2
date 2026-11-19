@@ -34,7 +34,8 @@ describe('wrangler.staging.toml', () => {
     expect(lines.join('\n')).not.toMatch(/API_KEY|TOKEN|SECRET|OPENAI|ANTHROPIC|SERPAPI|BRAVE|TAVILY|BING/i);
   });
   it('sets no variable the Worker does not read, and no build, trigger or route keys', () => {
-    const worker = readFileSync(join(root, 'worker.js'), 'utf8') + readFileSync(join(root, 'sentiment-v2', 'collector.js'), 'utf8');
+    const worker = readFileSync(join(root, 'worker.js'), 'utf8') + readFileSync(join(root, 'sentiment-v2', 'collector.js'), 'utf8')
+      + readFileSync(join(root, 'glm', 'runner.js'), 'utf8');
     const vars = [...lines.join('\n').matchAll(/^([A-Z][A-Z0-9_]+)\s*=\s*"/gm)].map((m) => m[1]).filter((k) => k !== 'GIT_COMMIT_SHA');
     for (const k of vars) expect(worker, `${k} is set in staging but read by no code`).toContain(`env.${k}`);
     expect(lines.join('\n')).not.toMatch(/^\[(build|triggers|env|\[routes\])|^(routes?|triggers|build)\s*=/m);

@@ -12,6 +12,7 @@ on:
     paths:
       - 'worker.js'
       - 'sentiment-v2/**'          # modules imported by worker.js (Sentiment V2 evidence collector and scorer)
+      - 'glm/**'                   # modules imported by worker.js (GLM evidence intelligence)
       - 'wrangler.toml'
       - 'package.json'
       - 'package-lock.json'

@@ -8,6 +8,7 @@ import { listCandidates, getCandidate, createCandidate, updateCandidate, decideC
 import { handleEventRoutes, runAutomaticDetection } from './events/event-api.js';
 import { sv2CollectEvidence, SV2_SOURCE_REGISTRY, SV2_COLLECTOR_LIMITS, SV2_COLLECTOR_VERSION } from './sentiment-v2/collector.js';
 import { sv2EvidenceReadings, sv2ScoreHeadline, SV2_EVIDENCE_RULES, SV2_LEXICON_SOURCE } from './sentiment-v2/evidence-score.js';
+import { glmDailySignalRun, glmTickAdjust, handleGlmRoutes } from './glm/runner.js';
 // ---- BTC k-NN historical analog model ----
 // Feature vector: the 4 headline gauges already computed and logged by the
 // original CryptoPulse pipeline every cycle (sentiment composite, technical
@@ -6309,10 +6310,20 @@ async function runCoinHorizonChain(env, predictFn, coin, horizon) {
     selectionForSnapshot = { ok: false, error: String(e) };
   }
 
+  // GLM bounded adjustment (shadow by default): additive `glm` object on the stored snapshot plus one idempotent
+  // ledger row. Off unless GLM_TICK_HOOK_ENABLED = "1"; never changes p_up, selection or calibration inputs.
+  let snapshotResult = predictResult;
+  try {
+    const glm = await glmTickAdjust(env, { coin, horizon, predictResult, selection: selectionForSnapshot });
+    if (glm) snapshotResult = { ...predictResult, glm };
+  } catch (e) {
+    console.error(JSON.stringify({ evt: 'glm_tick_error', coin, horizon, error_message: e && e.message }));
+  }
+
   // Store what this tick produced so GET requests can serve it without
   // recomputing. Isolated: a snapshot failure never affects the chain.
   try {
-    await savePredictionSnapshot(env, coin, horizon, predictResult, selectionForSnapshot);
+    await savePredictionSnapshot(env, coin, horizon, snapshotResult, selectionForSnapshot);
   } catch (e) {
     console.error(JSON.stringify({ evt: 'prediction_snapshot_error', where: 'chain', error_message: e && e.message }));
   }
@@ -10515,6 +10526,10 @@ const pulseWorkerHandlers = {
     const eventRoute = await handleEventRoutes(request, env, url, corsHeaders);
     if (eventRoute) return eventRoute;
 
+    // ---- GLM evidence intelligence, read-only research API (/api/glm/status|signals|run|adjustments) ----
+    const glmRoute = await handleGlmRoutes(request, env, url, corsHeaders);
+    if (glmRoute) return glmRoute;
+
     // ---- GET / — health check ----
     if (url.pathname === '/' && request.method === 'GET') {
       return new Response(JSON.stringify({ ok: true, service: 'PulseWorkerV2', ts: Date.now() }), {
@@ -11662,6 +11677,11 @@ const pulseWorkerHandlers = {
         ctx.waitUntil(runGeminiDailyAnalysis(env, 'cron').catch(err => console.error('Daily Gemini analysis failed:', err)));
         ctx.waitUntil(runLinkGeminiAnalysis(env, 'cron').catch(err => console.error('Daily LINK Gemini analysis failed:', err)));
       }
+      // GLM evidence intelligence daily signal (BTC 24 h, cutoff 07:00 UTC). Off unless GLM_SIGNAL_ENABLED = "1";
+      // inference additionally needs GLM_INFERENCE_ENABLED = "1" and a Neuron budget. Never blocks anything below.
+      ctx.waitUntil(glmDailySignalRun(env, glmDeps(env), { scheduledTs: event.scheduledTime })
+        .then((r) => { if (r && r.status !== 'disabled') console.log(JSON.stringify({ evt: 'glm_daily', status: r.status, run_id: r.run_id || null, signal: r.signal || null, usage: r.usage || null, reason: r.reason || null })); })
+        .catch((err) => console.error('GLM daily signal failed:', err)));
       // Recalibration is cheap and only needs daily freshness — resolved
       // counts move by at most a handful of predictions per day.
       for (const coin of ['BTC', 'LINK', 'ETH']) {
@@ -12790,6 +12810,11 @@ const SV2_AI_MAX_OUTPUT_TOKENS = 1200;          // max_completion_tokens: hard c
 const SV2_AI_RESERVE_SQL = "INSERT INTO sv2_ai_neurons (day, reserved_ts, model, reserved_neurons, slot, status) " +
   "SELECT ?, ?, ?, ?, COALESCE((SELECT MAX(slot) FROM sv2_ai_neurons WHERE day = ?), 0) + 1, 'reserved' " +
   "WHERE (SELECT COALESCE(SUM(MAX(reserved_neurons, COALESCE(actual_neurons, 0))), 0) FROM sv2_ai_neurons WHERE day = ?) + ? <= ?";
+
+// Worker internals the GLM runner reuses instead of duplicating (one Neuron ledger, one pricing table, one grounding rule).
+function glmDeps(env) {
+  return { reserveSql: SV2_AI_RESERVE_SQL, pricing: SV2_AI_PRICING, budget: sv2AiBudget(env), ungroundedNumbers: sv2UngroundedNumbers };
+}
 
 function sv2AiBudget(env) {
   const n = Number(env.SV2_GLM_DAILY_NEURONS || '0');

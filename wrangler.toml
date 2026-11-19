@@ -53,6 +53,19 @@ SV2_V1_SERVER_INPUT = "1"
 # Hourly copy of new V1 `history` readings into research_sentiment_archive before each V2 cycle (worker.js
 # syncV1ArchiveFromHistory). "0" stops the copy; the GitHub live-evidence-collection job still archives as before.
 V1_ARCHIVE_SYNC_ENABLED = "1"
+# GLM evidence intelligence (docs/GLM_PHASE_B_CONTRACTS.md; glm/runner.js). 07:00 UTC daily, BTC 24 h only.
+# GLM_SIGNAL_ENABLED "1": build and store the bounded, provenance-tracked input package and a NO_SIGNAL/CANDIDATE/ELIGIBLE
+#   record every day (~360 rows read, 3 written). With inference off every run is stored as status model_disabled.
+# GLM_INFERENCE_ENABLED "0": no model call. Turned on only after V1's Workers AI Neuron use is measured and reserved and
+#   the model licence/terms are confirmed; it then also needs SENTIMENT_V2_AI_MODEL = "@cf/zai-org/glm-4.7-flash" and a
+#   non-zero SV2_GLM_DAILY_NEURONS (shared, atomic sv2_ai_neurons ledger).
+# GLM_TICK_HOOK_ENABLED "0": no per-tick read/write. "1" records baseline / would-apply / applied / final per BTC 24 h tick.
+# GLM_INFLUENCE_CAP "0" = shadow: the served p_up is never changed. A value > 0 (hard max 0.10 in code) applies only to
+#   ELIGIBLE signals, and only after >= 30 qualifying resolved signals and owner sign-off (contract §13).
+GLM_SIGNAL_ENABLED = "1"
+GLM_INFERENCE_ENABLED = "0"
+GLM_TICK_HOOK_ENABLED = "0"
+GLM_INFLUENCE_CAP = "0"
 
 # Deliberately the SAME database as the original PulseWorker (sentiment-ff75) —
 # gives this Worker read access to the existing history/technical_eval tables

@@ -364,3 +364,33 @@ evidence, and V2 makes no new Gemini call. Earlier versions keep their meaning; 
   - Production-scale fixture: 55 items kept vs 41, 42 trimmed vs 61, V1 items kept 21 of 24 vs 14.
 - **Missing tables fail fast.** One `sqlite_master` lookup for the needed table names, then one batch of the present
   tables: 3 calls at most, reported as `missing_table:<name>`. Other batch errors still isolate each query once.
+
+## Revision 2026-11-19c: glm-input-3 / glm-prompt-3 / glm-qual-0.3 (V2 data-quality layer)
+
+Owner instruction "V1 Data Quality Assessment and V2 Adapter Improvements". V1 code, tables, scoring and collectors are
+unchanged; every correction lives in the V2 adapter / package layer (`glm/adapters.js`, `glm/package.js`).
+
+Read-only production assessment (≈2.9k rows) that motivated the changes:
+- `foufi_digest` 207 rows: 29 (14%) `transcript_status='error'` with NULL `summary_json`, 2 `unstructured` (no coins),
+  2 without a BTC score; 0 malformed JSON, 0 out-of-range scores. Previously NULL summaries were silently skipped.
+- `server_source_observations` (44 slots since 11-17): `global` error 44/44; `etfflows`, `nasdaq`, `sosovalue`, `sp500`,
+  `yield10y` unavailable 44/44; intermittent errors on `hloi`, `onchain`, `foufi`. Previously non-ok sources were
+  silently dropped. Observation ages: fng ≤23 h, foufi ≤16.7 h; none in the future, none out of range.
+- `server_composite_readings` 140 rows: completeness avg 0.73 / min 0.47; 1 below floor; none malformed.
+
+Changes:
+- **Item quality** (`quality: {status, issues}`; status `valid | stale | degraded | invalid`). Invalid items are excluded
+  with `reason: invalid:<issues>` and never become evidence (e.g. Foufi `summary_missing:error`, `summary_malformed`,
+  `summary_unstructured`, `btc_score_out_of_range`; V1 source `score_out_of_range`; composite out of [0,100]; collector
+  `missing_title` / `missing_or_invalid_url`). Stale (`observation_older_than_36h`, Gemini daily `older_than_24h`) and
+  degraded (`below_v1_floor`, `low_completeness`, `provenance_malformed`, `observed_after_fetch`, `btc_score_missing`,
+  `no_original_reference`) items are kept and carry their `quality` into the prompt.
+- **Input quality** (`pkg.quality`, persisted in `glm_runs.usage_json`; a summary in `header.input_quality`, hashed):
+  per required group (`v1, collector, market_v2, timesfm, chronos`) kept / valid / stale / degraded / invalid /
+  excluded_temporal / trimmed / duplicates / read_errors; `v1_sources_not_ok` by status; `package_status`
+  `complete | degraded | insufficient`. Insufficient = fewer than 3 usable groups or no usable model forecast.
+- **Runner (`glm-qual-0.3`)**: an insufficient package makes no model call and records `insufficient_evidence` /
+  NO_SIGNAL with `reason: package_insufficient: missing <groups>`.
+- **Prompt (`glm-prompt-3`)** rule 9: a non-complete package must be named in limitations and never presented as
+  complete; items with `quality` must be weighed accordingly.
+- Trimming reserves 1 KiB for the quality header; 24 KiB budget unchanged. Output schema stays `glm-signal-2`.

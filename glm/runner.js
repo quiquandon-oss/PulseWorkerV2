@@ -151,6 +151,11 @@ export async function glmDailySignalRun(env, deps = {}, opts = {}) {
 
     let runStatus, reason = null, output = null, validationErrors = null, ai = { counted: false };
     if (pkg.items.length === 0) { runStatus = 'insufficient_evidence'; reason = 'empty package'; }
+    else if (pkg.quality && pkg.quality.package_status === 'insufficient') {
+      // glm-qual-0.3: too few usable input groups (or no usable model forecast): no model call, NO_SIGNAL.
+      runStatus = 'insufficient_evidence';
+      reason = 'package_insufficient: missing ' + pkg.quality.missing_groups.join(',');
+    }
     else {
       const callCountBefore = usage.d1_calls;
       ai = await glmInvoke(env, deps, pkg, now(), flags);
@@ -184,7 +189,7 @@ export async function glmDailySignalRun(env, deps = {}, opts = {}) {
     const runUsage = { ...usage, d1_calls: usage.d1_calls + 1, d1_rows_written: usage.d1_rows_written + 2,
       reserved_neurons: ai.reserved_neurons ?? ai.meta?.reserved_neurons ?? 0, input_tokens: ai.meta?.input_tokens ?? null,
       output_tokens: ai.meta?.output_tokens ?? null, actual_neurons: ai.meta?.actual_neurons ?? null,
-      chronos_fetch: chron.error || 'ok', package_bytes: pkg.prompt.bytes, trimmed: pkg.trimmed, coverage: pkg.coverage, wall_ms: finished - started,
+      chronos_fetch: chron.error || 'ok', package_bytes: pkg.prompt.bytes, trimmed: pkg.trimmed, coverage: pkg.coverage, quality: pkg.quality, wall_ms: finished - started,
       read_rows_bound: GLM_READ_ROWS_BOUND };
     const fin = await db.batch([
       db.prepare(`UPDATE glm_runs SET finished_ts = ?, model = ?, status = ?, reason = ?, output_json = ?, validation_errors_json = ?, usage_json = ?

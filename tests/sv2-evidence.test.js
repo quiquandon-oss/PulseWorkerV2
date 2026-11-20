@@ -684,7 +684,7 @@ describe('wiring', () => {
     const order = ['runAutomaticDetection', 'syncV1ArchiveFromHistory', 'runSentimentV2Cycle', 'sv2CollectGuarded'].map(f => sched.indexOf(f));
     expect(sched).toMatch(/sv2CollectGuarded\(env, event\.scheduledTime, \(\) => SV2_D1_QUERIES_PER_INVOCATION - SV2_D1_QUERY_RESERVE - sv2Q\.n\)/);
     expect(order.every((x, i) => x > 0 && (i === 0 || x > order[i - 1]))).toBe(true);
-    expect(sched).toMatch(/console\.error\('sv2 evidence \(cron\) FAILED:'/);
+    expect(sched).toMatch(/logBounded\('error', 'sv2 evidence \(cron\) FAILED:'/);
     expect(sched).toMatch(/\.catch\(err => console\.error\('SV2 evidence \(cron\) failed:'/);
   });
   it('the run route is owner-only, and no new Cron Trigger was added', () => {

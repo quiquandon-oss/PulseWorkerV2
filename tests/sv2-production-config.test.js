@@ -100,7 +100,7 @@ describe('production wrangler.toml: GLM is OFF; the collector is ON behind its s
       },
       d1_databases: [{ binding: 'DB', database_name: 'sentiment-history', database_id: 'f91ca980-b886-423a-bd6f-f3baea46d181' }],
       triggers: { crons: ['0 * * * *', '0 7 * * *'] },
-      observability: { logs: { enabled: true, head_sampling_rate: 1, invocation_logs: true, persist: true }, traces: { enabled: false, head_sampling_rate: 1, persist: true } },
+      observability: { logs: { enabled: true, head_sampling_rate: 0.1, invocation_logs: false, persist: true }, traces: { enabled: false, head_sampling_rate: 1, persist: true } },
     });
   });
   it('the parser itself rejects constructs it does not understand (so nothing can hide behind unsupported syntax)', () => {
@@ -172,6 +172,8 @@ describe('production deploy stays behind the approval gate (deploy.yml)', () => 
   });
   it('the new evidence modules trigger the same gated deploy, not a separate or ungated one', () => {
     expect(deployCode).toContain("- 'sentiment-v2/**'");
+    expect(deployCode).toContain("- 'observability/**'");
+    expect(deployCode).toContain("- 'events/**'");
   });
 });
 

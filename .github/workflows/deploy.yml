@@ -13,6 +13,8 @@ on:
       - 'worker.js'
       - 'sentiment-v2/**'          # modules imported by worker.js (Sentiment V2 evidence collector and scorer)
       - 'glm/**'                   # modules imported by worker.js (GLM evidence intelligence)
+      - 'observability/**'         # modules imported by worker.js (bounded diagnostic logging)
+      - 'events/**'                # modules imported by worker.js (event detection)
       - 'wrangler.toml'
       - 'package.json'
       - 'package-lock.json'

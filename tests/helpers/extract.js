@@ -1,6 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
+import { logBounded } from '../../observability/bounded-log.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const WORKER_JS_PATH = join(__dirname, '..', '..', 'worker.js');
@@ -68,7 +69,8 @@ export function extractConstants(...names) {
 }
 
 export function evalInScope(source, extraGlobals = {}) {
-  const sandbox = { console, ...extraGlobals };
+  // logBounded is a module import of worker.js, so extracted functions see it like `console`.
+  const sandbox = { console, logBounded, ...extraGlobals };
   const keys = Object.keys(sandbox);
   const fnNames = [...source.matchAll(/^(?:async\s+)?function\s+([A-Za-z_$][\w$]*)\s*\(/gm)].map(m => m[1]);
   // Also expose top-level `const NAME = ...;` declarations (e.g. via

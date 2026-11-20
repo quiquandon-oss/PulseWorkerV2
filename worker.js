@@ -8,6 +8,7 @@ import { listCandidates, getCandidate, createCandidate, updateCandidate, decideC
 import { handleEventRoutes, runAutomaticDetection } from './events/event-api.js';
 import { sv2CollectEvidence, SV2_SOURCE_REGISTRY, SV2_COLLECTOR_LIMITS, SV2_COLLECTOR_VERSION } from './sentiment-v2/collector.js';
 import { sv2EvidenceReadings, sv2ScoreHeadline, SV2_EVIDENCE_RULES, SV2_LEXICON_SOURCE } from './sentiment-v2/evidence-score.js';
+import { logBounded } from './observability/bounded-log.js';
 import { glmDailySignalRun, glmTickAdjust, handleGlmRoutes, glmTickProbe, glmStagingProbesEnabled } from './glm/runner.js';
 // ---- BTC k-NN historical analog model ----
 // Feature vector: the 4 headline gauges already computed and logged by the
@@ -1212,7 +1213,7 @@ async function recordSelectionProvenance(env, selection_table, coin, horizonHour
     result.cycle_p_up = cycle.p;
     result.cycle_p_up_ts = cycle.ts;
   } catch (err) {
-    console.error(JSON.stringify({ evt: 'selection_provenance_error', selection_table, where: 'cycle_value', error_message: String(err && err.message || err) }));
+    logBounded('error', '', ({ evt: 'selection_provenance_error', selection_table, where: 'cycle_value', error_message: String(err && err.message || err) }));
     return false;
   }
   if (Date.now() < selectionProvenanceUnavailableUntil) return false;
@@ -1229,7 +1230,7 @@ async function recordSelectionProvenance(env, selection_table, coin, horizonHour
     return true;
   } catch (err) {
     if (/no such table/i.test(String(err && err.message || err))) selectionProvenanceUnavailableUntil = Date.now() + SELECTION_PROVENANCE_RETRY_MS;
-    console.error(JSON.stringify({ evt: 'selection_provenance_error', selection_table, error_message: String(err && err.message || err) }));
+    logBounded('error', '', ({ evt: 'selection_provenance_error', selection_table, error_message: String(err && err.message || err) }));
     return false;
   }
 }
@@ -5078,7 +5079,7 @@ async function fetchHyperliquidInfo(body, { fetchImpl = fetch, sleep = (ms) => n
     const backoffMs = Math.min(cfg.maxDelayMs, cfg.baseDelayMs * 2 ** (attempt - 1));
     const delayMs = retryAfterMs !== null ? retryAfterMs : Math.round(backoffMs / 2 + random() * (backoffMs / 2));
     if (waitedMs + delayMs > cfg.maxTotalWaitMs) return res;
-    console.warn(JSON.stringify({ evt: 'hyperliquid_429_retry', attempt, delay_ms: delayMs, retry_after: retryAfterMs !== null }));
+    logBounded('warn', '', ({ evt: 'hyperliquid_429_retry', attempt, delay_ms: delayMs, retry_after: retryAfterMs !== null }));
     try { await res.text(); } catch (_e) { /* release the 429 body before retrying */ }
     await sleep(delayMs);
     waitedMs += delayMs;
@@ -5697,7 +5698,7 @@ async function runLinkPrediction(env, horizonHours = 24, { persist = true, claim
   // actually reaches this function at all, and if so, exactly how far
   // it gets before whatever is happening happens.
   const __coreStart = Date.now();
-  const __checkpoint = (name) => console.log(JSON.stringify({ evt: name, coin: 'LINK', horizon: horizonHours, elapsed_ms: Date.now() - __coreStart }));
+  const __checkpoint = (name) => logBounded('log', '', ({ evt: name, coin: 'LINK', horizon: horizonHours, elapsed_ms: Date.now() - __coreStart }));
   __checkpoint('LINK_CORE_START');
 
   const lagMs = horizonHours * 60 * 60 * 1000;
@@ -6202,7 +6203,7 @@ function notePredictionSnapshotError(err, where) {
   if (/no such table/i.test(String(err && err.message || err))) {
     predictionSnapshotsUnavailableUntil = Date.now() + PREDICTION_SNAPSHOT_RETRY_MS;
   }
-  console.error(JSON.stringify({ evt: 'prediction_snapshot_error', where, error_message: String(err && err.message || err) }));
+  logBounded('error', '', ({ evt: 'prediction_snapshot_error', where, error_message: String(err && err.message || err) }));
 }
 
 // Called by the scheduled tick only. Stores what the tick produced, for a
@@ -6265,13 +6266,13 @@ async function selectionForServedPrediction(env, coin, horizon, predictResult) {
 // chain's failure" contract the old code had via its own .catch() calls.
 async function runCoinHorizonChain(env, predictFn, coin, horizon) {
   const chainStart = Date.now();
-  console.log(JSON.stringify({ evt: 'chain_start', coin, horizon, ts: chainStart }));
+  logBounded('log', '', ({ evt: 'chain_start', coin, horizon, ts: chainStart }));
 
   let predictResult = null;
   try {
     predictResult = await predictFn(env, horizon, { allowWrite: true });
     const challenger = predictResult && predictResult.challenger;
-    console.log(JSON.stringify({
+    logBounded('log', '', ({
       evt: 'prediction_done', coin, horizon,
       prediction_status: predictResult ? predictResult.status : null,
       challenger_ok: challenger ? !!challenger.ok : null,
@@ -6279,7 +6280,7 @@ async function runCoinHorizonChain(env, predictFn, coin, horizon) {
       elapsed_ms: Date.now() - chainStart,
     }));
   } catch (e) {
-    console.error(JSON.stringify({
+    logBounded('error', '', ({
       evt: 'prediction_failed', coin, horizon,
       error_type: e && e.name, error_message: e && e.message,
       elapsed_ms: Date.now() - chainStart,
@@ -6290,19 +6291,19 @@ async function runCoinHorizonChain(env, predictFn, coin, horizon) {
 
   const selectionStart = Date.now();
   let selectionForSnapshot = { ok: false, error: 'selection did not complete' };
-  console.log(JSON.stringify({ evt: 'selection_start', coin, horizon, ts: selectionStart }));
+  logBounded('log', '', ({ evt: 'selection_start', coin, horizon, ts: selectionStart }));
   try {
     const selectionResult = await selectBestVariant(env, coin, horizon);
     selectionForSnapshot = selectionResult;
     await recordSelectionProvenance(env, 'selection_decisions', coin, horizon, selectionResult, 'cron');
-    console.log(JSON.stringify({
+    logBounded('log', '', ({
       evt: 'selection_done', coin, horizon,
       selection_status: selectionResult ? selectionResult.status : null,
       chosen_variant: selectionResult ? selectionResult.chosen_variant : null,
       elapsed_ms: Date.now() - selectionStart, total_elapsed_ms: Date.now() - chainStart,
     }));
   } catch (e) {
-    console.error(JSON.stringify({
+    logBounded('error', '', ({
       evt: 'selection_failed', coin, horizon,
       error_type: e && e.name, error_message: e && e.message,
       elapsed_ms: Date.now() - selectionStart, total_elapsed_ms: Date.now() - chainStart,
@@ -6318,7 +6319,7 @@ async function runCoinHorizonChain(env, predictFn, coin, horizon) {
     const glm = await glmTickAdjust(env, { coin, horizon, predictResult, selection: selectionForSnapshot });
     if (glm) snapshotResult = { ...predictResult, glm };
   } catch (e) {
-    console.error(JSON.stringify({ evt: 'glm_tick_error', coin, horizon, error_message: e && e.message }));
+    logBounded('error', '', ({ evt: 'glm_tick_error', coin, horizon, error_message: e && e.message }));
   }
 
   // Store what this tick produced so GET requests can serve it without
@@ -6326,7 +6327,7 @@ async function runCoinHorizonChain(env, predictFn, coin, horizon) {
   try {
     await savePredictionSnapshot(env, coin, horizon, snapshotResult, selectionForSnapshot);
   } catch (e) {
-    console.error(JSON.stringify({ evt: 'prediction_snapshot_error', where: 'chain', error_message: e && e.message }));
+    logBounded('error', '', ({ evt: 'prediction_snapshot_error', where: 'chain', error_message: e && e.message }));
   }
 }
 
@@ -6380,7 +6381,7 @@ async function runCoinBatch(env, chains) {
   const tasks = chains.map(({ predictFn, coin, horizon }) => runCoinHorizonChain(env, predictFn, coin, horizon));
   const settled = await Promise.allSettled(tasks);
   const batchEnd = Date.now();
-  console.log(JSON.stringify({
+  logBounded('log', '', ({
     evt: 'batch_complete',
     coin: chains.length ? chains[0].coin : null,
     batch_start: batchStart,
@@ -11687,7 +11688,7 @@ const pulseWorkerHandlers = {
       // GLM evidence intelligence daily signal (BTC 24 h, cutoff 07:00 UTC). Off unless GLM_SIGNAL_ENABLED = "1";
       // inference additionally needs GLM_INFERENCE_ENABLED = "1" and a Neuron budget. Never blocks anything below.
       ctx.waitUntil(glmDailySignalRun(env, glmDeps(env), { scheduledTs: event.scheduledTime })
-        .then((r) => { if (r && r.status !== 'disabled') console.log(JSON.stringify({ evt: 'glm_daily', status: r.status, run_id: r.run_id || null, signal: r.signal || null, usage: r.usage || null, reason: r.reason || null })); })
+        .then((r) => { if (r && r.status !== 'disabled') logBounded('log', '', ({ evt: 'glm_daily', status: r.status, run_id: r.run_id || null, signal: r.signal || null, usage: r.usage || null, reason: r.reason || null })); })
         .catch((err) => console.error('GLM daily signal failed:', err)));
       // Recalibration is cheap and only needs daily freshness — resolved
       // counts move by at most a handful of predictions per day.
@@ -11742,24 +11743,24 @@ const pulseWorkerHandlers = {
         const sv2Q = { n: 0 };
         env = { ...env, DB: sv2CountingDb(env.DB, sv2Q) };
         ctx.waitUntil(runAutomaticDetection(env, { trigger: 'cron', nowTs: event.scheduledTime })
-          .then(r => console.log('event detection (cron):', JSON.stringify({ ok: r.ok, skipped: r.skipped || false, reason: r.reason || r.error || null })))
+          .then(r => logBounded('log', 'event detection (cron):', ({ ok: r.ok, skipped: r.skipped || false, reason: r.reason || r.error || null })))
           .catch(err => console.error('Event detection (cron) failed:', err))
           // Copy new V1 readings from `history` into the archive V2 reads. A failure is logged as an error and V2 still
           // runs on what the archive already holds (it never invents a missing reading).
           .then(() => syncV1ArchiveFromHistory(env, { nowTs: event.scheduledTime,
             queryBudget: SV2_D1_QUERIES_PER_INVOCATION - SV2_D1_QUERY_RESERVE - SV2_CYCLE_QUERY_HEADROOM - sv2Q.n }))
-          .then(r => { const line = JSON.stringify({ ok: r.ok, skipped: r.skipped || false, copied: r.copied || 0, already_present: r.already_present || 0, history_last_ts: r.history_last_ts || null, invalid: r.invalid || [], errors: r.errors || [], deferred: r.deferred || 0, truncated: r.truncated || false });
-            if (r.ok) console.log('v1 archive sync (cron):', line); else console.error('v1 archive sync (cron) FAILED:', line); })
+          .then(r => { const line = ({ ok: r.ok, skipped: r.skipped || false, copied: r.copied || 0, already_present: r.already_present || 0, history_last_ts: r.history_last_ts || null, invalid: r.invalid || [], errors: r.errors || [], deferred: r.deferred || 0, truncated: r.truncated || false });
+            if (r.ok) logBounded('log', 'v1 archive sync (cron):', line); else logBounded('error', 'v1 archive sync (cron) FAILED:', line); })
           .catch(err => console.error('V1 archive sync (cron) failed:', err))
           .then(() => runSentimentV2Cycle(env, { nowTs: event.scheduledTime, queryBudget: SV2_D1_QUERIES_PER_INVOCATION - SV2_D1_QUERY_RESERVE - sv2Q.n }))
-          .then(r => { const line = JSON.stringify({ ok: r.ok, skipped: r.skipped || false, written: r.written || 0, reason: r.reason || null, deferred_readings: r.deferred_readings || [] });
-            if (r.deferred_d1_budget) console.warn('sentiment v2 (cron) DEFERRED (D1 budget):', line); else console.log('sentiment v2 (cron):', line); })
+          .then(r => { const line = ({ ok: r.ok, skipped: r.skipped || false, written: r.written || 0, reason: r.reason || null, deferred_readings: r.deferred_readings || [] });
+            if (r.deferred_d1_budget) logBounded('warn', 'sentiment v2 (cron) DEFERRED (D1 budget):', line); else logBounded('log', 'sentiment v2 (cron):', line); })
           .catch(err => console.error('Sentiment V2 (cron) failed:', err))
           // Independent evidence last: V2 decisions are past V1 timestamps, so evidence retrieved now could not count for them
           // anyway (point-in-time), and V2 gets the D1 query headroom first. The collector spends only what is left.
           .then(() => sv2CollectGuarded(env, event.scheduledTime, () => SV2_D1_QUERIES_PER_INVOCATION - SV2_D1_QUERY_RESERVE - sv2Q.n))
-          .then(r => { const line = JSON.stringify({ ok: r.ok, skipped: r.skipped || false, items_new: r.items_new || 0, items_duplicate: r.items_duplicate || 0, budget: r.budget || null, sources: (r.sources || []).map(x => `${x.id}:${x.status}`), errors: r.errors || [] });
-            if (r.ok) console.log('sv2 evidence (cron):', line); else console.error('sv2 evidence (cron) FAILED:', line); })
+          .then(r => { const line = ({ ok: r.ok, skipped: r.skipped || false, items_new: r.items_new || 0, items_duplicate: r.items_duplicate || 0, budget: r.budget || null, sources: (r.sources || []).map(x => `${x.id}:${x.status}`), errors: r.errors || [] });
+            if (r.ok) logBounded('log', 'sv2 evidence (cron):', line); else logBounded('error', 'sv2 evidence (cron) FAILED:', line); })
           .catch(err => console.error('SV2 evidence (cron) failed:', err)));
       }
     }
@@ -11858,7 +11859,7 @@ function withD1Usage(env, usage) {
 function logD1Usage(usage, fields, env) {
   try {
     if (!usage.statements || (env && env.D1_USAGE_LOG === '0')) return;
-    console.log(JSON.stringify({ evt: 'd1_usage', ...fields, ...usage }));
+    logBounded('log', '', ({ evt: 'd1_usage', ...fields, ...usage }));
   } catch { /* accounting must never affect the invocation */ }
 }
 
@@ -12239,10 +12240,10 @@ async function dispatchResearchCollection(env, fetchImpl = fetch, url = RESEARCH
       signal: controller.signal,
     });
     const ok = res.status === 204;
-    console.log(JSON.stringify({ evt: 'research_dispatch', workflow: url.split('/').slice(-2)[0], status: res.status, ok }));
+    logBounded('log', '', ({ evt: 'research_dispatch', workflow: url.split('/').slice(-2)[0], status: res.status, ok }));
     return { dispatched: ok, status: res.status };
   } catch (err) {
-    console.error(JSON.stringify({ evt: 'research_dispatch', ok: false, error_message: String(err && err.message || err) }));
+    logBounded('error', '', ({ evt: 'research_dispatch', ok: false, error_message: String(err && err.message || err) }));
     return { dispatched: false, reason: 'error' };
   } finally {
     clearTimeout(timer);

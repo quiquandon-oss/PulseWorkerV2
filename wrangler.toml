@@ -119,9 +119,11 @@ crons = ["0 * * * *", "0 7 * * *"]   # hourly: production tick at hours divisibl
 # in Logs, which is what PR #34's LINK_* checkpoints need to actually
 # persist anywhere queryable.
 [observability.logs]
+# Logs are diagnostic only; audit records live in D1. 2026-11 volume reduction (Phase 0 closure §3.1):
+# no per-request invocation logs, 10 % head sampling, payloads capped at 512 bytes (observability/bounded-log.js).
 enabled = true
-head_sampling_rate = 1
-invocation_logs = true
+head_sampling_rate = 0.1
+invocation_logs = false
 persist = true
 
 [observability.traces]

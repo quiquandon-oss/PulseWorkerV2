@@ -9,6 +9,7 @@ import { handleEventRoutes, runAutomaticDetection } from './events/event-api.js'
 import { sv2CollectEvidence, SV2_SOURCE_REGISTRY, SV2_COLLECTOR_LIMITS, SV2_COLLECTOR_VERSION } from './sentiment-v2/collector.js';
 import { sv2EvidenceReadings, sv2ScoreHeadline, SV2_EVIDENCE_RULES, SV2_LEXICON_SOURCE } from './sentiment-v2/evidence-score.js';
 import { logBounded } from './observability/bounded-log.js';
+import { handleComparisonRoutes } from './comparison/v1-v2.js';
 import { glmDailySignalRun, glmTickAdjust, handleGlmRoutes, glmTickProbe, glmStagingProbesEnabled } from './glm/runner.js';
 // ---- BTC k-NN historical analog model ----
 // Feature vector: the 4 headline gauges already computed and logged by the
@@ -10531,6 +10532,10 @@ const pulseWorkerHandlers = {
     // ---- GLM evidence intelligence, read-only research API (/api/glm/status|signals|run|adjustments) ----
     const glmRoute = await handleGlmRoutes(request, env, url, corsHeaders);
     if (glmRoute) return glmRoute;
+
+    // ---- Read-only V1/V2 outcome comparison (/api/comparison/v1-v2, /summary); GET only, bounded, cached 5 min ----
+    const comparisonRoute = await handleComparisonRoutes(request, env, url, corsHeaders);
+    if (comparisonRoute) return comparisonRoute;
 
     // ---- GET / — health check ----
     if (url.pathname === '/' && request.method === 'GET') {

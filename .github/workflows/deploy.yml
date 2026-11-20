@@ -15,6 +15,7 @@ on:
       - 'glm/**'                   # modules imported by worker.js (GLM evidence intelligence)
       - 'observability/**'         # modules imported by worker.js (bounded diagnostic logging)
       - 'events/**'                # modules imported by worker.js (event detection)
+      - 'comparison/**'            # modules imported by worker.js (read-only V1/V2 comparison)
       - 'wrangler.toml'
       - 'package.json'
       - 'package-lock.json'

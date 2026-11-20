@@ -19,7 +19,7 @@ const pkgOf = async (ledger = LEDGER) => buildPackage({ raw: await readGlmInputs
 
 describe('versions', () => {
   it('input/prompt/schema/rule versions are bumped and part of the package header and hash', async () => {
-    expect([GLM_INPUT_VERSION, GLM_PROMPT_VERSION, GLM_SCHEMA_VERSION, GLM_RULE_VERSION]).toEqual(['glm-input-3', 'glm-prompt-3', 'glm-signal-2', 'glm-qual-0.3']);
+    expect([GLM_INPUT_VERSION, GLM_PROMPT_VERSION, GLM_SCHEMA_VERSION, GLM_RULE_VERSION]).toEqual(['glm-input-3', 'glm-prompt-3', 'glm-signal-2', 'glm-qual-0.4']);
     const p = await pkgOf();
     expect(p.header.input_version).toBe('glm-input-3');
   });

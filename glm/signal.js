@@ -198,7 +198,7 @@ export function qualifySignal({ output, pkg, previous = null, runStatus = 'compl
 
 // Bounded adjustment (§9). mode 'shadow' (cap 0) or 'active'. Only ELIGIBLE signals inside their validity window and
 // matching asset/horizon apply; would_apply is measured on the reference cap for evaluation.
-export function computeAdjustment({ signal, baseline_p_up, predictionTs, coin, horizonHours, influenceCap }) {
+export function computeAdjustment({ signal, baseline_p_up, predictionTs, coin, horizonHours, influenceCap, allowFlip = false }) {
   const out = { baseline_p_up, would_apply: 0, applied: 0, cap: 0, final_p_up: baseline_p_up, signal_status: 'NO_SIGNAL', reason: null };
   if (!Number.isFinite(baseline_p_up)) return { ...out, reason: 'no_baseline' };
   if (!GLM_SCOPE.assets.includes(coin) || !GLM_SCOPE.horizons.includes(horizonHours)) {
@@ -215,8 +215,13 @@ export function computeAdjustment({ signal, baseline_p_up, predictionTs, coin, h
   const applied = signal.eligibility === 'ELIGIBLE' ? dir * k * cap : 0;
   const lo = Math.min(GLM_ADJUST.clampLo, baseline_p_up);
   const hi = Math.max(GLM_ADJUST.clampHi, baseline_p_up);
-  const final = Math.min(hi, Math.max(lo, baseline_p_up + applied));
+  let final = Math.min(hi, Math.max(lo, baseline_p_up + applied));
+  // No-flip safeguard (glm-qual-0.4): GLM can strengthen or weaken the baseline call but never reverse its side of 0.5.
+  const mid = GLM_ADJUST.neutralPoint;
+  let flipCapped = false;
+  if (!allowFlip && baseline_p_up !== mid && (baseline_p_up - mid) * (final - mid) < 0) { final = mid; flipCapped = true; }
   const r6 = (x) => Math.round(x * 1e6) / 1e6;
+  const reason = signal.eligibility !== 'ELIGIBLE' ? 'candidate_not_applied' : cap <= 0 ? 'shadow_cap_0' : flipCapped ? 'applied_no_flip_capped' : 'applied';
   return { baseline_p_up, would_apply: r6(would), applied: r6(final - baseline_p_up), cap, final_p_up: r6(final),
-    signal_status: signal.eligibility, reason: signal.eligibility === 'ELIGIBLE' ? (cap > 0 ? 'applied' : 'shadow_cap_0') : 'candidate_not_applied' };
+    signal_status: signal.eligibility, reason };
 }

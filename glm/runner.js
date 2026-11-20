@@ -24,6 +24,7 @@ export function glmFlags(env) {
     inference: String(env.GLM_INFERENCE_ENABLED ?? '0') === '1',
     tick: String(env.GLM_TICK_HOOK_ENABLED ?? '0') === '1',
     cap, mode: cap > 0 ? 'active' : 'shadow',
+    allowFlip: String(env.GLM_ALLOW_FLIP ?? '0') === '1',
   };
 }
 
@@ -39,9 +40,11 @@ function errText(e) { return String((e && e.message) || e).slice(0, 200); }
 
 // One GLM call through the shared, atomic Neuron ledger (sv2_ai_neurons). Fail-closed on every unknown.
 async function glmInvoke(env, deps, pkg, nowTs, flags) {
-  const model = String(env.SENTIMENT_V2_AI_MODEL || '').trim();
+  // GLM's own model switch (GLM_MODEL, default the verified model). Independent of SENTIMENT_V2_AI_MODEL, which drives the
+  // separate per-cycle V2 annotation and stays off in production.
+  const model = String(env.GLM_MODEL || GLM_MODEL).trim();
   if (!flags.inference) return { status: 'model_disabled', reason: 'GLM_INFERENCE_ENABLED is not "1"', counted: false };
-  if (model !== GLM_MODEL) return { status: 'model_disabled', reason: 'SENTIMENT_V2_AI_MODEL is not the verified GLM model', counted: false };
+  if (model !== GLM_MODEL) return { status: 'model_disabled', reason: 'GLM_MODEL is not the verified GLM model', counted: false };
   const budget = Number(deps.budget) || 0;
   if (budget <= 0) return { status: 'skipped_budget', reason: 'daily Neuron budget is 0', counted: false };
   const pricing = deps.pricing && deps.pricing[model];
@@ -223,11 +226,14 @@ export async function glmTickAdjust(env, { coin, horizon, predictResult, selecti
     if (!base || !Number.isFinite(predictionTs)) return { ...common, signal_id: null, signal_status: 'NO_SIGNAL', adjustment: 0, would_apply_adjustment: 0, final_p_up: common.baseline_p_up, reason: 'no_baseline' };
     const db = env.DB;
     const sigRes = await db.prepare(
-      `SELECT signal_id, asset, horizon_hours, direction, strength, eligibility, valid_from_ts, valid_until_ts FROM glm_signals
+      `SELECT signal_id, run_id, asset, horizon_hours, direction, strength, eligibility, valid_from_ts, valid_until_ts, supporting_refs_json FROM glm_signals
        WHERE asset = ? AND horizon_hours = ? AND decision_cutoff_ts <= ? ORDER BY decision_cutoff_ts DESC LIMIT 1`,
     ).bind(coin, horizon, predictionTs).all();
     const sig = (sigRes && sigRes.results && sigRes.results[0]) || null;
-    const r = computeAdjustment({ signal: sig, baseline_p_up: base.baseline_p_up, predictionTs, coin, horizonHours: horizon, influenceCap: flags.cap });
+    const r = computeAdjustment({ signal: sig, baseline_p_up: base.baseline_p_up, predictionTs, coin, horizonHours: horizon, influenceCap: flags.cap, allowFlip: flags.allowFlip });
+    // Why: the model's own rationale and its top findings for the signal in force (one PK read, only when a signal applies).
+    let explanation = null;
+    if (sig && r.signal_status !== 'NO_SIGNAL') explanation = await glmExplanation(db, sig);
     await db.prepare(
       `INSERT OR IGNORE INTO glm_adjustments (coin, horizon_hours, prediction_ts, baseline_p_up, baseline_source, chosen_variant, signal_id,
         signal_status, would_apply, applied, cap, final_p_up, mode, reason, rule_version, created_ts) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
@@ -235,10 +241,77 @@ export async function glmTickAdjust(env, { coin, horizon, predictResult, selecti
       r.signal_status === 'NO_SIGNAL' ? null : (sig ? sig.signal_id : null), r.signal_status, r.would_apply, r.applied, r.cap,
       r.final_p_up, flags.mode, r.reason, GLM_RULE_VERSION, now).run();
     return { ...common, signal_id: sig && r.signal_status !== 'NO_SIGNAL' ? sig.signal_id : null, signal_status: r.signal_status,
-      adjustment: r.applied, would_apply_adjustment: r.would_apply, final_p_up: r.final_p_up, reason: r.reason };
+      direction: r.signal_status !== 'NO_SIGNAL' && sig ? sig.direction : null, strength: r.signal_status !== 'NO_SIGNAL' && sig ? sig.strength : null,
+      adjustment: r.applied, would_apply_adjustment: r.would_apply, cap: r.cap, final_p_up: r.final_p_up, reason: r.reason, explanation };
   } catch (e) {
     return { mode: flags.mode, signal_status: 'NO_SIGNAL', adjustment: 0, error: errText(e) };
   }
+}
+
+// The explanation shown with an applied/candidate signal: rationale + up to 3 findings (claim, type, refs) and the
+// supporting refs, all copied from the validated model output. Never throws; null when unavailable.
+export async function glmExplanation(db, sig) {
+  try {
+    const row = await db.prepare('SELECT output_json FROM glm_runs WHERE run_id = ?').bind(sig.run_id).first();
+    const out = row && row.output_json ? JSON.parse(row.output_json) : null;
+    const h = out && Array.isArray(out.horizons) ? out.horizons[0] : null;
+    if (!h) return null;
+    return { run_id: sig.run_id, rationale: String(h.rationale || '').slice(0, 400),
+      findings: (out.findings || []).slice(0, 3).map((f) => ({ type: f.type, claim: String(f.claim || '').slice(0, 240), refs: (f.refs || []).slice(0, 6) })),
+      supporting_refs: (h.supporting_refs || []).slice(0, 10), uncertainty: out.uncertainty || null };
+  } catch (_e) { return null; }
+}
+
+// Prospective evaluation (owner mandate 2026-11-20 §10): baseline V2 vs GLM-influenced V2 on resolved BTC 24 h ticks.
+// Pure over the rows so it can be tested; the route reads at most 500 ledger rows joined to their predictions.
+const brier = (p, y) => (p - y) * (p - y);
+export function glmEvaluationSummary(rows) {
+  const vb = (v) => (v == null || !Number.isFinite(v) ? null : v < 0.33 ? 'low_vol' : v < 0.67 ? 'mid_vol' : 'high_vol');
+  const empty = () => ({ ticks: 0, resolved: 0, signal_ticks: 0, applied_ticks: 0, abstained_ticks: 0,
+    hits_baseline: 0, hits_final: 0, brier_baseline: 0, brier_final: 0, false_activations: 0, helpful_activations: 0,
+    abs_adjustment_sum: 0, max_abs_adjustment: 0 });
+  const add = (g, r) => {
+    g.ticks += 1;
+    const adj = Number(r.applied) || 0;
+    if (r.signal_status && r.signal_status !== 'NO_SIGNAL') g.signal_ticks += 1; else g.abstained_ticks += 1;
+    if (adj !== 0) { g.applied_ticks += 1; g.abs_adjustment_sum += Math.abs(adj); g.max_abs_adjustment = Math.max(g.max_abs_adjustment, Math.abs(adj)); }
+    if (r.realized_up === 0 || r.realized_up === 1) {
+      const y = Number(r.realized_up), b = Number(r.baseline_p_up), f = Number(r.final_p_up);
+      g.resolved += 1;
+      if ((b >= 0.5 ? 1 : 0) === y) g.hits_baseline += 1;
+      if ((f >= 0.5 ? 1 : 0) === y) g.hits_final += 1;
+      g.brier_baseline += brier(b, y); g.brier_final += brier(f, y);
+      if (adj !== 0) { if ((adj > 0 ? 1 : 0) === y) g.helpful_activations += 1; else g.false_activations += 1; }
+    }
+  };
+  const fin = (g) => {
+    const r4 = (x) => Math.round(x * 1e4) / 1e4;
+    return { ticks: g.ticks, resolved: g.resolved, coverage: g.ticks ? r4(g.applied_ticks / g.ticks) : null,
+      abstention: g.ticks ? r4(g.abstained_ticks / g.ticks) : null, signal_ticks: g.signal_ticks, applied_ticks: g.applied_ticks,
+      directional_accuracy: { baseline: g.resolved ? r4(g.hits_baseline / g.resolved) : null, final: g.resolved ? r4(g.hits_final / g.resolved) : null },
+      brier: { baseline: g.resolved ? r4(g.brier_baseline / g.resolved) : null, final: g.resolved ? r4(g.brier_final / g.resolved) : null },
+      activations: { helpful: g.helpful_activations, false: g.false_activations },
+      adjustment: { mean_abs: g.applied_ticks ? r4(g.abs_adjustment_sum / g.applied_ticks) : 0, max_abs: r4(g.max_abs_adjustment) } };
+  };
+  const all = empty(); const by = {};
+  for (const r of rows || []) {
+    add(all, r);
+    for (const key of [`${r.coin}:${r.horizon_hours}`, `regime:${vb(r.volatility_percentile) || 'unknown'}`, `mode:${r.mode}`]) add(by[key] = by[key] || empty(), r);
+  }
+  const overall = fin(all);
+  return { overall, groups: Object.fromEntries(Object.entries(by).map(([k, g]) => [k, fin(g)])),
+    sufficient_for_claims: overall.resolved >= 30 && overall.applied_ticks >= 30,
+    note: 'Prospective, resolved ticks only. No claim of improvement is valid before at least 30 resolved applied ticks.' };
+}
+
+export async function glmEvaluation(env, limit = 500) {
+  const r = await env.DB.prepare(
+    `SELECT a.coin, a.horizon_hours, a.prediction_ts, a.baseline_p_up, a.final_p_up, a.applied, a.signal_status, a.mode,
+       p.realized_up, p.volatility_percentile
+     FROM glm_adjustments a LEFT JOIN predictions p ON p.horizon_hours = a.horizon_hours AND p.ts = a.prediction_ts
+     WHERE a.coin = ? AND a.horizon_hours = ? AND a.chosen_variant IS NOT 'staging_probe' ORDER BY a.prediction_ts DESC LIMIT ?`,
+  ).bind('BTC', 24, limit).all();
+  return glmEvaluationSummary(r.results || []);
 }
 
 // ---------- read-only research routes ----------
@@ -248,17 +321,19 @@ function jparse(s, d = null) { if (s == null) return d; try { return JSON.parse(
 
 export async function glmStatus(env, nowTs = Date.now()) {
   const f = glmFlags(env);
-  const model = String(env.SENTIMENT_V2_AI_MODEL || '').trim();
+  const model = String(env.GLM_MODEL || GLM_MODEL).trim();
   const out = {
     ok: true, versions: { input: GLM_INPUT_VERSION, prompt: GLM_PROMPT_VERSION, schema: GLM_SCHEMA_VERSION, rule: GLM_RULE_VERSION, model: GLM_MODEL },
-    flags: { signal_enabled: f.signal, inference_enabled: f.inference, tick_hook_enabled: f.tick, influence_cap: f.cap, mode: f.mode },
+    flags: { signal_enabled: f.signal, inference_enabled: f.inference, tick_hook_enabled: f.tick, influence_cap: f.cap, mode: f.mode,
+      allow_flip: f.allowFlip, daily_neuron_budget: Number(env.GLM_DAILY_NEURONS || 0) || 0 },
     scope: { assets: GLM_SCOPE.assets, horizons: GLM_SCOPE.horizons, run: '07:00 UTC daily', note: '12 h, ETH and LINK are NO_SIGNAL' },
-    adjustment: { reference_cap: GLM_ADJUST.referenceCap, hard_max_cap: GLM_ADJUST.hardMaxCap, thresholds: 'provisional, not calibrated' },
+    adjustment: { reference_cap: GLM_ADJUST.referenceCap, hard_max_cap: GLM_ADJUST.hardMaxCap, applied_cap: f.cap, no_flip: !f.allowFlip,
+      persistence: 'UP/DOWN applies only when ELIGIBLE (same direction on two consecutive daily runs)', thresholds: 'provisional, not calibrated' },
     eligibility: GLM_ELIGIBILITY,
     blocker_codes: [...glmInferenceBlockers(), ...(f.inference ? [] : ['inference_disabled']), ...(f.tick ? [] : ['tick_hook_disabled'])],
     blockers: [
-      ...(f.inference ? [] : ['inference disabled (GLM_INFERENCE_ENABLED != "1"): V1 Workers AI Neuron use and the 07:00 Worker CPU are not yet verified (model, free-plan eligibility and MIT licence are verified)']),
-      ...(model === GLM_MODEL ? [] : ['SENTIMENT_V2_AI_MODEL is not the verified GLM model']),
+      ...(f.inference ? [] : ['inference disabled (GLM_INFERENCE_ENABLED != "1")']),
+      ...(model === GLM_MODEL ? [] : ['GLM_MODEL is not the verified GLM model']),
       ...(f.tick ? [] : ['tick hook off (GLM_TICK_HOOK_ENABLED != "1"): adjustments not recorded yet']),
     ],
     last_run: null, counts: null,
@@ -328,6 +403,8 @@ export async function handleGlmRoutes(request, env, url, corsHeaders = {}) {
   } else if (url.pathname === '/api/glm/adjustments') {
     const lim = int('limit', 24, 1, 60);
     key = `/api/glm/adjustments?limit=${lim}`; compute = async () => ({ ok: true, adjustments: await glmAdjustments(env, lim) });
+  } else if (url.pathname === '/api/glm/evaluation') {
+    key = '/api/glm/evaluation'; compute = async () => ({ ok: true, evaluation: await glmEvaluation(env) });
   } else return new Response(JSON.stringify({ ok: false, error: 'not found' }), { status: 404, headers: { ...corsHeaders, ...JSON_HEADERS } });
   try {
     const edge = typeof caches !== 'undefined' && caches.default ? caches.default : null;

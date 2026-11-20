@@ -22,7 +22,8 @@ const deps = (env, extra = {}) => ({ reserveSql: W.SV2_AI_RESERVE_SQL, pricing: 
   ungroundedNumbers: W.sv2UngroundedNumbers, fetchImpl: async () => ({ ok: true, status: 200, headers: { get: () => null }, text: async () => JSON.stringify(LEDGER) }), ...extra });
 
 const ON = { GLM_SIGNAL_ENABLED: '1', GLM_INFERENCE_ENABLED: '0', GLM_TICK_HOOK_ENABLED: '1', GLM_INFLUENCE_CAP: '0' };
-const LIVE = { ...ON, GLM_INFERENCE_ENABLED: '1', SENTIMENT_V2_AI_MODEL: GLM_MODEL, SV2_GLM_DAILY_NEURONS: '300' };
+// GLM's model switch is independent of SENTIMENT_V2_AI_MODEL (the per-cycle V2 annotation stays off in production).
+const LIVE = { ...ON, GLM_INFERENCE_ENABLED: '1', SENTIMENT_V2_AI_MODEL: '', SV2_GLM_DAILY_NEURONS: '300' };
 
 let d1, nowTs;
 const clock = () => nowTs;
@@ -56,7 +57,7 @@ const writes = () => d1.log.filter((l) => !/^(SELECT|WITH)/i.test(l.sql));
 
 describe('flags and cutoff', () => {
   it('defaults are off/shadow; cap is clamped to the hard maximum', () => {
-    expect(glmFlags({})).toEqual({ signal: false, inference: false, tick: false, cap: 0, mode: 'shadow' });
+    expect(glmFlags({})).toEqual({ signal: false, inference: false, tick: false, cap: 0, mode: 'shadow', allowFlip: false });
     expect(glmFlags({ GLM_INFLUENCE_CAP: '0.5' }).cap).toBe(GLM_ADJUST.hardMaxCap);
     expect(glmFlags({ GLM_INFLUENCE_CAP: 'x' }).cap).toBe(0);
   });
@@ -201,8 +202,8 @@ describe('07:00 daily run', () => {
   it.each([
     ['budget 0', { ...LIVE, SV2_GLM_DAILY_NEURONS: '0' }, 'skipped_budget'],
     ['budget below one call', { ...LIVE, SV2_GLM_DAILY_NEURONS: '5' }, 'skipped_budget'],
-    ['wrong model', { ...LIVE, SENTIMENT_V2_AI_MODEL: '@cf/zai-org/glm-5.2' }, 'model_disabled'],
-    ['empty model', { ...LIVE, SENTIMENT_V2_AI_MODEL: '' }, 'model_disabled'],
+    ['wrong model', { ...LIVE, GLM_MODEL: '@cf/zai-org/glm-5.2' }, 'model_disabled'],
+    ['blank model', { ...LIVE, GLM_MODEL: ' ' }, 'model_disabled'],
   ])('%s -> %s, no AI call', async (_n, vars, st) => {
     const ai = aiReturning(validAnswer());
     const r = await glmDailySignalRun(mkEnv(vars, ai), deps(vars), { scheduledTs: CUT, now: clock });
@@ -258,7 +259,7 @@ describe('tick hook: bounded adjustment, shadow by default', () => {
     expect(g.would_apply_adjustment).toBeCloseTo(0.05, 6);
     await glmTickAdjust(mkEnv(ON), { coin: 'BTC', horizon: 24, predictResult: pr(), selection: sel });
     expect(count('glm_adjustments')).toBe(1);
-    expect(d1.log.length).toBe(4);   // 2 x (1 read + 1 insert)
+    expect(d1.log.length).toBe(6);   // 2 x (signal read + explanation read + insert)
   });
 
   it('active cap applies to ELIGIBLE only, bounded, baseline preserved alongside', async () => {
@@ -371,16 +372,136 @@ describe('migration 0031 and wiring', () => {
     expect(glmSrc).not.toMatch(/(INSERT|UPDATE)[^;]*\b(predictions|calibration_curve|selection_decisions|prediction_snapshots)\b/);
   });
 
-  it('production config: signal on, inference off, tick hook off, cap 0; deploy path filter includes glm/**', () => {
+  it('production config (owner mandate 2026-11-20): inference, tick hook and a bounded cap on; V2 annotation off', () => {
     const toml = readFileSync(join(ROOT, 'wrangler.toml'), 'utf8');
     expect(toml).toMatch(/^GLM_SIGNAL_ENABLED = "1"$/m);
-    expect(toml).toMatch(/^GLM_INFERENCE_ENABLED = "0"$/m);
-    expect(toml).toMatch(/^GLM_TICK_HOOK_ENABLED = "0"$/m);
-    expect(toml).toMatch(/^GLM_INFLUENCE_CAP = "0"$/m);
+    expect(toml).toMatch(/^GLM_INFERENCE_ENABLED = "1"$/m);
+    expect(toml).toMatch(/^GLM_TICK_HOOK_ENABLED = "1"$/m);
+    expect(toml).toMatch(/^GLM_INFLUENCE_CAP = "0.03"$/m);
+    expect(toml).toMatch(/^GLM_ALLOW_FLIP = "0"$/m);
+    expect(toml).toMatch(/^GLM_DAILY_NEURONS = "300"$/m);
     expect(toml).toMatch(/^SENTIMENT_V2_AI_MODEL = ""$/m);
     expect(toml).toMatch(/^SV2_GLM_DAILY_NEURONS = "0"$/m);
     expect(toml.match(/crons = \[[^\]]*\]/)[0]).toBe('crons = ["0 * * * *", "0 7 * * *"]');
     const deploy = readFileSync(join(ROOT, '.github/workflows/deploy.yml'), 'utf8');
     expect(deploy).toMatch(/- 'glm\/\*\*'/);
+  });
+});
+
+// ---------- Production influence (owner mandate 2026-11-20): glm-qual-0.4 ----------
+import { computeAdjustment } from '../glm/signal.js';
+import { glmEvaluationSummary } from '../glm/runner.js';
+
+describe('production influence: bounded, persistent, explained, fail-safe', () => {
+  const ACTIVE = { GLM_SIGNAL_ENABLED: '1', GLM_INFERENCE_ENABLED: '1', GLM_TICK_HOOK_ENABLED: '1', GLM_INFLUENCE_CAP: '0.03', GLM_ALLOW_FLIP: '0', SV2_GLM_DAILY_NEURONS: '300' };
+  const sel = { ok: true, chosen_variant: 'original' };
+  const pr = (o = {}) => ({ status: 'ok', persisted: true, ts: CUT + 26 * H, p_up: 0.6, ...o });
+  async function twoDays(day2Ai) {
+    await glmDailySignalRun(mkEnv(ACTIVE, aiReturning(validAnswer())), deps(ACTIVE), { scheduledTs: CUT, now: clock });
+    d1.db.prepare(`INSERT INTO experiment_4_timesfm (coin, horizon_hours, ts, input_end_ts, target_ts, price_at_prediction, forecast_price, predicted_return_pct,
+      direction, model_version, checkpoint, inference_backend, context_length, forecast_horizon_steps, features_used) VALUES ('BTC',24,?,?,?,63000,62500,-0.8,'DOWN','timesfm-2.5','c','torch-cpu',128,8,'u')`)
+      .run(CUT + 10 * H, CUT + 8 * H, CUT + 32 * H);
+    const ledger2 = { ...LEDGER, forecasts: [...LEDGER.forecasts, { id: 'BTC_24h_next', coin: 'BTC', horizon_hours: 24, issued_ts: CUT + 10 * H, input_end_ts: CUT + 8 * H, target_ts: CUT + 32 * H, direction: 'DOWN' }] };
+    d1.db.prepare("INSERT INTO sv2_evidence (evidence_id, source_id, family, canonical_url, title, retrieved_ts, title_hash, content_hash, collector_version) VALUES ('ev_n','fed_press','macro','https://fed.gov/n','Fed again',?,'thn','cn','v')").run(CUT + 20 * H);
+    nowTs = CUT + 24 * H + 30e3;
+    const out = validAnswer({ horizons: [{ horizon_hours: 24, direction: 'DOWN', strength: 'moderate', supporting_refs: ['tfm:4', 'chr:BTC_24h_next', 'ev:ev_n'], contradicting_refs: [], rationale: 'Fed release and both models point down' }],
+      findings: [{ type: 'model_forecast', claim: 'TimesFM and Chronos forecast DOWN', refs: ['tfm:4'] }], gemini_vs_original: [] });
+    return glmDailySignalRun(mkEnv(ACTIVE, day2Ai ? day2Ai() : aiReturning(out)),
+      deps(ACTIVE, { aiTimeoutMs: 50, fetchImpl: async () => ({ ok: true, status: 200, headers: { get: () => null }, text: async () => JSON.stringify(ledger2) }) }), { scheduledTs: CUT + 24 * H, now: clock });
+  }
+
+  it('day 1 CANDIDATE never moves p_up; day 2 ELIGIBLE moves it by strength x cap, with baseline, cap, rule and explanation recorded', async () => {
+    await glmDailySignalRun(mkEnv(ACTIVE, aiReturning(validAnswer())), deps(ACTIVE), { scheduledTs: CUT, now: clock });
+    const g1 = await glmTickAdjust(mkEnv(ACTIVE), { coin: 'BTC', horizon: 24, predictResult: pr({ ts: CUT + 2 * H }), selection: sel, now: CUT + 2 * H });
+    expect(g1).toMatchObject({ mode: 'active', signal_status: 'CANDIDATE', adjustment: 0, final_p_up: 0.6, reason: 'candidate_not_applied' });
+    const r = await twoDays();
+    expect(r.status).toBe('completed');
+    expect(r.signal.eligibility).toBe('ELIGIBLE');
+    const g = await glmTickAdjust(mkEnv(ACTIVE), { coin: 'BTC', horizon: 24, predictResult: pr(), selection: sel, now: CUT + 26 * H });
+    expect(g).toMatchObject({ mode: 'active', baseline_p_up: 0.6, signal_status: 'ELIGIBLE', direction: 'DOWN', strength: 'moderate', cap: 0.03, reason: 'applied', rule_version: 'glm-qual-0.4' });
+    expect(g.adjustment).toBeCloseTo(-0.02, 6);
+    expect(g.final_p_up).toBeCloseTo(0.58, 6);
+    expect(g.explanation).toMatchObject({ rationale: 'Fed release and both models point down', supporting_refs: ['tfm:4', 'chr:BTC_24h_next', 'ev:ev_n'] });
+    expect(g.explanation.findings[0].claim).toBe('TimesFM and Chronos forecast DOWN');
+    const row = d1.db.prepare('SELECT baseline_p_up, applied, cap, final_p_up, mode, reason, rule_version, signal_id FROM glm_adjustments WHERE prediction_ts = ?').get(CUT + 26 * H);
+    expect(row).toMatchObject({ baseline_p_up: 0.6, cap: 0.03, mode: 'active', reason: 'applied', rule_version: 'glm-qual-0.4' });
+    expect(row.applied).toBeCloseTo(-0.02, 6);
+    expect(row.signal_id).toMatch(/:24$/);
+    // the predictions table is never touched by GLM: the baseline stays the stored prediction
+    expect(d1.db.prepare('SELECT COUNT(*) AS n FROM predictions WHERE ts = ?').get(CUT + 26 * H).n).toBe(0);
+  });
+
+  it('per-asset / per-horizon safeguard: ETH, LINK and 12 h stay at baseline in active mode with zero queries', async () => {
+    await twoDays();
+    d1.log.length = 0;
+    for (const [coin, h] of [['ETH', 24], ['LINK', 24], ['BTC', 12]]) {
+      const g = await glmTickAdjust(mkEnv(ACTIVE), { coin, horizon: h, predictResult: pr(), selection: sel, now: CUT + 26 * H });
+      expect(g).toMatchObject({ mode: 'active', adjustment: 0, final_p_up: 0.6, signal_status: 'NO_SIGNAL' });
+    }
+    expect(d1.log).toEqual([]);
+  });
+
+  it.each([
+    ['model timeout', () => ({ run: vi.fn(() => new Promise(() => {})) }), 'timeout'],
+    ['quota exhausted', () => ({ run: vi.fn(async () => { throw new Error('3036: daily free allocation exhausted'); }) }), 'quota_exhausted'],
+    ['model unavailable', () => ({ run: vi.fn(async () => { throw new Error('5028 capacity'); }) }), 'model_unavailable'],
+    ['invalid output', () => aiReturning(validAnswer({ score: 1 })), 'invalid_output'],
+    ['malformed JSON', () => aiReturning('{not json'), 'invalid_output'],
+  ])('%s on day 2 -> NO_SIGNAL, served p_up falls back to the baseline', async (_n, mk, st) => {
+    const r = await twoDays(mk);
+    expect(r.status).toBe(st);
+    expect(r.signal).toMatchObject({ direction: 'NO_SIGNAL', eligibility: 'NO_SIGNAL' });
+    const g = await glmTickAdjust(mkEnv(ACTIVE), { coin: 'BTC', horizon: 24, predictResult: pr(), selection: sel, now: CUT + 26 * H });
+    expect(g.final_p_up).toBe(0.6);
+    expect(g.adjustment).toBe(0);
+  });
+
+  it('a failing ledger write or signal read never throws into the tick chain', async () => {
+    const env = { ...ACTIVE, DB: { prepare: () => { throw new Error('D1 down'); } } };
+    const g = await glmTickAdjust(env, { coin: 'BTC', horizon: 24, predictResult: pr(), selection: sel });
+    expect(g).toMatchObject({ signal_status: 'NO_SIGNAL', adjustment: 0 });
+  });
+});
+
+describe('no-flip safeguard and cap bounds', () => {
+  const sig = (o = {}) => ({ asset: 'BTC', horizon_hours: 24, direction: 'DOWN', strength: 'strong', eligibility: 'ELIGIBLE', valid_from_ts: 0, valid_until_ts: 10, ...o });
+  const adj = (o) => computeAdjustment({ signal: sig(o.sig), baseline_p_up: o.b, predictionTs: 5, coin: 'BTC', horizonHours: 24, influenceCap: o.cap ?? 0.03, allowFlip: !!o.flip });
+  it('DOWN cannot pull an UP call below 0.5 (and UP cannot lift a DOWN call above 0.5)', () => {
+    expect(adj({ b: 0.51 })).toMatchObject({ final_p_up: 0.5, reason: 'applied_no_flip_capped' });
+    expect(adj({ b: 0.49, sig: { direction: 'UP' } })).toMatchObject({ final_p_up: 0.5, reason: 'applied_no_flip_capped' });
+    expect(adj({ b: 0.51, flip: true }).final_p_up).toBeCloseTo(0.48, 6);
+  });
+  it('strength scales the cap; the hard max 0.10 bounds any configuration', () => {
+    expect(adj({ b: 0.7, sig: { strength: 'weak' } }).applied).toBeCloseTo(-0.01, 6);
+    expect(adj({ b: 0.7, sig: { strength: 'moderate' } }).applied).toBeCloseTo(-0.02, 6);
+    expect(adj({ b: 0.7 }).applied).toBeCloseTo(-0.03, 6);
+    expect(adj({ b: 0.7, cap: 5 }).applied).toBeCloseTo(-0.1, 6);
+  });
+  it('the shipped production cap equals the documented initial cap', () => {
+    expect(readFileSync(join(ROOT, 'wrangler.toml'), 'utf8')).toMatch(new RegExp(`^GLM_INFLUENCE_CAP = "${GLM_ADJUST.initialCap}"$`, 'm'));
+  });
+});
+
+describe('prospective evaluation: baseline vs GLM-influenced', () => {
+  const row = (o) => ({ coin: 'BTC', horizon_hours: 24, mode: 'active', signal_status: 'NO_SIGNAL', applied: 0, baseline_p_up: 0.6, final_p_up: 0.6, realized_up: null, volatility_percentile: 0.5, ...o });
+  it('coverage, abstention, accuracy, Brier, false activations, adjustment size and groups', () => {
+    const e = glmEvaluationSummary([
+      row({ realized_up: 1 }),
+      row({ signal_status: 'ELIGIBLE', applied: -0.02, final_p_up: 0.58, realized_up: 0 }),            // helpful
+      row({ signal_status: 'ELIGIBLE', applied: 0.03, baseline_p_up: 0.55, final_p_up: 0.58, realized_up: 0, volatility_percentile: 0.9 }), // false
+      row({ signal_status: 'CANDIDATE' }),
+    ]);
+    expect(e.overall).toMatchObject({ ticks: 4, resolved: 3, coverage: 0.5, abstention: 0.25, signal_ticks: 3, applied_ticks: 2,
+      activations: { helpful: 1, false: 1 }, adjustment: { mean_abs: 0.025, max_abs: 0.03 } });
+    expect(e.overall.directional_accuracy).toEqual({ baseline: 0.3333, final: 0.3333 });
+    expect(e.overall.brier.final).toBeLessThan(e.overall.brier.baseline + 0.01);
+    expect(e.groups['BTC:24'].ticks).toBe(4);
+    expect(e.groups['regime:high_vol'].applied_ticks).toBe(1);
+    expect(e.sufficient_for_claims).toBe(false);
+  });
+  it('empty ledger -> nulls, never a claim', () => {
+    const e = glmEvaluationSummary([]);
+    expect(e.overall).toMatchObject({ ticks: 0, coverage: null, directional_accuracy: { baseline: null, final: null } });
+    expect(e.sufficient_for_claims).toBe(false);
   });
 });

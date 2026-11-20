@@ -5,7 +5,7 @@
 export const GLM_INPUT_VERSION = 'glm-input-3';   // 3: item quality (valid/stale/degraded/invalid), per-group input quality, package status
 export const GLM_PROMPT_VERSION = 'glm-prompt-3'; // 3: package_status / item quality duties (2: Gemini assessment duties)
 export const GLM_SCHEMA_VERSION = 'glm-signal-2'; // 2: ai_interpretation/unknown findings, Gemini assessment fields
-export const GLM_RULE_VERSION = 'glm-qual-0.3';            // PROVISIONAL; 0.3: insufficient package -> no model call, NO_SIGNAL (0.2: AI-only chains never corroborate)
+export const GLM_RULE_VERSION = 'glm-qual-0.4';            // PROVISIONAL; 0.4: production influence (bounded cap, no-flip safeguard); 0.3: insufficient package -> no model call, NO_SIGNAL (0.2: AI-only chains never corroborate)
 export const GLM_MODEL = '@cf/zai-org/glm-4.7-flash';
 
 // Provenance classes (§2). Every input item carries exactly one.
@@ -60,6 +60,10 @@ export const GLM_ADJUST = Object.freeze({
   strengthK: Object.freeze({ weak: 1 / 3, moderate: 2 / 3, strong: 1 }),
   referenceCap: 0.05,
   hardMaxCap: 0.10,
+  // Production influence (owner mandate 2026-11-20). PROVISIONAL engineering defaults, not validated values:
+  // initialCap is what wrangler.toml ships (GLM_INFLUENCE_CAP); weak/moderate/strong move p_up by 1/3, 2/3, 1 of it.
+  initialCap: 0.03,
+  neutralPoint: 0.5,   // no-flip safeguard: the adjustment never moves p_up across 0.5 unless GLM_ALLOW_FLIP = "1"
   clampLo: 0.02,
   clampHi: 0.98,
 });
@@ -82,9 +86,12 @@ export const GLM_ELIGIBILITY = Object.freeze({
   pricing: Object.freeze({ verified: true, value: '5,500 / 36,400 Neurons per M input / output tokens', source: 'Workers AI pricing page' }),
   free_allocation: Object.freeze({ verified: true, value: '10,000 Neurons/day, account-wide, reset 00:00 UTC', source: 'Workers AI pricing page' }),
   rate_limit: Object.freeze({ verified: true, value: '300 requests/min (text generation)', source: 'Workers AI limits page' }),
-  v1_neuron_usage: Object.freeze({ verified: false, blocker: 'v1_neuron_usage_unmeasured',
+  // Owner activation 2026-11-20: inference enabled with these two items still unverified. Mitigation: account is on Workers
+  // Free (no billing beyond the allocation, error 3036), GLM is capped by GLM_DAILY_NEURONS (one call/day, <= 3% of the
+  // 10,000 free Neurons), and every failure falls back to the baseline.
+  v1_neuron_usage: Object.freeze({ verified: false, blocker: 'v1_neuron_usage_unmeasured', accepted_by_owner: '2026-11-20',
     needed: 'Workers AI dashboard (or GraphQL aiInferenceAdaptiveGroups, Account Analytics Read) daily Neurons for the last 7-30 days' }),
-  worker_cpu: Object.freeze({ verified: false, blocker: 'worker_cpu_unverified',
+  worker_cpu: Object.freeze({ verified: false, blocker: 'worker_cpu_unverified', accepted_by_owner: '2026-11-20',
     needed: 'Workers metrics for pulseworker-v2 scheduled 0 7 * * * (CPU time, exceededCpu), dashboard or GraphQL workersInvocationsAdaptive' }),
 });
 

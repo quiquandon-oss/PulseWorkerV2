@@ -56,9 +56,11 @@ SV2_SOURCES_DISABLED = "bitcoinmagazine"
 # GLM evidence intelligence (glm/runner.js): same switches as production. Inference stays off on staging too: the
 # Neuron allocation is account-wide and V1's use is not yet measured. The tick hook is on (staging has no cron).
 GLM_SIGNAL_ENABLED = "1"
-GLM_INFERENCE_ENABLED = "0"
+GLM_INFERENCE_ENABLED = "1"
 GLM_TICK_HOOK_ENABLED = "1"
-GLM_INFLUENCE_CAP = "0"
+GLM_INFLUENCE_CAP = "0.03"
+GLM_ALLOW_FLIP = "0"
+GLM_DAILY_NEURONS = "200"
 # Staging-only qualification probes (POST /api/sentiment-v2/run steps glm_daily, glm_tick_probe). Never in production.
 GLM_STAGING_PROBES = "1"
 

@@ -54,18 +54,26 @@ SV2_V1_SERVER_INPUT = "1"
 # syncV1ArchiveFromHistory). "0" stops the copy; the GitHub live-evidence-collection job still archives as before.
 V1_ARCHIVE_SYNC_ENABLED = "1"
 # GLM evidence intelligence (docs/GLM_PHASE_B_CONTRACTS.md; glm/runner.js). 07:00 UTC daily, BTC 24 h only.
-# GLM_SIGNAL_ENABLED "1": build and store the bounded, provenance-tracked input package and a NO_SIGNAL/CANDIDATE/ELIGIBLE
-#   record every day (~360 rows read, 3 written). With inference off every run is stored as status model_disabled.
-# GLM_INFERENCE_ENABLED "0": no model call. Turned on only after V1's Workers AI Neuron use is measured and reserved and
-#   the model licence/terms are confirmed; it then also needs SENTIMENT_V2_AI_MODEL = "@cf/zai-org/glm-4.7-flash" and a
-#   non-zero SV2_GLM_DAILY_NEURONS (shared, atomic sv2_ai_neurons ledger).
-# GLM_TICK_HOOK_ENABLED "0": no per-tick read/write. "1" records baseline / would-apply / applied / final per BTC 24 h tick.
-# GLM_INFLUENCE_CAP "0" = shadow: the served p_up is never changed. A value > 0 (hard max 0.10 in code) applies only to
-#   ELIGIBLE signals, and only after >= 30 qualifying resolved signals and owner sign-off (contract §13).
+# PRODUCTION INFLUENCE ENABLED (owner mandate 2026-11-20). Kill switch / rollback, each a one-line change + deploy:
+#   GLM_INFLUENCE_CAP = "0"      -> shadow: served p_up = baseline again (inference and ledger keep running)
+#   GLM_INFERENCE_ENABLED = "0"  -> no model call; every run NO_SIGNAL, so nothing applies
+#   GLM_TICK_HOOK_ENABLED = "0"  -> no per-tick read/write, no glm object on snapshots
+# GLM_SIGNAL_ENABLED "1": build the bounded, provenance-tracked package and store a NO_SIGNAL/CANDIDATE/ELIGIBLE record daily.
+# GLM_INFERENCE_ENABLED "1": one call of @cf/zai-org/glm-4.7-flash per day (GLM_MODEL defaults to it) through the shared
+#   atomic sv2_ai_neurons ledger, capped by GLM_DAILY_NEURONS (one call reserves ~210 Neurons, <= 3% of the free 10,000).
+#   Account is on Workers Free: beyond the allocation the call fails (3036) and nothing is billed; the run falls back.
+#   SENTIMENT_V2_AI_MODEL / SV2_GLM_DAILY_NEURONS (per-cycle V2 annotation) stay off and are independent of this.
+# GLM_TICK_HOOK_ENABLED "1": per BTC 24 h tick, baseline / would-apply / applied / final + explanation on the snapshot and
+#   one glm_adjustments row (2-3 D1 calls per tick; other coins/horizons 0).
+# GLM_INFLUENCE_CAP "0.03": PROVISIONAL, not validated. Only ELIGIBLE (2-day persistent, corroborated) UP/DOWN signals move
+#   p_up, by 1/3, 2/3 or 1 x cap (weak/moderate/strong); hard max 0.10 in code. GLM_ALLOW_FLIP "0": the adjustment never
+#   moves p_up across 0.5 (GLM cannot reverse the baseline call). The predictions table always keeps the baseline.
 GLM_SIGNAL_ENABLED = "1"
-GLM_INFERENCE_ENABLED = "0"
-GLM_TICK_HOOK_ENABLED = "0"
-GLM_INFLUENCE_CAP = "0"
+GLM_INFERENCE_ENABLED = "1"
+GLM_TICK_HOOK_ENABLED = "1"
+GLM_INFLUENCE_CAP = "0.03"
+GLM_ALLOW_FLIP = "0"
+GLM_DAILY_NEURONS = "300"
 
 # Deliberately the SAME database as the original PulseWorker (sentiment-ff75) —
 # gives this Worker read access to the existing history/technical_eval tables

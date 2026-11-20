@@ -34,11 +34,12 @@ describe('eligibility evidence and machine-readable blockers', () => {
     expect(GLM_ELIGIBILITY.licence.value).toBe('MIT');
     expect(glmInferenceBlockers()).toEqual(['v1_neuron_usage_unmeasured', 'worker_cpu_unverified']);
   });
-  it('status API exposes eligibility and blocker codes (inference and tick hook off in production)', async () => {
+  it('status API exposes eligibility and blocker codes; the two open items are owner-accepted', async () => {
     const st = await glmStatus({ DB: d1.binding, GLM_SIGNAL_ENABLED: '1' });
     expect(st.blocker_codes).toEqual(['v1_neuron_usage_unmeasured', 'worker_cpu_unverified', 'inference_disabled', 'tick_hook_disabled']);
     expect(st.eligibility.licence.value).toBe('MIT');
-    expect(st.blockers[0]).toMatch(/MIT licence are verified/);
+    expect(st.eligibility.v1_neuron_usage.accepted_by_owner).toBe('2026-11-20');
+    expect(st.blockers[0]).toMatch(/inference disabled/);
   });
 });
 
@@ -70,12 +71,12 @@ describe('staging-only tick probe', () => {
 });
 
 describe('configuration guards', () => {
-  it('GLM_STAGING_PROBES exists only in the staging config; production keeps inference, tick hook and cap off', () => {
+  it('GLM_STAGING_PROBES exists only in the staging config; production runs bounded influence (owner mandate 2026-11-20)', () => {
     const prod = readFileSync(join(ROOT, 'wrangler.toml'), 'utf8');
     const stg = readFileSync(join(ROOT, 'wrangler.staging.toml'), 'utf8');
     expect(prod).not.toMatch(/GLM_STAGING_PROBES/);
     expect(stg).toMatch(/^GLM_STAGING_PROBES = "1"$/m);
-    for (const [k, v] of [['GLM_INFERENCE_ENABLED', '0'], ['GLM_TICK_HOOK_ENABLED', '0'], ['GLM_INFLUENCE_CAP', '0']]) expect(prod).toMatch(new RegExp(`^${k} = "${v}"$`, 'm'));
+    for (const [k, v] of [['GLM_INFERENCE_ENABLED', '1'], ['GLM_TICK_HOOK_ENABLED', '1'], ['GLM_INFLUENCE_CAP', '0.03'], ['GLM_ALLOW_FLIP', '0'], ['GLM_DAILY_NEURONS', '300']]) expect(prod).toMatch(new RegExp(`^${k} = "${v}"$`, 'm'));
   });
   it('the admin run route gates glm_daily behind the staging flag', () => {
     const w = readFileSync(join(ROOT, 'worker.js'), 'utf8');

@@ -394,3 +394,34 @@ Changes:
 - **Prompt (`glm-prompt-3`)** rule 9: a non-complete package must be named in limitations and never presented as
   complete; items with `quality` must be weighed accordingly.
 - Trimming reserves 1 KiB for the quality header; 24 KiB budget unchanged. Output schema stays `glm-signal-2`.
+
+## Revision 2026-11-20: production influence (glm-qual-0.4)
+
+Owner mandate 2026-11-20 ("full GLM production-influence rollout for V2"): GLM moves the served BTC 24 h V2 probability
+through a bounded, traceable, reversible path. Supersedes the 2026-11-19 shadow decision (cap 0 until 30 signals).
+
+- **Inference**: one `@cf/zai-org/glm-4.7-flash` call per day at 07:00 UTC (`GLM_INFERENCE_ENABLED = "1"`). GLM has its own
+  model switch (`GLM_MODEL`, default the verified model) and Neuron cap (`GLM_DAILY_NEURONS = "300"`, one call reserves
+  ~210), both independent of `SENTIMENT_V2_AI_MODEL` / `SV2_GLM_DAILY_NEURONS` (per-cycle annotation, stays off).
+  Same atomic `sv2_ai_neurons` ledger. Workers Free: past the allocation the call fails (3036), nothing is billed.
+- **Qualification** unchanged in substance (UP / DOWN / NEUTRAL / NO_SIGNAL; >= 2 independent non-AI families; live
+  model forecast; fresh support; contradiction check; dedup by independence key; temporal cutoff; strict schema;
+  ungrounded numbers rejected). Only ELIGIBLE (same direction on 2 consecutive daily runs) signals move p_up.
+- **Bounded influence**: `GLM_INFLUENCE_CAP = "0.03"` (PROVISIONAL, not validated): weak / moderate / strong move p_up
+  by 1 / 2 / 3 points; hard max 0.10 in code; clamp [0.02, 0.98]. **No-flip safeguard** (`GLM_ALLOW_FLIP = "0"`): the
+  adjustment never moves p_up across 0.5 (reason `applied_no_flip_capped`). Scope: BTC 24 h only; ETH, LINK and 12 h
+  stay at baseline with zero queries.
+- **Traceability**: the `predictions` row (and calibration/selection inputs) always keep the baseline. Each BTC 24 h tick
+  writes one `glm_adjustments` row (baseline, signal, would_apply, applied, cap, final, mode, reason, rule version) and
+  the snapshot carries `glm` {baseline_p_up, direction, strength, adjustment, cap, final_p_up, reason, explanation
+  (model rationale + up to 3 findings + supporting refs)}. The frontend headlines `glm.final_p_up` only when the mode is
+  active and the adjustment is non-zero, and shows baseline -> final with the reason.
+- **Fail-safe**: timeout, invalid output, malformed JSON, model unavailable, quota exhaustion, D1 errors -> NO_SIGNAL /
+  null, served p_up = baseline; nothing throws into the tick chain.
+- **Evaluation**: `GET /api/glm/evaluation` (<= 500 ledger rows): coverage, abstention, directional accuracy and Brier
+  (baseline vs final), helpful / false activations, mean / max |adjustment|, by asset:horizon, volatility regime and
+  mode. `sufficient_for_claims` stays false until >= 30 resolved applied ticks; no improvement claim before that.
+- **Kill switch / rollback** (one-line change + deploy each): `GLM_INFLUENCE_CAP = "0"` (shadow), `GLM_INFERENCE_ENABLED
+  = "0"` (no call), `GLM_TICK_HOOK_ENABLED = "0"` (no tick read/write), or revert the PR.
+- Open items accepted by the owner: V1 Neuron use and 07:00 Worker CPU not measured (mitigations above; output
+  validation measured at ~0.6 ms locally).

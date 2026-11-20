@@ -92,9 +92,11 @@ describe('production wrangler.toml: GLM is OFF; the collector is ON behind its s
         CHALLENGER_ENABLED: '1',                // challenger pause switch, ON until the owner activates the pause
         SV2_V1_SERVER_INPUT: '1',               // V1 hourly server readings as a second V2 input (2026-11-16)
         GLM_SIGNAL_ENABLED: '1',                // GLM daily signal record (07:00), inference off -> status model_disabled
-        GLM_INFERENCE_ENABLED: '0',             // no GLM model call until V1 Neuron use + licence are verified
-        GLM_TICK_HOOK_ENABLED: '0',             // no per-tick GLM read/write until staging call counts are measured
-        GLM_INFLUENCE_CAP: '0',                 // shadow: served p_up never changed by GLM
+        GLM_INFERENCE_ENABLED: '1',             // owner mandate 2026-11-20: one GLM call per day
+        GLM_TICK_HOOK_ENABLED: '1',             // per BTC 24 h tick: baseline / applied / final ledger + snapshot glm object
+        GLM_INFLUENCE_CAP: '0.03',              // PROVISIONAL bounded influence on ELIGIBLE signals (hard max 0.10)
+        GLM_ALLOW_FLIP: '0',                    // GLM never reverses the baseline side of 0.5
+        GLM_DAILY_NEURONS: '300',               // GLM's own Neuron cap (one call), shared atomic ledger
       },
       d1_databases: [{ binding: 'DB', database_name: 'sentiment-history', database_id: 'f91ca980-b886-423a-bd6f-f3baea46d181' }],
       triggers: { crons: ['0 * * * *', '0 7 * * *'] },

@@ -6310,8 +6310,9 @@ async function runCoinHorizonChain(env, predictFn, coin, horizon) {
     selectionForSnapshot = { ok: false, error: String(e) };
   }
 
-  // GLM bounded adjustment (shadow by default): additive `glm` object on the stored snapshot plus one idempotent
-  // ledger row. Off unless GLM_TICK_HOOK_ENABLED = "1"; never changes p_up, selection or calibration inputs.
+  // GLM bounded adjustment: additive `glm` object on the stored snapshot (baseline_p_up, adjustment, final_p_up, reason,
+  // explanation) plus one idempotent ledger row. Off unless GLM_TICK_HOOK_ENABLED = "1". The predictions row, selection
+  // and calibration inputs keep the baseline; the served headline uses glm.final_p_up only in active mode.
   let snapshotResult = predictResult;
   try {
     const glm = await glmTickAdjust(env, { coin, horizon, predictResult, selection: selectionForSnapshot });
@@ -12819,7 +12820,10 @@ const SV2_AI_RESERVE_SQL = "INSERT INTO sv2_ai_neurons (day, reserved_ts, model,
 
 // Worker internals the GLM runner reuses instead of duplicating (one Neuron ledger, one pricing table, one grounding rule).
 function glmDeps(env) {
-  return { reserveSql: SV2_AI_RESERVE_SQL, pricing: SV2_AI_PRICING, budget: sv2AiBudget(env), ungroundedNumbers: sv2UngroundedNumbers };
+  // GLM's own daily Neuron cap (GLM_DAILY_NEURONS), separate from SV2_GLM_DAILY_NEURONS (per-cycle V2 annotation). Both
+  // reserve through the same atomic sv2_ai_neurons ledger.
+  const n = Number(env.GLM_DAILY_NEURONS || '0');
+  return { reserveSql: SV2_AI_RESERVE_SQL, pricing: SV2_AI_PRICING, budget: Number.isFinite(n) && n > 0 ? n : 0, ungroundedNumbers: sv2UngroundedNumbers };
 }
 
 function sv2AiBudget(env) {

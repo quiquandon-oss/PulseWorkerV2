@@ -174,6 +174,7 @@ describe('production deploy stays behind the approval gate (deploy.yml)', () => 
     expect(deployCode).toContain("- 'sentiment-v2/**'");
     expect(deployCode).toContain("- 'observability/**'");
     expect(deployCode).toContain("- 'events/**'");
+    expect(deployCode).toContain("- 'comparison/**'");
   });
 });
 

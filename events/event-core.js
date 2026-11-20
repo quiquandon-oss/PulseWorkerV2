@@ -2,6 +2,8 @@
 // Pure functions only (no I/O). Deliberately separate from V1 sentiment scoring: nothing here reads or writes V1
 // weights, confidence values, composite scores or predictions. A detected event is evidence, not a trading signal.
 
+import { logBounded } from '../observability/bounded-log.js';
+
 export const RULESET_VERSION = 'ed-v1';
 
 export const DIRECTIONS = ['UP', 'DOWN', 'MIXED', 'UNKNOWN'];
@@ -293,5 +295,5 @@ export function makeHttp({ fetchImpl = fetch, timeoutMs = 10_000, retries = 2, b
 
 // Structured log line (Workers Logs are enabled for this Worker).
 export function logEvent(kind, fields) {
-  try { console.log(JSON.stringify({ component: 'event-detection', kind, ...fields })); } catch (_e) { /* never throw from logging */ }
+  logBounded('log', '', { component: 'event-detection', kind, ...fields });
 }

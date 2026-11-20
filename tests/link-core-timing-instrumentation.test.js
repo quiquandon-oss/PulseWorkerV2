@@ -98,7 +98,7 @@ describe('LINK core-prediction timing checkpoints', () => {
 
   it('checkpoints add zero payload beyond {evt, coin, horizon, elapsed_ms} -- no feature data, no prices, no D1 row contents', () => {
     const src = extractFunctions('runLinkPrediction');
-    const checkpointFnMatch = src.match(/const __checkpoint = \(name\) => console\.log\(JSON\.stringify\(\{([^}]*)\}\)\);/);
+    const checkpointFnMatch = src.match(/const __checkpoint = \(name\) => logBounded\('log', '', \(\{([^}]*)\}\)\);/);
     expect(checkpointFnMatch).not.toBeNull();
     const fields = checkpointFnMatch[1];
     expect(fields).toContain('evt: name');

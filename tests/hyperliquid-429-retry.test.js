@@ -4,6 +4,7 @@
 import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { extractFunctions, extractConstants, evalInScope } from './helpers/extract.js';
+import { boundedJson } from '../observability/bounded-log.js';
 
 const SOURCE = extractConstants('HL_INFO_RETRY') + '\n\n' +
   extractFunctions('parseRetryAfterMs', 'fetchHyperliquidInfo', 'fetchHyperliquidPrice');
@@ -33,6 +34,8 @@ function harness(responses, { random = () => 0.5 } = {}) {
     fetch: fetchImpl,
     setTimeout: (fn) => fn(),
     console: { ...console, warn: (m) => warns.push(JSON.parse(m)) },
+    // worker.js logs through the bounded logger (observability/bounded-log.js); capture its warn lines.
+    logBounded: (level, _prefix, payload) => { if (level === 'warn') warns.push(JSON.parse(boundedJson(payload))); },
   });
   const opts = { fetchImpl, sleep: async (ms) => { sleeps.push(ms); }, random };
   return { scope, calls, sleeps, warns, opts };

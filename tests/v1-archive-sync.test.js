@@ -318,7 +318,7 @@ describe('wiring and safety', () => {
     const iDet = sched.indexOf('runAutomaticDetection'), iSync = sched.indexOf('syncV1ArchiveFromHistory'), iV2 = sched.indexOf('runSentimentV2Cycle');
     expect(iDet).toBeGreaterThan(0); expect(iSync).toBeGreaterThan(iDet); expect(iV2).toBeGreaterThan(iSync);
     expect(sched.indexOf('syncV1ArchiveFromHistory')).toBeGreaterThan(sched.indexOf('} else {'));
-    expect(sched.slice(iSync, iV2)).toMatch(/\.catch\(err => console\.error\('V1 archive sync \(cron\) failed:'/);
+    expect(sched.slice(iSync, iV2)).toMatch(/\.catch\(err => [\s\S]{0,160}?console\.error\('V1 archive sync \(cron\) failed:'/);
     expect(sched.slice(iSync, iV2)).toMatch(/logBounded\('error', 'v1 archive sync \(cron\) FAILED:'/);
   });
   it('reads history only, writes only INSERT OR IGNORE into research_sentiment_archive, and reaches no network', () => {

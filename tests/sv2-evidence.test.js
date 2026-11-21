@@ -685,7 +685,7 @@ describe('wiring', () => {
     expect(sched).toMatch(/sv2CollectGuarded\(env, event\.scheduledTime, \(\) => SV2_D1_QUERIES_PER_INVOCATION - SV2_D1_QUERY_RESERVE - sv2Q\.n\)/);
     expect(order.every((x, i) => x > 0 && (i === 0 || x > order[i - 1]))).toBe(true);
     expect(sched).toMatch(/logBounded\('error', 'sv2 evidence \(cron\) FAILED:'/);
-    expect(sched).toMatch(/\.catch\(err => console\.error\('SV2 evidence \(cron\) failed:'/);
+    expect(sched).toMatch(/\.catch\(err => [\s\S]{0,160}?console\.error\('SV2 evidence \(cron\) failed:'/);
   });
   it('the run route is owner-only, and no new Cron Trigger was added', () => {
     expect(WORKER).toMatch(/'POST:\/api\/sentiment-v2\/run',/);

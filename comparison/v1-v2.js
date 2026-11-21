@@ -25,7 +25,10 @@ export const V1_BANDS = Object.freeze([
   { key: '40/60', lo: 40, hi: 60, proposed: false },
 ]);
 const PROPOSED_BAND = V1_BANDS.find((b) => b.proposed);
-const SUPPORTED_ASSETS = ['BTC'];       // V2 `predictions` is the BTC ledger; LINK/ETH have no V1 counterpart reading
+// V2 prediction ledgers per asset (the same engine, one table per coin). V1 has no per-asset reading: its composite is
+// market-wide, so the same V1 reading is the V1 view for every asset (labelled as such in the methodology).
+export const ASSET_TABLES = Object.freeze({ BTC: 'predictions', ETH: 'eth_predictions', LINK: 'link_predictions' });
+const SUPPORTED_ASSETS = Object.keys(ASSET_TABLES);
 const SUPPORTED_HORIZONS = [12, 24];
 const GLM_SCOPE = { asset: 'BTC', horizon: 24 };
 const JSON_HEADERS = { 'Content-Type': 'application/json', 'Cache-Control': `public, max-age=${COMPARISON_LIMITS.cacheSeconds}` };
@@ -49,12 +52,15 @@ export function parseComparisonParams(searchParams) {
 }
 
 // ---- the single bounded read ------------------------------------------------------------------------------------
-// predictions via idx_predictions_horizon_ts (newest first, LIMIT n+1 for the truncation flag); selection_provenance,
+// the asset's V2 ledger (predictions / eth_predictions / link_predictions) via its (horizon_hours, ts) index (newest first, LIMIT n+1 for the truncation flag); selection_provenance,
 // selection_decisions and glm_adjustments by indexed equality; V1 readings by correlated indexed range lookups.
 // Measured on production 2026-11-20: 1,671 rows read for LIMIT 501 (budget 5,000).
-export const COMPARISON_SQL = `WITH base AS (
+export function comparisonSql(asset) {
+  const table = ASSET_TABLES[asset];
+  if (!table) throw new Error('unsupported asset');
+  return `WITH base AS (
   SELECT id, ts, target_ts, p_up, realized_up, resolved_ts, git_commit_sha, horizon_hours
-  FROM predictions WHERE horizon_hours = ?1 AND ts >= ?2 AND ts <= ?3 ORDER BY ts DESC LIMIT ?4
+  FROM ${table} WHERE horizon_hours = ?1 AND ts >= ?2 AND ts <= ?3 ORDER BY ts DESC LIMIT ?4
 ), j AS (
   SELECT b.*, sp.chosen_variant, sp.cycle_p_up, sd.chosen_p_up,
     g.baseline_p_up AS g_baseline, g.baseline_source AS g_source, g.final_p_up AS g_final, g.applied AS g_applied,
@@ -63,10 +69,10 @@ export const COMPARISON_SQL = `WITH base AS (
        AND s.computed_ts <= b.ts AND s.composite IS NOT NULL ORDER BY s.slot_ts DESC LIMIT 1) AS sc_slot,
     (SELECT h.id FROM history h WHERE h.ts <= b.ts AND h.ts >= b.ts - ?5 ORDER BY h.ts DESC LIMIT 1) AS h_id
   FROM base b
-  LEFT JOIN selection_provenance sp ON sp.coin = 'BTC' AND sp.horizon_hours = b.horizon_hours AND sp.prediction_ts = b.ts
+  LEFT JOIN selection_provenance sp ON sp.coin = ?6 AND sp.horizon_hours = b.horizon_hours AND sp.prediction_ts = b.ts
     AND sp.selection_table = 'selection_decisions'
   LEFT JOIN selection_decisions sd ON sd.id = sp.selection_row_id
-  LEFT JOIN glm_adjustments g ON g.coin = 'BTC' AND g.horizon_hours = b.horizon_hours AND g.prediction_ts = b.ts
+  LEFT JOIN glm_adjustments g ON g.coin = ?6 AND g.horizon_hours = b.horizon_hours AND g.prediction_ts = b.ts
 )
 SELECT j.*, sc.composite AS sc_value, sc.computed_ts AS sc_computed_ts, sc.version AS sc_version,
   h.ts AS h_ts, h.score AS h_value
@@ -74,12 +80,14 @@ FROM j
 LEFT JOIN server_composite_readings sc ON sc.slot_ts = j.sc_slot
 LEFT JOIN history h ON h.id = j.h_id
 ORDER BY j.ts DESC`;
+}
+export const COMPARISON_SQL = comparisonSql('BTC');
 
-export async function loadComparisonRows(db, { horizon, period, limit }, nowMs) {
+export async function loadComparisonRows(db, { asset = 'BTC', horizon, period, limit }, nowMs) {
   const span = PERIODS[period];
   const fromTs = span == null ? 0 : nowMs - span;
-  const res = await db.prepare(COMPARISON_SQL)
-    .bind(horizon, fromTs, nowMs, limit + 1, COMPARISON_LIMITS.v1MaxAgeMs).all();
+  const res = await db.prepare(comparisonSql(asset))
+    .bind(horizon, fromTs, nowMs, limit + 1, COMPARISON_LIMITS.v1MaxAgeMs, asset).all();
   const rows = (res && res.results) || [];
   // A prediction can only have one selection_decisions provenance row today; keep the first if that ever changes.
   const seen = new Set(); const unique = [];
@@ -217,7 +225,7 @@ export function summarize(records) {
 
 // ---- route ------------------------------------------------------------------------------------------------------
 const METHODOLOGY = {
-  v1: 'server_composite_readings.composite, else history.score; latest reading at or before the decision, at most 3 h old, else missing',
+  v1: 'server_composite_readings.composite, else history.score; latest reading at or before the decision, at most 3 h old, else missing. V1 is market-wide: the same reading is the V1 view for BTC, ETH and LINK',
   v1_direction: 'PROPOSED comparison convention (OD-12): score > 55 UP, < 45 DOWN, 45-55 no call; sensitivity bands 50/50, 45/55, 40/60. Not production logic',
   v2_baseline: 'served headline before GLM (glm_adjustments.baseline_p_up, else chosen variant cycle_p_up, else p_up)',
   v2_final: 'glm_adjustments.final_p_up (active mode), else baseline with reason glm_out_of_scope / no_adjustment',

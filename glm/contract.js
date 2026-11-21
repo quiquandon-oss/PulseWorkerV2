@@ -50,7 +50,10 @@ export const GLM_LIMITS = Object.freeze({
   maxRowsReadPerRun: 2000,
   chronosMaxBytes: 512 * 1024,
   chronosTimeoutMs: 8000,
-  aiTimeoutMs: 25000,
+  // 2026-11-21: the first production call (~6k-token prompt, up to 1,500 output tokens) did not answer within 25 s.
+  // Waiting is wall time, not CPU; the 07:00 cron runs in ctx.waitUntil well inside the scheduled-event wall limit.
+  // The staging probe (1.2k in / 656 out) took ~16 s, so 120 s leaves room for the full package.
+  aiTimeoutMs: 120000,
   minTs: Date.UTC(2020, 0, 1),
   maxTs: Date.UTC(2100, 0, 1),
 });

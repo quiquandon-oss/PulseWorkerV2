@@ -505,3 +505,11 @@ describe('prospective evaluation: baseline vs GLM-influenced', () => {
     expect(e.sufficient_for_claims).toBe(false);
   });
 });
+
+describe('GLM call timeout (2026-11-21 production timeout at 25 s)', () => {
+  it('allows the full package enough wall time but stays bounded', async () => {
+    const { GLM_LIMITS } = await import('../glm/contract.js');
+    expect(GLM_LIMITS.aiTimeoutMs).toBeGreaterThanOrEqual(90000);
+    expect(GLM_LIMITS.aiTimeoutMs).toBeLessThanOrEqual(180000);
+  });
+});

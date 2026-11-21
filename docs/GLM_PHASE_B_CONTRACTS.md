@@ -425,3 +425,32 @@ through a bounded, traceable, reversible path. Supersedes the 2026-11-19 shadow 
   = "0"` (no call), `GLM_TICK_HOOK_ENABLED = "0"` (no tick read/write), or revert the PR.
 - Open items accepted by the owner: V1 Neuron use and 07:00 Worker CPU not measured (mitigations above; output
   validation measured at ~0.6 ms locally).
+
+
+## Revision 2026-11-21: independent audit implementation mandate
+
+Owner mandate OD-18 in CryptoPulseV2 `docs/governance/OWNER_DECISIONS.md` authorises implementation of the
+independent audit recommendations. This revision supersedes older statements in this document where they conflict.
+
+- **Execution order:** V2 baseline and collector complete before optional GLM. GLM runs last and cannot defer or block
+  baseline work. A conservative shared-D1 headroom guard skips GLM without marking the forecast if it cannot fit.
+- **Trigger completeness:** bounded 36-hour scan, maximum four candidates per provider, oldest first; one inference
+  per invocation; one ledger outcome per forecast. Identical package hashes may share one inference and the covered
+  forecast is recorded with a link to the covering run. Unprocessed candidates remain eligible for the next scan.
+- **Budget re-offer:** a `skipped_budget` candidate may be offered once after the next UTC daily reset if it is still
+  within 36 hours. Timeouts, invalid outputs and uncertain-consumption outcomes are not automatically retried.
+- **Recovery:** a `started` run older than one hour is stale and becomes failed/re-eligible.
+- **Accounting and alerts:** per-step D1 query counts are recorded; alert after three consecutive non-tick hours
+  without a V2 decision.
+- **Research aggregation:** raw and calibrated outputs of the same k-NN row count as one family vote (initially their
+  mean; both remain visible). A below-50% source is neutral unless its Wilson upper bound is below 50%, in which
+  case it may count as a reversed vote. Research version is bumped; baseline V2 is unchanged.
+- **Prediction integrity:** redo PR #110 on current main as `knn-core-v2-asof` / `fp-asof-v2`, shadow-first.
+  Promotion is a separate owner decision after prospective evidence; elapsed time alone is insufficient.
+- **Budget:** retain the 300-Neuron internal budget and 1,000 hard clamp. Account-wide Neuron use, Worker CPU and
+  Observability remain unverified pending read-only dashboard evidence. No budget increase or paid fallback.
+- **Frontend:** Pages deployment is gated on tests and main-only; include the three mandatory browser smokes from
+  the audit. Complete the research/GLM transparency and Comparison items in the audit's dependency order.
+
+See PulseWorkerV2 `docs/OPERATIONS.md` for execution order, D1 accounting, trigger ledger, kill switches,
+telemetry limitations and release verification.

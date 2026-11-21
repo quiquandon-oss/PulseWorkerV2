@@ -454,3 +454,10 @@ independent audit recommendations. This revision supersedes older statements in 
 
 See PulseWorkerV2 `docs/OPERATIONS.md` for execution order, D1 accounting, trigger ledger, kill switches,
 telemetry limitations and release verification.
+
+### Implementation notes (audit review PR, 2026-11-21)
+
+- **Coverage by the daily run:** the 07:00 daily run also records every still-pending trigger as covered by its
+  package. Every forecast therefore gets an opportunity within 36 h, even when the hourly chain has no D1 room.
+- **Runs API:** read-only `GET /api/glm/runs?limit<=50` returns run id, cutoff, status, origin, forecast ref, covering
+  run, reason and Neurons.

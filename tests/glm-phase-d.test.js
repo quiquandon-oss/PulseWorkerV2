@@ -359,10 +359,15 @@ describe('migration 0031 and wiring', () => {
   });
 
   it('worker.js: GLM wired only at the 07:00 cron, the read-only routes and the tick chain; no Gemini call added', () => {
-    expect(WORKER).toMatch(/import \{ glmDailySignalRun, glmTickAdjust, handleGlmRoutes, glmTickProbe, glmStagingProbesEnabled, glmForecastTrigger \} from '\.\/glm\/runner\.js';/);
+    expect(WORKER).toMatch(/import \{ glmDailySignalRun, glmTickAdjust, handleGlmRoutes, glmTickProbe, glmStagingProbesEnabled, glmForecastTrigger, glmRecordCoveredByDaily \} from '\.\/glm\/runner\.js';/);
     // forecast-triggered GLM (change request 2026-11-21) runs only in the hourly non-tick chain
     expect((WORKER.match(/glmForecastTrigger\(/g) || []).length).toBe(1);
-    expect(WORKER).toMatch(/\.then\(\(\) => glmForecastTrigger\(env, glmDeps\(env\), \{ now: event\.scheduledTime \}\)\)/);
+    expect(WORKER).toMatch(/\.then\(\(\) => glmForecastTrigger\(env, glmDeps\(env\), \{ now: event\.scheduledTime, queryBudget: SV2_D1_QUERIES_PER_INVOCATION - SV2_D1_QUERY_RESERVE - sv2Q\.n \}\)\)/);
+    // audit review 2026-11-21 (decision 3): baseline V2 and the collector run BEFORE GLM, and nothing defers them
+    const chain = WORKER.slice(WORKER.indexOf("} else if (event.cron === '0 * * * *') {"), WORKER.indexOf('// No catch-all else'));
+    const order = ['runAutomaticDetection', 'syncV1ArchiveFromHistory', 'runSentimentV2Cycle', 'sv2CollectGuarded', 'glmForecastTrigger'].map((f) => chain.indexOf(f));
+    expect(order.every((x, i) => x > 0 && (i === 0 || x > order[i - 1]))).toBe(true);
+    expect(chain).not.toMatch(/glmTriggerRan|deferred one hour/);
     const at07 = WORKER.slice(WORKER.indexOf("if (event.cron === '0 7 * * *') {"), WORKER.indexOf("if (event.cron === '0 7 * * *') {") + 2500);
     expect(at07).toMatch(/glmDailySignalRun\(env, glmDeps\(env\)/);
     // exactly two call sites: the 07:00 cron and the staging-only probe step (gated by GLM_STAGING_PROBES)
@@ -523,21 +528,20 @@ import { glmForecastTrigger, glmBudgetGate } from '../glm/runner.js';
 describe('forecast-triggered GLM: independent triggers, idempotent, honest, budget-gated', () => {
   const ledgerFetch = async () => ({ ok: true, status: 200, headers: { get: () => null }, text: async () => JSON.stringify(LEDGER) });
   const at = CUT + 2 * H;
-  it('TimesFM and Chronos each trigger their own run (no waiting for the counterpart); a third call finds nothing due', async () => {
+  it('each forecast gets its own record: one analysis for the package, the other forecast recorded as covered; later calls find nothing due', async () => {
     nowTs = at + 30e3;
     const ai = aiReturning(validAnswer());
     const env = mkEnv(LIVE, ai);
     const r1 = await glmForecastTrigger(env, deps(LIVE, { fetchImpl: ledgerFetch, now: clock }), { now: at, fetchImpl: ledgerFetch });
     const r2 = await glmForecastTrigger(env, deps(LIVE, { fetchImpl: ledgerFetch, now: clock }), { now: at, fetchImpl: ledgerFetch });
     const r3 = await glmForecastTrigger(env, deps(LIVE, { fetchImpl: ledgerFetch, now: clock }), { now: at, fetchImpl: ledgerFetch });
-    expect([r1.ran, r2.ran, r3.ran]).toEqual([true, true, false]);
-    expect(new Set([r1.trigger.source, r2.trigger.source])).toEqual(new Set(['timesfm', 'chronos']));
-    // both forecasts precede the same cutoff: the second trigger's package is identical, so it is recorded as covered
-    expect(r2.status).toBe('duplicate_package');
-    expect(r3.status).toBe('nothing_due');
+    expect([r1.ran, r2.ran, r3.ran]).toEqual([true, false, false]);
+    // both forecasts precede the same cutoff: ONE package holds both, so the second is recorded as covered in the same call
+    expect(r1.covered.length).toBeGreaterThanOrEqual(1);
+    expect([r2.status, r3.status]).toEqual(['nothing_due', 'nothing_due']);
     expect(ai.run).toHaveBeenCalledTimes(1);
     const runs = d1.db.prepare("SELECT reason, decision_cutoff_ts, status FROM glm_runs WHERE reason LIKE 'trigger:%' ORDER BY rowid").all();
-    expect(runs).toHaveLength(2);
+    expect(runs).toHaveLength(1 + r1.covered.length);
     for (const r of runs) { expect(r.decision_cutoff_ts).toBe(at); expect(r.reason).toMatch(/^trigger:(tfm|chr):[^;]+; counterpart (timesfm|chronos) /); }
     expect(runs[1].reason).toMatch(/covered by run glm_/);
     // a later cutoff with a new forecast gets its own analysis (independent trigger)
@@ -593,6 +597,48 @@ describe('forecast-triggered GLM: independent triggers, idempotent, honest, budg
     expect((await glmBudgetGate(d1.binding, deps(LIVE), at + 24 * H)).ok).toBe(true);
   });
 
+  it('completeness: every unprocessed forecast of the same provider in 36 h is recorded; budget skips record all due forecasts at once', async () => {
+    nowTs = at + 30e3;
+    // a second, older TimesFM forecast that was never processed
+    d1.db.prepare(`INSERT INTO experiment_4_timesfm (coin, horizon_hours, ts, input_end_ts, target_ts, price_at_prediction, direction, model_version, checkpoint, inference_backend, context_length, forecast_horizon_steps, features_used)
+      VALUES ('BTC',24,?,?,?,63000,'DOWN','timesfm-2.5','c','cpu',128,8,'u')`).run(at - 5 * H, at - 6 * H, at + 19 * H);
+    const vars = { ...LIVE, SV2_GLM_DAILY_NEURONS: '100', GLM_DAILY_NEURONS: '100' };
+    const ai = aiReturning(validAnswer());
+    const r = await glmForecastTrigger(mkEnv(vars, ai), deps(vars, { fetchImpl: ledgerFetch }), { now: at, fetchImpl: ledgerFetch });
+    expect(r.status).toBe('skipped_budget');
+    expect(r.recorded.length).toBeGreaterThanOrEqual(3);                 // both TimesFM forecasts + Chronos
+    const refs = d1.db.prepare("SELECT reason FROM glm_runs WHERE status = 'skipped_budget'").all().map((x) => x.reason.split(';')[0]);
+    expect(new Set(refs).size).toBe(refs.length);                       // one record per forecast, no duplicates
+    expect(ai.run).not.toHaveBeenCalled();
+    // same UTC day: not offered again; after the 00:00 reset: offered once more, then never again
+    const again = await glmForecastTrigger(mkEnv(vars, ai), deps(vars, { fetchImpl: ledgerFetch }), { now: at + H, fetchImpl: ledgerFetch });
+    expect(again.status).toBe('nothing_due');
+  });
+
+  it('short D1 budget: defers without writing any marker, so the forecast is offered again next hour', async () => {
+    nowTs = at + 30e3;
+    const ai = aiReturning(validAnswer());
+    const r = await glmForecastTrigger(mkEnv(LIVE, ai), deps(LIVE, { fetchImpl: ledgerFetch, now: clock }), { now: at, fetchImpl: ledgerFetch, queryBudget: 6 });
+    expect(r.status).toBe('deferred_d1_budget');
+    expect(d1.db.prepare("SELECT COUNT(*) AS n FROM glm_runs WHERE reason LIKE 'trigger:%'").get().n).toBe(0);
+    expect(ai.run).not.toHaveBeenCalled();
+    const later = await glmForecastTrigger(mkEnv(LIVE, ai), deps(LIVE, { fetchImpl: ledgerFetch, now: clock }), { now: at, fetchImpl: ledgerFetch });
+    expect(later.ran).toBe(true);
+  });
+
+  it('due rule: interrupted runs do not count; one more chance after the daily reset only after a single budget skip', async () => {
+    const { glmDueForecasts } = await import('../glm/runner.js');
+    const c = [{ ref: 'tfm:1', forecast_ts: 1000 }];
+    const now = Date.UTC(2026, 10, 22, 2), cutoff = Math.floor(now / H) * H, yday = Date.UTC(2026, 10, 21, 23);
+    const m = (status, ts, started_ts = ts) => ({ reason: 'trigger:tfm:1; x', status, ts, started_ts });
+    expect(glmDueForecasts(c, [], cutoff, now)).toHaveLength(1);
+    expect(glmDueForecasts(c, [m('ok', yday)], cutoff, now)).toHaveLength(0);
+    expect(glmDueForecasts(c, [m('started', yday, yday)], cutoff, now)).toHaveLength(1);           // cut short, > 1 h old
+    expect(glmDueForecasts(c, [m('skipped_budget', yday)], cutoff, now)).toHaveLength(1);          // re-offered after reset
+    expect(glmDueForecasts(c, [m('skipped_budget', cutoff)], cutoff, now)).toHaveLength(0);        // same day: no
+    expect(glmDueForecasts(c, [m('skipped_budget', yday - 5 * H), m('skipped_budget', yday)], cutoff, now)).toHaveLength(0);  // once only
+  });
+
   it('nothing due -> exactly one D1 query (2026-11-21: the hourly chain shares 50 queries with detection and V2)', async () => {
     nowTs = at + 30e3;
     const env = mkEnv(LIVE, aiReturning(validAnswer()));
@@ -619,5 +665,35 @@ describe('forecast-triggered GLM: independent triggers, idempotent, honest, budg
     expect(G.glmDeps({ GLM_DAILY_NEURONS: '50000' }).budget).toBe(1000);
     expect(G.glmDeps({}).budget).toBe(0);
     expect(readFileSync(join(ROOT, 'wrangler.toml'), 'utf8')).toMatch(/^GLM_DAILY_NEURONS = "300"$/m);
+  });
+});
+
+describe('GET /api/glm/runs (audit review 2026-11-21, P2-3)', () => {
+  it('lists runs and trigger records newest first, bounded, with origin, forecast ref and covering run', async () => {
+    const { glmRuns } = await import('../glm/runner.js');
+    const rows = [
+      { run_id: 'glm_' + 'a'.repeat(24) + '_1795276800000', decision_cutoff_ts: 1795276800000, started_ts: 1, finished_ts: 2, status: 'skipped_budget', reason: 'trigger:tfm:162; counterpart chronos x; BUDGET_EXHAUSTED: 206 of 300', n_items: 0, n_excluded: 0, package_bytes: 0, usage_json: '{}' },
+      { run_id: 'glm_' + 'b'.repeat(24) + '_1795244400000', decision_cutoff_ts: 1795244400000, started_ts: 1, finished_ts: 2, status: 'duplicate_package', reason: 'trigger:chr:BTC_24h_x; counterpart timesfm y; covered by daily run glm_' + 'c'.repeat(24) + '_1795244400000', n_items: 0, n_excluded: 0, package_bytes: 0, usage_json: '{}' },
+      { run_id: 'glm_' + 'c'.repeat(24) + '_1795244400000', decision_cutoff_ts: 1795244400000, started_ts: 1, finished_ts: 2, status: 'timeout', reason: 'no answer within the time limit', n_items: 37, n_excluded: 18, package_bytes: 23627, usage_json: '{"reserved_neurons":206.05}' }];
+    let bound = null;
+    const env = { DB: { prepare: (sql) => ({ bind: (n) => { bound = n; return { all: async () => ({ results: rows }) }; } }) } };
+    const out = await glmRuns(env, 50);
+    expect(bound).toBe(50);
+    expect(out.map((r) => [r.origin, r.forecast_ref, r.status])).toEqual([['timesfm', 'tfm:162', 'skipped_budget'], ['chronos', 'chr:BTC_24h_x', 'duplicate_package'], ['daily_0700', null, 'timeout']]);
+    expect(out[1].covered_by).toBe('glm_' + 'c'.repeat(24) + '_1795244400000');
+    expect(out[2].neurons.reserved).toBe(206.05);
+  });
+});
+
+describe('hourly chain record (OPERATIONS.md §2-3): per-step D1 counts and the V2 outcome on the existing event_runs row', () => {
+  it('records once at the end of the chain, on the detection run row, and is served read-only and bounded', async () => {
+    const { readFileSync } = await import('node:fs');
+    const W = readFileSync(new URL('../worker.js', import.meta.url), 'utf8');
+    const chainSrc = W.slice(W.indexOf("} else if (event.cron === '0 * * * *') {"), W.indexOf('// No catch-all else'));
+    expect(chainSrc).toMatch(/\.then\(\(\) => sv2RecordChain\(env, chain\)\)/);
+    for (const step of ['detection', 'sync', 'v2', 'collector', 'glm']) expect(chainSrc).toMatch(new RegExp(`chain\\.steps\\.${step} = `));
+    expect(W).toMatch(/UPDATE event_runs SET summary_json = json_set\(COALESCE\(summary_json, '\{\}'\), '\$\.chain', json\(\?\)\) WHERE run_id = \?/);
+    expect(W).toMatch(/url\.pathname === '\/api\/sentiment-v2\/chain' && request\.method === 'GET'/);
+    expect(W).toMatch(/Math\.min\(48, parseInt\(url\.searchParams\.get\('limit'\)/);
   });
 });

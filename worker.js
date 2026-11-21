@@ -11,7 +11,7 @@ import { sv2EvidenceReadings, sv2ScoreHeadline, SV2_EVIDENCE_RULES, SV2_LEXICON_
 import { logBounded } from './observability/bounded-log.js';
 import { handleComparisonRoutes } from './comparison/v1-v2.js';
 import { handleSv2ForecastRoute } from './comparison/sv2-forecast.js';
-import { glmDailySignalRun, glmTickAdjust, handleGlmRoutes, glmTickProbe, glmStagingProbesEnabled, glmForecastTrigger } from './glm/runner.js';
+import { glmDailySignalRun, glmTickAdjust, handleGlmRoutes, glmTickProbe, glmStagingProbesEnabled, glmForecastTrigger, glmRecordCoveredByDaily } from './glm/runner.js';
 import { fetchChronosLedger } from './glm/adapters.js';
 import { sv2fModelSource, sv2fForecastSource, sv2fGlm, sv2ForecastResearch, SV2F_EVAL_WINDOW_MS, SV2F_VERSION } from './sentiment-v2/forecast-family.js';
 // ---- BTC k-NN historical analog model ----
@@ -11715,7 +11715,10 @@ const pulseWorkerHandlers = {
       // GLM evidence intelligence daily signal (BTC 24 h, cutoff 07:00 UTC). Off unless GLM_SIGNAL_ENABLED = "1";
       // inference additionally needs GLM_INFERENCE_ENABLED = "1" and a Neuron budget. Never blocks anything below.
       ctx.waitUntil(glmDailySignalRun(env, glmDeps(env), { scheduledTs: event.scheduledTime })
-        .then((r) => { if (r && r.status !== 'disabled') logBounded('log', '', ({ evt: 'glm_daily', status: r.status, run_id: r.run_id || null, signal: r.signal || null, usage: r.usage || null, reason: r.reason || null })); })
+        .then((r) => { if (r && r.status !== 'disabled') logBounded('log', '', ({ evt: 'glm_daily', status: r.status, run_id: r.run_id || null, signal: r.signal || null, usage: r.usage || null, reason: r.reason || null }));
+          // the daily package holds every forecast issued before 07:00: pending triggers are recorded as covered by it (2026-11-21 audit, A)
+          return r && r.run_id ? glmRecordCoveredByDaily(env, glmDeps(env), { cutoff: Math.floor(event.scheduledTime / 3600000) * 3600000, runId: r.run_id, now: event.scheduledTime })
+            .then((c) => { if (c && (c.recorded || c.error)) logBounded('log', '', ({ evt: 'glm_daily_covered', recorded: c.recorded, refs: c.refs || [], error: c.error || null })); }) : null; })
         .catch((err) => console.error('GLM daily signal failed:', err)));
       // Recalibration is cheap and only needs daily freshness — resolved
       // counts move by at most a handful of predictions per day.
@@ -11767,8 +11770,7 @@ const pulseWorkerHandlers = {
         // Sentiment V2 runs after detection, in the same non-tick invocation (never alongside the prediction tick), so
         // detection's writes complete first and a V2 failure cannot affect them. V2 is idempotent per V1 observation.
         // One counter of top-level D1 calls for the whole chain (D1 limits queries per invocation; a batch counts as one).
-        const sv2Q = { n: 0 };
-        let glmTriggerRan = false;
+        const sv2Q = { n: 0 }, sv2Steps = {};
         env = { ...env, DB: sv2CountingDb(env.DB, sv2Q) };
         ctx.waitUntil(runAutomaticDetection(env, { trigger: 'cron', nowTs: event.scheduledTime })
           .then(r => logBounded('log', 'event detection (cron):', ({ ok: r.ok, skipped: r.skipped || false, reason: r.reason || r.error || null })))
@@ -11780,24 +11782,23 @@ const pulseWorkerHandlers = {
           .then(r => { const line = ({ ok: r.ok, skipped: r.skipped || false, copied: r.copied || 0, already_present: r.already_present || 0, history_last_ts: r.history_last_ts || null, invalid: r.invalid || [], errors: r.errors || [], deferred: r.deferred || 0, truncated: r.truncated || false });
             if (r.ok) logBounded('log', 'v1 archive sync (cron):', line); else logBounded('error', 'v1 archive sync (cron) FAILED:', line); })
           .catch(err => console.error('V1 archive sync (cron) failed:', err))
-          // Forecast-triggered GLM (change request 2026-11-21): a new TimesFM / Chronos-2 forecast gets one GLM analysis
-          // (budget-gated). When a GLM package is actually built this hour, the V2 cycle and the collector wait one hour
-          // (they catch up; idempotent) so the invocation stays inside the Workers Free CPU limit.
-          .then(() => glmForecastTrigger(env, glmDeps(env), { now: event.scheduledTime }))
-          .then(r => { glmTriggerRan = !!(r && r.ran); if (r && r.status !== 'disabled' && r.status !== 'nothing_due') logBounded('log', 'glm forecast trigger (cron):', ({ status: r.status, ran: r.ran, trigger: r.trigger ? r.trigger.ref : null, run_id: r.run_id || null, reason: r.reason || null })); })
-          .catch(err => console.error('GLM forecast trigger (cron) failed:', err))
-          .then(() => (glmTriggerRan ? { ok: true, skipped: true, reason: 'deferred one hour: GLM forecast analysis ran in this invocation' }
-            : runSentimentV2Cycle(env, { nowTs: event.scheduledTime, queryBudget: SV2_D1_QUERIES_PER_INVOCATION - SV2_D1_QUERY_RESERVE - sv2Q.n })))
-          .then(r => { const line = ({ ok: r.ok, skipped: r.skipped || false, written: r.written || 0, reason: r.reason || null, deferred_readings: r.deferred_readings || [] });
+          // Baseline first (audit review 2026-11-21, decision 3): V2 cycle, then the collector, then GLM on what is left. GLM
+          // is optional downstream intelligence: it never defers or delays V2 or the collector.
+          .then(() => { sv2Steps.v2_start = sv2Q.n; return runSentimentV2Cycle(env, { nowTs: event.scheduledTime, queryBudget: SV2_D1_QUERIES_PER_INVOCATION - SV2_D1_QUERY_RESERVE - sv2Q.n }); })
+          .then(r => { const line = ({ ok: r.ok, skipped: r.skipped || false, written: r.written || 0, reason: r.reason || null, deferred_readings: r.deferred_readings || [], d1_queries_before: sv2Steps.v2_start, d1_queries_after: sv2Q.n });
             if (r.deferred_d1_budget) logBounded('warn', 'sentiment v2 (cron) DEFERRED (D1 budget):', line); else logBounded('log', 'sentiment v2 (cron):', line); })
           .catch(err => console.error('Sentiment V2 (cron) failed:', err))
-          // Independent evidence last: V2 decisions are past V1 timestamps, so evidence retrieved now could not count for them
-          // anyway (point-in-time), and V2 gets the D1 query headroom first. The collector spends only what is left.
-          .then(() => (glmTriggerRan ? { ok: true, skipped: true, reason: 'deferred one hour: GLM forecast analysis ran in this invocation' }
-            : sv2CollectGuarded(env, event.scheduledTime, () => SV2_D1_QUERIES_PER_INVOCATION - SV2_D1_QUERY_RESERVE - sv2Q.n)))
-          .then(r => { const line = ({ ok: r.ok, skipped: r.skipped || false, items_new: r.items_new || 0, items_duplicate: r.items_duplicate || 0, budget: r.budget || null, sources: (r.sources || []).map(x => `${x.id}:${x.status}`), errors: r.errors || [] });
+          // Independent evidence next: V2 decisions are past V1 timestamps, so evidence retrieved now could not count for them
+          // anyway (point-in-time), and V2 gets the D1 query headroom first. The collector spends what is left before GLM.
+          .then(() => sv2CollectGuarded(env, event.scheduledTime, () => SV2_D1_QUERIES_PER_INVOCATION - SV2_D1_QUERY_RESERVE - sv2Q.n))
+          .then(r => { const line = ({ ok: r.ok, skipped: r.skipped || false, items_new: r.items_new || 0, items_duplicate: r.items_duplicate || 0, budget: r.budget || null, sources: (r.sources || []).map(x => `${x.id}:${x.status}`), errors: r.errors || [], d1_queries_after: sv2Q.n });
             if (r.ok) logBounded('log', 'sv2 evidence (cron):', line); else logBounded('error', 'sv2 evidence (cron) FAILED:', line); })
-          .catch(err => console.error('SV2 evidence (cron) failed:', err)));
+          .catch(err => console.error('SV2 evidence (cron) failed:', err))
+          // Forecast-triggered GLM last, on the remaining D1 queries (it defers itself, without a marker, when they do not
+          // cover one analysis). A CPU or wall-time overrun here can only cut GLM: V2 and evidence are already written.
+          .then(() => glmForecastTrigger(env, glmDeps(env), { now: event.scheduledTime, queryBudget: SV2_D1_QUERIES_PER_INVOCATION - SV2_D1_QUERY_RESERVE - sv2Q.n }))
+          .then(r => { if (r && r.status !== 'disabled' && r.status !== 'nothing_due') logBounded('log', 'glm forecast trigger (cron):', ({ status: r.status, ran: r.ran, trigger: r.trigger ? r.trigger.ref : null, run_id: r.run_id || null, covered: r.covered || r.recorded || r.due || [], reason: r.reason || null, d1_queries_after: sv2Q.n })); })
+          .catch(err => console.error('GLM forecast trigger (cron) failed:', err)));
       }
     }
     // No catch-all else: an unrecognized event.cron does nothing.

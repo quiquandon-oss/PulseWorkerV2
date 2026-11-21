@@ -18,7 +18,7 @@
 //     ELIGIBLE signal valid at the decision time.
 // Pure functions only (no I/O); worker.js loads the point-in-time rows and calls sv2ForecastResearch.
 
-export const SV2F_VERSION = 'sv2f-research-0.1';
+export const SV2F_VERSION = 'sv2f-research-0.2';   // 0.2 (owner decision 2, 2026-11-21): one vote per model; reversal only when clearly below 50 %
 export const SV2F_PRIOR_K = 10;                 // PROPOSED: equivalent to 20 prior pseudo-forecasts split 50/50
 export const SV2F_EVAL_WINDOW_MS = 90 * 86400000; // only outcomes resolved in the 90 days before the decision
 export const SV2F_FRESH_PREDICTION_MS = 6 * 3600000;   // production models run every 3 h
@@ -31,12 +31,22 @@ const r2 = (x) => Math.round(x * 100) / 100;
 const r4 = (x) => Math.round(x * 1e4) / 1e4;
 
 // Directional reading from measured accuracy. dir: 'UP' | 'DOWN' | 'NEUTRAL'.
+// Wilson 95 % upper bound of a hit rate.
+function wilsonUpper(h, n, z = 1.959963984540054) {
+  if (!(n > 0)) return 1;
+  const p = h / n, d = 1 + z * z / n, c = p + z * z / (2 * n), m = z * Math.sqrt(p * (1 - p) / n + z * z / (4 * n * n));
+  return (c + m) / d;
+}
 export function sv2fReading(dir, hits, n, k = SV2F_PRIOR_K) {
   const nn = Math.max(0, Number(n) || 0), hh = Math.max(0, Math.min(nn, Number(hits) || 0));
   const raw = nn > 0 ? hh / nn : null;
-  const adjusted = (hh + k) / (nn + 2 * k);
+  let adjusted = (hh + k) / (nn + 2 * k);
+  // 0.2: a below-50 % record counts as reversed evidence only when it is clearly below chance (Wilson upper bound < 50 %);
+  // otherwise it carries no information (reading 50).
+  const neutralized = adjusted < 0.5 && wilsonUpper(hh, nn) >= 0.5;
+  if (neutralized) adjusted = 0.5;
   const reading = dir === 'UP' ? 100 * adjusted : dir === 'DOWN' ? 100 - 100 * adjusted : 50;
-  return { direction: dir, resolved_n: nn, hits: hh, raw_hit_rate: raw === null ? null : r4(raw), adjusted_hit_rate: r4(adjusted), reading: r2(reading), prior_k: k };
+  return { direction: dir, resolved_n: nn, hits: hh, raw_hit_rate: raw === null ? null : r4(raw), adjusted_hit_rate: r4(adjusted), neutralized, reading: r2(reading), prior_k: k };
 }
 
 const dirOfP = (p) => (p > 0.5 ? 'UP' : p < 0.5 ? 'DOWN' : 'NEUTRAL');
@@ -102,7 +112,13 @@ export function sv2fGlm(signals, t) {
 export function sv2ForecastResearch(result, sources, glm) {
   const out = { version: SV2F_VERSION, baseline_score: result.sentiment_score ?? null, sources, glm };
   if (result.sentiment_score === null || result.sentiment_score === undefined) return { ...out, status: 'baseline_unavailable', enhanced_score: null };
-  const fresh = Object.entries(sources).filter(([, s]) => s.state === 'fresh');
+  const freshAll = Object.entries(sources).filter(([, s]) => s.state === 'fresh');
+  // 0.2: model_original and model_calibrated are two outputs of the same k-NN prediction: they share ONE vote (their mean).
+  // Both stay visible in `sources`; contributions split the shared vote between them.
+  const GROUP = { model_original: 'model_knn', model_calibrated: 'model_knn' };
+  const votes = {};
+  for (const [k, src] of freshAll) (votes[GROUP[k] || k] = votes[GROUP[k] || k] || []).push([k, src]);
+  const fresh = Object.values(votes).map((members) => [members.map(([k]) => k), { reading: members.reduce((a, [, x]) => a + x.reading, 0) / members.length }]);
   const famScores = Object.values(result.families || {}).map((f) => f.score).filter((x) => x !== null && x !== undefined);
   const missing = Object.entries(sources).filter(([, s]) => s.state !== 'fresh').map(([k, s]) => `${k}:${s.state}${s.reason ? ':' + s.reason : ''}`);
   const evAdj = Number(result.events?.adjustment) || 0;
@@ -118,13 +134,14 @@ export function sv2ForecastResearch(result, sources, glm) {
     const nFam = nBase + 1;
     composite = (baseComposite * nBase + familyScore) / nFam;
     // Contribution of each source to the final score, in points: its share of the forecast family, which has weight 1/nFam.
-    for (const [k, s] of fresh) contributions[k] = r2((s.reading - 50) / fresh.length / nFam);
+    for (const [keys] of fresh) for (const k of keys) contributions[k] = r2((sources[k].reading - 50) / keys.length / fresh.length / nFam);
   }
   const glmAdj = glm && glm.state === 'applied' ? glm.adjustment : 0;
   const enhanced = fresh.length || glmAdj ? Math.max(0, Math.min(100, composite + evAdj + glmAdj)) : Number(result.sentiment_score);
   return { ...out, status: fresh.length || glmAdj ? 'ok' : 'no_forecast_inputs', enhanced_score: r2(enhanced), delta: r2(enhanced - result.sentiment_score),
     family_score: familyScore === null ? null : r2(familyScore), n_families_with_forecast: famScores.length + (fresh.length ? 1 : 0),
     contributions: { ...contributions, glm: glmAdj }, missing,
-    agreement: { up: fresh.filter(([, s]) => s.direction === 'UP').map(([k]) => k), down: fresh.filter(([, s]) => s.direction === 'DOWN').map(([k]) => k),
-      neutral: fresh.filter(([, s]) => s.direction === 'NEUTRAL').map(([k]) => k) } };
+    votes: fresh.map(([keys, v]) => ({ sources: keys, reading: r2(v.reading) })),
+    agreement: { up: freshAll.filter(([, s]) => s.direction === 'UP').map(([k]) => k), down: freshAll.filter(([, s]) => s.direction === 'DOWN').map(([k]) => k),
+      neutral: freshAll.filter(([, s]) => s.direction === 'NEUTRAL').map(([k]) => k) } };
 }

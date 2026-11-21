@@ -3,6 +3,7 @@
   predictions  /prediction-freshness interpreted by prediction_staleness.py
   workflows    GitHub run history interpreted by workflow_health.py
   usage        /d1-usage interpreted by d1_usage_alert.py
+  sentiment_v2 newest V2 decision from /api/sentiment-v2/forecast-research (silent stop, 2026-11-21)
 
 A check that cannot read its source is itself a finding, never a pass. Read-only apart from the alert issue.
 
@@ -10,7 +11,7 @@ A check that cannot read its source is itself a finding, never a pass. Read-only
 
 --simulate replaces the live sources with a fixed scenario and uses the label "ops-alert-test", so the whole
 path (checks, de-duplication, issue, run result) can be exercised without touching the real alert. Scenarios:
-healthy, usage_warning, usage_critical, usage_stale, predictions_stale, fetch_failure.
+healthy, usage_warning, usage_critical, usage_stale, predictions_stale, v2_stale, fetch_failure.
 """
 import datetime as dt
 import json
@@ -39,6 +40,25 @@ def check_predictions(fetch):
         return prediction_staleness.problems(fetch(WORKER + "/prediction-freshness")), []
     except Exception as e:
         return [f"could not read /prediction-freshness ({type(e).__name__})"], []
+
+
+# V2 writes a decision in most non-tick hours (16 of 24). Before 2026-11-21 gaps reached about 3 h; that day a D1 budget
+# deferral stopped it for 6 h without any alert. More than 4 h without a new decision is a finding.
+V2_MAX_GAP_H = 4
+
+
+def check_sentiment_v2(fetch, now):
+    try:
+        d = fetch(WORKER + "/api/sentiment-v2/forecast-research?limit=1")
+        pts = (d or {}).get("points") or []
+        if not pts:
+            return ["Sentiment V2: no decision returned by /api/sentiment-v2/forecast-research"], []
+        age_h = (now * 1000 - float(pts[0]["decision_ts"])) / 3600000
+        if age_h > V2_MAX_GAP_H:
+            return [f"Sentiment V2: no new decision for {age_h:.1f} h (limit {V2_MAX_GAP_H} h); check the hourly chain and its D1 budget"], []
+        return [], [f"Sentiment V2: newest decision {age_h:.1f} h old"]
+    except Exception as e:
+        return [f"could not read /api/sentiment-v2/forecast-research ({type(e).__name__})"], []
 
 
 def check_usage(fetch, now):
@@ -77,7 +97,7 @@ def simulate(name, now):
     def failing(_url):
         raise OSError("simulated outage")
     usage = {"healthy": 500000, "usage_warning": 3200000, "usage_critical": 5200000}
-    checks, notes = {"predictions": [], "workflows": [], "usage": []}, [f"SIMULATION: {name} (label {TEST_LABEL}; live sources not read)"]
+    checks, notes = {"predictions": [], "workflows": [], "usage": [], "sentiment_v2": []}, [f"SIMULATION: {name} (label {TEST_LABEL}; live sources not read)"]
     if name in usage:
         checks["usage"], lines = check_usage(lambda _u: _usage_payload(now, usage[name]), now)
         notes += lines
@@ -86,6 +106,8 @@ def simulate(name, now):
         notes += lines
     elif name == "predictions_stale":
         checks["predictions"], _ = check_predictions(lambda _u: _freshness_payload("STALE"))
+    elif name == "v2_stale":
+        checks["sentiment_v2"], _ = check_sentiment_v2(lambda _u: {"points": [{"decision_ts": (now - 6 * 3600) * 1000}]}, now)
     elif name == "fetch_failure":
         checks["predictions"], _ = check_predictions(failing)
         checks["usage"], _ = check_usage(failing, now)
@@ -106,11 +128,13 @@ def main(argv=None, now=None):
         p, _ = check_predictions(fetch_json)
         w, _ = check_workflows(repo, token, now)
         u, notes = check_usage(fetch_json, now)
-        checks, label = {"predictions": p, "workflows": w, "usage": u}, alert_state.LABEL
+        v, vnotes = check_sentiment_v2(fetch_json, now)
+        notes += vnotes
+        checks, label = {"predictions": p, "workflows": w, "usage": u, "sentiment_v2": v}, alert_state.LABEL
     for line in notes:
         print(line)
     print()
-    for name in ("predictions", "workflows", "usage"):
+    for name in ("predictions", "workflows", "usage", "sentiment_v2"):
         print(f"{name}: " + ("no problem" if not checks[name] else f"{len(checks[name])} problem(s)"))
         for text in checks[name]:
             print(f"- {text}")

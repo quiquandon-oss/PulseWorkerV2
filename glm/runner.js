@@ -216,64 +216,110 @@ export async function glmDailySignalRun(env, deps = {}, opts = {}) {
   }
 }
 
-// Forecast-triggered GLM (owner change request 2026-11-21 §6): every new eligible TimesFM 2.5 or Chronos-2 BTC 24 h
-// forecast creates one GLM opportunity, without waiting for the counterpart. Idempotent per forecast (glm_runs.reason
-// starts with trigger:<ref>), cutoff = the top of the current hour, budget checked before any package is built
-// (BUDGET_EXHAUSTED is recorded, nothing else is interrupted). At most one trigger per invocation. Never throws.
-export async function glmForecastTrigger(env, deps = {}, { now = Date.now(), fetchImpl } = {}) {
+// Forecast-triggered GLM (owner change request 2026-11-21 §6; revised 2026-11-21 after the audit review, decisions 3-4).
+// Every eligible TimesFM 2.5 / Chronos-2 BTC 24 h forecast issued in the last 36 h is its own trigger opportunity and gets
+// its own glm_runs record (run, covered, skipped_budget). Runs LAST in the hourly chain, on the D1 queries baseline V2 and
+// the collector left: it never defers them. Per invocation: 1 scan query, 1 budget-gate query, at most ONE model call,
+// one batched marker write. A due forecast that does not fit this hour gets no marker and is offered again next hour
+// (bounded by the 36 h freshness rule). A forecast skipped for budget is offered once more after the 00:00 UTC reset if
+// still fresh. A run left 'started' for over an hour (invocation cut short) does not count. Never throws.
+export const GLM_TRIGGER_RUN_QUERIES = 14;   // worst case D1 calls for one analysis (gate, package reads, run row, ledger, signal, markers)
+export const GLM_TRIGGER_MAX_PER_PROVIDER = 4;
+
+function glmMarkerInsert(db, { ref, cutoff, now, status, packageHash, reason, usage }) {
+  return sha256Hex(ref + '|' + status).then((h) => db.prepare(`INSERT OR IGNORE INTO glm_runs (run_id, asset, decision_cutoff_ts, started_ts, finished_ts, package_hash, input_version, prompt_version,
+    schema_version, status, reason, n_items, n_excluded, package_bytes, input_refs_json, missing_json, usage_json, rule_version) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+    .bind(`glm_${h.slice(0, 24)}_${cutoff}`, 'BTC', cutoff, now, now, packageHash, GLM_INPUT_VERSION, GLM_PROMPT_VERSION, GLM_SCHEMA_VERSION, status,
+      reason, 0, 0, 0, '[]', '[]', JSON.stringify(usage || {}), GLM_RULE_VERSION));
+}
+async function glmWriteMarkers(db, rows) {
+  if (!rows.length) return 0;
+  const stmts = await Promise.all(rows.map((r) => glmMarkerInsert(db, r)));
+  if (typeof db.batch === 'function') await db.batch(stmts); else for (const st of stmts) await st.run();
+  return rows.length;
+}
+// Which forecasts still need an opportunity. Pure (exported for tests).
+export function glmDueForecasts(cands, marks, cutoff, now) {
+  const day = (ts) => new Date(ts).toISOString().slice(0, 10);
+  return cands.filter((c) => {
+    const mine = marks.filter((m) => Number(m.ts) >= c.forecast_ts && String(m.reason || '').startsWith(`trigger:${c.ref};`))
+      .filter((m) => !(m.status === 'started' && now - Number(m.started_ts || m.ts) > H));   // interrupted run: not an opportunity
+    if (!mine.length) return true;
+    // decision 4: one more chance after the daily reset, only after a single budget skip on an earlier UTC day
+    return mine.length === 1 && mine[0].status === 'skipped_budget' && day(Number(mine[0].ts)) < day(cutoff);
+  });
+}
+async function glmTriggerScan(db, cutoff, fetchImpl) {
+  const lo = cutoff - GLM_LIMITS.staleForecastMs;
+  const scan = await db.prepare(`SELECT 'tfm' AS k, id, ts, NULL AS reason, NULL AS status, NULL AS started_ts FROM (SELECT id, ts FROM experiment_4_timesfm WHERE coin = 'BTC' AND horizon_hours = 24 AND ts <= ? AND ts >= ? ORDER BY ts DESC LIMIT ${GLM_TRIGGER_MAX_PER_PROVIDER})
+    UNION ALL SELECT * FROM (SELECT 'seen' AS k, NULL AS id, decision_cutoff_ts AS ts, reason, status, started_ts FROM glm_runs WHERE asset = 'BTC' AND decision_cutoff_ts >= ? AND reason LIKE 'trigger:%' LIMIT 300)`)
+    .bind(cutoff, lo, lo).all();
+  const rows = (scan && scan.results) || [];
+  const chron = await fetchChronosLedger(fetchImpl);
+  const chr = chron.ledger && Array.isArray(chron.ledger.forecasts)
+    ? chron.ledger.forecasts.filter((f) => f && f.coin === 'BTC' && Number(f.horizon_hours) === 24 && Number(f.issued_ts) <= cutoff && Number(f.issued_ts) >= lo)
+      .sort((a, b) => Number(b.issued_ts) - Number(a.issued_ts)).slice(0, GLM_TRIGGER_MAX_PER_PROVIDER) : [];
+  const cands = rows.filter((r) => r.k === 'tfm').map((t) => ({ source: 'timesfm', ref: `tfm:${t.id}`, forecast_ts: Number(t.ts) }))
+    .concat(chr.map((f) => ({ source: 'chronos', ref: `chr:${f.id}`, forecast_ts: Number(f.issued_ts) })))
+    .sort((a, b) => a.forecast_ts - b.forecast_ts);
+  return { cands, marks: rows.filter((r) => r.k === 'seen'), chronos_error: chron.error || null };
+}
+const glmCounterpart = (c, cands, chronErr) => {
+  const other = cands.filter((x) => x.source !== c.source).slice(-1)[0];
+  return other ? `${other.source} ${other.ref} issued ${new Date(other.forecast_ts).toISOString()}`
+    : `${c.source === 'timesfm' ? 'chronos' : 'timesfm'} missing${c.source === 'timesfm' && chronErr ? ' (' + chronErr + ')' : ''}`;
+};
+
+export async function glmForecastTrigger(env, deps = {}, { now = Date.now(), fetchImpl, queryBudget = Infinity } = {}) {
   const flags = glmFlags(env);
   if (!flags.signal || !flags.inference) return { ran: false, status: 'disabled' };
+  if (queryBudget < 1) return { ran: false, status: 'deferred_d1_budget', reason: 'no D1 query left for the trigger scan this hour' };
   const db = env.DB;
   const cutoff = Math.floor(now / H) * H;
   try {
-    // ONE D1 query for the latest TimesFM forecast and the trigger markers of the last 36 h (2026-11-21: the hourly chain
-    // shares 50 D1 queries per invocation with event detection and the V2 cycle; three separate reads left V2 short).
-    const scan = await db.prepare(`SELECT 'tfm' AS k, id, ts, NULL AS reason FROM (SELECT id, ts FROM experiment_4_timesfm WHERE coin = 'BTC' AND horizon_hours = 24 AND ts <= ? ORDER BY ts DESC LIMIT 1)
-      UNION ALL SELECT * FROM (SELECT 'seen' AS k, NULL AS id, decision_cutoff_ts AS ts, reason FROM glm_runs WHERE asset = 'BTC' AND decision_cutoff_ts >= ? AND reason LIKE 'trigger:%' LIMIT 200)`)
-      .bind(cutoff, cutoff - GLM_LIMITS.staleForecastMs).all();
-    const scanRows = (scan && scan.results) || [];
-    const tfm = scanRows.find((r) => r.k === 'tfm') || null;
-    const marks = scanRows.filter((r) => r.k === 'seen');
-    const chron = await fetchChronosLedger(fetchImpl || deps.fetchImpl || fetch);
-    const chr = chron.ledger && Array.isArray(chron.ledger.forecasts)
-      ? chron.ledger.forecasts.filter((f) => f && f.coin === 'BTC' && Number(f.horizon_hours) === 24 && Number(f.issued_ts) <= cutoff)
-        .reduce((a, f) => (!a || Number(f.issued_ts) > Number(a.issued_ts) ? f : a), null) : null;
-    const cands = [];
-    if (tfm) cands.push({ source: 'timesfm', ref: `tfm:${tfm.id}`, forecast_ts: Number(tfm.ts) });
-    if (chr) cands.push({ source: 'chronos', ref: `chr:${chr.id}`, forecast_ts: Number(chr.issued_ts) });
-    const fresh = cands.filter((c) => cutoff - c.forecast_ts <= GLM_LIMITS.staleForecastMs).sort((a, b) => a.forecast_ts - b.forecast_ts);
-    for (const c of fresh) {
-      // same rule as before (a marker for this forecast at or after it was issued), evaluated on the rows read above
-      const seen = marks.some((m) => Number(m.ts) >= c.forecast_ts && String(m.reason || '').startsWith(`trigger:${c.ref};`));
-      if (seen) continue;
-      const other = cands.find((x) => x.source !== c.source);
-      c.counterpart = other ? `${other.source} ${other.ref} issued ${new Date(other.forecast_ts).toISOString()}`
-        : `${c.source === 'timesfm' ? 'chronos' : 'timesfm'} missing${c.source === 'timesfm' && chron.error ? ' (' + chron.error + ')' : ''}`;
-      // Budget gate first (cheap): if one maximum-size call cannot fit, record BUDGET_EXHAUSTED and build nothing.
-      const gate = await glmBudgetGate(db, deps, now);
-      if (!gate.ok) {
-        const id = `glm_${(await sha256Hex(c.ref)).slice(0, 24)}_${cutoff}`;
-        await db.prepare(`INSERT OR IGNORE INTO glm_runs (run_id, asset, decision_cutoff_ts, started_ts, finished_ts, package_hash, input_version, prompt_version,
-          schema_version, status, reason, n_items, n_excluded, package_bytes, input_refs_json, missing_json, usage_json, rule_version) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
-          .bind(id, 'BTC', cutoff, now, now, `none:${c.ref}:${cutoff}`, GLM_INPUT_VERSION, GLM_PROMPT_VERSION, GLM_SCHEMA_VERSION, 'skipped_budget',
-            `trigger:${c.ref}; counterpart ${c.counterpart}; ${gate.reason}`, 0, 0, 0, '[]', '[]', JSON.stringify({ trigger: c, budget: gate }), GLM_RULE_VERSION).run();
-        return { ran: false, status: 'skipped_budget', reason: gate.reason, trigger: c };
-      }
-      const r = await glmDailySignalRun(env, deps, { now: deps.now || (() => Date.now()), cutoffTs: cutoff, trigger: c });
-      if (r.status === 'duplicate_package') {
-        // Both forecasts arrived before the same cutoff: one identical package already holds both, and it is never sent
-        // twice. The trigger is recorded as covered by that run (idempotency marker, no second model call).
-        const id = `glm_${(await sha256Hex(c.ref)).slice(0, 24)}_${cutoff}`;
-        await db.prepare(`INSERT OR IGNORE INTO glm_runs (run_id, asset, decision_cutoff_ts, started_ts, finished_ts, package_hash, input_version, prompt_version,
-          schema_version, status, reason, n_items, n_excluded, package_bytes, input_refs_json, missing_json, usage_json, rule_version) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
-          .bind(id, 'BTC', cutoff, now, now, `covered:${c.ref}:${cutoff}`, GLM_INPUT_VERSION, GLM_PROMPT_VERSION, GLM_SCHEMA_VERSION, 'duplicate_package',
-            `trigger:${c.ref}; counterpart ${c.counterpart}; covered by run ${r.run_id}`, 0, 0, 0, '[]', '[]', JSON.stringify({ trigger: c, covered_by: r.run_id }), GLM_RULE_VERSION).run();
-      }
-      return { ran: true, status: r.status, run_id: r.run_id || null, signal: r.signal || null, trigger: c, usage: r.usage || null };
+    const { cands, marks, chronos_error } = await glmTriggerScan(db, cutoff, fetchImpl || deps.fetchImpl || fetch);
+    const due = glmDueForecasts(cands, marks, cutoff, now);
+    if (!due.length) return { ran: false, status: 'nothing_due', candidates: cands.map((c) => c.ref), chronos_error };
+    for (const c of due) c.counterpart = glmCounterpart(c, cands, chronos_error);
+    if (queryBudget < 3) return { ran: false, status: 'deferred_d1_budget', due: due.map((c) => c.ref), reason: 'not enough D1 queries left for the budget gate' };
+    const gate = await glmBudgetGate(db, deps, now);
+    if (!gate.ok) {
+      // every due forecast gets its own BUDGET_EXHAUSTED record, in one batched write
+      await glmWriteMarkers(db, due.map((c) => ({ ref: c.ref, cutoff, now, status: 'skipped_budget', packageHash: `none:${c.ref}:${cutoff}`,
+        reason: `trigger:${c.ref}; counterpart ${c.counterpart}; ${gate.reason}`, usage: { trigger: c, budget: gate } })));
+      return { ran: false, status: 'skipped_budget', reason: gate.reason, trigger: due[0], recorded: due.map((c) => c.ref) };
     }
-    return { ran: false, status: 'nothing_due', candidates: cands.map((c) => c.ref), chronos_error: chron.error || null };
+    if (queryBudget - 2 < GLM_TRIGGER_RUN_QUERIES) {
+      return { ran: false, status: 'deferred_d1_budget', due: due.map((c) => c.ref), reason: `D1 queries left (${queryBudget - 2}) below one analysis (${GLM_TRIGGER_RUN_QUERIES}); offered again next hour` };
+    }
+    // one analysis: every due forecast was issued before this cutoff, so the same package holds all of them
+    const lead = due[0];
+    const r = await glmDailySignalRun(env, deps, { now: deps.now || (() => Date.now()), cutoffTs: cutoff, trigger: lead });
+    const covered = (r.status === 'duplicate_package' ? due : due.slice(1));
+    if (r.run_id) {
+      await glmWriteMarkers(db, covered.map((c) => ({ ref: c.ref, cutoff, now, status: 'duplicate_package', packageHash: `covered:${c.ref}:${cutoff}`,
+        reason: `trigger:${c.ref}; counterpart ${c.counterpart}; covered by run ${r.run_id}`, usage: { trigger: c, covered_by: r.run_id } })));
+    }
+    return { ran: true, status: r.status, run_id: r.run_id || null, signal: r.signal || null, trigger: lead, covered: covered.map((c) => c.ref), usage: r.usage || null };
   } catch (e) {
     return { ran: false, status: 'failed', reason: errText(e) };
+  }
+}
+
+// The 07:00 daily run (own invocation and D1 budget) also stands for every trigger still pending at its cutoff: its package
+// holds all forecasts issued before the cutoff, so each gets a 'covered' record. Guarantees every eligible forecast an
+// analysis opportunity within 36 h even when the hourly chain never has room. Two D1 calls at most. Never throws.
+export async function glmRecordCoveredByDaily(env, deps = {}, { cutoff, runId, now = Date.now(), fetchImpl } = {}) {
+  try {
+    if (!runId) return { recorded: 0 };
+    const { cands, marks, chronos_error } = await glmTriggerScan(env.DB, cutoff, fetchImpl || deps.fetchImpl || fetch);
+    const due = glmDueForecasts(cands, marks, cutoff, now);
+    for (const c of due) c.counterpart = glmCounterpart(c, cands, chronos_error);
+    const n = await glmWriteMarkers(env.DB, due.map((c) => ({ ref: c.ref, cutoff, now, status: 'duplicate_package', packageHash: `covered:${c.ref}:${cutoff}`,
+      reason: `trigger:${c.ref}; counterpart ${c.counterpart}; covered by daily run ${runId}`, usage: { trigger: c, covered_by: runId } })));
+    return { recorded: n, refs: due.map((c) => c.ref) };
+  } catch (e) {
+    return { recorded: 0, error: errText(e) };
   }
 }
 
@@ -481,6 +527,22 @@ export async function glmAdjustments(env, limit) {
   return r.results || [];
 }
 
+// Every GLM run and trigger record (audit review 2026-11-21, P2-3): daily runs, forecast-triggered runs, covered and
+// budget-skipped forecasts, newest first. Read-only, bounded (<= 50 rows), edge-cached like the other GLM routes.
+export async function glmRuns(env, limit = 30) {
+  const r = await env.DB.prepare(`SELECT run_id, decision_cutoff_ts, started_ts, finished_ts, status, reason, n_items, n_excluded, package_bytes, usage_json
+    FROM glm_runs WHERE asset = 'BTC' ORDER BY decision_cutoff_ts DESC, started_ts DESC LIMIT ?`).bind(limit).all();
+  return ((r && r.results) || []).map((x) => {
+    let u = {}; try { u = JSON.parse(x.usage_json || '{}') || {}; } catch (_e) { u = {}; }
+    const reason = String(x.reason || ''), m = reason.match(/^trigger:((tfm|chr):[^;]+);/);
+    return { run_id: x.run_id, decision_cutoff_ts: x.decision_cutoff_ts, started_ts: x.started_ts, finished_ts: x.finished_ts, status: x.status,
+      origin: m ? (m[2] === 'tfm' ? 'timesfm' : 'chronos') : 'daily_0700', forecast_ref: m ? m[1] : null,
+      covered_by: (reason.match(/covered by (?:daily )?run (glm_[0-9a-f]{24}_\d{13})/) || [])[1] || null,
+      reason: reason.slice(0, 300), n_items: x.n_items, n_excluded: x.n_excluded, package_bytes: x.package_bytes,
+      neurons: { reserved: u.reserved_neurons ?? null, actual: u.actual_neurons ?? null, input_tokens: u.input_tokens ?? null, output_tokens: u.output_tokens ?? null } };
+  });
+}
+
 export async function handleGlmRoutes(request, env, url, corsHeaders = {}) {
   if (!url.pathname.startsWith('/api/glm/')) return null;
   if (request.method !== 'GET') return new Response(JSON.stringify({ ok: false, error: 'method not allowed' }), { status: 405, headers: { ...corsHeaders, ...JSON_HEADERS } });
@@ -497,6 +559,9 @@ export async function handleGlmRoutes(request, env, url, corsHeaders = {}) {
   } else if (url.pathname === '/api/glm/adjustments') {
     const lim = int('limit', 24, 1, 60);
     key = `/api/glm/adjustments?limit=${lim}`; compute = async () => ({ ok: true, adjustments: await glmAdjustments(env, lim) });
+  } else if (url.pathname === '/api/glm/runs') {
+    const lim = int('limit', 30, 1, 50);
+    key = `/api/glm/runs?limit=${lim}`; compute = async () => ({ ok: true, runs: await glmRuns(env, lim) });
   } else if (url.pathname === '/api/glm/evaluation') {
     key = '/api/glm/evaluation'; compute = async () => ({ ok: true, evaluation: await glmEvaluation(env) });
   } else return new Response(JSON.stringify({ ok: false, error: 'not found' }), { status: 404, headers: { ...corsHeaders, ...JSON_HEADERS } });

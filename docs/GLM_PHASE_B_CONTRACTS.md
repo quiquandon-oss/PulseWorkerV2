@@ -425,3 +425,17 @@ through a bounded, traceable, reversible path. Supersedes the 2026-11-19 shadow 
   = "0"` (no call), `GLM_TICK_HOOK_ENABLED = "0"` (no tick read/write), or revert the PR.
 - Open items accepted by the owner: V1 Neuron use and 07:00 Worker CPU not measured (mitigations above; output
   validation measured at ~0.6 ms locally).
+
+## Revision 2026-11-21: forecast triggers, isolation and runs API (audit review, owner decisions 3-4)
+
+- **Supersedes "one call per day at 07:00":** the 07:00 run stays. In addition, every TimesFM 2.5 / Chronos-2 BTC 24 h
+  forecast issued in the last 36 h is its own trigger opportunity, with its own `glm_runs` record
+  (`trigger:<ref>; …`: run, `duplicate_package` covered, or `skipped_budget`).
+- **Per invocation:** at most one model call. All forecasts in the same package are recorded as covered by it. Every
+  budget skip is recorded. A budget skip is offered once more after 00:00 UTC if still fresh. A run left `started` for
+  over 1 h does not count as an opportunity.
+- **Isolation:** the trigger runs last in the hourly chain, after the V2 cycle and the collector, on the D1 queries they
+  left. It never defers them. Without room for one analysis it writes nothing and is offered again next hour. The 07:00
+  daily run records every still-pending forecast as covered by its package.
+- **Read-only `GET /api/glm/runs?limit<=50`:** run id, cutoff, status, origin, forecast ref, covering run, reason and
+  Neurons.

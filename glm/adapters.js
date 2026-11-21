@@ -572,7 +572,18 @@ export function normChronos(ledger, cutoffTs, horizon = 24) {
 export const GLM_CHRONOS_LEDGER_URL =
   'https://raw.githubusercontent.com/quiquandon-oss/PulseWorkerV2/research-data/exp008-chronos/exp008_chronos/derived/ledger.json';
 
-export async function fetchChronosLedger(fetchImpl = fetch, { url = GLM_CHRONOS_LEDGER_URL, maxBytes = GLM_LIMITS.chronosMaxBytes, timeoutMs = GLM_LIMITS.chronosTimeoutMs } = {}) {
+// One download per isolate per 10 minutes when the real network fetch is used (the hourly chain read it twice: the GLM
+// trigger and the V2 forecast family; audit review 2026-11-21, P3-2). A failed download is never cached.
+let _chronosMemo = null;
+export const CHRONOS_MEMO_MS = 10 * 60 * 1000;
+export async function fetchChronosLedger(fetchImpl = fetch, opts = {}) {
+  const real = typeof fetch === 'function' && fetchImpl === fetch && !opts.url;
+  if (real && _chronosMemo && Date.now() - _chronosMemo.at < CHRONOS_MEMO_MS) return _chronosMemo.result;
+  const result = await fetchChronosLedgerOnce(fetchImpl, opts);
+  if (real && result && result.ledger) _chronosMemo = { at: Date.now(), result };
+  return result;
+}
+async function fetchChronosLedgerOnce(fetchImpl = fetch, { url = GLM_CHRONOS_LEDGER_URL, maxBytes = GLM_LIMITS.chronosMaxBytes, timeoutMs = GLM_LIMITS.chronosTimeoutMs } = {}) {
   const ctl = typeof AbortController !== 'undefined' ? new AbortController() : null;
   const timer = ctl ? setTimeout(() => ctl.abort(), timeoutMs) : null;
   try {

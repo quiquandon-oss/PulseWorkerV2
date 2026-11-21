@@ -261,3 +261,12 @@ the previous day's signal (cutoff 18–30 h earlier), not an intraday trigger.
 
 The GLM ledger is an internal allocation, **not** proof of the account-wide remaining Neurons (V1 and other usage are
 not readable with current access).
+
+### §11 addendum 2026-11-21: `sv2f-research-0.2` (owner decision 2, audit review)
+
+- **One vote per model:** `model_original` and `model_calibrated` are two outputs of the same k-NN prediction. They now
+  share one vote (their mean). Both stay in `sources`, and `votes` shows the grouping.
+- **Reversal only when clearly below chance:** a below-50 % record counts as reversed evidence only when its Wilson 95 %
+  upper bound is below 50 %. Otherwise the source reads 50 (no information) and is flagged `neutralized`.
+- **Production unchanged:** `sentiment_score` is untouched. Earlier rows keep `sv2f-research-0.1`.
+- **Hourly order changed:** V2 cycle → collector → GLM trigger (see `docs/OPERATIONS.md`).

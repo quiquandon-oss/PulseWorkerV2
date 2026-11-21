@@ -36,3 +36,27 @@ class LiveCheckTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SentimentV2StalenessTest(unittest.TestCase):
+    """2026-11-21: V2 stopped writing for 6 h without an alert (D1 budget deferral)."""
+
+    def test_recent_decision_passes_and_a_6h_gap_is_a_finding(self):
+        now = 1_795_280_000
+        ok, notes = alert_run.check_sentiment_v2(lambda _u: {"points": [{"decision_ts": (now - 3600) * 1000}]}, now)
+        self.assertEqual(ok, [])
+        self.assertTrue(notes)
+        bad, _ = alert_run.check_sentiment_v2(lambda _u: {"points": [{"decision_ts": (now - 6 * 3600) * 1000}]}, now)
+        self.assertEqual(len(bad), 1)
+        self.assertIn("6.0 h", bad[0])
+
+    def test_unreadable_or_empty_is_a_finding(self):
+        def down(_u):
+            raise OSError("x")
+        self.assertEqual(len(alert_run.check_sentiment_v2(down, 0)[0]), 1)
+        self.assertEqual(len(alert_run.check_sentiment_v2(lambda _u: {"points": []}, 0)[0]), 1)
+
+    def test_simulation(self):
+        checks, _ = alert_run.simulate("v2_stale", 1_795_280_000)
+        self.assertEqual(len(checks["sentiment_v2"]), 1)
+

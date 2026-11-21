@@ -159,3 +159,25 @@ describe('comparison API: baseline vs research, GLM trigger and Neuron measureme
     expect(r.neurons_7d).toMatchObject({ glm_daily_budget: 300, days: [{ calls: 1, reserved: 206, actual: 70, committed: 70, account_limited: 0 }] });
   });
 });
+
+describe('sv2f-research-0.2 (owner decision 2, 2026-11-21)', () => {
+  const src = (direction, reading) => ({ state: 'fresh', direction, reading });
+  it('original and calibrated k-NN outputs share ONE vote; both stay visible', () => {
+    const r = F.sv2ForecastResearch(BASE, { model_original: src('UP', 70), model_calibrated: src('UP', 60), forecast_timesfm: src('DOWN', 40), forecast_chronos: { state: 'stale' } }, { state: 'missing', adjustment: 0 });
+    expect(F.SV2F_VERSION).toBe('sv2f-research-0.2');
+    expect(r.votes).toEqual([{ sources: ['model_original', 'model_calibrated'], reading: 65 }, { sources: ['forecast_timesfm'], reading: 40 }]);
+    expect(r.family_score).toBe(52.5);                                      // (65 + 40) / 2, not (70 + 60 + 40) / 3
+    expect(Object.keys(r.sources)).toEqual(expect.arrayContaining(['model_original', 'model_calibrated']));
+    expect(r.contributions.model_original + r.contributions.model_calibrated).toBeCloseTo(r2((65 - 50) / 2 / r.n_families_with_forecast), 1);
+    expect(r.agreement.up).toEqual(['model_original', 'model_calibrated']);
+  });
+  it('a below-50 % record is neutral (reading 50) unless clearly below chance (Wilson upper bound < 50 %)', () => {
+    const near = F.sv2fReading('DOWN', 6, 19);                             // 31.6 %, n = 19: not clearly below chance
+    expect(near).toMatchObject({ neutralized: true, reading: 50 });
+    const clear = F.sv2fReading('DOWN', 220, 509);                         // 43.2 %, n = 509: clearly below chance
+    expect(clear.neutralized).toBe(false);
+    expect(clear.reading).toBeGreaterThan(50);                              // reversed, as before
+    expect(F.sv2fReading('UP', 60, 100)).toMatchObject({ neutralized: false });
+  });
+});
+function r2(x) { return Math.round(x * 100) / 100; }

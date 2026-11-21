@@ -797,8 +797,9 @@ describe('deployment safety and the atomic AI ceiling', () => {
     expect(slots.length).toBe(2);
     expect(calls).toBe(3);                 // 1 probe + 2 within budget
   });
-  it('the reservation is one atomic conditional insert keyed by day and slot, checked against max(reserved, actual)', () => {
-    expect(S.SV2_AI_RESERVE_SQL).toMatch(/^INSERT INTO sv2_ai_neurons .* SELECT .* WHERE \(SELECT COALESCE\(SUM\(MAX\(reserved_neurons, COALESCE\(actual_neurons, 0\)\)\), 0\) FROM sv2_ai_neurons WHERE day = \?\) \+ \? <= \?$/);
+  it('the reservation is one atomic conditional insert keyed by day and slot, reconciled to actual use when known', () => {
+    // 2026-11-21 (owner budget decision): committed = actual Neurons once measured, else the reservation (timeouts keep it).
+    expect(S.SV2_AI_RESERVE_SQL).toMatch(/^INSERT INTO sv2_ai_neurons .* SELECT .* WHERE \(SELECT COALESCE\(SUM\(COALESCE\(actual_neurons, reserved_neurons\)\), 0\) FROM sv2_ai_neurons WHERE day = \?\) \+ \? <= \?$/);
     const mig = readFileSync(join(dirname(fileURLToPath(import.meta.url)), '..', '.ai', 'migrations', '0029_sv2_evidence_and_ai_budget.sql'), 'utf8');
     expect(mig).toMatch(/PRIMARY KEY \(day, slot\)/);
   });

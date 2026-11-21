@@ -11,7 +11,9 @@ import { sv2EvidenceReadings, sv2ScoreHeadline, SV2_EVIDENCE_RULES, SV2_LEXICON_
 import { logBounded } from './observability/bounded-log.js';
 import { handleComparisonRoutes } from './comparison/v1-v2.js';
 import { handleSv2ForecastRoute } from './comparison/sv2-forecast.js';
-import { glmDailySignalRun, glmTickAdjust, handleGlmRoutes, glmTickProbe, glmStagingProbesEnabled } from './glm/runner.js';
+import { glmDailySignalRun, glmTickAdjust, handleGlmRoutes, glmTickProbe, glmStagingProbesEnabled, glmForecastTrigger } from './glm/runner.js';
+import { fetchChronosLedger } from './glm/adapters.js';
+import { sv2fModelSource, sv2fForecastSource, sv2fGlm, sv2ForecastResearch, SV2F_EVAL_WINDOW_MS, SV2F_VERSION } from './sentiment-v2/forecast-family.js';
 // ---- BTC k-NN historical analog model ----
 // Feature vector: the 4 headline gauges already computed and logged by the
 // original CryptoPulse pipeline every cycle (sentiment composite, technical
@@ -10958,6 +10960,22 @@ const pulseWorkerHandlers = {
       return new Response(JSON.stringify(out), { status: out.ok ? 200 : 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
     }
 
+    // Sentiment V2 forecast family RESEARCH comparison and GLM trigger measurements (change request 2026-11-21). Read-only,
+    // bounded (<= 96 results, <= 7 days of GLM runs and Neuron rows), cached 5 min. Production sentiment_score is not changed.
+    if (url.pathname === '/api/sentiment-v2/forecast-research' && request.method === 'GET') {
+      const limit = Math.max(1, Math.min(96, parseInt(url.searchParams.get('limit') || '48', 10) || 48));
+      try {
+        const edge = typeof caches !== 'undefined' && caches.default ? caches.default : null;
+        const cacheKey = new Request(`${url.origin}/api/sentiment-v2/forecast-research?limit=${limit}`, { method: 'GET' });
+        if (edge) { const hit = await edge.match(cacheKey); if (hit) return new Response(hit.body, { headers: { ...corsHeaders, 'Content-Type': 'application/json', 'Cache-Control': 'public, max-age=300', 'X-SV2-Cache': 'edge' } }); }
+        const body = JSON.stringify(await getSv2ForecastResearch(env, Date.now(), limit));
+        if (edge) { try { await edge.put(cacheKey, new Response(body, { headers: { 'Content-Type': 'application/json', 'Cache-Control': 'public, max-age=300' } })); } catch (_e) { /* best effort */ } }
+        return new Response(body, { headers: { ...corsHeaders, 'Content-Type': 'application/json', 'Cache-Control': 'public, max-age=300', 'X-SV2-Cache': 'miss' } });
+      } catch (err) {
+        return new Response(JSON.stringify({ ok: false, error: String(err).slice(0, 200) }), { status: 503, headers: { ...corsHeaders, 'Content-Type': 'application/json', 'Cache-Control': 'no-store' } });
+      }
+    }
+
     // Sentiment V2 evidence and status (read-only, bounded, cached 5 min at the edge).
     if ((url.pathname === '/api/sentiment-v2/status' || url.pathname === '/api/sentiment-v2/evidence') && request.method === 'GET') {
       const isStatus = url.pathname === '/api/sentiment-v2/status';
@@ -11750,6 +11768,7 @@ const pulseWorkerHandlers = {
         // detection's writes complete first and a V2 failure cannot affect them. V2 is idempotent per V1 observation.
         // One counter of top-level D1 calls for the whole chain (D1 limits queries per invocation; a batch counts as one).
         const sv2Q = { n: 0 };
+        let glmTriggerRan = false;
         env = { ...env, DB: sv2CountingDb(env.DB, sv2Q) };
         ctx.waitUntil(runAutomaticDetection(env, { trigger: 'cron', nowTs: event.scheduledTime })
           .then(r => logBounded('log', 'event detection (cron):', ({ ok: r.ok, skipped: r.skipped || false, reason: r.reason || r.error || null })))
@@ -11761,13 +11780,21 @@ const pulseWorkerHandlers = {
           .then(r => { const line = ({ ok: r.ok, skipped: r.skipped || false, copied: r.copied || 0, already_present: r.already_present || 0, history_last_ts: r.history_last_ts || null, invalid: r.invalid || [], errors: r.errors || [], deferred: r.deferred || 0, truncated: r.truncated || false });
             if (r.ok) logBounded('log', 'v1 archive sync (cron):', line); else logBounded('error', 'v1 archive sync (cron) FAILED:', line); })
           .catch(err => console.error('V1 archive sync (cron) failed:', err))
-          .then(() => runSentimentV2Cycle(env, { nowTs: event.scheduledTime, queryBudget: SV2_D1_QUERIES_PER_INVOCATION - SV2_D1_QUERY_RESERVE - sv2Q.n }))
+          // Forecast-triggered GLM (change request 2026-11-21): a new TimesFM / Chronos-2 forecast gets one GLM analysis
+          // (budget-gated). When a GLM package is actually built this hour, the V2 cycle and the collector wait one hour
+          // (they catch up; idempotent) so the invocation stays inside the Workers Free CPU limit.
+          .then(() => glmForecastTrigger(env, glmDeps(env), { now: event.scheduledTime }))
+          .then(r => { glmTriggerRan = !!(r && r.ran); if (r && r.status !== 'disabled' && r.status !== 'nothing_due') logBounded('log', 'glm forecast trigger (cron):', ({ status: r.status, ran: r.ran, trigger: r.trigger ? r.trigger.ref : null, run_id: r.run_id || null, reason: r.reason || null })); })
+          .catch(err => console.error('GLM forecast trigger (cron) failed:', err))
+          .then(() => (glmTriggerRan ? { ok: true, skipped: true, reason: 'deferred one hour: GLM forecast analysis ran in this invocation' }
+            : runSentimentV2Cycle(env, { nowTs: event.scheduledTime, queryBudget: SV2_D1_QUERIES_PER_INVOCATION - SV2_D1_QUERY_RESERVE - sv2Q.n })))
           .then(r => { const line = ({ ok: r.ok, skipped: r.skipped || false, written: r.written || 0, reason: r.reason || null, deferred_readings: r.deferred_readings || [] });
             if (r.deferred_d1_budget) logBounded('warn', 'sentiment v2 (cron) DEFERRED (D1 budget):', line); else logBounded('log', 'sentiment v2 (cron):', line); })
           .catch(err => console.error('Sentiment V2 (cron) failed:', err))
           // Independent evidence last: V2 decisions are past V1 timestamps, so evidence retrieved now could not count for them
           // anyway (point-in-time), and V2 gets the D1 query headroom first. The collector spends only what is left.
-          .then(() => sv2CollectGuarded(env, event.scheduledTime, () => SV2_D1_QUERIES_PER_INVOCATION - SV2_D1_QUERY_RESERVE - sv2Q.n))
+          .then(() => (glmTriggerRan ? { ok: true, skipped: true, reason: 'deferred one hour: GLM forecast analysis ran in this invocation' }
+            : sv2CollectGuarded(env, event.scheduledTime, () => SV2_D1_QUERIES_PER_INVOCATION - SV2_D1_QUERY_RESERVE - sv2Q.n)))
           .then(r => { const line = ({ ok: r.ok, skipped: r.skipped || false, items_new: r.items_new || 0, items_duplicate: r.items_duplicate || 0, budget: r.budget || null, sources: (r.sources || []).map(x => `${x.id}:${x.status}`), errors: r.errors || [] });
             if (r.ok) logBounded('log', 'sv2 evidence (cron):', line); else logBounded('error', 'sv2 evidence (cron) FAILED:', line); })
           .catch(err => console.error('SV2 evidence (cron) failed:', err)));
@@ -12826,14 +12853,18 @@ const SV2_AI_PRICING = {
 const SV2_AI_MAX_OUTPUT_TOKENS = 1200;          // max_completion_tokens: hard cap on generated tokens (incl. reasoning)
 const SV2_AI_RESERVE_SQL = "INSERT INTO sv2_ai_neurons (day, reserved_ts, model, reserved_neurons, slot, status) " +
   "SELECT ?, ?, ?, ?, COALESCE((SELECT MAX(slot) FROM sv2_ai_neurons WHERE day = ?), 0) + 1, 'reserved' " +
-  "WHERE (SELECT COALESCE(SUM(MAX(reserved_neurons, COALESCE(actual_neurons, 0))), 0) FROM sv2_ai_neurons WHERE day = ?) + ? <= ?";
+  "WHERE (SELECT COALESCE(SUM(COALESCE(actual_neurons, reserved_neurons)), 0) FROM sv2_ai_neurons WHERE day = ?) + ? <= ?";
 
+const GLM_DAILY_NEURONS_MAX = 1000;
 // Worker internals the GLM runner reuses instead of duplicating (one Neuron ledger, one pricing table, one grounding rule).
 function glmDeps(env) {
   // GLM's own daily Neuron cap (GLM_DAILY_NEURONS), separate from SV2_GLM_DAILY_NEURONS (per-cycle V2 annotation). Both
   // reserve through the same atomic sv2_ai_neurons ledger.
+  // Reconciliation: a call's committed Neurons are its measured actual use once known, else its reservation (timeouts and
+  // errors keep the reservation). Hard maximum GLM_DAILY_NEURONS_MAX (1,000 = 10% of the free 10,000): any higher setting
+  // is clamped; raising the shipped 300 needs explicit owner approval.
   const n = Number(env.GLM_DAILY_NEURONS || '0');
-  return { reserveSql: SV2_AI_RESERVE_SQL, pricing: SV2_AI_PRICING, budget: Number.isFinite(n) && n > 0 ? n : 0, ungroundedNumbers: sv2UngroundedNumbers };
+  return { reserveSql: SV2_AI_RESERVE_SQL, pricing: SV2_AI_PRICING, budget: Number.isFinite(n) && n > 0 ? Math.min(n, GLM_DAILY_NEURONS_MAX) : 0, ungroundedNumbers: sv2UngroundedNumbers };
 }
 
 function sv2AiBudget(env) {
@@ -12981,7 +13012,8 @@ function sv2Row(result, ai, usage, nowTs) {
       events: result.events.events, excluded: result.events.excluded, n_raw: result.events.n_raw }),
     JSON.stringify(result.predictive), JSON.stringify({ families: result.families, composite_before_events: result.composite_before_events ?? null,
       redundancy: result.redundancy, evidence: result.evidence ?? null, evidence_status: result.evidence_status ?? null,
-      ...(result.v1_input ? { v1_input: result.v1_input } : {}) }),
+      ...(result.v1_input ? { v1_input: result.v1_input } : {}),
+      ...(result.forecast_research ? { forecast_research: result.forecast_research } : {}) }),
     JSON.stringify(result.supporting_ids), JSON.stringify(result.contradicting_ids), JSON.stringify(result.missing),
     ai ? ai.model : null, ai ? ai.status : 'disabled', JSON.stringify(ai ? { reason: ai.reason || null, output: ai.output || null, reserved_neurons: ai.reserved_neurons ?? null, actual_neurons: ai.actual_neurons ?? null, input_tokens: ai.input_tokens ?? null, output_tokens: ai.output_tokens ?? null,
       prompt_version: ai.prompt_version ?? null, prompt_sha256: ai.prompt_sha256 ?? null, package_sha256: ai.package_sha256 ?? null } : {}),
@@ -13176,7 +13208,7 @@ const SV2_D1_QUERY_RESERVE = 3;                  // d1_usage_daily recording and
 // V1 reading read (16 fixed)
 // + 5 per pending reading (AI reserve, slot, settle, limit check, insert) x maxCatchUp 3 = 30. Kept free for V2 by the
 // sync; the cycle itself checks the budget it is given and defers readings it could not finish (never a partial write).
-const SV2_CYCLE_QUERIES_FIXED = 16;              // includes the server-reading read (SV2_V1_SERVER_INPUT)
+const SV2_CYCLE_QUERIES_FIXED = 17;              // includes the server-reading read (SV2_V1_SERVER_INPUT) and the forecast-research batch
 const SV2_CYCLE_QUERIES_PER_READING = 5;
 const SV2_CYCLE_QUERY_HEADROOM = SV2_CYCLE_QUERIES_FIXED + 3 * SV2_CYCLE_QUERIES_PER_READING;
 function sv2CountingDb(db, counter) {
@@ -13192,7 +13224,68 @@ function sv2CountingDb(db, counter) {
     exec: (...x) => { counter.n++; return db.exec(...x); } };
 }
 
-async function runSentimentV2Cycle(env, { nowTs, queryBudget = Infinity } = {}) {
+// Baseline vs research-stage enhanced score per decision, plus GLM trigger and Neuron measurements (last 7 days).
+async function getSv2ForecastResearch(env, nowTs, limit) {
+  const since = nowTs - 7 * 86400000;
+  const [res, runs, neur] = await env.DB.batch([
+    env.DB.prepare('SELECT decision_ts, status, sentiment_score, family_json FROM sentiment_v2_results WHERE asset = ? AND calc_version = ? ORDER BY decision_ts DESC LIMIT ?').bind('BTC', SENTIMENT_V2_VERSION, limit),
+    env.DB.prepare("SELECT status, CASE WHEN reason LIKE 'trigger:tfm:%' THEN 'timesfm' WHEN reason LIKE 'trigger:chr:%' THEN 'chronos' ELSE 'daily_0700' END AS origin, COUNT(*) AS n FROM glm_runs WHERE asset = 'BTC' AND decision_cutoff_ts >= ? GROUP BY status, origin").bind(since),
+    env.DB.prepare('SELECT day, COUNT(*) AS calls, COALESCE(SUM(reserved_neurons), 0) AS reserved, COALESCE(SUM(actual_neurons), 0) AS actual, COALESCE(SUM(COALESCE(actual_neurons, reserved_neurons)), 0) AS committed, ' +
+      "SUM(CASE WHEN status = 'account_limited' THEN 1 ELSE 0 END) AS account_limited FROM sv2_ai_neurons WHERE day >= ? GROUP BY day ORDER BY day DESC").bind(new Date(since).toISOString().slice(0, 10)),
+  ]);
+  const points = (res.results || []).map((r) => {
+    let fr = null; try { fr = JSON.parse(r.family_json || '{}').forecast_research || null; } catch (_e) { fr = null; }
+    return { decision_ts: r.decision_ts, status: r.status, baseline_score: r.sentiment_score, research: fr };
+  });
+  const withR = points.filter((p) => p.research && Number.isFinite(p.research.enhanced_score) && Number.isFinite(p.baseline_score));
+  const deltas = withR.map((p) => p.research.enhanced_score - p.baseline_score);
+  const srcCount = {};
+  for (const p of withR) for (const [k, v] of Object.entries(p.research.sources || {})) { srcCount[k] = srcCount[k] || {}; srcCount[k][v.state] = (srcCount[k][v.state] || 0) + 1; }
+  const glmApplied = withR.filter((p) => p.research.glm && p.research.glm.state === 'applied').length;
+  const budget = Math.min(Number(env.GLM_DAILY_NEURONS || 0) || 0, GLM_DAILY_NEURONS_MAX);
+  return { ok: true, stage: 'research', version: SV2F_VERSION,
+    note: 'Research stage: the production sentiment_score is the baseline; enhanced_score is what the forecast family + GLM would give. No production scoring change.',
+    summary: { decisions: points.length, with_research: withR.length,
+      mean_delta: deltas.length ? Math.round(deltas.reduce((a, x) => a + x, 0) / deltas.length * 100) / 100 : null,
+      max_abs_delta: deltas.length ? Math.round(Math.max(...deltas.map(Math.abs)) * 100) / 100 : null,
+      class_changes: withR.filter((p) => sv2Classify(p.research.enhanced_score) !== sv2Classify(p.baseline_score)).length,
+      source_states: srcCount, glm_applied_decisions: glmApplied },
+    glm_runs_7d: runs.results || [],
+    neurons_7d: { glm_daily_budget: budget, note: 'GLM ledger is an internal allocation, not the account-wide remaining Neurons (not readable with current access).', days: neur.results || [] },
+    points };
+}
+
+// Point-in-time inputs for the research-stage forecast family: BTC 24 h production predictions (original, calibrated),
+// TimesFM 2.5 forecasts, GLM signals (one batch, bounded) and the Chronos-2 ledger (GitHub research data, read-only).
+async function sv2LoadForecastInputs(env, firstTs, lastTs, fetchImpl) {
+  const lo = firstTs - SV2F_EVAL_WINDOW_MS - 2 * 86400000;
+  const [pred, tfm, glm] = await env.DB.batch([
+    env.DB.prepare('SELECT ts, p_up, calibrated_p_up, model_version, realized_up, resolved_ts FROM predictions WHERE horizon_hours = 24 AND ts >= ? AND ts <= ? ORDER BY ts DESC LIMIT 1000').bind(lo, lastTs),
+    env.DB.prepare("SELECT id, ts AS issued_ts, target_ts, direction, model_version, correct, resolved_ts FROM experiment_4_timesfm WHERE coin = 'BTC' AND horizon_hours = 24 AND ts >= ? AND ts <= ? ORDER BY ts DESC LIMIT 300").bind(lo, lastTs),
+    env.DB.prepare("SELECT signal_id, decision_cutoff_ts, valid_from_ts, valid_until_ts, direction, strength, eligibility FROM glm_signals WHERE asset = 'BTC' AND horizon_hours = 24 AND decision_cutoff_ts >= ? AND decision_cutoff_ts <= ? ORDER BY decision_cutoff_ts DESC LIMIT 100").bind(firstTs - 2 * 86400000, lastTs),
+  ]);
+  const chron = await fetchChronosLedger(fetchImpl || fetch);
+  const chronos = chron.ledger && Array.isArray(chron.ledger.forecasts)
+    ? chron.ledger.forecasts.filter((f) => f && f.coin === 'BTC' && Number(f.horizon_hours) === 24)
+      .map((f) => ({ id: f.id, issued_ts: f.issued_ts, target_ts: f.target_ts, direction: f.direction, correct: f.correct ?? null,
+        resolved_ts: f.resolved_ts ?? null, model_version: `${f.model_id || 'chronos'}@${f.model_revision_resolved || f.model_revision || '?'}` }))
+    : null;
+  return { predictions: pred.results || [], timesfm: tfm.results || [], glm: glm.results || [], chronos, chronos_error: chron.error || null,
+    rows_read: (pred.results || []).length + (tfm.results || []).length + (glm.results || []).length };
+}
+
+function sv2ForecastResearchFor(result, ts, inp) {
+  if (!inp || inp.error) return { version: SV2F_VERSION, status: 'unavailable', error: inp ? inp.error : 'no inputs', baseline_score: result.sentiment_score ?? null, enhanced_score: null };
+  const sources = {
+    model_original: sv2fModelSource(inp.predictions, ts, 'p_up'),
+    model_calibrated: sv2fModelSource(inp.predictions, ts, 'calibrated_p_up'),
+    forecast_timesfm: sv2fForecastSource(inp.timesfm, ts),
+    forecast_chronos: inp.chronos ? sv2fForecastSource(inp.chronos, ts) : { state: 'unavailable', reason: 'chronos_ledger_' + (inp.chronos_error || 'unavailable') },
+  };
+  return sv2ForecastResearch(result, sources, sv2fGlm(inp.glm, ts));
+}
+
+async function runSentimentV2Cycle(env, { nowTs, queryBudget = Infinity, fetchImpl } = {}) {
   if (String(env.SENTIMENT_V2_ENABLED || '0') !== '1') return { ok: true, skipped: true, reason: 'disabled' };
   // Not enough D1 queries left in this invocation (shared with event detection) for even one reading: defer the whole
   // cycle before any query. Pending readings stay in the archive and a later run computes them.
@@ -13310,6 +13403,15 @@ async function runSentimentV2Cycle(env, { nowTs, queryBudget = Infinity } = {}) 
     const r = await env.DB.prepare("SELECT 1 AS x FROM sv2_ai_neurons WHERE day = ? AND status = 'account_limited' LIMIT 1").bind(day).first();
     return !!r;
   };
+  // Research-stage forecast family (sentiment-v2/forecast-family.js, owner change request 2026-11-21): one batched
+  // point-in-time read + the Chronos ledger fetch per cycle. Never changes sentiment_score; any failure is recorded.
+  let forecastInputs;
+  try {
+    forecastInputs = await sv2LoadForecastInputs(env, pending[0], hi, fetchImpl);
+    rowsRead += forecastInputs.rows_read;
+  } catch (err) {
+    forecastInputs = { error: String((err && err.message) || err).slice(0, 160) };
+  }
   let written = 0;
   const decisions = [];
   for (const ts of pending) {
@@ -13331,6 +13433,8 @@ async function runSentimentV2Cycle(env, { nowTs, queryBudget = Infinity } = {}) 
       result.missing.truncated_inputs = truncatedInputs;
       if (result.status === 'OK') { result.status = 'DEGRADED'; result.degraded_reason = 'inputs_truncated'; }
     }
+    try { result.forecast_research = sv2ForecastResearchFor(result, ts, forecastInputs); }
+    catch (err) { result.forecast_research = { status: 'unavailable', error: String((err && err.message) || err).slice(0, 160) }; }
     let ai = { status: 'disabled', model: null, counted: false };
     if (result.sentiment_score !== null) {
       const { pkg, allowedIds } = sv2AiPackage(result);
@@ -13628,7 +13732,7 @@ async function getSentimentV2Status(env, nowTs) {
     day, calls: 0, reserved_neurons: 0, actual_neurons: 0, committed_neurons: 0, account_limited_today: false, remaining_neurons: budget,
     account_free_allocation_neurons: 10000, max_output_tokens: SV2_AI_MAX_OUTPUT_TOKENS };
   if (canRead) try {
-    const r = await env.DB.prepare("SELECT COUNT(*) AS calls, COALESCE(SUM(reserved_neurons), 0) AS reserved, COALESCE(SUM(actual_neurons), 0) AS actual, COALESCE(SUM(MAX(reserved_neurons, COALESCE(actual_neurons, 0))), 0) AS committed, MAX(CASE WHEN status = 'account_limited' THEN 1 ELSE 0 END) AS limited FROM sv2_ai_neurons WHERE day = ?").bind(day).first();
+    const r = await env.DB.prepare("SELECT COUNT(*) AS calls, COALESCE(SUM(reserved_neurons), 0) AS reserved, COALESCE(SUM(actual_neurons), 0) AS actual, COALESCE(SUM(COALESCE(actual_neurons, reserved_neurons)), 0) AS committed, MAX(CASE WHEN status = 'account_limited' THEN 1 ELSE 0 END) AS limited FROM sv2_ai_neurons WHERE day = ?").bind(day).first();
     if (r) Object.assign(out.ai, { calls: Number(r.calls), reserved_neurons: Math.round(Number(r.reserved) * 100) / 100, actual_neurons: Math.round(Number(r.actual) * 100) / 100,
       committed_neurons: Math.round(Number(r.committed) * 100) / 100, account_limited_today: Number(r.limited) === 1,
       remaining_neurons: Math.max(0, Math.round((budget - Number(r.committed)) * 100) / 100) });

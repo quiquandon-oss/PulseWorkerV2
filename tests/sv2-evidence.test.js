@@ -624,7 +624,7 @@ describe('GLM Neuron ledger on real SQLite', () => {
     const results = [];
     for (let k = 0; k < 10; k++) results.push(await S.sv2GlmProbe(env, NOW));
     const rows = d1.db.prepare('SELECT * FROM sv2_ai_neurons').all();
-    const committed = rows.reduce((s2, r) => s2 + Math.max(r.reserved_neurons, r.actual_neurons || 0), 0);
+    const committed = rows.reduce((s2, r) => s2 + (r.actual_neurons ?? r.reserved_neurons), 0);
     expect(committed).toBeLessThanOrEqual(150);
     expect(rows.length).toBe(calls);
     expect(results.filter(r => r.status === 'quota_guard').length).toBe(10 - calls);

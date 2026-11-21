@@ -218,3 +218,46 @@ GLM-4.7-flash (`@cf/zai-org/glm-4.7-flash`):
 - No search API, crawling, paid provider or paid fallback.
 - No TiRex, LightGBM, XGBoost or HMM.
 - V1 is unchanged.
+
+## 11. Change request 2026-11-21: forecast family (RESEARCH STAGE) and forecast-triggered GLM
+
+Owner decisions 2026-11-21: (1) one new equal-weight family `model_forecasts` + GLM as a bounded adjustment;
+(2) readings from measured directional accuracy with smooth shrinkage; (3) approved models: production `original` and
+`calibrated` only (plus TimesFM 2.5 and Chronos-2); (4) GLM budget = internal ledger share, hard stop, 300 Neurons/day
+kept, future maximum 1,000 only with approval. **Production scoring is not changed yet** ("implement the calculation as an
+auditable research-stage component first, with tests and a comparison against the existing scoring approach").
+
+Where each source enters (`sentiment-v2/forecast-family.js`, computed in `runSentimentV2Cycle` per decision):
+
+| Source | Input (point-in-time at the decision ts) | Reading |
+|---|---|---|
+| model_original | latest BTC 24 h `predictions.p_up` made ≤ t and ≤ 6 h old | direction of p_up vs 0.5 |
+| model_calibrated | same row, `calibrated_p_up` | idem |
+| forecast_timesfm | latest `experiment_4_timesfm` BTC 24 h forecast issued ≤ t, target > t, ≤ 36 h old | its direction |
+| forecast_chronos | latest Chronos-2 ledger BTC 24 h forecast (research-data branch, read-only), same rules | its direction |
+| GLM | latest BTC 24 h `glm_signals` with cutoff ≤ t, valid at t, ELIGIBLE, UP/DOWN | ±5 × strength (1/3, 2/3, 1) points |
+
+- Reading = 100 × adjusted accuracy for UP, 100 − that for DOWN, 50 for neutral; adjusted = (hits + k)/(n + 2k), k = 10
+  (**proposed**, smooth, no step at 30). Accuracy only from the same model, asset (BTC), horizon (24 h) and model version,
+  outcomes resolved at or before t and within 90 days. Sample count, raw and adjusted accuracy are stored per source.
+- `model_forecasts` score = mean of the fresh readings; it joins the existing equal-weight average:
+  enhanced = (composite_before_events × n + family) / (n + 1) + events adjustment + GLM adjustment, clamped 0–100.
+  With no fresh forecast and no applied GLM the enhanced score equals the baseline exactly.
+- Missing / stale / invalid / unavailable sources are listed (`missing`) and never imputed. Agreement and disagreement:
+  `agreement.up/down/neutral`. Per-source contribution in points: `contributions`.
+- Stored in `family_json.forecast_research` of new results only; `sentiment_score` (production) stays the baseline.
+  Compare: `GET /api/sentiment-v2/forecast-research?limit=48` (baseline vs research, deltas, class changes, source
+  states, GLM runs by origin/status and Neuron ledger for 7 days).
+
+Forecast-triggered GLM (`glm/runner.js glmForecastTrigger`, hourly non-tick cron): each new TimesFM or Chronos-2 BTC
+24 h forecast (≤ 36 h old) creates one GLM opportunity with cutoff = top of the hour, without waiting for the
+counterpart (recorded in the run's reason). Idempotent per forecast (`glm_runs.reason` = `trigger:<ref>; …`); two
+forecasts before the same cutoff share one package (the second is recorded as covered). The budget gate runs first:
+today's committed Neurons (actual once reconciled, else the reservation) + one maximum call must fit under
+`GLM_DAILY_NEURONS` (300, clamped to ≤ 1,000), and no 3036 seen today; otherwise `BUDGET_EXHAUSTED` is recorded and
+nothing is built. A trigger run writes a signal only when the model answered with valid output. When a package is built,
+the V2 cycle and collector wait one hour (CPU limit); budget exhaustion never stops them. Persistence now compares with
+the previous day's signal (cutoff 18–30 h earlier), not an intraday trigger.
+
+The GLM ledger is an internal allocation, **not** proof of the account-wide remaining Neurons (V1 and other usage are
+not readable with current access).

@@ -359,7 +359,10 @@ describe('migration 0031 and wiring', () => {
   });
 
   it('worker.js: GLM wired only at the 07:00 cron, the read-only routes and the tick chain; no Gemini call added', () => {
-    expect(WORKER).toMatch(/import \{ glmDailySignalRun, glmTickAdjust, handleGlmRoutes, glmTickProbe, glmStagingProbesEnabled \} from '\.\/glm\/runner\.js';/);
+    expect(WORKER).toMatch(/import \{ glmDailySignalRun, glmTickAdjust, handleGlmRoutes, glmTickProbe, glmStagingProbesEnabled, glmForecastTrigger \} from '\.\/glm\/runner\.js';/);
+    // forecast-triggered GLM (change request 2026-11-21) runs only in the hourly non-tick chain
+    expect((WORKER.match(/glmForecastTrigger\(/g) || []).length).toBe(1);
+    expect(WORKER).toMatch(/\.then\(\(\) => glmForecastTrigger\(env, glmDeps\(env\), \{ now: event\.scheduledTime \}\)\)/);
     const at07 = WORKER.slice(WORKER.indexOf("if (event.cron === '0 7 * * *') {"), WORKER.indexOf("if (event.cron === '0 7 * * *') {") + 2500);
     expect(at07).toMatch(/glmDailySignalRun\(env, glmDeps\(env\)/);
     // exactly two call sites: the 07:00 cron and the staging-only probe step (gated by GLM_STAGING_PROBES)
@@ -511,5 +514,99 @@ describe('GLM call timeout (2026-11-21 production timeout at 25 s)', () => {
     const { GLM_LIMITS } = await import('../glm/contract.js');
     expect(GLM_LIMITS.aiTimeoutMs).toBeGreaterThanOrEqual(90000);
     expect(GLM_LIMITS.aiTimeoutMs).toBeLessThanOrEqual(180000);
+  });
+});
+
+// ---------- Forecast-triggered GLM + budget gate (change request 2026-11-21, owner budget decision) ----------
+import { glmForecastTrigger, glmBudgetGate } from '../glm/runner.js';
+
+describe('forecast-triggered GLM: independent triggers, idempotent, honest, budget-gated', () => {
+  const ledgerFetch = async () => ({ ok: true, status: 200, headers: { get: () => null }, text: async () => JSON.stringify(LEDGER) });
+  const at = CUT + 2 * H;
+  it('TimesFM and Chronos each trigger their own run (no waiting for the counterpart); a third call finds nothing due', async () => {
+    nowTs = at + 30e3;
+    const ai = aiReturning(validAnswer());
+    const env = mkEnv(LIVE, ai);
+    const r1 = await glmForecastTrigger(env, deps(LIVE, { fetchImpl: ledgerFetch, now: clock }), { now: at, fetchImpl: ledgerFetch });
+    const r2 = await glmForecastTrigger(env, deps(LIVE, { fetchImpl: ledgerFetch, now: clock }), { now: at, fetchImpl: ledgerFetch });
+    const r3 = await glmForecastTrigger(env, deps(LIVE, { fetchImpl: ledgerFetch, now: clock }), { now: at, fetchImpl: ledgerFetch });
+    expect([r1.ran, r2.ran, r3.ran]).toEqual([true, true, false]);
+    expect(new Set([r1.trigger.source, r2.trigger.source])).toEqual(new Set(['timesfm', 'chronos']));
+    // both forecasts precede the same cutoff: the second trigger's package is identical, so it is recorded as covered
+    expect(r2.status).toBe('duplicate_package');
+    expect(r3.status).toBe('nothing_due');
+    expect(ai.run).toHaveBeenCalledTimes(1);
+    const runs = d1.db.prepare("SELECT reason, decision_cutoff_ts, status FROM glm_runs WHERE reason LIKE 'trigger:%' ORDER BY rowid").all();
+    expect(runs).toHaveLength(2);
+    for (const r of runs) { expect(r.decision_cutoff_ts).toBe(at); expect(r.reason).toMatch(/^trigger:(tfm|chr):[^;]+; counterpart (timesfm|chronos) /); }
+    expect(runs[1].reason).toMatch(/covered by run glm_/);
+    // a later cutoff with a new forecast gets its own analysis (independent trigger)
+    d1.db.prepare(`INSERT INTO experiment_4_timesfm (coin, horizon_hours, ts, input_end_ts, target_ts, price_at_prediction, direction, model_version, checkpoint, inference_backend, context_length, forecast_horizon_steps, features_used)
+      VALUES ('BTC',24,?,?,?,63000,'UP','timesfm-2.5','c','cpu',128,8,'u')`).run(at + 2 * H, at + H, at + 26 * H);
+    const r4 = await glmForecastTrigger(env, deps(LIVE, { fetchImpl: ledgerFetch, now: clock }), { now: at + 3 * H, fetchImpl: ledgerFetch });
+    expect(r4).toMatchObject({ ran: true, trigger: { source: 'timesfm' } });
+    expect(r4.trigger.counterpart).toMatch(/^chronos chr:/);
+    expect(ai.run).toHaveBeenCalledTimes(2);
+    // the Neuron ledger reconciled each call to its actual use
+    const led = d1.db.prepare('SELECT reserved_neurons, actual_neurons FROM sv2_ai_neurons ORDER BY slot').all();
+    expect(led).toHaveLength(2);
+    for (const l of led) expect(l.actual_neurons).toBeLessThan(l.reserved_neurons);
+  });
+
+  it('a trigger whose model output is invalid records the run but writes no signal (the day signal is not overwritten)', async () => {
+    nowTs = at + 30e3;
+    const before = d1.db.prepare('SELECT COUNT(*) AS n FROM glm_signals').get().n;
+    const r = await glmForecastTrigger(mkEnv(LIVE, aiReturning('{not json')), deps(LIVE, { fetchImpl: ledgerFetch, now: clock }), { now: at, fetchImpl: ledgerFetch });
+    expect(r).toMatchObject({ ran: true, status: 'invalid_output' });
+    expect(d1.db.prepare('SELECT COUNT(*) AS n FROM glm_signals').get().n).toBe(before);
+  });
+
+  it.each([
+    ['budget below one maximum call', { ...LIVE, SV2_GLM_DAILY_NEURONS: '100' }, null, /BUDGET_EXHAUSTED: 0 of 100 GLM Neurons used, one call needs up to/],
+    ['account allocation exhausted today (3036)', LIVE, 'account_limited', /BUDGET_EXHAUSTED: account free allocation reported exhausted/],
+    ['budget already used today', LIVE, 'used', /BUDGET_EXHAUSTED: 250 of 300 GLM Neurons used/],
+  ])('%s -> BUDGET_EXHAUSTED recorded, no package, no model call', async (_n, vars, ledgerState, re) => {
+    const day = new Date(at).toISOString().slice(0, 10);
+    if (ledgerState === 'account_limited') d1.db.prepare("INSERT INTO sv2_ai_neurons (day, slot, reserved_ts, model, reserved_neurons, status) VALUES (?,1,?,?,10,'account_limited')").run(day, at, GLM_MODEL);
+    if (ledgerState === 'used') d1.db.prepare("INSERT INTO sv2_ai_neurons (day, slot, reserved_ts, model, reserved_neurons, actual_neurons, status) VALUES (?,1,?,?,260,250,'ok')").run(day, at, GLM_MODEL);
+    const ai = aiReturning(validAnswer());
+    const r = await glmForecastTrigger(mkEnv(vars, ai), deps(vars, { fetchImpl: ledgerFetch }), { now: at, fetchImpl: ledgerFetch });
+    expect(r).toMatchObject({ ran: false, status: 'skipped_budget' });
+    expect(r.reason).toMatch(re);
+    expect(ai.run).not.toHaveBeenCalled();
+    const row = d1.db.prepare("SELECT status, reason, n_items, package_hash FROM glm_runs WHERE reason LIKE 'trigger:%'").get();
+    expect(row).toMatchObject({ status: 'skipped_budget', n_items: 0 });
+    expect(row.package_hash).toMatch(/^none:/);
+    expect(row.reason).toMatch(re);
+    // idempotent: the same forecast is not retried in the same window
+    const again = await glmForecastTrigger(mkEnv(vars, ai), deps(vars, { fetchImpl: ledgerFetch }), { now: at, fetchImpl: ledgerFetch });
+    expect(again.trigger?.ref).not.toBe(r.trigger.ref);
+  });
+
+  it('an unreadable ledger is BUDGET_EXHAUSTED; the next UTC day starts from zero', async () => {
+    const broken = { prepare: () => { throw new Error('D1 down'); } };
+    const g = await glmBudgetGate(broken, deps(LIVE), at);
+    expect(g).toMatchObject({ ok: false });
+    expect(g.reason).toMatch(/^BUDGET_EXHAUSTED: GLM Neuron ledger cannot be read/);
+    d1.db.prepare("INSERT INTO sv2_ai_neurons (day, slot, reserved_ts, model, reserved_neurons, actual_neurons, status) VALUES (?,1,?,?,260,250,'ok')").run(new Date(at).toISOString().slice(0, 10), at, GLM_MODEL);
+    expect((await glmBudgetGate(d1.binding, deps(LIVE), at)).ok).toBe(false);
+    expect((await glmBudgetGate(d1.binding, deps(LIVE), at + 24 * H)).ok).toBe(true);
+  });
+
+  it('inference off -> disabled with zero queries; stale forecasts never trigger', async () => {
+    d1.log.length = 0;
+    expect(await glmForecastTrigger(mkEnv(ON), deps(ON), { now: at, fetchImpl: ledgerFetch })).toMatchObject({ ran: false, status: 'disabled' });
+    expect(d1.log).toEqual([]);
+    const late = CUT + 80 * H;
+    const r = await glmForecastTrigger(mkEnv(LIVE, aiReturning(validAnswer())), deps(LIVE, { fetchImpl: ledgerFetch }), { now: late, fetchImpl: ledgerFetch });
+    expect(r).toMatchObject({ ran: false, status: 'nothing_due' });
+  });
+
+  it('GLM daily budget is clamped to 1,000 Neurons whatever the configuration says', () => {
+    const G = evalInScope(extractConstants('GLM_DAILY_NEURONS_MAX', 'SV2_AI_RESERVE_SQL', 'SV2_AI_PRICING') + '\n' + extractFunctions('glmDeps', 'sv2UngroundedNumbers'));
+    expect(G.glmDeps({ GLM_DAILY_NEURONS: '300' }).budget).toBe(300);
+    expect(G.glmDeps({ GLM_DAILY_NEURONS: '50000' }).budget).toBe(1000);
+    expect(G.glmDeps({}).budget).toBe(0);
+    expect(readFileSync(join(ROOT, 'wrangler.toml'), 'utf8')).toMatch(/^GLM_DAILY_NEURONS = "300"$/m);
   });
 });

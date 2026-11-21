@@ -46,7 +46,7 @@ async function glmInvoke(env, deps, pkg, nowTs, flags) {
   if (!flags.inference) return { status: 'model_disabled', reason: 'GLM_INFERENCE_ENABLED is not "1"', counted: false };
   if (model !== GLM_MODEL) return { status: 'model_disabled', reason: 'GLM_MODEL is not the verified GLM model', counted: false };
   const budget = Number(deps.budget) || 0;
-  if (budget <= 0) return { status: 'skipped_budget', reason: 'daily Neuron budget is 0', counted: false };
+  if (budget <= 0) return { status: 'skipped_budget', reason: 'BUDGET_EXHAUSTED: GLM daily Neuron budget is 0', counted: false };
   const pricing = deps.pricing && deps.pricing[model];
   if (!pricing) return { status: 'model_unavailable', reason: 'model has no Neuron pricing entry', counted: false };
   if (!env.AI || typeof env.AI.run !== 'function') return { status: 'model_unavailable', reason: 'Workers AI binding unavailable', counted: false };
@@ -54,8 +54,8 @@ async function glmInvoke(env, deps, pkg, nowTs, flags) {
   const day = new Date(nowTs).toISOString().slice(0, 10);
   try {
     const lim = await db.prepare("SELECT 1 AS x FROM sv2_ai_neurons WHERE day = ? AND status = 'account_limited' LIMIT 1").bind(day).first();
-    if (lim) return { status: 'quota_exhausted', reason: 'account free allocation reported exhausted today', counted: false };
-  } catch (e) { return { status: 'skipped_budget', reason: 'Neuron ledger unavailable: ' + errText(e), counted: false }; }
+    if (lim) return { status: 'quota_exhausted', reason: 'BUDGET_EXHAUSTED: account free allocation reported exhausted today (3036)', counted: false };
+  } catch (e) { return { status: 'skipped_budget', reason: 'BUDGET_EXHAUSTED: GLM Neuron ledger cannot be read: ' + errText(e), counted: false }; }
   const bytes = new TextEncoder().encode(pkg.prompt.system).length + pkg.prompt.bytes;
   const estimate = Math.ceil(((bytes + 256) * pricing.neurons_per_m_input + GLM_LIMITS.maxCompletionTokens * pricing.neurons_per_m_output) / 1e6 * 100) / 100;
   let slot = null;
@@ -65,8 +65,8 @@ async function glmInvoke(env, deps, pkg, nowTs, flags) {
       const row = await db.prepare('SELECT slot FROM sv2_ai_neurons WHERE rowid = ?').bind(r.meta.last_row_id).first();
       slot = row ? Number(row.slot) : null;
     }
-  } catch (e) { return { status: 'skipped_budget', reason: 'reservation failed: ' + errText(e), counted: false }; }
-  if (slot === null) return { status: 'skipped_budget', reason: `daily Neuron budget ${budget} would be exceeded (estimate ${estimate})`, counted: false };
+  } catch (e) { return { status: 'skipped_budget', reason: 'BUDGET_EXHAUSTED: reservation failed: ' + errText(e), counted: false }; }
+  if (slot === null) return { status: 'skipped_budget', reason: `BUDGET_EXHAUSTED: GLM daily Neuron budget ${budget} would be exceeded (estimate ${estimate})`, counted: false };
   const record = async (u) => {
     try {
       await db.prepare('UPDATE sv2_ai_neurons SET input_tokens = ?, output_tokens = ?, actual_neurons = ?, status = ? WHERE day = ? AND slot = ?')
@@ -112,7 +112,8 @@ export async function glmDailySignalRun(env, deps = {}, opts = {}) {
   if (!flags.signal) return { status: 'disabled' };
   const now = nowFn(opts);
   const started = now();
-  const cutoff = glmCutoff(opts.scheduledTs ?? started);
+  const cutoff = Number.isFinite(opts.cutoffTs) ? opts.cutoffTs : glmCutoff(opts.scheduledTs ?? started);
+  const trigger = opts.trigger || null;   // forecast-triggered run (glmForecastTrigger): { source, ref, forecast_ts, counterpart }
   const db = env.DB;
   const usage = { d1_calls: 0, d1_rows_read: 0, d1_rows_written: 0 };
   try {
@@ -124,7 +125,10 @@ export async function glmDailySignalRun(env, deps = {}, opts = {}) {
       usage.d1_calls += 1;
       const [snap, prev] = await db.batch([
         db.prepare('SELECT computed_ts, body_json FROM prediction_snapshots WHERE coin = ? AND horizon_hours = ?').bind('BTC', 24),
-        db.prepare('SELECT direction, eligibility, decision_cutoff_ts FROM glm_signals WHERE asset = ? AND horizon_hours = ? AND decision_cutoff_ts < ? ORDER BY decision_cutoff_ts DESC LIMIT 1').bind('BTC', 24, cutoff),
+        // Persistence compares with the signal of the previous day (cutoff 18-30 h earlier), not with an intraday
+        // forecast-triggered run a few hours before.
+        db.prepare('SELECT direction, eligibility, decision_cutoff_ts FROM glm_signals WHERE asset = ? AND horizon_hours = ? AND decision_cutoff_ts >= ? AND decision_cutoff_ts <= ? ORDER BY decision_cutoff_ts DESC LIMIT 1')
+          .bind('BTC', 24, cutoff - GLM_LIMITS.persistenceGapMs[1], cutoff - GLM_LIMITS.persistenceGapMs[0]),
       ]);
       usage.d1_rows_read += (snap.results || []).length + (prev.results || []).length;
       const s = (snap.results || [])[0];
@@ -141,11 +145,11 @@ export async function glmDailySignalRun(env, deps = {}, opts = {}) {
     usage.d1_calls += 1;
     const ins = await db.prepare(
       `INSERT OR IGNORE INTO glm_runs (run_id, asset, decision_cutoff_ts, started_ts, package_hash, input_version, prompt_version,
-        schema_version, status, n_items, n_excluded, package_bytes, input_refs_json, missing_json, rule_version)
-       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+        schema_version, status, n_items, n_excluded, package_bytes, input_refs_json, missing_json, rule_version, reason)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
     ).bind(runId, 'BTC', cutoff, started, pkg.package_hash, GLM_INPUT_VERSION, GLM_PROMPT_VERSION, GLM_SCHEMA_VERSION, 'started',
       pkg.items.length, pkg.excluded.length, pkg.prompt.bytes, JSON.stringify(pkg.input_refs), JSON.stringify(pkg.header.missing),
-      GLM_RULE_VERSION).run();
+      GLM_RULE_VERSION, trigger ? `trigger:${trigger.ref};` : null).run();
     usage.d1_rows_read += Number(ins?.meta?.rows_read ?? 0) || 0;
     if (!(ins && ins.meta && Number(ins.meta.changes) > 0)) {
       return { status: 'duplicate_package', run_id: runId, package_hash: pkg.package_hash, usage };
@@ -171,6 +175,7 @@ export async function glmDailySignalRun(env, deps = {}, opts = {}) {
       }
     }
     if (degraded && (runStatus === 'model_disabled' || runStatus === 'completed')) reason = (reason ? reason + '; ' : '') + 'inputs_degraded: ' + Object.keys(raw.errors).join(',');
+    if (trigger) reason = `trigger:${trigger.ref}; counterpart ${trigger.counterpart || 'unknown'}` + (reason ? '; ' + reason : '');
     const finished = now();
     const sig = qualifySignal({ output, pkg, previous, runStatus });
     sig.valid_from_ts = finished;
@@ -193,13 +198,15 @@ export async function glmDailySignalRun(env, deps = {}, opts = {}) {
       reserved_neurons: ai.reserved_neurons ?? ai.meta?.reserved_neurons ?? 0, input_tokens: ai.meta?.input_tokens ?? null,
       output_tokens: ai.meta?.output_tokens ?? null, actual_neurons: ai.meta?.actual_neurons ?? null,
       chronos_fetch: chron.error || 'ok', package_bytes: pkg.prompt.bytes, trimmed: pkg.trimmed, coverage: pkg.coverage, quality: pkg.quality, wall_ms: finished - started,
-      read_rows_bound: GLM_READ_ROWS_BOUND };
+      read_rows_bound: GLM_READ_ROWS_BOUND, trigger };
+    // A forecast-triggered run writes signals only when the model actually answered; a skipped or failed trigger run is
+    // recorded in glm_runs (status + reason) but never replaces the day's signal with a NO_SIGNAL that was not analysed.
+    const writeSignals = !trigger || (ai.status === 'answered' && output !== null);
     const fin = await db.batch([
       db.prepare(`UPDATE glm_runs SET finished_ts = ?, model = ?, status = ?, reason = ?, output_json = ?, validation_errors_json = ?, usage_json = ?
                   WHERE run_id = ?`).bind(finished, ai.counted ? GLM_MODEL : null, runStatus, reason, output ? JSON.stringify(output) : null,
         validationErrors ? JSON.stringify(validationErrors) : null, JSON.stringify(runUsage), runId),
-      sigRow(24, sig, wouldApply),
-      sigRow(12, noSignal12, 0),
+      ...(writeSignals ? [sigRow(24, sig, wouldApply), sigRow(12, noSignal12, 0)] : []),
     ]);
     const finalRows = (fin || []).reduce((s, r) => s + (Number(r?.meta?.rows_read ?? 0) || 0), 0);
     return { status: runStatus, run_id: runId, signal: { direction: sig.direction, eligibility: sig.eligibility, reasons: sig.reasons },
@@ -207,6 +214,86 @@ export async function glmDailySignalRun(env, deps = {}, opts = {}) {
   } catch (e) {
     return { status: 'failed', reason: errText(e), usage };
   }
+}
+
+// Forecast-triggered GLM (owner change request 2026-11-21 §6): every new eligible TimesFM 2.5 or Chronos-2 BTC 24 h
+// forecast creates one GLM opportunity, without waiting for the counterpart. Idempotent per forecast (glm_runs.reason
+// starts with trigger:<ref>), cutoff = the top of the current hour, budget checked before any package is built
+// (BUDGET_EXHAUSTED is recorded, nothing else is interrupted). At most one trigger per invocation. Never throws.
+export async function glmForecastTrigger(env, deps = {}, { now = Date.now(), fetchImpl } = {}) {
+  const flags = glmFlags(env);
+  if (!flags.signal || !flags.inference) return { ran: false, status: 'disabled' };
+  const db = env.DB;
+  const cutoff = Math.floor(now / H) * H;
+  try {
+    const tfm = await db.prepare("SELECT id, ts FROM experiment_4_timesfm WHERE coin = 'BTC' AND horizon_hours = 24 AND ts <= ? ORDER BY ts DESC LIMIT 1").bind(cutoff).first();
+    const chron = await fetchChronosLedger(fetchImpl || deps.fetchImpl || fetch);
+    const chr = chron.ledger && Array.isArray(chron.ledger.forecasts)
+      ? chron.ledger.forecasts.filter((f) => f && f.coin === 'BTC' && Number(f.horizon_hours) === 24 && Number(f.issued_ts) <= cutoff)
+        .reduce((a, f) => (!a || Number(f.issued_ts) > Number(a.issued_ts) ? f : a), null) : null;
+    const cands = [];
+    if (tfm) cands.push({ source: 'timesfm', ref: `tfm:${tfm.id}`, forecast_ts: Number(tfm.ts) });
+    if (chr) cands.push({ source: 'chronos', ref: `chr:${chr.id}`, forecast_ts: Number(chr.issued_ts) });
+    const fresh = cands.filter((c) => cutoff - c.forecast_ts <= GLM_LIMITS.staleForecastMs).sort((a, b) => a.forecast_ts - b.forecast_ts);
+    for (const c of fresh) {
+      const seen = await db.prepare('SELECT 1 AS x FROM glm_runs WHERE asset = ? AND decision_cutoff_ts >= ? AND reason LIKE ? LIMIT 1')
+        .bind('BTC', c.forecast_ts, `trigger:${c.ref};%`).first();
+      if (seen) continue;
+      const other = cands.find((x) => x.source !== c.source);
+      c.counterpart = other ? `${other.source} ${other.ref} issued ${new Date(other.forecast_ts).toISOString()}`
+        : `${c.source === 'timesfm' ? 'chronos' : 'timesfm'} missing${c.source === 'timesfm' && chron.error ? ' (' + chron.error + ')' : ''}`;
+      // Budget gate first (cheap): if one maximum-size call cannot fit, record BUDGET_EXHAUSTED and build nothing.
+      const gate = await glmBudgetGate(db, deps, now);
+      if (!gate.ok) {
+        const id = `glm_${(await sha256Hex(c.ref)).slice(0, 24)}_${cutoff}`;
+        await db.prepare(`INSERT OR IGNORE INTO glm_runs (run_id, asset, decision_cutoff_ts, started_ts, finished_ts, package_hash, input_version, prompt_version,
+          schema_version, status, reason, n_items, n_excluded, package_bytes, input_refs_json, missing_json, usage_json, rule_version) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+          .bind(id, 'BTC', cutoff, now, now, `none:${c.ref}:${cutoff}`, GLM_INPUT_VERSION, GLM_PROMPT_VERSION, GLM_SCHEMA_VERSION, 'skipped_budget',
+            `trigger:${c.ref}; counterpart ${c.counterpart}; ${gate.reason}`, 0, 0, 0, '[]', '[]', JSON.stringify({ trigger: c, budget: gate }), GLM_RULE_VERSION).run();
+        return { ran: false, status: 'skipped_budget', reason: gate.reason, trigger: c };
+      }
+      const r = await glmDailySignalRun(env, deps, { now: deps.now || (() => Date.now()), cutoffTs: cutoff, trigger: c });
+      if (r.status === 'duplicate_package') {
+        // Both forecasts arrived before the same cutoff: one identical package already holds both, and it is never sent
+        // twice. The trigger is recorded as covered by that run (idempotency marker, no second model call).
+        const id = `glm_${(await sha256Hex(c.ref)).slice(0, 24)}_${cutoff}`;
+        await db.prepare(`INSERT OR IGNORE INTO glm_runs (run_id, asset, decision_cutoff_ts, started_ts, finished_ts, package_hash, input_version, prompt_version,
+          schema_version, status, reason, n_items, n_excluded, package_bytes, input_refs_json, missing_json, usage_json, rule_version) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+          .bind(id, 'BTC', cutoff, now, now, `covered:${c.ref}:${cutoff}`, GLM_INPUT_VERSION, GLM_PROMPT_VERSION, GLM_SCHEMA_VERSION, 'duplicate_package',
+            `trigger:${c.ref}; counterpart ${c.counterpart}; covered by run ${r.run_id}`, 0, 0, 0, '[]', '[]', JSON.stringify({ trigger: c, covered_by: r.run_id }), GLM_RULE_VERSION).run();
+      }
+      return { ran: true, status: r.status, run_id: r.run_id || null, signal: r.signal || null, trigger: c, usage: r.usage || null };
+    }
+    return { ran: false, status: 'nothing_due', candidates: cands.map((c) => c.ref), chronos_error: chron.error || null };
+  } catch (e) {
+    return { ran: false, status: 'failed', reason: errText(e) };
+  }
+}
+
+// GLM's own allocation (an internal share, NOT proof of the account-wide remaining Neurons, which this Worker cannot read):
+// today's committed Neurons in the ledger (actual when reconciled, else the reservation) plus one maximum-size call must
+// fit under the GLM budget, and no account-allocation error (3036) may have been seen today.
+export async function glmBudgetGate(db, deps, now) {
+  const budget = Number(deps.budget) || 0;
+  const pricing = deps.pricing && deps.pricing[GLM_MODEL];
+  if (budget <= 0) return { ok: false, reason: 'BUDGET_EXHAUSTED: GLM daily Neuron budget is 0', budget };
+  if (!pricing) return { ok: false, reason: 'BUDGET_EXHAUSTED: no Neuron pricing for the GLM model', budget };
+  const day = new Date(now).toISOString().slice(0, 10);
+  const maxCall = Math.ceil(((GLM_LIMITS.maxPromptBytes + 4096 + 256) * pricing.neurons_per_m_input + GLM_LIMITS.maxCompletionTokens * pricing.neurons_per_m_output) / 1e6 * 100) / 100;
+  try {
+    const r = await db.prepare("SELECT COALESCE(SUM(COALESCE(actual_neurons, reserved_neurons)), 0) AS used, MAX(CASE WHEN status = 'account_limited' THEN 1 ELSE 0 END) AS limited FROM sv2_ai_neurons WHERE day = ?").bind(day).first();
+    const used = Number(r && r.used) || 0;
+    if (r && Number(r.limited) === 1) return { ok: false, reason: 'BUDGET_EXHAUSTED: account free allocation reported exhausted today (3036)', budget, used };
+    if (used + maxCall > budget) return { ok: false, reason: `BUDGET_EXHAUSTED: ${Math.round(used * 100) / 100} of ${budget} GLM Neurons used, one call needs up to ${maxCall}`, budget, used, max_call: maxCall };
+    return { ok: true, budget, used, max_call: maxCall };
+  } catch (e) {
+    return { ok: false, reason: 'BUDGET_EXHAUSTED: GLM Neuron ledger cannot be read: ' + errText(e), budget };
+  }
+}
+
+async function sha256Hex(text) {
+  const d = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(String(text)));
+  return [...new Uint8Array(d)].map((b) => b.toString(16).padStart(2, '0')).join('');
 }
 
 // Tick hook (BTC 24 h only reads the DB; other coin/horizons return NO_SIGNAL with zero queries). Never throws.

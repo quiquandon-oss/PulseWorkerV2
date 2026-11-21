@@ -42,12 +42,65 @@ def check_predictions(fetch):
         return [f"could not read /prediction-freshness ({type(e).__name__})"], []
 
 
-# V2 writes a decision in most non-tick hours (16 of 24). Before 2026-11-21 gaps reached about 3 h; that day a D1 budget
-# deferral stopped it for 6 h without any alert. More than 4 h without a new decision is a finding.
+# V2 freshness (docs/OPERATIONS.md §3, owner mandate OD-18): a finding when the last THREE non-tick hourly opportunities
+# (hours not divisible by 3, UTC) produced no V2 decision. Each slot is classified from the chain summary that the
+# Worker keeps on the hour's event_runs row (GET /api/sentiment-v2/chain):
+#   no_invocation      no hourly run record for that slot (not scheduled, or nothing recorded)
+#   invocation_failed  a run record exists but the chain never finished or a step errored before V2
+#   v2_deferred        the run happened but V2 deferred itself (D1 query budget)
+#   v2_no_decision     V2 ran but wrote no decision (reason given)
+#   current            V2 wrote a decision
+# Diagnostic only: nothing is changed or replayed. Falls back to the newest decision's age when the route is missing.
 V2_MAX_GAP_H = 4
+V2_SLOTS = 3
+SLOT_SETTLE_S = 20 * 60
+
+
+def v2_slot_state(run):
+    if run is None:
+        return "no_invocation", "no hourly run record"
+    c = run.get("chain")
+    if not c:
+        return "invocation_failed", "run record without a finished chain summary"
+    v2 = (c.get("steps") or {}).get("v2")
+    if not v2 or v2.get("error"):
+        return "invocation_failed", (v2 or {}).get("error") or "V2 step did not run"
+    if v2.get("deferred"):
+        return "v2_deferred", v2.get("reason") or "deferred (D1 query budget)"
+    if not v2.get("written"):
+        return "v2_no_decision", v2.get("reason") or "no decision written"
+    return "current", f"{v2.get('written')} decision(s)"
+
+
+def last_nontick_slots(now, n=V2_SLOTS):
+    out, h = [], int((now - SLOT_SETTLE_S) // 3600) * 3600
+    while len(out) < n:
+        if (h // 3600) % 24 % 3 != 0:
+            out.append(h)
+        h -= 3600
+    return out
+
+
+def classify_v2(chain_payload, now):
+    runs = (chain_payload or {}).get("runs") or []
+    rows = []
+    for slot in last_nontick_slots(now):
+        run = next((r for r in runs if slot * 1000 <= float(r.get("started_ts") or 0) < (slot + 1800) * 1000), None)
+        state, detail = v2_slot_state(run)
+        rows.append((slot, state, detail))
+    return rows
 
 
 def check_sentiment_v2(fetch, now):
+    try:
+        rows = classify_v2(fetch(WORKER + "/api/sentiment-v2/chain?limit=12"), now)
+    except Exception:
+        rows = None
+    if rows is not None:
+        lines = [f"Sentiment V2 {time.strftime('%H:%M', time.gmtime(s))} UTC: {st} ({d})" for s, st, d in rows]
+        if all(st != "current" for _, st, _ in rows):
+            return [f"Sentiment V2: no decision in the last {len(rows)} non-tick hours: " + "; ".join(lines)], lines
+        return [], lines
     try:
         d = fetch(WORKER + "/api/sentiment-v2/forecast-research?limit=1")
         pts = (d or {}).get("points") or []
@@ -55,10 +108,10 @@ def check_sentiment_v2(fetch, now):
             return ["Sentiment V2: no decision returned by /api/sentiment-v2/forecast-research"], []
         age_h = (now * 1000 - float(pts[0]["decision_ts"])) / 3600000
         if age_h > V2_MAX_GAP_H:
-            return [f"Sentiment V2: no new decision for {age_h:.1f} h (limit {V2_MAX_GAP_H} h); check the hourly chain and its D1 budget"], []
-        return [], [f"Sentiment V2: newest decision {age_h:.1f} h old"]
+            return [f"Sentiment V2: no new decision for {age_h:.1f} h (limit {V2_MAX_GAP_H} h; chain route unavailable)"], []
+        return [], [f"Sentiment V2: newest decision {age_h:.1f} h old (chain route unavailable)"]
     except Exception as e:
-        return [f"could not read /api/sentiment-v2/forecast-research ({type(e).__name__})"], []
+        return [f"could not read Sentiment V2 freshness ({type(e).__name__})"], []
 
 
 def check_usage(fetch, now):
@@ -107,7 +160,7 @@ def simulate(name, now):
     elif name == "predictions_stale":
         checks["predictions"], _ = check_predictions(lambda _u: _freshness_payload("STALE"))
     elif name == "v2_stale":
-        checks["sentiment_v2"], _ = check_sentiment_v2(lambda _u: {"points": [{"decision_ts": (now - 6 * 3600) * 1000}]}, now)
+        checks["sentiment_v2"], _ = check_sentiment_v2(lambda _u: {"runs": [{"started_ts": (s + 54) * 1000, "chain": {"steps": {"v2": {"deferred": True, "reason": "deferred: D1 query budget"}}}} for s in last_nontick_slots(now)]}, now)
     elif name == "fetch_failure":
         checks["predictions"], _ = check_predictions(failing)
         checks["usage"], _ = check_usage(failing, now)

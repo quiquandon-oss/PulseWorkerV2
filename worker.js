@@ -10962,6 +10962,20 @@ const pulseWorkerHandlers = {
 
     // Sentiment V2 forecast family RESEARCH comparison and GLM trigger measurements (change request 2026-11-21). Read-only,
     // bounded (<= 96 results, <= 7 days of GLM runs and Neuron rows), cached 5 min. Production sentiment_score is not changed.
+    if (url.pathname === '/api/sentiment-v2/chain' && request.method === 'GET') {
+      const limit = Math.max(1, Math.min(48, parseInt(url.searchParams.get('limit') || '12', 10) || 12));
+      try {
+        const edge = typeof caches !== 'undefined' && caches.default ? caches.default : null;
+        const cacheKey = new Request(`${url.origin}/api/sentiment-v2/chain?limit=${limit}`, { method: 'GET' });
+        if (edge) { const hit = await edge.match(cacheKey); if (hit) return new Response(hit.body, { headers: { ...corsHeaders, 'Content-Type': 'application/json', 'Cache-Control': 'public, max-age=300', 'X-SV2-Cache': 'edge' } }); }
+        const body = JSON.stringify(await getSv2Chain(env, limit));
+        if (edge) { try { await edge.put(cacheKey, new Response(body, { headers: { 'Content-Type': 'application/json', 'Cache-Control': 'public, max-age=300' } })); } catch (_e) { /* best effort */ } }
+        return new Response(body, { headers: { ...corsHeaders, 'Content-Type': 'application/json', 'Cache-Control': 'public, max-age=300' } });
+      } catch (err) {
+        return new Response(JSON.stringify({ ok: false, error: String(err).slice(0, 200) }), { status: 503, headers: { ...corsHeaders, 'Content-Type': 'application/json', 'Cache-Control': 'no-store' } });
+      }
+    }
+
     if (url.pathname === '/api/sentiment-v2/forecast-research' && request.method === 'GET') {
       const limit = Math.max(1, Math.min(96, parseInt(url.searchParams.get('limit') || '48', 10) || 48));
       try {
@@ -11770,35 +11784,43 @@ const pulseWorkerHandlers = {
         // Sentiment V2 runs after detection, in the same non-tick invocation (never alongside the prediction tick), so
         // detection's writes complete first and a V2 failure cannot affect them. V2 is idempotent per V1 observation.
         // One counter of top-level D1 calls for the whole chain (D1 limits queries per invocation; a batch counts as one).
-        const sv2Q = { n: 0 }, sv2Steps = {};
+        const sv2Q = { n: 0 }, sv2Steps = {}, chain = { v: 'chain-1', ts: event.scheduledTime, steps: {} };
         env = { ...env, DB: sv2CountingDb(env.DB, sv2Q) };
         ctx.waitUntil(runAutomaticDetection(env, { trigger: 'cron', nowTs: event.scheduledTime })
-          .then(r => logBounded('log', 'event detection (cron):', ({ ok: r.ok, skipped: r.skipped || false, reason: r.reason || r.error || null })))
-          .catch(err => console.error('Event detection (cron) failed:', err))
+          .then(r => { chain.run_id = r && r.run_id || null; chain.steps.detection = { ok: !!(r && r.ok), skipped: !!(r && r.skipped), q: sv2Q.n };
+            logBounded('log', 'event detection (cron):', ({ ok: r.ok, skipped: r.skipped || false, reason: r.reason || r.error || null })); })
+          .catch(err => { chain.steps.detection = { error: String(err).slice(0, 120), q: sv2Q.n }; console.error('Event detection (cron) failed:', err); })
           // Copy new V1 readings from `history` into the archive V2 reads. A failure is logged as an error and V2 still
           // runs on what the archive already holds (it never invents a missing reading).
           .then(() => syncV1ArchiveFromHistory(env, { nowTs: event.scheduledTime,
             queryBudget: SV2_D1_QUERIES_PER_INVOCATION - SV2_D1_QUERY_RESERVE - SV2_CYCLE_QUERY_HEADROOM - sv2Q.n }))
           .then(r => { const line = ({ ok: r.ok, skipped: r.skipped || false, copied: r.copied || 0, already_present: r.already_present || 0, history_last_ts: r.history_last_ts || null, invalid: r.invalid || [], errors: r.errors || [], deferred: r.deferred || 0, truncated: r.truncated || false });
+            chain.steps.sync = { ok: !!r.ok, copied: r.copied || 0, q: sv2Q.n };
             if (r.ok) logBounded('log', 'v1 archive sync (cron):', line); else logBounded('error', 'v1 archive sync (cron) FAILED:', line); })
-          .catch(err => console.error('V1 archive sync (cron) failed:', err))
+          .catch(err => { chain.steps.sync = { error: String(err).slice(0, 120), q: sv2Q.n }; console.error('V1 archive sync (cron) failed:', err); })
           // Baseline first (audit review 2026-11-21, decision 3): V2 cycle, then the collector, then GLM on what is left. GLM
           // is optional downstream intelligence: it never defers or delays V2 or the collector.
           .then(() => { sv2Steps.v2_start = sv2Q.n; return runSentimentV2Cycle(env, { nowTs: event.scheduledTime, queryBudget: SV2_D1_QUERIES_PER_INVOCATION - SV2_D1_QUERY_RESERVE - sv2Q.n }); })
           .then(r => { const line = ({ ok: r.ok, skipped: r.skipped || false, written: r.written || 0, reason: r.reason || null, deferred_readings: r.deferred_readings || [], d1_queries_before: sv2Steps.v2_start, d1_queries_after: sv2Q.n });
+            chain.steps.v2 = { ok: !!r.ok, skipped: !!r.skipped, deferred: !!r.deferred_d1_budget, written: r.written || 0, reason: r.reason || null, q_before: sv2Steps.v2_start, q: sv2Q.n };
             if (r.deferred_d1_budget) logBounded('warn', 'sentiment v2 (cron) DEFERRED (D1 budget):', line); else logBounded('log', 'sentiment v2 (cron):', line); })
-          .catch(err => console.error('Sentiment V2 (cron) failed:', err))
+          .catch(err => { chain.steps.v2 = { error: String(err).slice(0, 120), q: sv2Q.n }; console.error('Sentiment V2 (cron) failed:', err); })
           // Independent evidence next: V2 decisions are past V1 timestamps, so evidence retrieved now could not count for them
           // anyway (point-in-time), and V2 gets the D1 query headroom first. The collector spends what is left before GLM.
           .then(() => sv2CollectGuarded(env, event.scheduledTime, () => SV2_D1_QUERIES_PER_INVOCATION - SV2_D1_QUERY_RESERVE - sv2Q.n))
           .then(r => { const line = ({ ok: r.ok, skipped: r.skipped || false, items_new: r.items_new || 0, items_duplicate: r.items_duplicate || 0, budget: r.budget || null, sources: (r.sources || []).map(x => `${x.id}:${x.status}`), errors: r.errors || [], d1_queries_after: sv2Q.n });
+            chain.steps.collector = { ok: !!r.ok, skipped: !!r.skipped, sources: (r.sources || []).length, items_new: r.items_new || 0, q: sv2Q.n };
             if (r.ok) logBounded('log', 'sv2 evidence (cron):', line); else logBounded('error', 'sv2 evidence (cron) FAILED:', line); })
-          .catch(err => console.error('SV2 evidence (cron) failed:', err))
+          .catch(err => { chain.steps.collector = { error: String(err).slice(0, 120), q: sv2Q.n }; console.error('SV2 evidence (cron) failed:', err); })
           // Forecast-triggered GLM last, on the remaining D1 queries (it defers itself, without a marker, when they do not
           // cover one analysis). A CPU or wall-time overrun here can only cut GLM: V2 and evidence are already written.
           .then(() => glmForecastTrigger(env, glmDeps(env), { now: event.scheduledTime, queryBudget: SV2_D1_QUERIES_PER_INVOCATION - SV2_D1_QUERY_RESERVE - sv2Q.n }))
-          .then(r => { if (r && r.status !== 'disabled' && r.status !== 'nothing_due') logBounded('log', 'glm forecast trigger (cron):', ({ status: r.status, ran: r.ran, trigger: r.trigger ? r.trigger.ref : null, run_id: r.run_id || null, covered: r.covered || r.recorded || r.due || [], reason: r.reason || null, d1_queries_after: sv2Q.n })); })
-          .catch(err => console.error('GLM forecast trigger (cron) failed:', err)));
+          .then(r => { chain.steps.glm = { status: r ? r.status : null, ran: !!(r && r.ran), q: sv2Q.n }; if (r && r.status !== 'disabled' && r.status !== 'nothing_due') logBounded('log', 'glm forecast trigger (cron):', ({ status: r.status, ran: r.ran, trigger: r.trigger ? r.trigger.ref : null, run_id: r.run_id || null, covered: r.covered || r.recorded || r.due || [], reason: r.reason || null, d1_queries_after: sv2Q.n })); })
+          .catch(err => { chain.steps.glm = { error: String(err).slice(0, 120), q: sv2Q.n }; console.error('GLM forecast trigger (cron) failed:', err); })
+          // Per-step D1 counts and the V2 outcome, kept on this invocation's existing event_runs record (OPERATIONS.md §2-3):
+          // one bounded UPDATE from the reserved queries. Read by GET /api/sentiment-v2/chain and the V2 freshness alert.
+          .then(() => sv2RecordChain(env, chain))
+          .catch(err => console.error('Chain record failed:', err)));
       }
     }
     // No catch-all else: an unrecognized event.cron does nothing.
@@ -13290,6 +13312,21 @@ function sv2ForecastResearchFor(result, ts, inp) {
     forecast_chronos: inp.chronos ? sv2fForecastSource(inp.chronos, ts) : { state: 'unavailable', reason: 'chronos_ledger_' + (inp.chronos_error || 'unavailable') },
   };
   return sv2ForecastResearch(result, sources, sv2fGlm(inp.glm, ts));
+}
+
+// One summary per hourly non-tick invocation on its event_runs row (no new table, one query). Skipped when detection
+// did not create a row this hour (then the alert reports "no invocation record").
+async function sv2RecordChain(env, chain) {
+  if (!chain || !chain.run_id) return { recorded: false, reason: 'no event_runs row this invocation' };
+  chain.q_total = Object.values(chain.steps).reduce((m, x) => Math.max(m, Number(x && x.q) || 0), 0);
+  await env.DB.prepare("UPDATE event_runs SET summary_json = json_set(COALESCE(summary_json, '{}'), '$.chain', json(?)) WHERE run_id = ?")
+    .bind(JSON.stringify(chain), chain.run_id).run();
+  return { recorded: true };
+}
+// The last hourly chain summaries (read-only, bounded to 48 rows, cached 5 min).
+async function getSv2Chain(env, limit) {
+  const r = await env.DB.prepare("SELECT run_id, started_ts, json_extract(summary_json, '$.chain') AS chain FROM event_runs WHERE trigger = 'cron' ORDER BY started_ts DESC LIMIT ?").bind(limit).all();
+  return { ok: true, runs: ((r && r.results) || []).map((x) => { let c = null; try { c = x.chain ? JSON.parse(x.chain) : null; } catch (_e) { c = null; } return { run_id: x.run_id, started_ts: x.started_ts, chain: c }; }) };
 }
 
 async function runSentimentV2Cycle(env, { nowTs, queryBudget = Infinity, fetchImpl } = {}) {

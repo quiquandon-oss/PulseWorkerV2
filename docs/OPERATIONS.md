@@ -198,3 +198,16 @@ Until then all budgets stay as they are.
   - Replayed backtests are not valid evidence.
   - The corrected core runs only as a switched-off shadow until CPU is measured.
 - **Comparison:** V1 is market-wide: the same reading stands for BTC, ETH and LINK.
+
+### Chain record and V2 freshness alert (implements §2-§3)
+
+- **Storage:** each hourly non-tick invocation stores `{steps: {detection, sync, v2, collector, glm}, q_total}` on its
+  existing `event_runs` row (`summary_json.chain`).
+  - One bounded `UPDATE`, using the reserved queries. No new table.
+  - Each step carries its cumulative D1 query count `q`.
+  - V2 also records `deferred`, `written` and `reason`.
+- **Route:** read-only `GET /api/sentiment-v2/chain?limit<=48`, cached 5 min.
+- **Alert:** `ops/alert_run.py` classifies the last three non-tick slots as `no_invocation`, `invocation_failed`,
+  `v2_deferred`, `v2_no_decision` or `current`. It raises a finding when none is current, and falls back to the newest
+  decision's age while the route is not deployed.
+- **Tests:** they include a replay of the 2026-11-21 gap.

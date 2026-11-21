@@ -684,3 +684,16 @@ describe('GET /api/glm/runs (audit review 2026-11-21, P2-3)', () => {
     expect(out[2].neurons.reserved).toBe(206.05);
   });
 });
+
+describe('hourly chain record (OPERATIONS.md §2-3): per-step D1 counts and the V2 outcome on the existing event_runs row', () => {
+  it('records once at the end of the chain, on the detection run row, and is served read-only and bounded', async () => {
+    const { readFileSync } = await import('node:fs');
+    const W = readFileSync(new URL('../worker.js', import.meta.url), 'utf8');
+    const chainSrc = W.slice(W.indexOf("} else if (event.cron === '0 * * * *') {"), W.indexOf('// No catch-all else'));
+    expect(chainSrc).toMatch(/\.then\(\(\) => sv2RecordChain\(env, chain\)\)/);
+    for (const step of ['detection', 'sync', 'v2', 'collector', 'glm']) expect(chainSrc).toMatch(new RegExp(`chain\\.steps\\.${step} = `));
+    expect(W).toMatch(/UPDATE event_runs SET summary_json = json_set\(COALESCE\(summary_json, '\{\}'\), '\$\.chain', json\(\?\)\) WHERE run_id = \?/);
+    expect(W).toMatch(/url\.pathname === '\/api\/sentiment-v2\/chain' && request\.method === 'GET'/);
+    expect(W).toMatch(/Math\.min\(48, parseInt\(url\.searchParams\.get\('limit'\)/);
+  });
+});

@@ -593,6 +593,17 @@ describe('forecast-triggered GLM: independent triggers, idempotent, honest, budg
     expect((await glmBudgetGate(d1.binding, deps(LIVE), at + 24 * H)).ok).toBe(true);
   });
 
+  it('nothing due -> exactly one D1 query (2026-11-21: the hourly chain shares 50 queries with detection and V2)', async () => {
+    nowTs = at + 30e3;
+    const env = mkEnv(LIVE, aiReturning(validAnswer()));
+    await glmForecastTrigger(env, deps(LIVE, { fetchImpl: ledgerFetch, now: clock }), { now: at, fetchImpl: ledgerFetch });
+    await glmForecastTrigger(env, deps(LIVE, { fetchImpl: ledgerFetch, now: clock }), { now: at, fetchImpl: ledgerFetch });
+    d1.log.length = 0;
+    const r = await glmForecastTrigger(env, deps(LIVE, { fetchImpl: ledgerFetch, now: clock }), { now: at + H, fetchImpl: ledgerFetch });
+    expect(r.status).toBe('nothing_due');
+    expect(d1.log).toHaveLength(1);
+  });
+
   it('inference off -> disabled with zero queries; stale forecasts never trigger', async () => {
     d1.log.length = 0;
     expect(await glmForecastTrigger(mkEnv(ON), deps(ON), { now: at, fetchImpl: ledgerFetch })).toMatchObject({ ran: false, status: 'disabled' });

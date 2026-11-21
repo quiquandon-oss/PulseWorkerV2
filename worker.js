@@ -13209,7 +13209,13 @@ const SV2_D1_QUERY_RESERVE = 3;                  // d1_usage_daily recording and
 // + 5 per pending reading (AI reserve, slot, settle, limit check, insert) x maxCatchUp 3 = 30. Kept free for V2 by the
 // sync; the cycle itself checks the budget it is given and defers readings it could not finish (never a partial write).
 const SV2_CYCLE_QUERIES_FIXED = 17;              // includes the server-reading read (SV2_V1_SERVER_INPUT) and the forecast-research batch
-const SV2_CYCLE_QUERIES_PER_READING = 5;
+const SV2_CYCLE_QUERIES_PER_READING = 5;              // with the per-cycle AI annotation on (reserve, slot, settle, limit check, insert)
+const SV2_CYCLE_QUERIES_PER_READING_NO_AI = 1;        // annotation off (production: SENTIMENT_V2_AI_MODEL = ""): the insert only
+// Queries one reading really costs in this deployment (2026-11-21): reserving 5 when the annotation is off left the cycle
+// deferred every hour once the forecast trigger shared the 50-query invocation budget.
+function sv2CycleQueriesPerReading(env) {
+  return String((env && env.SENTIMENT_V2_AI_MODEL) || '').trim() && sv2AiBudget(env) > 0 ? SV2_CYCLE_QUERIES_PER_READING : SV2_CYCLE_QUERIES_PER_READING_NO_AI;
+}
 const SV2_CYCLE_QUERY_HEADROOM = SV2_CYCLE_QUERIES_FIXED + 3 * SV2_CYCLE_QUERIES_PER_READING;
 function sv2CountingDb(db, counter) {
   if (!db) return db;
@@ -13289,7 +13295,8 @@ async function runSentimentV2Cycle(env, { nowTs, queryBudget = Infinity, fetchIm
   if (String(env.SENTIMENT_V2_ENABLED || '0') !== '1') return { ok: true, skipped: true, reason: 'disabled' };
   // Not enough D1 queries left in this invocation (shared with event detection) for even one reading: defer the whole
   // cycle before any query. Pending readings stay in the archive and a later run computes them.
-  if (queryBudget < SV2_CYCLE_QUERIES_FIXED + SV2_CYCLE_QUERIES_PER_READING) {
+  const perReading = sv2CycleQueriesPerReading(env);
+  if (queryBudget < SV2_CYCLE_QUERIES_FIXED + perReading) {
     return { ok: true, skipped: true, deferred_d1_budget: true, reason: `deferred: D1 query budget (${Math.max(0, queryBudget)} left in this invocation)` };
   }
   const cfg = sv2Config();
@@ -13323,7 +13330,7 @@ async function runSentimentV2Cycle(env, { nowTs, queryBudget = Infinity, fetchIm
   const pending = pendTs.sort((a, b) => a - b);
   if (!pending.length) return { ok: true, written: 0, reason: 'no new V1 observation' };
   // Oldest first, as many as the remaining D1 budget allows; the rest stay pending (> the new MAX(decision_ts)).
-  const fitReadings = Math.floor((queryBudget - SV2_CYCLE_QUERIES_FIXED) / SV2_CYCLE_QUERIES_PER_READING);
+  const fitReadings = Math.floor((queryBudget - SV2_CYCLE_QUERIES_FIXED) / perReading);
   const deferredReadings = pending.length > fitReadings ? pending.splice(fitReadings) : [];
   const lo = pending[0] - cfg.historyMs, hi = pending[pending.length - 1];
   const histRes = await env.DB.prepare('SELECT observation_ts, score, btc_price, sources_json FROM research_sentiment_archive WHERE observation_ts >= ? AND observation_ts <= ? ORDER BY observation_ts ASC')

@@ -226,7 +226,14 @@ export async function glmForecastTrigger(env, deps = {}, { now = Date.now(), fet
   const db = env.DB;
   const cutoff = Math.floor(now / H) * H;
   try {
-    const tfm = await db.prepare("SELECT id, ts FROM experiment_4_timesfm WHERE coin = 'BTC' AND horizon_hours = 24 AND ts <= ? ORDER BY ts DESC LIMIT 1").bind(cutoff).first();
+    // ONE D1 query for the latest TimesFM forecast and the trigger markers of the last 36 h (2026-11-21: the hourly chain
+    // shares 50 D1 queries per invocation with event detection and the V2 cycle; three separate reads left V2 short).
+    const scan = await db.prepare(`SELECT 'tfm' AS k, id, ts, NULL AS reason FROM (SELECT id, ts FROM experiment_4_timesfm WHERE coin = 'BTC' AND horizon_hours = 24 AND ts <= ? ORDER BY ts DESC LIMIT 1)
+      UNION ALL SELECT * FROM (SELECT 'seen' AS k, NULL AS id, decision_cutoff_ts AS ts, reason FROM glm_runs WHERE asset = 'BTC' AND decision_cutoff_ts >= ? AND reason LIKE 'trigger:%' LIMIT 200)`)
+      .bind(cutoff, cutoff - GLM_LIMITS.staleForecastMs).all();
+    const scanRows = (scan && scan.results) || [];
+    const tfm = scanRows.find((r) => r.k === 'tfm') || null;
+    const marks = scanRows.filter((r) => r.k === 'seen');
     const chron = await fetchChronosLedger(fetchImpl || deps.fetchImpl || fetch);
     const chr = chron.ledger && Array.isArray(chron.ledger.forecasts)
       ? chron.ledger.forecasts.filter((f) => f && f.coin === 'BTC' && Number(f.horizon_hours) === 24 && Number(f.issued_ts) <= cutoff)
@@ -236,8 +243,8 @@ export async function glmForecastTrigger(env, deps = {}, { now = Date.now(), fet
     if (chr) cands.push({ source: 'chronos', ref: `chr:${chr.id}`, forecast_ts: Number(chr.issued_ts) });
     const fresh = cands.filter((c) => cutoff - c.forecast_ts <= GLM_LIMITS.staleForecastMs).sort((a, b) => a.forecast_ts - b.forecast_ts);
     for (const c of fresh) {
-      const seen = await db.prepare('SELECT 1 AS x FROM glm_runs WHERE asset = ? AND decision_cutoff_ts >= ? AND reason LIKE ? LIMIT 1')
-        .bind('BTC', c.forecast_ts, `trigger:${c.ref};%`).first();
+      // same rule as before (a marker for this forecast at or after it was issued), evaluated on the rows read above
+      const seen = marks.some((m) => Number(m.ts) >= c.forecast_ts && String(m.reason || '').startsWith(`trigger:${c.ref};`));
       if (seen) continue;
       const other = cands.find((x) => x.source !== c.source);
       c.counterpart = other ? `${other.source} ${other.ref} issued ${new Date(other.forecast_ts).toISOString()}`

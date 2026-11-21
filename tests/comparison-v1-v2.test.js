@@ -4,6 +4,7 @@ import { describe, it, expect } from 'vitest';
 import { createRequire } from 'node:module';
 import { readFileSync } from 'node:fs';
 import {
+  comparisonSql, ASSET_TABLES,
   handleComparisonRoutes, parseComparisonParams, alignRecord, summarize, wilson, v1Direction, V1_BANDS,
   COMPARISON_SQL, COMPARISON_LIMITS, loadComparisonRows,
 } from '../comparison/v1-v2.js';
@@ -20,6 +21,12 @@ CREATE TABLE predictions (id INTEGER PRIMARY KEY AUTOINCREMENT, ts INTEGER NOT N
   btc_price_at_prediction REAL NOT NULL DEFAULT 0, p_up REAL NOT NULL, n_analogs INTEGER NOT NULL DEFAULT 0,
   realized_up INTEGER, resolved_ts INTEGER, horizon_hours INTEGER DEFAULT 24, calibrated_p_up REAL, git_commit_sha TEXT);
 CREATE INDEX idx_predictions_horizon_ts ON predictions(horizon_hours, ts);
+CREATE TABLE eth_predictions (id INTEGER PRIMARY KEY AUTOINCREMENT, ts INTEGER NOT NULL, target_ts INTEGER NOT NULL, eth_price_at_prediction REAL NOT NULL DEFAULT 0,
+  p_up REAL NOT NULL, n_analogs INTEGER NOT NULL DEFAULT 0, realized_up INTEGER, resolved_ts INTEGER, horizon_hours INTEGER DEFAULT 24, calibrated_p_up REAL, git_commit_sha TEXT);
+CREATE INDEX idx_eth_predictions_horizon_ts ON eth_predictions(horizon_hours, ts);
+CREATE TABLE link_predictions (id INTEGER PRIMARY KEY AUTOINCREMENT, ts INTEGER NOT NULL, target_ts INTEGER NOT NULL, link_price_at_prediction REAL NOT NULL DEFAULT 0,
+  p_up REAL NOT NULL, n_analogs INTEGER NOT NULL DEFAULT 0, realized_up INTEGER, resolved_ts INTEGER, horizon_hours INTEGER DEFAULT 24, calibrated_p_up REAL, git_commit_sha TEXT);
+CREATE INDEX idx_link_predictions_horizon_ts ON link_predictions(horizon_hours, ts);
 CREATE TABLE history (id INTEGER PRIMARY KEY AUTOINCREMENT, ts INTEGER NOT NULL, score INTEGER NOT NULL, btc_price REAL);
 CREATE INDEX idx_ts ON history(ts);
 CREATE TABLE server_composite_readings (slot_ts INTEGER PRIMARY KEY, computed_ts INTEGER NOT NULL, version TEXT NOT NULL,
@@ -74,7 +81,8 @@ describe('parameters and bounds', () => {
   it('defaults and validation', () => {
     expect(q('')).toEqual({ asset: 'BTC', horizon: 24, period: 'all', limit: 200 });
     expect(q('limit=9999').limit).toBe(500);
-    expect(q('asset=ETH').error).toMatch(/asset/);
+    expect(q('asset=DOGE').error).toMatch(/asset/);
+    expect(q('asset=eth').asset).toBe('ETH');
     expect(q('horizon=6').error).toMatch(/horizon/);
     expect(q('period=90d').error).toMatch(/period/);
     expect(q('limit=0').error).toMatch(/limit/);
@@ -259,7 +267,7 @@ describe('degraded states', () => {
     const seen = [];
     const fake = { prepare: () => ({ bind: (...a) => { seen.push(a); return { all: async () => ({ results: [], meta: { rows_read: 0 } }) }; } }) };
     await loadComparisonRows(fake, { horizon: 12, period: '7d', limit: 500 }, NOW);
-    expect(seen[0]).toEqual([12, NOW - 7 * 86400000, NOW, 501, 3 * H]);
+    expect(seen[0]).toEqual([12, NOW - 7 * 86400000, NOW, 501, 3 * H, 'BTC']);
   });
 });
 
@@ -276,3 +284,29 @@ describe('read-only proof (static)', () => {
     expect(sched.slice(0, sched.indexOf('\n  },\n'))).not.toMatch(/Comparison/);
   });
 });
+
+describe('ETH and LINK (same V2 engine, one ledger per asset; V1 is market-wide)', () => {
+  it('each asset reads its own ledger through its index, with its own selection rows; GLM stays BTC 24 h only', async () => {
+    const { db, S } = fixture();
+    expect(Object.keys(ASSET_TABLES)).toEqual(['BTC', 'ETH', 'LINK']);
+    for (const [a, table] of Object.entries(ASSET_TABLES)) {
+      const plan = db.prepare(`EXPLAIN QUERY PLAN ${comparisonSql(a)}`).all(24, 0, NOW, 501, 3 * H, a).map((r) => r.detail).join('\n');
+      expect(plan).toMatch(new RegExp(`${table} USING INDEX idx_${table}_horizon_ts`));
+    }
+    expect(() => comparisonSql('DOGE')).toThrow();
+    db.prepare('INSERT INTO eth_predictions (ts, target_ts, p_up, realized_up, resolved_ts, horizon_hours) VALUES (?,?,?,?,?,24)').run(NOW - 30 * H, NOW - 6 * H, 0.3, 0, NOW - 6 * H);
+    db.prepare("INSERT INTO selection_provenance (selection_table, selection_row_id, recorded_ts, coin, horizon_hours, prediction_ts, chosen_variant, cycle_p_up, selection_trigger, semantics_version) VALUES ('selection_decisions', NULL, ?, 'ETH', 24, ?, 'calibrated', 0.42, 'cron', 'sel-v1')").run(NOW, NOW - 30 * H);
+    db.prepare("INSERT INTO selection_provenance (selection_table, selection_row_id, recorded_ts, coin, horizon_hours, prediction_ts, chosen_variant, cycle_p_up, selection_trigger, semantics_version) VALUES ('selection_decisions', NULL, ?, 'BTC', 24, ?, 'experimental', 0.9, 'cron', 'sel-v1')").run(NOW, NOW - 30 * H);
+    S.run(NOW - 31 * H, NOW - 31 * H + 1000, 40);
+    const { body } = await call({ DB: d1(db) }, '/api/comparison/v1-v2?asset=ETH');
+    expect(body.asset).toBe('ETH');
+    expect(body.records).toHaveLength(1);
+    expect(body.records[0].v2_baseline).toMatchObject({ p_up: 0.42, variant: 'calibrated' });   // ETH selection row, not BTC's
+    expect(body.records[0].v2_final.reason).toBe('glm_out_of_scope');
+    expect(body.records[0].v1).toMatchObject({ score: 40, direction: 'DOWN' });
+    expect(body.methodology.v1).toMatch(/market-wide/);
+    const link = await call({ DB: d1(db) }, '/api/comparison/v1-v2/summary?asset=LINK');
+    expect(link.body.summary.n_aligned).toBe(0);
+  });
+});
+

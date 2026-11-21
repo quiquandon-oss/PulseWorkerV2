@@ -197,6 +197,22 @@ Until then all budgets stay as they are.
   - Live predictions use no future data and their recorded accuracy is honest.
   - Replayed backtests are not valid evidence.
   - The corrected core runs only as a switched-off shadow until CPU is measured.
+  - **Implemented (2026-11-21):** `knn-core-v2-asof` / `knn-core-v2-selfcontained`, pipeline `fp-asof-v2`
+    (PR #110 redone on current main):
+    - `pipeline: 'asof'` option on `runPrediction`, `runEthPrediction` and `runLinkPrediction`. The default `'v1'` is
+      unchanged, and `'asof'` forces `persist: false`.
+    - Fixes: one-sided context join (`asOfRow`, at most `TOL_MS` old), imputation means and z-score statistics fitted
+      without the predicted row, and the read-time backfill restamp `bf-restamp-v1`. Stored rows are not rewritten.
+    - **Switch:** `KNN_V2_SHADOW_ENABLED`, shipped `"0"`. When it is `"1"`, each persisted production prediction is
+      followed by a shadow run (`runKnnV2Shadow`, try/catch, never throws). The run writes one `INSERT OR IGNORE` into
+      `knn_v2_shadow` (migration 0032, owner-applied).
+    - **Cost when enabled:** 3 extra unbounded reads plus 1 insert per coin and horizon in the tick, and roughly double
+      the k-NN CPU. That is why it stays off until `exceededCpu` per cron is measured.
+    - **Evidence route:** read-only `GET /api/knn-v2-shadow?limit<=200`, cached 5 min. It shows served vs shadow p_up
+      with outcomes resolved through `served_prediction_id`, and per-coin hits and disagreements.
+    - **Not included:** the backfill writer fix (stamp at candle close). Backfill is a one-off operator action, and the
+      read-time restamp covers the stored rows.
+    - Promotion stays a separate owner decision after prospective evidence.
 - **Comparison:** V1 is market-wide: the same reading stands for BTC, ETH and LINK.
 
 ### Chain record and V2 freshness alert (implements §2-§3)

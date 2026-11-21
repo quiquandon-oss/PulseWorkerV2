@@ -149,6 +149,90 @@ function nearestRow(history, targetTs, tolMs = TOL_MS) {
   return best;
 }
 
+// ---- Shadow core knn-core-v2 (PR #110 redone on current main, OD-18 / OPERATIONS.md "k-NN look-ahead") ----
+// Production stays knn-core-v1 (pipeline 'v1', byte-identical). Pipeline 'asof' (fp-asof-v2) is computed only as a
+// switched-off shadow (KNN_V2_SHADOW_ENABLED, default "0"), never persisted to the prediction tables and never served.
+// It fixes three look-ahead paths of knn-core-v1:
+//  1. V1 context is joined as-of (latest reading at or before the row, no older than CONTEXT_ASOF_MAX_AGE_MS), never a
+//     later reading (nearestRow is two-sided, so an analog could carry a reading from inside its own outcome window);
+//  2. imputation means and z-score statistics are fitted on the rows before the predicted row only;
+//  3. backfill rows stamped at candle OPEN time (but holding the CLOSE) are read at their availability time
+//     (bf-restamp-v1). Stored rows are not rewritten.
+// Promotion is a separate owner decision after prospective evidence (knn_v2_shadow), and needs CPU telemetry first.
+const KNN_V2_SHADOW_VERSIONS = { BTC: 'knn-core-v2-asof', LINK: 'knn-core-v2-asof', ETH: 'knn-core-v2-selfcontained' };
+const FEATURE_PIPELINE_VERSION = 'fp-asof-v2';
+const CONTEXT_ASOF_MAX_AGE_MS = TOL_MS;   // same window as knn-core-v1's join, now one-sided
+
+// Latest row at or before targetTs and no older than maxAgeMs, else null. Never a later row. `rows` sorted by ts
+// ascending; among equal timestamps the last one in that order wins.
+function asOfRow(rows, targetTs, maxAgeMs) {
+  let lo = 0, hi = rows.length - 1, idx = -1;
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1;
+    if (rows[mid].ts <= targetTs) { idx = mid; lo = mid + 1; } else hi = mid - 1;
+  }
+  if (idx < 0) return null;
+  return targetTs - rows[idx].ts <= maxAgeMs ? rows[idx] : null;
+}
+
+// bf-restamp-v1: rows up to the per-table cutoff (last mis-stamped backfill row, verified read-only 2026-11-01) that
+// sit exactly on the hour were stamped at candle open; they become available one interval later (+24 h for midnight
+// daily candles, +1 h otherwise). Live rows carry millisecond jitter, so they are never exactly on the hour.
+// Duplicate corrected timestamps keep one row, chosen deterministically (greatest JSON).
+const BACKFILL_RESTAMP_VERSION = 'bf-restamp-v1';
+const BACKFILL_RESTAMP_CUTOFF_TS = { btc_data: 1785718800000, eth_data: 1786924800000, link_data: 1785726000000 };
+function restampBackfillRows(rows, table) {
+  const cutoff = BACKFILL_RESTAMP_CUTOFF_TS[table];
+  const H = 3600000, D = 24 * H;
+  if (!cutoff) return rows;
+  const byTs = new Map();
+  const out = [];
+  for (const r of rows) {
+    if (r.ts <= cutoff && r.ts % H === 0) {
+      const fixed = { ...r, ts: r.ts + (r.ts % D === 0 ? D : H), restamped: true };
+      const prev = byTs.get(fixed.ts);
+      if (!prev || JSON.stringify(fixed) > JSON.stringify(prev)) byTs.set(fixed.ts, fixed);
+    } else {
+      out.push(r);
+    }
+  }
+  return out.concat([...byTs.values()]).sort((a, b) => a.ts - b.ts);
+}
+
+function knnV2ShadowEnabled(env) { return String(env?.KNN_V2_SHADOW_ENABLED ?? '0') === '1'; }
+
+// Runs the knn-core-v2 shadow next to a production prediction that was just persisted, and records served vs shadow
+// p_up in knn_v2_shadow (migration 0032). Never throws, never touches the production tables, and does nothing unless
+// KNN_V2_SHADOW_ENABLED is "1" and the production prediction was actually written (cron path). Outcomes are not
+// stored here: they resolve through served_prediction_id on the production prediction tables.
+const KNN_V2_SHADOW_RUNNERS = { BTC: (env, h, o) => runPrediction(env, h, o), ETH: (env, h, o) => runEthPrediction(env, h, o), LINK: (env, h, o) => runLinkPrediction(env, h, o) };
+async function runKnnV2Shadow(env, coin, horizonHours, served) {
+  if (!knnV2ShadowEnabled(env)) return { status: 'disabled' };
+  if (!served || served.status !== 'ok' || !served.persisted || served.prediction_id == null) return { status: 'skipped_not_persisted' };
+  const t0 = Date.now();
+  try {
+    const shadow = await KNN_V2_SHADOW_RUNNERS[coin](env, horizonHours, { persist: false, pipeline: 'asof' });
+    const ok = shadow && shadow.status === 'ok';
+    await env.DB.prepare(
+      `INSERT OR IGNORE INTO knn_v2_shadow
+       (coin, horizon_hours, served_prediction_id, served_ts, served_model_version, served_p_up, shadow_model_version,
+        feature_pipeline, shadow_status, shadow_p_up, shadow_calibrated_p_up, shadow_median_return_pct, shadow_n_analogs,
+        elapsed_ms, created_ts)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
+    ).bind(
+      coin, horizonHours, served.prediction_id, served.ts, MODEL_VERSIONS[coin === 'BTC' ? 'btc_core' : coin === 'ETH' ? 'eth_core' : 'link_core'],
+      served.p_up, KNN_V2_SHADOW_VERSIONS[coin], FEATURE_PIPELINE_VERSION, shadow?.status ?? 'error',
+      ok ? shadow.p_up : null, ok ? (shadow.calibrated_p_up ?? null) : null, ok ? (shadow.median_analog_return_pct ?? null) : null,
+      ok ? (shadow.n_analogs ?? null) : null, Date.now() - t0, Date.now()
+    ).run();
+    return { status: ok ? 'recorded' : 'recorded_no_prediction', p_up: ok ? shadow.p_up : null };
+  } catch (e) {
+    // The shadow must never break the production cycle (missing table before migration 0032 included).
+    console.error('knn_v2_shadow failed', coin, horizonHours, String(e?.message ?? e).slice(0, 200));
+    return { status: 'error' };
+  }
+}
+
 // Trend-strength guardrail. MA-slope based (no external deps, Workers-safe).
 // Returns -1 (strong downtrend) to +1 (strong uptrend), 0 = no clear trend.
 function trendStrength(sortedRows, priceField, shortN = 8, longN = 21) {
@@ -490,13 +574,16 @@ async function resolveWriteAuthorization(env, table, coin, allowWrite) {
   }
 }
 
-async function runPrediction(env, horizonHours = 24, { persist = true, claimToken = null } = {}) {
+async function runPrediction(env, horizonHours = 24, { persist = true, claimToken = null, pipeline = 'v1' } = {}) {
+  const asof = pipeline === 'asof';
+  if (asof) persist = false;   // shadow core: never written to predictions
   const lagMs = horizonHours * 60 * 60 * 1000;
   const tolMs = lagMs * 0.2;
 
-  const { results: btcRows } = await env.DB.prepare(
+  const { results: btcRowsStored } = await env.DB.prepare(
     'SELECT ts, btc_price, technical_score FROM btc_data ORDER BY ts ASC'
   ).all();
+  const btcRows = asof ? restampBackfillRows(btcRowsStored, 'btc_data') : btcRowsStored;
   if (btcRows.length < MIN_COMPLETE_ROWS) {
     return { ok: true, status: 'insufficient_data', n_available: btcRows.length, min_required: MIN_COMPLETE_ROWS };
   }
@@ -517,7 +604,7 @@ async function runPrediction(env, horizonHours = 24, { persist = true, claimToke
   const realScoreVals = [], realRegimeVals = [], realBottomVals = [];
   for (const r of btcRows) {
     if (r.technical_score == null) continue;
-    const nearestHist = nearestRow(history, r.ts);
+    const nearestHist = asof ? asOfRow(history, r.ts, CONTEXT_ASOF_MAX_AGE_MS) : nearestRow(history, r.ts);
     const fresh = nearestHist && Math.abs(nearestHist.ts - r.ts) <= HISTORY_FRESHNESS_MS;
     rawRows.push({
       ts: r.ts, btc_price: r.btc_price, technical_score: r.technical_score,
@@ -532,9 +619,12 @@ async function runPrediction(env, horizonHours = 24, { persist = true, claimToke
     }
   }
   const meanOf = (arr, fallback) => arr.length ? arr.reduce((a, b) => a + b, 0) / arr.length : fallback;
-  const meanScore = meanOf(realScoreVals, 50);
-  const meanRegime = meanOf(realRegimeVals, 0);
-  const meanBottom = meanOf(realBottomVals, 25);
+  // asof: imputation means from the rows before the predicted (last) row only.
+  const trainRaw = rawRows.slice(0, -1);
+  const realOf = (k) => trainRaw.map(r => r[k]).filter(v => v != null);
+  const meanScore = meanOf(asof ? realOf('score') : realScoreVals, 50);
+  const meanRegime = meanOf(asof ? realOf('regime_mag') : realRegimeVals, 0);
+  const meanBottom = meanOf(asof ? realOf('bottom_score') : realBottomVals, 25);
   const complete = rawRows.map(r => ({
     ts: r.ts, btc_price: r.btc_price, technical_score: r.technical_score,
     score: r.score ?? meanScore,
@@ -547,7 +637,7 @@ async function runPrediction(env, horizonHours = 24, { persist = true, claimToke
   }
 
   const stats = {};
-  for (const k of FEATURE_KEYS) stats[k] = meanStd(complete.map(r => r[k]));
+  for (const k of FEATURE_KEYS) stats[k] = meanStd((asof ? complete.slice(0, -1) : complete).map(r => r[k]));
 
   const today = complete[complete.length - 1];
   // Exclude candidates too recent to possibly have a resolved forward
@@ -729,6 +819,7 @@ async function runPrediction(env, horizonHours = 24, { persist = true, claimToke
     note: isRegimeAnomaly
       ? `Today's setup doesn't closely resemble anything in ${candidates.length} days of history — the analogs behind this number are weaker matches than usual. Read with extra caution.`
       : `Based on the ${resolved.length} most similar days in ${candidates.length} days of history. Small sample — read as a rough lean and a plausible range, not a forecast.`,
+    ...(asof ? { model_version: KNN_V2_SHADOW_VERSIONS.BTC, feature_pipeline: FEATURE_PIPELINE_VERSION, data_ts: today.ts } : {}),
   };
 }
 
@@ -757,13 +848,16 @@ const ETH_FEATURE_KEYS = ['technical_score', 'eth_regime_mag'];
 const ETH_MIN_COMPLETE_ROWS = 30;
 const ETH_MIN_RESOLVED_ANALOGS = 5;
 
-async function runEthPrediction(env, horizonHours = 24, { persist = true, claimToken = null } = {}) {
+async function runEthPrediction(env, horizonHours = 24, { persist = true, claimToken = null, pipeline = 'v1' } = {}) {
+  const asof = pipeline === 'asof';
+  if (asof) persist = false;   // shadow core: never written to eth_predictions
   const lagMs = horizonHours * 60 * 60 * 1000;
   const tolMs = lagMs * 0.2;
 
-  const { results: ethRows } = await env.DB.prepare(
+  const { results: ethRowsStored } = await env.DB.prepare(
     'SELECT ts, eth_price, technical_score FROM eth_data ORDER BY ts ASC'
   ).all();
+  const ethRows = asof ? restampBackfillRows(ethRowsStored, 'eth_data') : ethRowsStored;
   if (ethRows.length < ETH_MIN_COMPLETE_ROWS) {
     return { ok: true, status: 'insufficient_data', n_available: ethRows.length, min_required: ETH_MIN_COMPLETE_ROWS };
   }
@@ -779,7 +873,7 @@ async function runEthPrediction(env, horizonHours = 24, { persist = true, claimT
   }
 
   const stats = {};
-  for (const k of ETH_FEATURE_KEYS) stats[k] = meanStd(complete.map(r => r[k]));
+  for (const k of ETH_FEATURE_KEYS) stats[k] = meanStd((asof ? complete.slice(0, -1) : complete).map(r => r[k]));
 
   const today = complete[complete.length - 1];
   const candidates = complete.slice(0, -1).filter(r => r.ts <= today.ts - (lagMs + tolMs));
@@ -970,6 +1064,7 @@ async function ethPredictAndLog(env, horizonHours = 24, { allowWrite = false } =
   const { persist, claimToken } = await resolveWriteAuthorization(env, 'eth_data', 'ETH', allowWrite);
   if (persist) await logEthData(env, claimToken);
   const result = await runEthPrediction(env, horizonHours, { persist, claimToken });
+  if (knnV2ShadowEnabled(env)) result.knn_v2_shadow = await runKnnV2Shadow(env, 'ETH', horizonHours, result);
   result.backfilled_this_call = resolvedCount;
   if (!challengerEnabled(env)) {
     result.challenger = { ok: true, status: 'paused', reason: 'CHALLENGER_ENABLED = "0"' };
@@ -4758,6 +4853,7 @@ async function predictAndLog(env, horizonHours = 24, { allowWrite = false } = {}
   const { persist, claimToken } = await resolveWriteAuthorization(env, 'btc_data', 'BTC', allowWrite);
   if (persist) await logBtcData(env, claimToken);
   const result = await runPrediction(env, horizonHours, { persist, claimToken });
+  if (knnV2ShadowEnabled(env)) result.knn_v2_shadow = await runKnnV2Shadow(env, 'BTC', horizonHours, result);
   result.backfilled_this_call = resolvedCount;
   result.gemini_bias_backfilled_this_call = geminiResolvedCount;
   if (!challengerEnabled(env)) {
@@ -5688,7 +5784,9 @@ const LINK_FEATURE_KEYS = ['technical_score', 'btc_regime_mag', 'sentiment_score
 const LINK_MIN_COMPLETE_ROWS = 30;
 const LINK_MIN_RESOLVED_ANALOGS = 5;
 
-async function runLinkPrediction(env, horizonHours = 24, { persist = true, claimToken = null } = {}) {
+async function runLinkPrediction(env, horizonHours = 24, { persist = true, claimToken = null, pipeline = 'v1' } = {}) {
+  const asof = pipeline === 'asof';
+  if (asof) persist = false;   // shadow core: never written to link_predictions
   // Diagnostic-only timing checkpoints, added 2026-09-04 per the
   // execution-boundary investigation into LINK's core-prediction stall
   // (production evidence established: LINK's price-log write succeeds
@@ -5707,9 +5805,10 @@ async function runLinkPrediction(env, horizonHours = 24, { persist = true, claim
 
   const lagMs = horizonHours * 60 * 60 * 1000;
   const tolMs = lagMs * 0.2;
-  const { results: linkRows } = await env.DB.prepare(
+  const { results: linkRowsStored } = await env.DB.prepare(
     'SELECT ts, link_price, technical_score, funding_adj FROM link_data ORDER BY ts ASC'
   ).all();
+  const linkRows = asof ? restampBackfillRows(linkRowsStored, 'link_data') : linkRowsStored;
   if (linkRows.length < LINK_MIN_COMPLETE_ROWS) {
     return { ok: true, status: 'insufficient_data', n_available: linkRows.length, min_required: LINK_MIN_COMPLETE_ROWS };
   }
@@ -5732,15 +5831,20 @@ async function runLinkPrediction(env, horizonHours = 24, { persist = true, claim
   ).all();
   __checkpoint('LINK_HISTORY_READ_DONE');
   const rawRows = [];
-  const realRegimeVals = [], realSentimentVals = [];
+  let realRegimeVals = [], realSentimentVals = [];
   for (const r of linkRows) {
     if (r.technical_score == null) continue;
-    const nearestBtc = nearestRow(btcHistory, r.ts);
+    const nearestBtc = asof ? asOfRow(btcHistory, r.ts, CONTEXT_ASOF_MAX_AGE_MS) : nearestRow(btcHistory, r.ts);
     rawRows.push({
       ts: r.ts, link_price: r.link_price, technical_score: r.technical_score,
       btc_regime_mag: nearestBtc?.regime_mag ?? null, sentiment_score: nearestBtc?.score ?? null,
     });
     if (nearestBtc) { realRegimeVals.push(nearestBtc.regime_mag); realSentimentVals.push(nearestBtc.score); }
+  }
+  if (asof) {   // imputation means from the rows before the predicted (last) row only
+    const trainRaw = rawRows.slice(0, -1);
+    realRegimeVals = trainRaw.map(r => r.btc_regime_mag).filter(v => v != null);
+    realSentimentVals = trainRaw.map(r => r.sentiment_score).filter(v => v != null);
   }
   const meanRegime = realRegimeVals.length ? realRegimeVals.reduce((a, b) => a + b, 0) / realRegimeVals.length : 0;
   const meanSentiment = realSentimentVals.length ? realSentimentVals.reduce((a, b) => a + b, 0) / realSentimentVals.length : 50;
@@ -5756,7 +5860,7 @@ async function runLinkPrediction(env, horizonHours = 24, { persist = true, claim
   __checkpoint('LINK_FEATURE_BUILD_DONE');
 
   const stats = {};
-  for (const k of LINK_FEATURE_KEYS) stats[k] = meanStd(complete.map(r => r[k]));
+  for (const k of LINK_FEATURE_KEYS) stats[k] = meanStd((asof ? complete.slice(0, -1) : complete).map(r => r[k]));
 
   const today = complete[complete.length - 1];
   // Same fix as BTC's model: exclude candidates too recent to possibly have
@@ -5925,6 +6029,7 @@ async function linkPredictAndLog(env, horizonHours = 24, { allowWrite = false } 
   const { persist, claimToken } = await resolveWriteAuthorization(env, 'link_data', 'LINK', allowWrite);
   if (persist) await logLinkData(env, claimToken);
   const result = await runLinkPrediction(env, horizonHours, { persist, claimToken });
+  if (knnV2ShadowEnabled(env)) result.knn_v2_shadow = await runKnnV2Shadow(env, 'LINK', horizonHours, result);
   result.backfilled_this_call = resolvedCount;
   if (!challengerEnabled(env)) {
     result.challenger = { ok: true, status: 'paused', reason: 'CHALLENGER_ENABLED = "0"' };
@@ -10976,6 +11081,21 @@ const pulseWorkerHandlers = {
       }
     }
 
+    // knn-core-v2 shadow vs served knn-core-v1 (OD-18). Read-only, bounded (<= 200 rows), cached 5 min.
+    if (url.pathname === '/api/knn-v2-shadow' && request.method === 'GET') {
+      const limit = Math.max(1, Math.min(200, parseInt(url.searchParams.get('limit') || '100', 10) || 100));
+      try {
+        const edge = typeof caches !== 'undefined' && caches.default ? caches.default : null;
+        const cacheKey = new Request(`${url.origin}/api/knn-v2-shadow?limit=${limit}`, { method: 'GET' });
+        if (edge) { const hit = await edge.match(cacheKey); if (hit) return new Response(hit.body, { headers: { ...corsHeaders, 'Content-Type': 'application/json', 'Cache-Control': 'public, max-age=300' } }); }
+        const body = JSON.stringify(await getKnnV2Shadow(env, limit));
+        if (edge) { try { await edge.put(cacheKey, new Response(body, { headers: { 'Content-Type': 'application/json', 'Cache-Control': 'public, max-age=300' } })); } catch (_e) { /* best effort */ } }
+        return new Response(body, { headers: { ...corsHeaders, 'Content-Type': 'application/json', 'Cache-Control': 'public, max-age=300' } });
+      } catch (err) {
+        return new Response(JSON.stringify({ ok: false, error: String(err).slice(0, 200) }), { status: 503, headers: { ...corsHeaders, 'Content-Type': 'application/json', 'Cache-Control': 'no-store' } });
+      }
+    }
+
     if (url.pathname === '/api/sentiment-v2/forecast-research' && request.method === 'GET') {
       const limit = Math.max(1, Math.min(96, parseInt(url.searchParams.get('limit') || '48', 10) || 48));
       try {
@@ -13324,6 +13444,40 @@ async function sv2RecordChain(env, chain) {
   return { recorded: true };
 }
 // The last hourly chain summaries (read-only, bounded to 48 rows, cached 5 min).
+// Shadow rows with the production outcome (resolved through served_prediction_id) and a hit-rate summary per coin over
+// the rows where both cores made a call and the outcome is known. Descriptive only: no promotion logic.
+async function getKnnV2Shadow(env, limit) {
+  let rows;
+  try {
+    const r = await env.DB.prepare(
+      `SELECT s.coin, s.horizon_hours, s.served_prediction_id, s.served_ts, s.served_model_version, s.served_p_up,
+              s.shadow_model_version, s.feature_pipeline, s.shadow_status, s.shadow_p_up, s.shadow_n_analogs, s.elapsed_ms,
+              CASE s.coin WHEN 'BTC' THEN (SELECT realized_up FROM predictions WHERE id = s.served_prediction_id)
+                          WHEN 'ETH' THEN (SELECT realized_up FROM eth_predictions WHERE id = s.served_prediction_id)
+                          WHEN 'LINK' THEN (SELECT realized_up FROM link_predictions WHERE id = s.served_prediction_id) END AS realized_up
+       FROM knn_v2_shadow s ORDER BY s.served_ts DESC LIMIT ?`
+    ).bind(limit).all();
+    rows = (r && r.results) || [];
+  } catch (e) {
+    if (/no such table/i.test(String(e))) return { ok: true, status: 'not_migrated', enabled: knnV2ShadowEnabled(env), rows: [] };
+    throw e;
+  }
+  const summary = {};
+  for (const x of rows) {
+    const k = `${x.coin}_${x.horizon_hours}h`;
+    const a = summary[k] || (summary[k] = { n_rows: 0, n_resolved: 0, served_hits: 0, shadow_hits: 0, disagreements: 0 });
+    a.n_rows++;
+    if (x.served_p_up == null || x.shadow_p_up == null) continue;
+    const servedUp = x.served_p_up > 0.5, shadowUp = x.shadow_p_up > 0.5;
+    if (servedUp !== shadowUp) a.disagreements++;
+    if (x.realized_up == null) continue;
+    a.n_resolved++;
+    if (servedUp === (x.realized_up === 1)) a.served_hits++;
+    if (shadowUp === (x.realized_up === 1)) a.shadow_hits++;
+  }
+  return { ok: true, status: 'ok', enabled: knnV2ShadowEnabled(env), feature_pipeline: FEATURE_PIPELINE_VERSION, summary, rows };
+}
+
 async function getSv2Chain(env, limit) {
   const r = await env.DB.prepare("SELECT run_id, started_ts, json_extract(summary_json, '$.chain') AS chain FROM event_runs WHERE trigger = 'cron' ORDER BY started_ts DESC LIMIT ?").bind(limit).all();
   return { ok: true, runs: ((r && r.results) || []).map((x) => { let c = null; try { c = x.chain ? JSON.parse(x.chain) : null; } catch (_e) { c = null; } return { run_id: x.run_id, started_ts: x.started_ts, chain: c }; }) };

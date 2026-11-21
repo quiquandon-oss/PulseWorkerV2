@@ -90,6 +90,7 @@ describe('production wrangler.toml: GLM is OFF; the collector is ON behind its s
         RESEARCH_FUNDING_DISPATCH_ENABLED: '0', // EXP-023 intraday funding dispatch paused (2026-11-17)
         V1_ARCHIVE_SYNC_ENABLED: '1',
         CHALLENGER_ENABLED: '1',                // challenger pause switch, ON until the owner activates the pause
+        KNN_V2_SHADOW_ENABLED: '0',             // knn-core-v2 shadow (OD-18): OFF until Worker CPU per cron is measured
         SV2_V1_SERVER_INPUT: '1',               // V1 hourly server readings as a second V2 input (2026-11-16)
         GLM_SIGNAL_ENABLED: '1',                // GLM daily signal record (07:00), inference off -> status model_disabled
         GLM_INFERENCE_ENABLED: '1',             // owner mandate 2026-11-20: one GLM call per day

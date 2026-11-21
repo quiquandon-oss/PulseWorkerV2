@@ -46,6 +46,10 @@ SV2_SOURCES_DISABLED = "bitcoinmagazine"
 # and the daily challenger calibration refresh and removes the 3 challenger variants from selection; pending rows still
 # resolve and all history stays. Ships "1" (unchanged); set "0" only after the production selection check.
 CHALLENGER_ENABLED = "1"
+# knn-core-v2 shadow (worker.js runKnnV2Shadow; OD-18, OPERATIONS.md "k-NN look-ahead"). "1" computes the fp-asof-v2
+# core after each persisted production prediction and logs served vs shadow p_up in knn_v2_shadow (migration 0032).
+# Never served, never written to the prediction tables. Ships "0": switch on only after Worker CPU per cron is measured.
+KNN_V2_SHADOW_ENABLED = "0"
 # V1 hourly server readings (sentiment-ff75 scomp-v1, server_composite_readings) as a second V2 input (worker.js
 # sv2ServerV1Rows; owner decision 2026-11-16). Read-only: nothing is copied into research_sentiment_archive or `history`.
 # Each V2 result records its input in family_json.v1_input (browser | server). "0" returns V2 to archive-only input.

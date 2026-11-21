@@ -82,7 +82,7 @@ describe('predictAndLog — orchestration and write-authorization logic', () => 
 
   let source;
   beforeAll(() => {
-    source = extractFunctions('predictAndLog', 'resolveWriteAuthorization', 'challengerEnabled');
+    source = extractFunctions('predictAndLog', 'resolveWriteAuthorization', 'challengerEnabled', 'knnV2ShadowEnabled');
   });
 
   it('1. CRON (allowWrite:true) always writes with claimToken:null -- logBtcData called with null, isRecentDataStale never queried (short-circuit)', async () => {
@@ -177,7 +177,9 @@ describe('regression: runPrediction/runLinkPrediction/runEthPrediction/runChalle
   it('all four functions default to persist:true, claimToken:null (safe, backward-compatible for any other caller)', () => {
     for (const name of ['runPrediction', 'runLinkPrediction', 'runEthPrediction']) {
       const src = extractFunctions(name);
-      expect(src).toMatch(/\{ persist = true, claimToken = null \} = \{\}/);
+      // pipeline defaults to 'v1' (production); 'asof' is the switched-off knn-core-v2 shadow and forces persist:false
+      expect(src).toMatch(/\{ persist = true, claimToken = null, pipeline = 'v1' \} = \{\}/);
+      expect(src).toMatch(/if \(asof\) persist = false;/);
       expect(src).toMatch(/if \(claimToken === null\) \{/);
     }
     const challengerSrc = extractFunctions('runChallengerPrediction');
